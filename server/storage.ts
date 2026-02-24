@@ -429,15 +429,17 @@ export class DatabaseStorage implements IStorage {
     const offset = filters.offset || 0;
     const conditions = [];
     if (filters.search) {
-      conditions.push(or(
-        ilike(hubspotContacts.firstName, `%${filters.search}%`),
-        ilike(hubspotContacts.lastName, `%${filters.search}%`),
-        ilike(hubspotContacts.email, `%${filters.search}%`),
-        ilike(hubspotContacts.company, `%${filters.search}%`),
-        ilike(hubspotContacts.ownerName, `%${filters.search}%`),
-        ilike(hubspotContacts.associatedCompanyName, `%${filters.search}%`),
-        ilike(hubspotContacts.hubspotId, `%${filters.search}%`)
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(hubspotContacts.firstName, `%${word}%`),
+        ilike(hubspotContacts.lastName, `%${word}%`),
+        ilike(hubspotContacts.email, `%${word}%`),
+        ilike(hubspotContacts.company, `%${word}%`),
+        ilike(hubspotContacts.ownerName, `%${word}%`),
+        ilike(hubspotContacts.associatedCompanyName, `%${word}%`),
+        ilike(hubspotContacts.hubspotId, `%${word}%`)
       ));
+      conditions.push(and(...wordConditions));
     }
     const where = conditions.length ? and(...conditions) : undefined;
     const [data, countRes] = await Promise.all([
@@ -456,10 +458,14 @@ export class DatabaseStorage implements IStorage {
     const offset = filters.offset || 0;
     const conditions = [];
     if (filters.search) {
-      conditions.push(or(
-        ilike(hubspotDeals.dealName, `%${filters.search}%`),
-        ilike(hubspotDeals.hubspotId, `%${filters.search}%`)
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(hubspotDeals.dealName, `%${word}%`),
+        ilike(hubspotDeals.hubspotId, `%${word}%`),
+        ilike(hubspotDeals.ownerName, `%${word}%`),
+        ilike(hubspotDeals.associatedCompanyName, `%${word}%`)
       ));
+      conditions.push(and(...wordConditions));
     }
     if (filters.pipeline) conditions.push(eq(hubspotDeals.pipeline, filters.pipeline));
     if (filters.stage) conditions.push(eq(hubspotDeals.dealStage, filters.stage));
