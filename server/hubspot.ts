@@ -502,6 +502,19 @@ export async function runFullHubSpotSync(): Promise<{
   };
 }
 
+export async function updateHubSpotDealStage(hubspotDealId: string, stageId: string): Promise<{ success: boolean; message: string }> {
+  try {
+    const client = await getHubSpotClient();
+    await client.crm.deals.basicApi.update(hubspotDealId, {
+      properties: { dealstage: stageId },
+    });
+    return { success: true, message: `Deal ${hubspotDealId} updated to stage ${stageId}` };
+  } catch (e: any) {
+    console.error(`Failed to update HubSpot deal ${hubspotDealId}:`, e.message);
+    return { success: false, message: e.message };
+  }
+}
+
 function detectChanges(existing: any, newData: any, fields: string[]): { field: string; oldValue: string; newValue: string }[] {
   const changes: { field: string; oldValue: string; newValue: string }[] = [];
   for (const field of fields) {

@@ -34,8 +34,10 @@ import {
   Settings2,
   Unplug,
   RefreshCw,
+  ArrowRightLeft,
+  Save,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { PollJob } from "@shared/schema";
 
 export default function SettingsPage() {
@@ -187,6 +189,8 @@ export default function SettingsPage() {
           <RateLimitBar name="CompanyCam" limit="100 req/min" usage={2} />
         </CardContent>
       </Card>
+
+      <StageMappingCard />
 
       <Card>
         <CardHeader className="pb-3">
@@ -734,5 +738,158 @@ function EndpointRow({ name, url, method }: { name: string; url: string; method:
       </div>
       <code className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded">{url}</code>
     </div>
+  );
+}
+
+function StageMappingCard() {
+  const { toast } = useToast();
+  const [mappings, setMappings] = useState<Record<string, string>>({});
+  const [enabled, setEnabled] = useState(false);
+  const [hasChanges, setHasChanges] = useState(false);
+
+  const { data: config, isLoading: configLoading } = useQuery<{ mappings: Record<string, string>; enabled: boolean }>({
+    queryKey: ["/api/stage-mapping/config"],
+  });
+
+  const { data: hubspotStages } = useQuery<{ stageId: string; label: string; pipelineLabel: string }[]>({
+    queryKey: ["/api/stage-mapping/hubspot-stages"],
+  });
+
+  const { data: bidboardStatuses } = useQuery<string[]>({
+    queryKey: ["/api/stage-mapping/bidboard-statuses"],
+  });
+
+  useEffect(() => {
+    if (config) {
+      setMappings(config.mappings || {});
+      setEnabled(config.enabled || false);
+    }
+  }, [config]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/stage-mapping/config", { mappings, enabled });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/stage-mapping/config"] });
+      setHasChanges(false);
+      toast({ title: "Stage mapping saved" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to save", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const handleMappingChange = (bidboardStatus: string, hubspotStageId: string) => {
+    setMappings(prev => {
+      const updated = { ...prev };
+      if (hubspotStageId === "__none__") {
+        delete updated[bidboardStatus];
+      } else {
+        updated[bidboardStatus] = hubspotStageId;
+      }
+      return updated;
+    });
+    setHasChanges(true);
+  };
+
+  const handleEnabledChange = (val: boolean) => {
+    setEnabled(val);
+    setHasChanges(true);
+  };
+
+  const statuses = bidboardStatuses || [];
+  const stages = hubspotStages || [];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2">
+            <ArrowRightLeft className="w-4 h-4" />
+            BidBoard → HubSpot Stage Mapping
+          </CardTitle>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Label htmlFor="stage-mapping-toggle" className="text-xs text-muted-foreground">
+                {enabled ? "Active" : "Disabled"}
+              </Label>
+              <Switch
+                id="stage-mapping-toggle"
+                checked={enabled}
+                onCheckedChange={handleEnabledChange}
+                data-testid="switch-stage-mapping-toggle"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={() => saveMutation.mutate()}
+              disabled={!hasChanges || saveMutation.isPending}
+              data-testid="button-save-stage-mapping"
+            >
+              {saveMutation.isPending ? (
+                <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+              ) : (
+                <Save className="w-4 h-4 mr-1" />
+              )}
+              Save
+            </Button>
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground mt-1">
+          When a BidBoard CSV is re-imported with status changes, matching HubSpot deals are automatically updated to the mapped stage.
+        </p>
+      </CardHeader>
+      <CardContent>
+        {configLoading ? (
+          <Skeleton className="h-40 w-full" />
+        ) : statuses.length === 0 ? (
+          <p className="text-sm text-muted-foreground text-center py-6">
+            No BidBoard data imported yet. Import a BidBoard CSV on the Procore Data page first.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            <div className="grid grid-cols-[1fr,auto,1fr] gap-3 items-center px-2 pb-1 border-b">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">BidBoard Status</span>
+              <span className="text-xs text-muted-foreground">→</span>
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">HubSpot Stage</span>
+            </div>
+            {statuses.map(status => (
+              <div key={status} className="grid grid-cols-[1fr,auto,1fr] gap-3 items-center px-2 py-1.5 rounded-lg hover:bg-muted/50" data-testid={`mapping-row-${status.toLowerCase().replace(/\s+/g, "-")}`}>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-xs font-normal">{status}</Badge>
+                </div>
+                <span className="text-muted-foreground text-sm">→</span>
+                <Select
+                  value={mappings[status] || "__none__"}
+                  onValueChange={(val) => handleMappingChange(status, val)}
+                >
+                  <SelectTrigger className="h-8 text-xs" data-testid={`select-mapping-${status.toLowerCase().replace(/\s+/g, "-")}`}>
+                    <SelectValue placeholder="Not mapped" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Not mapped</SelectItem>
+                    {stages.map(s => (
+                      <SelectItem key={s.stageId} value={s.stageId}>
+                        {s.label} ({s.pipelineLabel})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+            {Object.keys(mappings).length > 0 && (
+              <div className="mt-3 pt-3 border-t">
+                <p className="text-xs text-muted-foreground">
+                  {Object.keys(mappings).length} of {statuses.length} statuses mapped.
+                  {!enabled && " Enable the toggle above to activate automatic syncing."}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

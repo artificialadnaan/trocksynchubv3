@@ -4,6 +4,7 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-24: Added BidBoard → HubSpot stage mapping feature. Configurable mapping page in Settings lets user map BidBoard statuses to HubSpot deal stages. On BidBoard CSV re-import, detects status changes and automatically pushes matching HubSpot deals to the mapped stage via API. Mapping stored in automation_config table. Toggle to enable/disable auto-sync.
 - 2026-02-24: Added BidBoard CSV/XLSX import feature. New bidboard_estimates DB table stores imported data with auto-matching to Procore projects (exact and fuzzy name matching). Upload via BidBoard tab on Procore Data page. Each re-import clears and replaces previous data. 378 estimates imported, 188 matched to Procore, 190 BidBoard-only.
 - 2026-02-24: Upgraded Procore project sync to use company-level endpoint (/rest/v1.0/companies/{CID}/projects) which returns 505 projects vs 273 from user-level endpoint. Detailed data enriched from user-level endpoint where available. Company-level returns simplified structure (nested address, stage_name, status_name).
 - 2026-02-24: Fixed bid PATCH routes to explicitly construct upsert objects instead of using `...bid` spread (which carried DB Date objects causing `value.toISOString is not a function`).

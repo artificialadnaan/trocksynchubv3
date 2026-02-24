@@ -7,7 +7,7 @@ import session from "express-session";
 import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
-import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines } from "./hubspot";
+import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, updateHubSpotDealStage } from "./hubspot";
 import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
 
 const PgSession = connectPgSimple(session);
@@ -1097,6 +1097,14 @@ export async function registerRoutes(
 
       if (!rows.length) return res.status(400).json({ message: "Empty spreadsheet" });
 
+      const oldEstimates = await storage.getBidboardEstimates({ limit: 10000, offset: 0 });
+      const oldStatusMap = new Map<string, string>();
+      for (const est of oldEstimates.data) {
+        if (est.name && est.status) {
+          oldStatusMap.set(est.name.trim().toLowerCase(), est.status);
+        }
+      }
+
       const dbProjectNames = await storage.getProcoreProjects({ limit: 10000, offset: 0 });
       const dbNameMap = new Map<string, string>();
       for (const p of dbProjectNames.data) {
@@ -1106,10 +1114,13 @@ export async function registerRoutes(
       await storage.clearBidboardEstimates();
 
       let imported = 0, matched = 0, unmatched = 0;
+      const statusChanges: { name: string; oldStatus: string; newStatus: string }[] = [];
 
       for (const row of rows) {
         const name = (row.Name || "").trim();
         if (!name) continue;
+
+        const newStatus = (row.Status || "").trim();
 
         let createdDate: Date | null = null;
         if (row["Created Date"]) {
@@ -1149,11 +1160,16 @@ export async function registerRoutes(
           if (matchStatus === "unmatched") unmatched++;
         }
 
+        const oldStatus = oldStatusMap.get(nameLC);
+        if (oldStatus && newStatus && oldStatus !== newStatus) {
+          statusChanges.push({ name, oldStatus, newStatus });
+        }
+
         await storage.upsertBidboardEstimate({
           name,
           estimator: (row.Estimator || "").trim() || null,
           office: (row.Office || "").trim() || null,
-          status: (row.Status || "").trim() || null,
+          status: newStatus || null,
           salesPricePerArea: (row["Sales Price Per Area"] || "").toString().trim() || null,
           projectCost: row["Project Cost"] != null ? String(row["Project Cost"]) : null,
           profitMargin: row["Profit Margin"] != null ? String(row["Profit Margin"]) : null,
@@ -1169,16 +1185,105 @@ export async function registerRoutes(
         imported++;
       }
 
+      let hubspotSyncResult = { attempted: 0, succeeded: 0, failed: 0, skipped: 0, details: [] as any[] };
+
+      if (statusChanges.length > 0) {
+        const mappingConfig = await storage.getAutomationConfig("bidboard_hubspot_stage_mapping");
+        const mappingValue = mappingConfig?.value as { mappings?: Record<string, string>; enabled?: boolean } | undefined;
+        
+        if (mappingValue?.enabled && mappingValue.mappings && Object.keys(mappingValue.mappings).length > 0) {
+          const changedNames = statusChanges.map(sc => sc.name);
+          const matchingDeals = await storage.getHubspotDealsByDealNames(changedNames);
+          const dealsByName = new Map<string, { hubspotId: string; dealName: string; dealStage: string | null }>();
+          for (const d of matchingDeals) {
+            if (d.dealName) {
+              dealsByName.set(d.dealName.trim().toLowerCase(), {
+                hubspotId: d.hubspotId,
+                dealName: d.dealName,
+                dealStage: d.dealStage,
+              });
+            }
+          }
+
+          for (const change of statusChanges) {
+            const targetStageId = mappingValue.mappings[change.newStatus];
+            if (!targetStageId) {
+              hubspotSyncResult.skipped++;
+              continue;
+            }
+
+            const deal = dealsByName.get(change.name.trim().toLowerCase());
+            if (!deal) {
+              hubspotSyncResult.skipped++;
+              hubspotSyncResult.details.push({
+                name: change.name,
+                status: "skipped",
+                reason: "No matching HubSpot deal",
+              });
+              continue;
+            }
+
+            if (deal.dealStage === targetStageId) {
+              hubspotSyncResult.skipped++;
+              continue;
+            }
+
+            hubspotSyncResult.attempted++;
+            const result = await updateHubSpotDealStage(deal.hubspotId, targetStageId);
+            if (result.success) {
+              hubspotSyncResult.succeeded++;
+              hubspotSyncResult.details.push({
+                name: change.name,
+                hubspotId: deal.hubspotId,
+                status: "updated",
+                oldBidBoardStatus: change.oldStatus,
+                newBidBoardStatus: change.newStatus,
+                newHubSpotStage: targetStageId,
+              });
+              await storage.createAuditLog({
+                action: "hubspot_stage_sync",
+                entityType: "deal",
+                entityId: deal.hubspotId,
+                source: "bidboard_import",
+                status: "success",
+                details: {
+                  dealName: deal.dealName,
+                  oldBidBoardStatus: change.oldStatus,
+                  newBidBoardStatus: change.newStatus,
+                  newHubSpotStageId: targetStageId,
+                },
+              });
+            } else {
+              hubspotSyncResult.failed++;
+              hubspotSyncResult.details.push({
+                name: change.name,
+                hubspotId: deal.hubspotId,
+                status: "failed",
+                error: result.message,
+              });
+            }
+          }
+        }
+      }
+
       await storage.createAuditLog({
         action: "bidboard_import",
         entityType: "bidboard",
         entityId: null,
         source: "upload",
         status: "success",
-        details: { imported, matched, unmatched, totalRows: rows.length },
+        details: {
+          imported, matched, unmatched, totalRows: rows.length,
+          statusChanges: statusChanges.length,
+          hubspotSync: hubspotSyncResult,
+        },
       });
 
-      res.json({ success: true, imported, matched, unmatched, totalRows: rows.length });
+      res.json({
+        success: true, imported, matched, unmatched, totalRows: rows.length,
+        statusChanges: statusChanges.length,
+        hubspotSync: hubspotSyncResult,
+      });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
@@ -1203,6 +1308,55 @@ export async function registerRoutes(
     try {
       const count = await storage.getBidboardEstimateCount();
       res.json({ count });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/stage-mapping/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("bidboard_hubspot_stage_mapping");
+      res.json(config?.value || { mappings: {}, enabled: false });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/stage-mapping/config", requireAuth, async (req, res) => {
+    try {
+      const { mappings, enabled } = req.body;
+      await storage.upsertAutomationConfig({
+        key: "bidboard_hubspot_stage_mapping",
+        value: { mappings: mappings || {}, enabled: !!enabled },
+        description: "Maps BidBoard estimate statuses to HubSpot deal stages",
+        isActive: true,
+      });
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/stage-mapping/hubspot-stages", requireAuth, async (_req, res) => {
+    try {
+      const pipelines = await storage.getHubspotPipelines();
+      const stages: { stageId: string; label: string; pipelineLabel: string }[] = [];
+      for (const p of pipelines) {
+        const pStages = (p.stages as any[]) || [];
+        for (const s of pStages) {
+          stages.push({ stageId: s.stageId, label: s.label, pipelineLabel: p.label });
+        }
+      }
+      res.json(stages);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/stage-mapping/bidboard-statuses", requireAuth, async (_req, res) => {
+    try {
+      const result = await storage.getBidboardDistinctStatuses();
+      res.json(result);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

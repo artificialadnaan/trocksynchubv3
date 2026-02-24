@@ -123,6 +123,8 @@ export interface IStorage {
   getBidboardEstimates(filters: { search?: string; status?: string; matchStatus?: string; limit?: number; offset?: number }): Promise<{ data: BidboardEstimate[]; total: number }>;
   getBidboardEstimateCount(): Promise<number>;
   clearBidboardEstimates(): Promise<void>;
+  getBidboardDistinctStatuses(): Promise<string[]>;
+  getHubspotDealsByDealNames(names: string[]): Promise<HubspotDeal[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -874,6 +876,20 @@ export class DatabaseStorage implements IStorage {
 
   async clearBidboardEstimates(): Promise<void> {
     await db.delete(bidboardEstimates);
+  }
+
+  async getBidboardDistinctStatuses(): Promise<string[]> {
+    const rows = await db.selectDistinct({ status: bidboardEstimates.status }).from(bidboardEstimates).where(sql`${bidboardEstimates.status} IS NOT NULL`);
+    return rows.map(r => r.status).filter(Boolean) as string[];
+  }
+
+  async getHubspotDealsByDealNames(names: string[]): Promise<HubspotDeal[]> {
+    if (!names.length) return [];
+    const lowerNames = names.map(n => n.trim().toLowerCase());
+    const results = await db.select().from(hubspotDeals).where(
+      sql`LOWER(TRIM(${hubspotDeals.dealName})) IN (${sql.join(lowerNames.map(n => sql`${n}`), sql`, `)})`
+    );
+    return results;
   }
 }
 
