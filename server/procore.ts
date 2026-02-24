@@ -123,48 +123,94 @@ function detectChanges(existing: any, newData: any, fields: string[]): { field: 
   return changes;
 }
 
+function projectDataFromApi(project: any): any {
+  if (project.address && typeof project.address === 'object' && project.address.street !== undefined) {
+    return {
+      procoreId: String(project.id),
+      name: project.name || null,
+      displayName: project.name || null,
+      projectNumber: null,
+      address: project.address?.street || null,
+      city: project.address?.city || null,
+      stateCode: project.address?.state_code || null,
+      zip: project.address?.zip || null,
+      countryCode: project.address?.country_code || null,
+      phone: null,
+      active: project.status_name !== 'Inactive' ? true : false,
+      stage: null,
+      projectStageName: project.stage_name || null,
+      startDate: null,
+      completionDate: null,
+      projectedFinishDate: null,
+      estimatedValue: null,
+      totalValue: null,
+      storeNumber: null,
+      deliveryMethod: null,
+      workScope: null,
+      companyId: null,
+      companyName: null,
+      properties: project,
+      procoreUpdatedAt: null,
+    };
+  }
+  return {
+    procoreId: String(project.id),
+    name: project.name || null,
+    displayName: project.display_name || null,
+    projectNumber: project.project_number || null,
+    address: project.address || null,
+    city: project.city || null,
+    stateCode: project.state_code || null,
+    zip: project.zip || null,
+    countryCode: project.country_code || null,
+    phone: project.phone || null,
+    active: project.active ?? null,
+    stage: project.stage || null,
+    projectStageName: project.project_stage?.name || null,
+    startDate: project.start_date || null,
+    completionDate: project.completion_date || null,
+    projectedFinishDate: project.projected_finish_date || null,
+    estimatedValue: project.estimated_value ? String(project.estimated_value) : null,
+    totalValue: project.total_value ? String(project.total_value) : null,
+    storeNumber: project.store_number || null,
+    deliveryMethod: project.delivery_method || null,
+    workScope: project.work_scope || null,
+    companyId: project.company?.id ? String(project.company.id) : null,
+    companyName: project.company?.name || null,
+    properties: project,
+    procoreUpdatedAt: project.updated_at ? new Date(project.updated_at) : null,
+  };
+}
+
 export async function syncProcoreProjects(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 
-  const allProjects = await fetchProcorePages<any>(
+  const companyProjects = await fetchProcoreJson(
+    `/rest/v1.0/companies/${companyId}/projects?per_page=500`,
+    companyId
+  ) as any[];
+  console.log(`[procore] Company-level projects: ${companyProjects.length}`);
+
+  const detailedProjects = await fetchProcorePages<any>(
     `/rest/v1.0/projects?company_id=${companyId}`,
     companyId
   );
+  console.log(`[procore] Detailed projects (user-level): ${detailedProjects.length}`);
+
+  const detailedMap = new Map<string, any>();
+  for (const p of detailedProjects) {
+    detailedMap.set(String(p.id), p);
+  }
 
   let created = 0, updated = 0, changes = 0;
 
-  for (const project of allProjects) {
+  for (const project of companyProjects) {
     const procoreId = String(project.id);
     const existing = await storage.getProcoreProjectByProcoreId(procoreId);
-
-    const data = {
-      procoreId,
-      name: project.name || null,
-      displayName: project.display_name || null,
-      projectNumber: project.project_number || null,
-      address: project.address || null,
-      city: project.city || null,
-      stateCode: project.state_code || null,
-      zip: project.zip || null,
-      countryCode: project.country_code || null,
-      phone: project.phone || null,
-      active: project.active ?? null,
-      stage: project.stage || null,
-      projectStageName: project.project_stage?.name || null,
-      startDate: project.start_date || null,
-      completionDate: project.completion_date || null,
-      projectedFinishDate: project.projected_finish_date || null,
-      estimatedValue: project.estimated_value ? String(project.estimated_value) : null,
-      totalValue: project.total_value ? String(project.total_value) : null,
-      storeNumber: project.store_number || null,
-      deliveryMethod: project.delivery_method || null,
-      workScope: project.work_scope || null,
-      companyId: project.company?.id ? String(project.company.id) : null,
-      companyName: project.company?.name || null,
-      properties: project,
-      procoreUpdatedAt: project.updated_at ? new Date(project.updated_at) : null,
-    };
+    const detailed = detailedMap.get(procoreId);
+    const source = detailed || project;
+    const data = projectDataFromApi(source);
 
     const trackFields = ['name', 'displayName', 'projectNumber', 'address', 'city', 'stateCode', 'zip', 'phone', 'active', 'stage', 'projectStageName', 'startDate', 'completionDate', 'projectedFinishDate', 'estimatedValue', 'totalValue', 'deliveryMethod', 'companyName'];
 
@@ -178,7 +224,7 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
           fieldName: change.field,
           oldValue: change.oldValue,
           newValue: change.newValue,
-          fullSnapshot: project,
+          fullSnapshot: source,
           syncedAt: new Date(),
         });
         changes++;
@@ -189,7 +235,7 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
         entityType: 'project',
         entityProcoreId: procoreId,
         changeType: 'created',
-        fullSnapshot: project,
+        fullSnapshot: source,
         syncedAt: new Date(),
       });
       created++;
@@ -199,7 +245,7 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
     await storage.upsertProcoreProject(data);
   }
 
-  return { synced: allProjects.length, created, updated, changes };
+  return { synced: companyProjects.length, created, updated, changes };
 }
 
 export async function syncProcoreVendors(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
@@ -382,7 +428,7 @@ export async function fetchProcoreProjectStages(): Promise<any[]> {
   try {
     return await fetchProcoreJson(`/rest/v1.0/companies/${companyId}/project_stages`, companyId);
   } catch {
-    const projects = await fetchProcoreJson(`/rest/v1.0/projects?company_id=${companyId}&per_page=300`, companyId);
+    const projects = await fetchProcoreJson(`/rest/v1.0/companies/${companyId}/projects?per_page=300`, companyId);
     const stageMap = new Map<number, string>();
     for (const p of projects) {
       if (p.project_stage?.id && p.project_stage?.name) {
