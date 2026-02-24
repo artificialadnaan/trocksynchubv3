@@ -4,6 +4,7 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-24: Added CompanyCam Data browser page (/companycam-data) with tabs for Projects, Users, Photos, and Change History. Full sync engine (server/companycam.ts) pulls all data via CompanyCam API with paginated fetching, change detection, and 2-week history. 4 new DB tables: companycam_projects, companycam_users, companycam_photos, companycam_change_history.
 - 2026-02-24: Added BidBoard → HubSpot stage mapping feature. Configurable mapping page in Settings lets user map BidBoard statuses to HubSpot deal stages. On BidBoard CSV re-import, detects status changes and automatically pushes matching HubSpot deals to the mapped stage via API. Mapping stored in automation_config table. Toggle to enable/disable auto-sync.
 - 2026-02-24: Added BidBoard CSV/XLSX import feature. New bidboard_estimates DB table stores imported data with auto-matching to Procore projects (exact and fuzzy name matching). Upload via BidBoard tab on Procore Data page. Each re-import clears and replaces previous data. 378 estimates imported, 188 matched to Procore, 190 BidBoard-only.
 - 2026-02-24: Upgraded Procore project sync to use company-level endpoint (/rest/v1.0/companies/{CID}/projects) which returns 505 projects vs 273 from user-level endpoint. Detailed data enriched from user-level endpoint where available. Company-level returns simplified structure (nested address, stage_name, status_name).
@@ -25,7 +26,8 @@ Production-grade middleware application for bidirectional synchronization betwee
 - **Auth**: Session-based with bcrypt password hashing
 - **HubSpot Integration**: Replit OAuth connector (server/hubspot.ts) - auto token refresh
 - **Procore Integration**: OAuth 2.0 with token refresh (server/procore.ts) - credentials stored in automation_config
-- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms, bidboard_estimates
+- **CompanyCam Integration**: Bearer token auth (server/companycam.ts) - token stored in oauth_tokens table
+- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms, bidboard_estimates, companycam_projects, companycam_users, companycam_photos, companycam_change_history
 
 ## Key Files
 - `shared/schema.ts` - Drizzle schema and Zod validation schemas
@@ -33,8 +35,9 @@ Production-grade middleware application for bidirectional synchronization betwee
 - `server/routes.ts` - API endpoints and webhook receivers
 - `server/hubspot.ts` - HubSpot sync engine
 - `server/procore.ts` - Procore sync engine with OAuth token refresh
+- `server/companycam.ts` - CompanyCam sync engine with paginated fetching and change detection
 - `client/src/App.tsx` - Main app with auth flow and routing
-- `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings, HubSpot Data, Procore Data
+- `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings, HubSpot Data, Procore Data, CompanyCam Data
 
 ## Webhook Endpoints
 - POST `/webhooks/hubspot` - HubSpot webhook receiver

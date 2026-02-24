@@ -532,3 +532,99 @@ export const procoreChangeHistory = pgTable("procore_change_history", {
 export const insertProcoreChangeHistorySchema = createInsertSchema(procoreChangeHistory).omit({ id: true, createdAt: true });
 export type InsertProcoreChangeHistory = z.infer<typeof insertProcoreChangeHistorySchema>;
 export type ProcoreChangeHistory = typeof procoreChangeHistory.$inferSelect;
+
+export const companycamProjects = pgTable("companycam_projects", {
+  id: serial("id").primaryKey(),
+  companycamId: text("companycam_id").notNull().unique(),
+  name: text("name"),
+  status: text("status"),
+  archived: boolean("archived").default(false),
+  streetAddress: text("street_address"),
+  city: text("city"),
+  state: text("state"),
+  postalCode: text("postal_code"),
+  country: text("country"),
+  photoCount: integer("photo_count").default(0),
+  creatorName: text("creator_name"),
+  projectUrl: text("project_url"),
+  publicUrl: text("public_url"),
+  latitude: text("latitude"),
+  longitude: text("longitude"),
+  integrations: jsonb("integrations"),
+  featureImageUrl: text("feature_image_url"),
+  notepad: text("notepad"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  companycamCreatedAt: timestamp("companycam_created_at"),
+  companycamUpdatedAt: timestamp("companycam_updated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertCompanycamProjectSchema = createInsertSchema(companycamProjects).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertCompanycamProject = z.infer<typeof insertCompanycamProjectSchema>;
+export type CompanycamProject = typeof companycamProjects.$inferSelect;
+
+export const companycamUsers = pgTable("companycam_users", {
+  id: serial("id").primaryKey(),
+  companycamId: text("companycam_id").notNull().unique(),
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  email: text("email"),
+  phoneNumber: text("phone_number"),
+  status: text("status"),
+  userRole: text("user_role"),
+  userUrl: text("user_url"),
+  profileImage: jsonb("profile_image"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  companycamCreatedAt: timestamp("companycam_created_at"),
+  companycamUpdatedAt: timestamp("companycam_updated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertCompanycamUserSchema = createInsertSchema(companycamUsers).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertCompanycamUser = z.infer<typeof insertCompanycamUserSchema>;
+export type CompanycamUser = typeof companycamUsers.$inferSelect;
+
+export const companycamPhotos = pgTable("companycam_photos", {
+  id: serial("id").primaryKey(),
+  companycamId: text("companycam_id").notNull().unique(),
+  projectId: text("project_id"),
+  projectName: text("project_name"),
+  creatorName: text("creator_name"),
+  status: text("status"),
+  latitude: text("latitude"),
+  longitude: text("longitude"),
+  thumbnailUrl: text("thumbnail_url"),
+  webUrl: text("web_url"),
+  originalUrl: text("original_url"),
+  photoUrl: text("photo_url"),
+  description: text("description"),
+  capturedAt: timestamp("captured_at"),
+  tags: jsonb("tags"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  companycamCreatedAt: timestamp("companycam_created_at"),
+  companycamUpdatedAt: timestamp("companycam_updated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertCompanycamPhotoSchema = createInsertSchema(companycamPhotos).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertCompanycamPhoto = z.infer<typeof insertCompanycamPhotoSchema>;
+export type CompanycamPhoto = typeof companycamPhotos.$inferSelect;
+
+export const companycamChangeHistory = pgTable("companycam_change_history", {
+  id: serial("id").primaryKey(),
+  entityType: text("entity_type").notNull(),
+  entityCompanycamId: text("entity_companycam_id").notNull(),
+  changeType: text("change_type").notNull(),
+  fieldName: text("field_name"),
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  fullSnapshot: jsonb("full_snapshot"),
+  syncedAt: timestamp("synced_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const insertCompanycamChangeHistorySchema = createInsertSchema(companycamChangeHistory).omit({ id: true, createdAt: true });
+export type InsertCompanycamChangeHistory = z.infer<typeof insertCompanycamChangeHistorySchema>;
+export type CompanycamChangeHistory = typeof companycamChangeHistory.$inferSelect;

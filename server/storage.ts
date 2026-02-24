@@ -24,6 +24,10 @@ import {
   procoreBids, type ProcoreBid, type InsertProcoreBid,
   procoreBidForms, type ProcoreBidForm, type InsertProcoreBidForm,
   bidboardEstimates, type BidboardEstimate, type InsertBidboardEstimate,
+  companycamProjects, type CompanycamProject, type InsertCompanycamProject,
+  companycamUsers, type CompanycamUser, type InsertCompanycamUser,
+  companycamPhotos, type CompanycamPhoto, type InsertCompanycamPhoto,
+  companycamChangeHistory, type CompanycamChangeHistory, type InsertCompanycamChangeHistory,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -125,6 +129,20 @@ export interface IStorage {
   clearBidboardEstimates(): Promise<void>;
   getBidboardDistinctStatuses(): Promise<string[]>;
   getHubspotDealsByDealNames(names: string[]): Promise<HubspotDeal[]>;
+
+  upsertCompanycamProject(data: InsertCompanycamProject): Promise<CompanycamProject>;
+  getCompanycamProjectByCompanycamId(companycamId: string): Promise<CompanycamProject | undefined>;
+  getCompanycamProjects(filters: { search?: string; status?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamProject[]; total: number }>;
+  upsertCompanycamUser(data: InsertCompanycamUser): Promise<CompanycamUser>;
+  getCompanycamUserByCompanycamId(companycamId: string): Promise<CompanycamUser | undefined>;
+  getCompanycamUsers(filters: { search?: string; role?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamUser[]; total: number }>;
+  upsertCompanycamPhoto(data: InsertCompanycamPhoto): Promise<CompanycamPhoto>;
+  getCompanycamPhotoByCompanycamId(companycamId: string): Promise<CompanycamPhoto | undefined>;
+  getCompanycamPhotos(filters: { search?: string; projectId?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamPhoto[]; total: number }>;
+  createCompanycamChangeHistory(data: InsertCompanycamChangeHistory): Promise<CompanycamChangeHistory>;
+  getCompanycamChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamChangeHistory[]; total: number }>;
+  getCompanycamDataCounts(): Promise<{ projects: number; users: number; photos: number; changeHistory: number }>;
+  purgeCompanycamChangeHistory(olderThan: Date): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -890,6 +908,172 @@ export class DatabaseStorage implements IStorage {
       sql`LOWER(TRIM(${hubspotDeals.dealName})) IN (${sql.join(lowerNames.map(n => sql`${n}`), sql`, `)})`
     );
     return results;
+  }
+
+  async upsertCompanycamProject(data: InsertCompanycamProject): Promise<CompanycamProject> {
+    const [result] = await db.insert(companycamProjects).values(data)
+      .onConflictDoUpdate({
+        target: companycamProjects.companycamId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getCompanycamProjectByCompanycamId(companycamId: string): Promise<CompanycamProject | undefined> {
+    const [result] = await db.select().from(companycamProjects).where(eq(companycamProjects.companycamId, companycamId));
+    return result;
+  }
+
+  async getCompanycamProjects(filters: { search?: string; status?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamProject[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions: any[] = [];
+    if (filters.status) conditions.push(eq(companycamProjects.status, filters.status));
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(companycamProjects.name, `%${word}%`),
+        ilike(companycamProjects.city, `%${word}%`),
+        ilike(companycamProjects.state, `%${word}%`),
+        ilike(companycamProjects.companycamId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(companycamProjects).where(where).orderBy(desc(companycamProjects.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(companycamProjects).orderBy(desc(companycamProjects.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(companycamProjects).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(companycamProjects),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertCompanycamUser(data: InsertCompanycamUser): Promise<CompanycamUser> {
+    const [result] = await db.insert(companycamUsers).values(data)
+      .onConflictDoUpdate({
+        target: companycamUsers.companycamId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getCompanycamUserByCompanycamId(companycamId: string): Promise<CompanycamUser | undefined> {
+    const [result] = await db.select().from(companycamUsers).where(eq(companycamUsers.companycamId, companycamId));
+    return result;
+  }
+
+  async getCompanycamUsers(filters: { search?: string; role?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamUser[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions: any[] = [];
+    if (filters.role) conditions.push(eq(companycamUsers.userRole, filters.role));
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(companycamUsers.firstName, `%${word}%`),
+        ilike(companycamUsers.lastName, `%${word}%`),
+        ilike(companycamUsers.email, `%${word}%`),
+        ilike(companycamUsers.companycamId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(companycamUsers).where(where).orderBy(desc(companycamUsers.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(companycamUsers).orderBy(desc(companycamUsers.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(companycamUsers).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(companycamUsers),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertCompanycamPhoto(data: InsertCompanycamPhoto): Promise<CompanycamPhoto> {
+    const [result] = await db.insert(companycamPhotos).values(data)
+      .onConflictDoUpdate({
+        target: companycamPhotos.companycamId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getCompanycamPhotoByCompanycamId(companycamId: string): Promise<CompanycamPhoto | undefined> {
+    const [result] = await db.select().from(companycamPhotos).where(eq(companycamPhotos.companycamId, companycamId));
+    return result;
+  }
+
+  async getCompanycamPhotos(filters: { search?: string; projectId?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamPhoto[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions: any[] = [];
+    if (filters.projectId) conditions.push(eq(companycamPhotos.projectId, filters.projectId));
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(companycamPhotos.projectName, `%${word}%`),
+        ilike(companycamPhotos.creatorName, `%${word}%`),
+        ilike(companycamPhotos.description, `%${word}%`),
+        ilike(companycamPhotos.companycamId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(companycamPhotos).where(where).orderBy(desc(companycamPhotos.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(companycamPhotos).orderBy(desc(companycamPhotos.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(companycamPhotos).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(companycamPhotos),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async createCompanycamChangeHistory(data: InsertCompanycamChangeHistory): Promise<CompanycamChangeHistory> {
+    const [result] = await db.insert(companycamChangeHistory).values(data).returning();
+    return result;
+  }
+
+  async getCompanycamChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamChangeHistory[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions: any[] = [];
+    if (filters.entityType) conditions.push(eq(companycamChangeHistory.entityType, filters.entityType));
+    if (filters.changeType) conditions.push(eq(companycamChangeHistory.changeType, filters.changeType));
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(companycamChangeHistory).where(where).orderBy(desc(companycamChangeHistory.createdAt)).limit(limit).offset(offset)
+        : db.select().from(companycamChangeHistory).orderBy(desc(companycamChangeHistory.createdAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(companycamChangeHistory).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(companycamChangeHistory),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async getCompanycamDataCounts(): Promise<{ projects: number; users: number; photos: number; changeHistory: number }> {
+    const [projRes, userRes, photoRes, histRes] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(companycamProjects),
+      db.select({ count: sql<number>`count(*)::int` }).from(companycamUsers),
+      db.select({ count: sql<number>`count(*)::int` }).from(companycamPhotos),
+      db.select({ count: sql<number>`count(*)::int` }).from(companycamChangeHistory),
+    ]);
+    return {
+      projects: projRes[0]?.count || 0,
+      users: userRes[0]?.count || 0,
+      photos: photoRes[0]?.count || 0,
+      changeHistory: histRes[0]?.count || 0,
+    };
+  }
+
+  async purgeCompanycamChangeHistory(olderThan: Date): Promise<number> {
+    const deleted = await db.delete(companycamChangeHistory).where(lte(companycamChangeHistory.createdAt, olderThan)).returning();
+    return deleted.length;
   }
 }
 

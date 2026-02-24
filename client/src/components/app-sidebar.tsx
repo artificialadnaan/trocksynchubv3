@@ -9,6 +9,7 @@ import {
   LogOut,
   Zap,
   Database,
+  Camera,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,7 @@ const navItems = [
   { path: "/projects", label: "Project Mapper", icon: FolderSync },
   { path: "/hubspot-data", label: "HubSpot Data", icon: Database },
   { path: "/procore-data", label: "Procore Data", icon: Database },
+  { path: "/companycam-data", label: "CompanyCam Data", icon: Camera },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },
 ];

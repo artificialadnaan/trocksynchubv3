@@ -9,6 +9,7 @@ import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, updateHubSpotDealStage } from "./hubspot";
 import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
+import { runFullCompanycamSync } from "./companycam";
 
 const PgSession = connectPgSimple(session);
 
@@ -703,6 +704,84 @@ export async function registerRoutes(
       res.json({ success: true, message: "CompanyCam configuration saved" });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/companycam/sync", requireAuth, async (_req, res) => {
+    try {
+      const result = await runFullCompanycamSync();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ success: false, message: e.message });
+    }
+  });
+
+  app.get("/api/integrations/companycam/data-counts", requireAuth, async (_req, res) => {
+    try {
+      const counts = await storage.getCompanycamDataCounts();
+      res.json(counts);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/companycam/projects", requireAuth, async (req, res) => {
+    try {
+      const { search, status, limit, offset } = req.query;
+      const result = await storage.getCompanycamProjects({
+        search: search as string,
+        status: status as string,
+        limit: limit ? Number(limit) : 50,
+        offset: offset ? Number(offset) : 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/companycam/users", requireAuth, async (req, res) => {
+    try {
+      const { search, role, limit, offset } = req.query;
+      const result = await storage.getCompanycamUsers({
+        search: search as string,
+        role: role as string,
+        limit: limit ? Number(limit) : 50,
+        offset: offset ? Number(offset) : 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/companycam/photos", requireAuth, async (req, res) => {
+    try {
+      const { search, projectId, limit, offset } = req.query;
+      const result = await storage.getCompanycamPhotos({
+        search: search as string,
+        projectId: projectId as string,
+        limit: limit ? Number(limit) : 50,
+        offset: offset ? Number(offset) : 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/companycam/change-history", requireAuth, async (req, res) => {
+    try {
+      const { entityType, changeType, limit, offset } = req.query;
+      const result = await storage.getCompanycamChangeHistory({
+        entityType: entityType as string,
+        changeType: changeType as string,
+        limit: limit ? Number(limit) : 50,
+        offset: offset ? Number(offset) : 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
