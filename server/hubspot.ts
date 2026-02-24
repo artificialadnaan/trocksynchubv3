@@ -141,20 +141,45 @@ export async function syncHubSpotCompanies(): Promise<{ synced: number; created:
 
 async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   const ownerMap = new Map<string, string>();
+  const accessToken = await getAccessToken();
+
   try {
-    const accessToken = await getAccessToken();
-    const response = await fetch('https://api.hubapi.com/owners/v2/owners', {
+    const response = await fetch('https://api.hubapi.com/crm/v3/owners?limit=500', {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
     });
-    if (!response.ok) throw new Error(`Owners API: ${response.status}`);
-    const owners = await response.json();
-    for (const owner of owners) {
-      const name = [owner.firstName, owner.lastName].filter(Boolean).join(' ');
-      const display = owner.email ? `${name} (${owner.email})` : name;
-      ownerMap.set(String(owner.ownerId), display);
+    if (response.ok) {
+      const data = await response.json();
+      for (const owner of data.results || []) {
+        const name = [owner.firstName, owner.lastName].filter(Boolean).join(' ');
+        const display = owner.email ? `${name} (${owner.email})` : name;
+        ownerMap.set(String(owner.id), display);
+      }
+      if (ownerMap.size > 0) {
+        console.log(`Fetched ${ownerMap.size} owners from HubSpot v3 API`);
+        return ownerMap;
+      }
     }
   } catch (e) {
-    console.error('Failed to fetch HubSpot owners:', e);
+    console.log('v3 owners API unavailable, trying fallback...');
+  }
+
+  try {
+    const tokenInfoRes = await fetch(`https://api.hubapi.com/oauth/v1/access-tokens/${accessToken}`);
+    if (tokenInfoRes.ok) {
+      const tokenInfo = await tokenInfoRes.json();
+      if (tokenInfo.user_id && tokenInfo.user) {
+        const email = tokenInfo.user;
+        const namePart = email.split('@')[0].split('.').map((p: string) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+        ownerMap.set(String(tokenInfo.user_id), `${namePart} (${email})`);
+        console.log(`Resolved owner from token info: ${tokenInfo.user_id} -> ${namePart} (${email})`);
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch owner info from token endpoint:', e);
+  }
+
+  if (ownerMap.size === 0) {
+    console.warn('Could not resolve any HubSpot owners. Owner names will show as IDs.');
   }
   return ownerMap;
 }
