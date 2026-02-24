@@ -192,6 +192,8 @@ export default function SettingsPage() {
 
       <StageMappingCard />
 
+      <HubspotProcoreSyncCard />
+
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base font-semibold flex items-center gap-2">
@@ -738,6 +740,172 @@ function EndpointRow({ name, url, method }: { name: string; url: string; method:
       </div>
       <code className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded">{url}</code>
     </div>
+  );
+}
+
+function HubspotProcoreSyncCard() {
+  const { toast } = useToast();
+  const [enabled, setEnabled] = useState(false);
+  const [bulkSyncing, setBulkSyncing] = useState(false);
+  const [bulkResult, setBulkResult] = useState<any>(null);
+
+  const { data: config, isLoading } = useQuery<any>({
+    queryKey: ["/api/automation/hubspot-procore/config"],
+  });
+
+  useEffect(() => {
+    if (config) {
+      setEnabled(config.enabled || false);
+    }
+  }, [config]);
+
+  const saveConfig = useMutation({
+    mutationFn: async (newEnabled: boolean) => {
+      const res = await apiRequest("POST", "/api/automation/hubspot-procore/config", {
+        enabled: newEnabled,
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/automation/hubspot-procore/config"] });
+      toast({ title: "Configuration saved" });
+    },
+  });
+
+  const handleToggle = (val: boolean) => {
+    setEnabled(val);
+    saveConfig.mutate(val);
+  };
+
+  const handleBulkSync = async (type: 'companies' | 'contacts' | 'both') => {
+    setBulkSyncing(true);
+    setBulkResult(null);
+    try {
+      const res = await apiRequest("POST", "/api/automation/hubspot-procore/bulk-sync", { type });
+      const data = await res.json();
+      setBulkResult(data);
+      const companyStats = data.companies;
+      const contactStats = data.contacts;
+      const parts: string[] = [];
+      if (companyStats) parts.push(`Companies: ${companyStats.created} created, ${companyStats.updated} updated, ${companyStats.skipped} skipped`);
+      if (contactStats) parts.push(`Contacts: ${contactStats.created} created, ${contactStats.updated} updated, ${contactStats.skipped} skipped`);
+      toast({ title: "Bulk sync complete", description: parts.join(' | ') + ` (${data.duration})` });
+    } catch (e: any) {
+      toast({ title: "Sync failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBulkSyncing(false);
+    }
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2" data-testid="text-hubspot-procore-sync-title">
+            <ArrowRightLeft className="w-4 h-4" />
+            HubSpot → Procore Directory Sync
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">{enabled ? "Auto-sync enabled" : "Disabled"}</span>
+            <Switch
+              checked={enabled}
+              onCheckedChange={handleToggle}
+              data-testid="switch-hubspot-procore-auto-sync"
+            />
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground mt-1">
+          When enabled, new HubSpot companies and contacts are automatically synced to Procore's company directory as vendors. Matching rules prevent duplicates — updates only fill empty fields, never overwriting existing data.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="rounded-md bg-muted/50 p-3 space-y-2">
+          <p className="text-xs font-medium">Matching Rules (in priority order):</p>
+          <div className="grid grid-cols-2 gap-1 text-xs text-muted-foreground">
+            <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">100</Badge> Exact email match</div>
+            <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">90</Badge> Exact company name</div>
+            <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">80</Badge> Domain match</div>
+            <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">70</Badge> Legal/trade name</div>
+            <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">60</Badge> Partial name match</div>
+            <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">40</Badge> Person name in vendor</div>
+          </div>
+          <p className="text-[10px] text-muted-foreground">Threshold: score ≥ 60 = match found. Below threshold = new vendor created.</p>
+        </div>
+
+        <Separator />
+
+        <div>
+          <p className="text-xs font-medium mb-2">Manual Bulk Sync</p>
+          <p className="text-xs text-muted-foreground mb-3">
+            Push all existing HubSpot companies/contacts to Procore. Safe to run multiple times — matching prevents duplicates.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={bulkSyncing}
+              onClick={() => handleBulkSync('companies')}
+              data-testid="button-bulk-sync-companies"
+            >
+              {bulkSyncing ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+              Sync Companies
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={bulkSyncing}
+              onClick={() => handleBulkSync('contacts')}
+              data-testid="button-bulk-sync-contacts"
+            >
+              {bulkSyncing ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+              Sync Contacts
+            </Button>
+            <Button
+              size="sm"
+              disabled={bulkSyncing}
+              onClick={() => handleBulkSync('both')}
+              data-testid="button-bulk-sync-both"
+            >
+              {bulkSyncing ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+              Sync All
+            </Button>
+          </div>
+        </div>
+
+        {bulkResult && (
+          <div className="rounded-md border p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium">Last Sync Results</p>
+              <Badge variant="outline" className="text-[10px]">{bulkResult.duration}</Badge>
+            </div>
+            {bulkResult.companies && (
+              <div className="text-xs space-y-1">
+                <p className="font-medium">Companies ({bulkResult.companies.total})</p>
+                <div className="flex gap-3 text-muted-foreground">
+                  <span className="text-green-600">{bulkResult.companies.created} created</span>
+                  <span className="text-blue-600">{bulkResult.companies.updated} updated</span>
+                  <span>{bulkResult.companies.skipped} skipped</span>
+                  {bulkResult.companies.errors > 0 && <span className="text-red-600">{bulkResult.companies.errors} errors</span>}
+                </div>
+              </div>
+            )}
+            {bulkResult.contacts && (
+              <div className="text-xs space-y-1">
+                <p className="font-medium">Contacts ({bulkResult.contacts.total})</p>
+                <div className="flex gap-3 text-muted-foreground">
+                  <span className="text-green-600">{bulkResult.contacts.created} created</span>
+                  <span className="text-blue-600">{bulkResult.contacts.updated} updated</span>
+                  <span>{bulkResult.contacts.skipped} skipped</span>
+                  {bulkResult.contacts.errors > 0 && <span className="text-red-600">{bulkResult.contacts.errors} errors</span>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

@@ -10,6 +10,7 @@ import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, updateHubSpotDealStage } from "./hubspot";
 import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
 import { runFullCompanycamSync } from "./companycam";
+import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact } from "./hubspot-procore-sync";
 
 const PgSession = connectPgSimple(session);
 
@@ -358,6 +359,15 @@ export async function registerRoutes(
         });
 
         await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
+
+        const eventType = event.subscriptionType || event.eventType || "";
+        const objectType = event.objectType || "";
+        const objectId = String(event.objectId || "");
+        try {
+          await processHubspotWebhookForProcore(eventType, objectType, objectId);
+        } catch (autoErr: any) {
+          console.error(`HubSpot→Procore auto-sync error for ${objectType} ${objectId}:`, autoErr.message);
+        }
       }
       res.status(200).json({ received: true });
     } catch (e: any) {
@@ -806,6 +816,74 @@ export async function registerRoutes(
         ? "Invalid API token. Please check your CompanyCam token."
         : e.response?.data?.message || e.message;
       res.json({ success: false, message: msg });
+    }
+  });
+
+  app.get("/api/automation/hubspot-procore/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("hubspot_procore_auto_sync");
+      res.json(config?.value || { enabled: false });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/hubspot-procore/config", requireAuth, async (req, res) => {
+    try {
+      await storage.upsertAutomationConfig({
+        key: "hubspot_procore_auto_sync",
+        value: req.body,
+        description: "HubSpot → Procore vendor directory auto-sync configuration",
+      });
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/hubspot-procore/sync-company/:hubspotId", requireAuth, async (req, res) => {
+    try {
+      const result = await syncHubspotCompanyToProcore(req.params.hubspotId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ action: 'error', message: e.message });
+    }
+  });
+
+  app.post("/api/automation/hubspot-procore/sync-contact/:hubspotId", requireAuth, async (req, res) => {
+    try {
+      const result = await syncHubspotContactToProcore(req.params.hubspotId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ action: 'error', message: e.message });
+    }
+  });
+
+  app.post("/api/automation/hubspot-procore/bulk-sync", requireAuth, async (req, res) => {
+    try {
+      const type = req.body.type || 'both';
+      const result = await runBulkHubspotToProcoreSync(type);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/automation/hubspot-procore/test-match/company/:hubspotId", requireAuth, async (req, res) => {
+    try {
+      const result = await testMatchingForCompany(req.params.hubspotId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/automation/hubspot-procore/test-match/contact/:hubspotId", requireAuth, async (req, res) => {
+    try {
+      const result = await testMatchingForContact(req.params.hubspotId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
