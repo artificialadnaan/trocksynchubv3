@@ -7,6 +7,7 @@ import session from "express-session";
 import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
+import { testHubSpotConnection, fetchHubSpotDeals, fetchHubSpotCompanies, fetchHubSpotContacts } from "./hubspot";
 
 const PgSession = connectPgSimple(session);
 
@@ -91,10 +92,19 @@ export async function registerRoutes(
         storage.getOAuthToken("procore"),
         storage.getOAuthToken("companycam"),
       ]);
+
+      let hubspotConnected = !!hubspot?.accessToken || !!process.env.HUBSPOT_ACCESS_TOKEN;
+      if (!hubspotConnected) {
+        try {
+          const testResult = await testHubSpotConnection();
+          hubspotConnected = testResult.success;
+        } catch { hubspotConnected = false; }
+      }
+
       res.json({
-        hubspot: { connected: !!hubspot || !!process.env.HUBSPOT_ACCESS_TOKEN, expiresAt: hubspot?.expiresAt },
-        procore: { connected: !!procore, expiresAt: procore?.expiresAt },
-        companycam: { connected: !!companycam || !!process.env.COMPANYCAM_API_TOKEN, expiresAt: companycam?.expiresAt },
+        hubspot: { connected: hubspotConnected, expiresAt: hubspot?.expiresAt },
+        procore: { connected: !!procore?.accessToken, expiresAt: procore?.expiresAt },
+        companycam: { connected: !!(companycam?.accessToken) || !!process.env.COMPANYCAM_API_TOKEN, expiresAt: companycam?.expiresAt },
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -480,25 +490,51 @@ export async function registerRoutes(
 
   app.post("/api/integrations/hubspot/test", requireAuth, async (_req, res) => {
     try {
-      const token = await storage.getOAuthToken("hubspot");
-      const accessToken = token?.accessToken || process.env.HUBSPOT_ACCESS_TOKEN;
-      if (!accessToken) return res.status(400).json({ success: false, message: "No HubSpot access token configured" });
-
-      const axios = (await import("axios")).default;
-      const response = await axios.get("https://api.hubapi.com/crm/v3/objects/deals?limit=1", {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        timeout: 10000,
-      });
-
-      res.json({
-        success: true,
-        message: `Connected! Found ${response.data.total || 0} deals in your HubSpot account.`,
-      });
+      const result = await testHubSpotConnection();
+      res.json(result);
     } catch (e: any) {
-      const msg = e.response?.status === 401
-        ? "Invalid access token. Please check your HubSpot Private App token."
-        : e.response?.data?.message || e.message;
-      res.json({ success: false, message: msg });
+      res.json({ success: false, message: e.message });
+    }
+  });
+
+  app.get("/api/integrations/hubspot/sync", requireAuth, async (req, res) => {
+    try {
+      const type = (req.query.type as string) || "deals";
+      const limit = parseInt(req.query.limit as string) || 20;
+
+      let data: any[] = [];
+      let label = "";
+
+      if (type === "deals") {
+        data = await fetchHubSpotDeals(limit);
+        label = "deals";
+      } else if (type === "companies") {
+        data = await fetchHubSpotCompanies(limit);
+        label = "companies";
+      } else if (type === "contacts") {
+        data = await fetchHubSpotContacts(limit);
+        label = "contacts";
+      }
+
+      await storage.createAuditLog({
+        action: "hubspot_data_sync",
+        entityType: label,
+        source: "hubspot",
+        status: "success",
+        details: { count: data.length, type: label },
+      });
+
+      res.json({ success: true, type: label, count: data.length, data });
+    } catch (e: any) {
+      await storage.createAuditLog({
+        action: "hubspot_data_sync",
+        entityType: "unknown",
+        source: "hubspot",
+        status: "error",
+        errorMessage: e.message,
+        details: { error: e.message },
+      });
+      res.status(500).json({ success: false, message: e.message });
     }
   });
 

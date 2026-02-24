@@ -33,6 +33,7 @@ import {
   Loader2,
   Settings2,
   Unplug,
+  RefreshCw,
 } from "lucide-react";
 import { useState } from "react";
 import type { PollJob } from "@shared/schema";
@@ -261,26 +262,9 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
   open: boolean; onOpenChange: (open: boolean) => void; existingConfig?: any;
 }) {
   const { toast } = useToast();
-  const [accessToken, setAccessToken] = useState("");
-  const [portalId, setPortalId] = useState(existingConfig?.portalId || "");
-  const [webhookUrl, setWebhookUrl] = useState(existingConfig?.webhookUrl || "");
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/integrations/hubspot/save", { accessToken, portalId, webhookUrl });
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/connections"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/integrations/config"] });
-      toast({ title: "HubSpot configuration saved" });
-      onOpenChange(false);
-    },
-    onError: (e: Error) => {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    },
-  });
+  const [syncType, setSyncType] = useState("deals");
+  const [syncResult, setSyncResult] = useState<any>(null);
 
   const testMutation = useMutation({
     mutationFn: async () => {
@@ -289,9 +273,32 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
     },
     onSuccess: (data: any) => {
       setTestResult(data);
+      if (data.success) {
+        queryClient.invalidateQueries({ queryKey: ["/api/dashboard/connections"] });
+      }
     },
     onError: (e: Error) => {
       setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  const syncMutation = useMutation({
+    mutationFn: async (type: string) => {
+      const res = await fetch(`/api/integrations/hubspot/sync?type=${type}&limit=20`, { credentials: "include" });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message);
+      }
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setSyncResult(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+      toast({ title: `Synced ${data.count} ${data.type} from HubSpot` });
+    },
+    onError: (e: Error) => {
+      setSyncResult(null);
+      toast({ title: "Sync Error", description: e.message, variant: "destructive" });
     },
   });
 
@@ -306,45 +313,19 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
             HubSpot CRM Configuration
           </DialogTitle>
           <DialogDescription>
-            Connect your HubSpot account using a Private App access token. You can create one in HubSpot under Settings &gt; Integrations &gt; Private Apps.
+            HubSpot is connected via the Replit integration. Use the buttons below to test the connection and sync data.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
-          <div className="space-y-2">
-            <Label htmlFor="hs-token">Private App Access Token</Label>
-            <Input
-              id="hs-token"
-              type="password"
-              placeholder="pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-              value={accessToken}
-              onChange={(e) => setAccessToken(e.target.value)}
-              data-testid="input-hubspot-token"
-            />
-            <p className="text-xs text-muted-foreground">Required scopes: crm.objects.deals.read, crm.objects.deals.write, crm.objects.companies.read, crm.objects.contacts.read</p>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="hs-portal">Portal ID (Hub ID)</Label>
-            <Input
-              id="hs-portal"
-              placeholder="e.g., 12345678"
-              value={portalId}
-              onChange={(e) => setPortalId(e.target.value)}
-              data-testid="input-hubspot-portal-id"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="hs-webhook">Webhook Target URL (optional)</Label>
-            <Input
-              id="hs-webhook"
-              placeholder="Auto-detected from your deployment URL"
-              value={webhookUrl}
-              onChange={(e) => setWebhookUrl(e.target.value)}
-              data-testid="input-hubspot-webhook-url"
-            />
-            <p className="text-xs text-muted-foreground">Leave blank to auto-detect. This is the URL HubSpot will send webhook events to.</p>
+          <div className="p-3 rounded-lg bg-muted/50 border">
+            <p className="text-sm font-medium mb-1">Connection Method</p>
+            <p className="text-xs text-muted-foreground">
+              Managed automatically via Replit integration with OAuth. Token refresh is handled for you.
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Scopes: deals (read/write), companies (read/write), contacts (read/write), schemas (read)
+            </p>
           </div>
 
           {testResult && (
@@ -353,25 +334,73 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
 
           <Separator />
 
-          <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium mb-2">Test Connection</p>
             <Button
               variant="outline"
               onClick={() => testMutation.mutate()}
               disabled={testMutation.isPending}
+              className="w-full"
               data-testid="button-test-hubspot"
             >
               {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
-              Test Connection
-            </Button>
-            <Button
-              onClick={() => saveMutation.mutate()}
-              disabled={!accessToken || saveMutation.isPending}
-              data-testid="button-save-hubspot"
-            >
-              {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : null}
-              Save Configuration
+              {testMutation.isPending ? "Testing..." : "Test HubSpot Connection"}
             </Button>
           </div>
+
+          <Separator />
+
+          <div>
+            <p className="text-sm font-medium mb-2">Sync Data from HubSpot</p>
+            <p className="text-xs text-muted-foreground mb-3">Pull the latest records from your HubSpot account to verify the integration is working.</p>
+            <div className="flex gap-2">
+              <Select value={syncType} onValueChange={setSyncType}>
+                <SelectTrigger className="w-[140px]" data-testid="select-sync-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="deals">Deals</SelectItem>
+                  <SelectItem value="companies">Companies</SelectItem>
+                  <SelectItem value="contacts">Contacts</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button
+                onClick={() => syncMutation.mutate(syncType)}
+                disabled={syncMutation.isPending}
+                className="flex-1"
+                data-testid="button-sync-hubspot"
+              >
+                {syncMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-1" />}
+                {syncMutation.isPending ? "Syncing..." : "Sync Now"}
+              </Button>
+            </div>
+          </div>
+
+          {syncResult && (
+            <div className="rounded-lg border overflow-hidden">
+              <div className="px-3 py-2 bg-muted/30 border-b">
+                <p className="text-sm font-medium">
+                  {syncResult.count} {syncResult.type} found
+                </p>
+              </div>
+              <div className="max-h-48 overflow-y-auto">
+                {syncResult.data?.map((item: any, i: number) => (
+                  <div key={item.id || i} className="px-3 py-2 border-b last:border-0 text-sm" data-testid={`sync-result-${i}`}>
+                    <p className="font-medium text-sm">
+                      {item.properties?.dealname || item.properties?.name || `${item.properties?.firstname || ""} ${item.properties?.lastname || ""}`.trim() || `Record #${item.id}`}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      ID: {item.id}
+                      {item.properties?.amount && ` | $${Number(item.properties.amount).toLocaleString()}`}
+                      {item.properties?.dealstage && ` | Stage: ${item.properties.dealstage}`}
+                      {item.properties?.email && ` | ${item.properties.email}`}
+                      {item.properties?.domain && ` | ${item.properties.domain}`}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>
