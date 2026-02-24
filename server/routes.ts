@@ -1457,6 +1457,217 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/bidboard/import-url", requireAuth, async (req, res) => {
+    try {
+      const { url } = req.body;
+      if (!url || typeof url !== 'string') return res.status(400).json({ message: "URL is required" });
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        return res.status(400).json({ message: `Failed to download file: ${response.status} ${response.statusText}. The link may have expired — S3 links are only valid for about 3 minutes.` });
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      const workbook = XLSX.read(buffer, { type: "buffer" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet) as any[];
+
+      if (!rows.length) return res.status(400).json({ message: "Empty spreadsheet" });
+
+      const oldEstimates = await storage.getBidboardEstimates({ limit: 10000, offset: 0 });
+      const oldStatusMap = new Map<string, string>();
+      for (const est of oldEstimates.data) {
+        if (est.name && est.status) {
+          oldStatusMap.set(est.name.trim().toLowerCase(), est.status);
+        }
+      }
+
+      const dbProjectNames = await storage.getProcoreProjects({ limit: 10000, offset: 0 });
+      const dbNameMap = new Map<string, string>();
+      for (const p of dbProjectNames.data) {
+        dbNameMap.set((p.name || "").trim().toLowerCase(), String(p.procoreId));
+      }
+
+      await storage.clearBidboardEstimates();
+
+      let imported = 0, matched = 0, unmatched = 0;
+      const statusChanges: { name: string; oldStatus: string; newStatus: string }[] = [];
+
+      for (const row of rows) {
+        const name = (row.Name || "").trim();
+        if (!name) continue;
+
+        const newStatus = (row.Status || "").trim();
+
+        let createdDate: Date | null = null;
+        if (row["Created Date"]) {
+          if (typeof row["Created Date"] === "number") {
+            createdDate = new Date((row["Created Date"] - 25569) * 86400000);
+          } else {
+            createdDate = new Date(row["Created Date"]);
+          }
+        }
+        let dueDate: Date | null = null;
+        if (row["Due Date"]) {
+          if (typeof row["Due Date"] === "number") {
+            dueDate = new Date((row["Due Date"] - 25569) * 86400000);
+          } else {
+            dueDate = new Date(row["Due Date"]);
+          }
+        }
+
+        const nameLC = name.toLowerCase();
+        const exactMatch = dbNameMap.get(nameLC);
+        let matchStatus = "unmatched";
+        let procoreProjectId: string | null = null;
+
+        if (exactMatch) {
+          matchStatus = "matched";
+          procoreProjectId = exactMatch;
+          matched++;
+        } else {
+          for (const [dbName, dbId] of dbNameMap.entries()) {
+            if (dbName.includes(nameLC) || nameLC.includes(dbName)) {
+              matchStatus = "partial";
+              procoreProjectId = dbId;
+              matched++;
+              break;
+            }
+          }
+          if (matchStatus === "unmatched") unmatched++;
+        }
+
+        const oldStatus = oldStatusMap.get(nameLC);
+        if (oldStatus && newStatus && oldStatus !== newStatus) {
+          statusChanges.push({ name, oldStatus, newStatus });
+        }
+
+        await storage.upsertBidboardEstimate({
+          name,
+          estimator: (row.Estimator || "").trim() || null,
+          office: (row.Office || "").trim() || null,
+          status: newStatus || null,
+          salesPricePerArea: (row["Sales Price Per Area"] || "").toString().trim() || null,
+          projectCost: row["Project Cost"] != null ? String(row["Project Cost"]) : null,
+          profitMargin: row["Profit Margin"] != null ? String(row["Profit Margin"]) : null,
+          totalSales: row["Total Sales"] != null ? String(row["Total Sales"]) : null,
+          createdDate,
+          dueDate,
+          customerName: (row["Customer Name"] || "").trim() || null,
+          customerContact: (row["Customer Contact"] || "").trim() || null,
+          projectNumber: row["Project #"] ? String(row["Project #"]).trim() : null,
+          procoreProjectId,
+          matchStatus,
+        });
+        imported++;
+      }
+
+      let hubspotSyncResult = { attempted: 0, succeeded: 0, failed: 0, skipped: 0, details: [] as any[] };
+
+      if (statusChanges.length > 0) {
+        const mappingConfig = await storage.getAutomationConfig("bidboard_hubspot_stage_mapping");
+        const mappingValue = mappingConfig?.value as { mappings?: Record<string, string>; enabled?: boolean } | undefined;
+        
+        if (mappingValue?.enabled && mappingValue.mappings && Object.keys(mappingValue.mappings).length > 0) {
+          const changedNames = statusChanges.map(sc => sc.name);
+          const matchingDeals = await storage.getHubspotDealsByDealNames(changedNames);
+          const dealsByName = new Map<string, { hubspotId: string; dealName: string; dealStage: string | null }>();
+          for (const d of matchingDeals) {
+            if (d.dealName) {
+              dealsByName.set(d.dealName.trim().toLowerCase(), {
+                hubspotId: d.hubspotId,
+                dealName: d.dealName,
+                dealStage: d.dealStage,
+              });
+            }
+          }
+
+          for (const change of statusChanges) {
+            const targetStageId = mappingValue.mappings[change.newStatus];
+            if (!targetStageId) {
+              hubspotSyncResult.skipped++;
+              continue;
+            }
+
+            const deal = dealsByName.get(change.name.trim().toLowerCase());
+            if (!deal) {
+              hubspotSyncResult.skipped++;
+              hubspotSyncResult.details.push({
+                name: change.name,
+                status: "skipped",
+                reason: "No matching HubSpot deal",
+              });
+              continue;
+            }
+
+            if (deal.dealStage === targetStageId) {
+              hubspotSyncResult.skipped++;
+              continue;
+            }
+
+            hubspotSyncResult.attempted++;
+            const result = await updateHubSpotDealStage(deal.hubspotId, targetStageId);
+            if (result.success) {
+              hubspotSyncResult.succeeded++;
+              hubspotSyncResult.details.push({
+                name: change.name,
+                hubspotId: deal.hubspotId,
+                status: "updated",
+                oldBidBoardStatus: change.oldStatus,
+                newBidBoardStatus: change.newStatus,
+                newHubSpotStage: targetStageId,
+              });
+              await storage.createAuditLog({
+                action: "hubspot_stage_sync",
+                entityType: "deal",
+                entityId: deal.hubspotId,
+                source: "bidboard_url_import",
+                status: "success",
+                details: {
+                  dealName: deal.dealName,
+                  oldBidBoardStatus: change.oldStatus,
+                  newBidBoardStatus: change.newStatus,
+                  newHubSpotStageId: targetStageId,
+                },
+              });
+            } else {
+              hubspotSyncResult.failed++;
+              hubspotSyncResult.details.push({
+                name: change.name,
+                hubspotId: deal.hubspotId,
+                status: "failed",
+                error: result.message,
+              });
+            }
+          }
+        }
+      }
+
+      await storage.createAuditLog({
+        action: "bidboard_import",
+        entityType: "bidboard",
+        entityId: null,
+        source: "url_fetch",
+        status: "success",
+        details: {
+          imported, matched, unmatched, totalRows: rows.length,
+          statusChanges: statusChanges.length,
+          hubspotSync: hubspotSyncResult,
+        },
+      });
+
+      res.json({
+        success: true, imported, matched, unmatched, totalRows: rows.length,
+        statusChanges: statusChanges.length,
+        hubspotSync: hubspotSyncResult,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.get("/api/bidboard/estimates", requireAuth, async (req, res) => {
     try {
       const result = await storage.getBidboardEstimates({

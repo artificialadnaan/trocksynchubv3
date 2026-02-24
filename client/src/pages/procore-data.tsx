@@ -33,6 +33,8 @@ import {
   Pencil,
   Upload,
   Calculator,
+  Link2,
+  Loader2,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { useLocation } from "wouter";
@@ -1116,6 +1118,8 @@ function BidboardEstimatesTab() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [matchFilter, setMatchFilter] = useState("all");
   const [openRows, setOpenRows] = useState<Set<number>>(new Set());
+  const [urlInput, setUrlInput] = useState("");
+  const [showUrlInput, setShowUrlInput] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -1156,10 +1160,36 @@ function BidboardEstimatesTab() {
     },
   });
 
+  const urlImportMutation = useMutation({
+    mutationFn: async (url: string) => {
+      const res = await apiRequest("POST", "/api/bidboard/import-url", { url });
+      if (!res.ok) throw new Error((await res.json()).message);
+      return res.json();
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/estimates"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/procore/data-counts"] });
+      setUrlInput("");
+      setShowUrlInput(false);
+      toast({
+        title: "BidBoard Import Complete",
+        description: `${result.imported} estimates imported. ${result.matched} matched to Procore projects, ${result.unmatched} unmatched.`,
+      });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Import failed", description: e.message, variant: "destructive" });
+    },
+  });
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) importMutation.mutate(file);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const handleUrlImport = () => {
+    if (!urlInput.trim()) return;
+    urlImportMutation.mutate(urlInput.trim());
   };
 
   const toggleRow = (id: number) => {
@@ -1197,15 +1227,52 @@ function BidboardEstimatesTab() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => setShowUrlInput(!showUrlInput)}
+              data-testid="button-bidboard-url-toggle"
+            >
+              <Link2 className="w-4 h-4 mr-2" />
+              Fetch from URL
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => fileInputRef.current?.click()}
               disabled={importMutation.isPending}
               data-testid="button-bidboard-import"
             >
               <Upload className="w-4 h-4 mr-2" />
-              {importMutation.isPending ? "Importing..." : "Import BidBoard Export"}
+              {importMutation.isPending ? "Importing..." : "Upload File"}
             </Button>
           </div>
         </div>
+        {showUrlInput && (
+          <div className="mt-3 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Paste the S3 download link from Procore BidBoard export. Links expire in ~3 minutes, so paste and import quickly.
+            </p>
+            <div className="flex gap-2">
+              <Input
+                placeholder="https://procore-fas-general-default-production.s3.amazonaws.com/..."
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                className="text-xs"
+                data-testid="input-bidboard-url"
+              />
+              <Button
+                size="sm"
+                onClick={handleUrlImport}
+                disabled={!urlInput.trim() || urlImportMutation.isPending}
+                data-testid="button-bidboard-url-import"
+              >
+                {urlImportMutation.isPending ? (
+                  <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Fetching...</>
+                ) : (
+                  "Import"
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
       </CardHeader>
       <CardContent>
         <div className="flex gap-2 mb-4">
