@@ -23,6 +23,7 @@ import {
   procoreBidPackages, type ProcoreBidPackage, type InsertProcoreBidPackage,
   procoreBids, type ProcoreBid, type InsertProcoreBid,
   procoreBidForms, type ProcoreBidForm, type InsertProcoreBidForm,
+  bidboardEstimates, type BidboardEstimate, type InsertBidboardEstimate,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -117,6 +118,11 @@ export interface IStorage {
   getProcoreBids(filters: { search?: string; bidPackageId?: string; bidStatus?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBid[]; total: number }>;
   upsertProcoreBidForm(data: InsertProcoreBidForm): Promise<ProcoreBidForm>;
   getProcoreBidForms(filters: { search?: string; bidPackageId?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBidForm[]; total: number }>;
+
+  upsertBidboardEstimate(data: InsertBidboardEstimate): Promise<BidboardEstimate>;
+  getBidboardEstimates(filters: { search?: string; status?: string; matchStatus?: string; limit?: number; offset?: number }): Promise<{ data: BidboardEstimate[]; total: number }>;
+  getBidboardEstimateCount(): Promise<number>;
+  clearBidboardEstimates(): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -826,6 +832,48 @@ export class DatabaseStorage implements IStorage {
         : db.select({ count: sql<number>`count(*)::int` }).from(procoreBidForms),
     ]);
     return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertBidboardEstimate(data: InsertBidboardEstimate): Promise<BidboardEstimate> {
+    const [result] = await db.insert(bidboardEstimates).values(data).returning();
+    return result;
+  }
+
+  async getBidboardEstimates(filters: { search?: string; status?: string; matchStatus?: string; limit?: number; offset?: number }): Promise<{ data: BidboardEstimate[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions: any[] = [];
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(bidboardEstimates.name, `%${word}%`),
+        ilike(bidboardEstimates.estimator, `%${word}%`),
+        ilike(bidboardEstimates.customerName, `%${word}%`),
+        ilike(bidboardEstimates.projectNumber, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    if (filters.status) conditions.push(eq(bidboardEstimates.status, filters.status));
+    if (filters.matchStatus) conditions.push(eq(bidboardEstimates.matchStatus, filters.matchStatus));
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(bidboardEstimates).where(where).orderBy(desc(bidboardEstimates.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(bidboardEstimates).orderBy(desc(bidboardEstimates.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(bidboardEstimates).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(bidboardEstimates),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async getBidboardEstimateCount(): Promise<number> {
+    const [res] = await db.select({ count: sql<number>`count(*)::int` }).from(bidboardEstimates);
+    return res?.count || 0;
+  }
+
+  async clearBidboardEstimates(): Promise<void> {
+    await db.delete(bidboardEstimates);
   }
 }
 

@@ -4,10 +4,13 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-24: Added BidBoard CSV/XLSX import feature. New bidboard_estimates DB table stores imported data with auto-matching to Procore projects (exact and fuzzy name matching). Upload via BidBoard tab on Procore Data page. Each re-import clears and replaces previous data. 378 estimates imported, 188 matched to Procore, 190 BidBoard-only.
+- 2026-02-24: Upgraded Procore project sync to use company-level endpoint (/rest/v1.0/companies/{CID}/projects) which returns 505 projects vs 273 from user-level endpoint. Detailed data enriched from user-level endpoint where available. Company-level returns simplified structure (nested address, stage_name, status_name).
+- 2026-02-24: Fixed bid PATCH routes to explicitly construct upsert objects instead of using `...bid` spread (which carried DB Date objects causing `value.toISOString is not a function`).
 - 2026-02-24: Added bid detail page (/procore-data/bids/:bidId) with full Procore bid data: bid_items, attachments (proxied via backend), bidder notes/comments, inclusions/exclusions, cost codes, vendor/requester details, NDA status, raw JSON. Award status dropdown (Pending/Awarded/Rejected) PATCHes Procore in real-time from both the bids list and detail page. Attachment proxy endpoint handles Procore's S3 redirect URLs.
 - 2026-02-24: Added inline bid award status dropdown to Bids tab on Procore Data page. Each bid row has a select dropdown that writes back to Procore API via PATCH /rest/v1.0/projects/{PID}/bid_packages/{BPID}/bids/{BID_ID}. View Detail button navigates to dedicated bid detail page.
 - 2026-02-24: Added Bid Board sync to Procore engine. Pulls bid packages (8), bids (138), and bid forms (29) via company and project-level API endpoints. Three new DB tables: procore_bid_packages, procore_bids, procore_bid_forms. Three new tabs added to Procore Data page with search, pagination, status filters, and expandable rows.
-- 2026-02-24: Added Procore Data browser page (/procore-data) with tabs for Projects (273), Vendors (629), Users (495), Bid Packages (8), Bids (138), Bid Forms (29), and Change History. Full sync with 2-week version control.
+- 2026-02-24: Added Procore Data browser page (/procore-data) with tabs for Projects (505), Vendors (629), Users (496), Bid Packages (8), Bids (138), Bid Forms (29), BidBoard Estimates (378), and Change History. Full sync with 2-week version control.
 - 2026-02-24: Created Procore sync engine (server/procore.ts) with OAuth token refresh, paginated API fetching, and change detection.
 - 2026-02-24: Procore OAuth flow updated to read credentials from DB config instead of env vars. Opens in new tab to avoid iframe blocking.
 - 2026-02-24: Added HubSpot Data browser page (/hubspot-data) with tabs for Companies, Contacts, Deals, Pipelines, and Change History. Search, pagination, expandable rows with full details.
@@ -21,7 +24,7 @@ Production-grade middleware application for bidirectional synchronization betwee
 - **Auth**: Session-based with bcrypt password hashing
 - **HubSpot Integration**: Replit OAuth connector (server/hubspot.ts) - auto token refresh
 - **Procore Integration**: OAuth 2.0 with token refresh (server/procore.ts) - credentials stored in automation_config
-- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms
+- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms, bidboard_estimates
 
 ## Key Files
 - `shared/schema.ts` - Drizzle schema and Zod validation schemas

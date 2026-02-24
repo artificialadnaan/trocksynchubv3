@@ -493,6 +493,30 @@ export const insertProcoreBidFormSchema = createInsertSchema(procoreBidForms).om
 export type InsertProcoreBidForm = z.infer<typeof insertProcoreBidFormSchema>;
 export type ProcoreBidForm = typeof procoreBidForms.$inferSelect;
 
+export const bidboardEstimates = pgTable("bidboard_estimates", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  estimator: text("estimator"),
+  office: text("office"),
+  status: text("status"),
+  salesPricePerArea: text("sales_price_per_area"),
+  projectCost: numeric("project_cost"),
+  profitMargin: numeric("profit_margin"),
+  totalSales: numeric("total_sales"),
+  createdDate: timestamp("created_date"),
+  dueDate: timestamp("due_date"),
+  customerName: text("customer_name"),
+  customerContact: text("customer_contact"),
+  projectNumber: text("project_number"),
+  procoreProjectId: text("procore_project_id"),
+  matchStatus: text("match_status").default("unmatched"),
+  importedAt: timestamp("imported_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertBidboardEstimateSchema = createInsertSchema(bidboardEstimates).omit({ id: true, importedAt: true, updatedAt: true });
+export type InsertBidboardEstimate = z.infer<typeof insertBidboardEstimateSchema>;
+export type BidboardEstimate = typeof bidboardEstimates.$inferSelect;
+
 export const procoreChangeHistory = pgTable("procore_change_history", {
   id: serial("id").primaryKey(),
   entityType: text("entity_type").notNull(),

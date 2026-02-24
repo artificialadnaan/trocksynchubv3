@@ -786,7 +786,8 @@ export async function registerRoutes(
   app.get("/api/integrations/procore/data-counts", requireAuth, async (_req, res) => {
     try {
       const counts = await storage.getProcoreDataCounts();
-      res.json(counts);
+      const bidboardCount = await storage.getBidboardEstimateCount();
+      res.json({ ...counts, bidboardEstimates: bidboardCount });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
@@ -1077,6 +1078,131 @@ export async function registerRoutes(
         offset: parseInt(req.query.offset as string) || 0,
       });
       res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  const multer = (await import("multer")).default;
+  const XLSX = (await import("xlsx")).default;
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+  app.post("/api/bidboard/import", requireAuth, upload.single("file"), async (req: any, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet) as any[];
+
+      if (!rows.length) return res.status(400).json({ message: "Empty spreadsheet" });
+
+      const dbProjectNames = await storage.getProcoreProjects({ limit: 10000, offset: 0 });
+      const dbNameMap = new Map<string, string>();
+      for (const p of dbProjectNames.data) {
+        dbNameMap.set((p.name || "").trim().toLowerCase(), String(p.procoreId));
+      }
+
+      await storage.clearBidboardEstimates();
+
+      let imported = 0, matched = 0, unmatched = 0;
+
+      for (const row of rows) {
+        const name = (row.Name || "").trim();
+        if (!name) continue;
+
+        let createdDate: Date | null = null;
+        if (row["Created Date"]) {
+          if (typeof row["Created Date"] === "number") {
+            createdDate = new Date((row["Created Date"] - 25569) * 86400000);
+          } else {
+            createdDate = new Date(row["Created Date"]);
+          }
+        }
+        let dueDate: Date | null = null;
+        if (row["Due Date"]) {
+          if (typeof row["Due Date"] === "number") {
+            dueDate = new Date((row["Due Date"] - 25569) * 86400000);
+          } else {
+            dueDate = new Date(row["Due Date"]);
+          }
+        }
+
+        const nameLC = name.toLowerCase();
+        const exactMatch = dbNameMap.get(nameLC);
+        let matchStatus = "unmatched";
+        let procoreProjectId: string | null = null;
+
+        if (exactMatch) {
+          matchStatus = "matched";
+          procoreProjectId = exactMatch;
+          matched++;
+        } else {
+          for (const [dbName, dbId] of dbNameMap.entries()) {
+            if (dbName.includes(nameLC) || nameLC.includes(dbName)) {
+              matchStatus = "partial";
+              procoreProjectId = dbId;
+              matched++;
+              break;
+            }
+          }
+          if (matchStatus === "unmatched") unmatched++;
+        }
+
+        await storage.upsertBidboardEstimate({
+          name,
+          estimator: (row.Estimator || "").trim() || null,
+          office: (row.Office || "").trim() || null,
+          status: (row.Status || "").trim() || null,
+          salesPricePerArea: (row["Sales Price Per Area"] || "").toString().trim() || null,
+          projectCost: row["Project Cost"] != null ? String(row["Project Cost"]) : null,
+          profitMargin: row["Profit Margin"] != null ? String(row["Profit Margin"]) : null,
+          totalSales: row["Total Sales"] != null ? String(row["Total Sales"]) : null,
+          createdDate,
+          dueDate,
+          customerName: (row["Customer Name"] || "").trim() || null,
+          customerContact: (row["Customer Contact"] || "").trim() || null,
+          projectNumber: row["Project #"] ? String(row["Project #"]).trim() : null,
+          procoreProjectId,
+          matchStatus,
+        });
+        imported++;
+      }
+
+      await storage.createAuditLog({
+        action: "bidboard_import",
+        entityType: "bidboard",
+        entityId: null,
+        source: "upload",
+        status: "success",
+        details: { imported, matched, unmatched, totalRows: rows.length },
+      });
+
+      res.json({ success: true, imported, matched, unmatched, totalRows: rows.length });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/bidboard/estimates", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getBidboardEstimates({
+        search: req.query.search as string,
+        status: req.query.status as string,
+        matchStatus: req.query.matchStatus as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/bidboard/count", requireAuth, async (_req, res) => {
+    try {
+      const count = await storage.getBidboardEstimateCount();
+      res.json({ count });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

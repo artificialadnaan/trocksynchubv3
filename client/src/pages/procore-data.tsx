@@ -31,8 +31,10 @@ import {
   ClipboardList,
   ExternalLink,
   Pencil,
+  Upload,
+  Calculator,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useLocation } from "wouter";
 import { format } from "date-fns";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -45,9 +47,10 @@ import type {
   ProcoreBidPackage,
   ProcoreBid,
   ProcoreBidForm,
+  BidboardEstimate,
 } from "@shared/schema";
 
-type TabType = "projects" | "vendors" | "users" | "bidPackages" | "bids" | "bidForms" | "history";
+type TabType = "projects" | "vendors" | "users" | "bidPackages" | "bids" | "bidForms" | "bidboardEstimates" | "history";
 
 const tabs: { id: TabType; label: string; icon: any }[] = [
   { id: "projects", label: "Projects", icon: Building2 },
@@ -56,6 +59,7 @@ const tabs: { id: TabType; label: string; icon: any }[] = [
   { id: "bidPackages", label: "Bid Packages", icon: Gavel },
   { id: "bids", label: "Bids", icon: FileText },
   { id: "bidForms", label: "Bid Forms", icon: ClipboardList },
+  { id: "bidboardEstimates", label: "BidBoard", icon: Calculator },
   { id: "history", label: "Change History", icon: History },
 ];
 
@@ -70,6 +74,7 @@ export default function ProcoreDataPage() {
     bidPackages: number;
     bids: number;
     bidForms: number;
+    bidboardEstimates: number;
   }>({
     queryKey: ["/api/integrations/procore/data-counts"],
   });
@@ -81,6 +86,7 @@ export default function ProcoreDataPage() {
     bidPackages: counts?.bidPackages || 0,
     bids: counts?.bids || 0,
     bidForms: counts?.bidForms || 0,
+    bidboardEstimates: counts?.bidboardEstimates || 0,
     history: counts?.changeHistory || 0,
   };
 
@@ -110,9 +116,9 @@ export default function ProcoreDataPage() {
           >
             <tab.icon className="w-4 h-4" />
             {tab.label}
-            {!countsLoading && (
+            {!countsLoading && countMap[tab.id] != null && (
               <Badge variant="secondary" className="text-xs ml-1 px-1.5 py-0">
-                {countMap[tab.id].toLocaleString()}
+                {(countMap[tab.id] || 0).toLocaleString()}
               </Badge>
             )}
           </button>
@@ -125,6 +131,7 @@ export default function ProcoreDataPage() {
       {activeTab === "bidPackages" && <BidPackagesTab />}
       {activeTab === "bids" && <BidsTab />}
       {activeTab === "bidForms" && <BidFormsTab />}
+      {activeTab === "bidboardEstimates" && <BidboardEstimatesTab />}
       {activeTab === "history" && <ChangeHistoryTab />}
     </div>
   );
@@ -1097,6 +1104,221 @@ function BidFormsTab() {
             </div>
             <Pagination page={page} setPage={setPage} total={data.total} limit={limit} />
           </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BidboardEstimatesTab() {
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [matchFilter, setMatchFilter] = useState("all");
+  const [openRows, setOpenRows] = useState<Set<number>>(new Set());
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { toast } = useToast();
+
+  const { data, isLoading } = useQuery<{ data: BidboardEstimate[]; total: number }>({
+    queryKey: ["/api/bidboard/estimates", search, page, statusFilter, matchFilter],
+    queryFn: async () => {
+      const params = new URLSearchParams({ limit: "50", offset: String(page * 50) });
+      if (search) params.set("search", search);
+      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (matchFilter !== "all") params.set("matchStatus", matchFilter);
+      const res = await fetch(`/api/bidboard/estimates?${params}`, { credentials: "include" });
+      return res.json();
+    },
+  });
+
+  const importMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/bidboard/import", {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error((await res.json()).message);
+      return res.json();
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/estimates"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/procore/data-counts"] });
+      toast({
+        title: "BidBoard Import Complete",
+        description: `${result.imported} estimates imported. ${result.matched} matched to Procore projects, ${result.unmatched} unmatched.`,
+      });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Import failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) importMutation.mutate(file);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const toggleRow = (id: number) => {
+    setOpenRows(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const stripHtml = (str: string | null) => str ? str.replace(/<[^>]*>/g, "") : "";
+  const totalPages = Math.ceil((data?.total || 0) / 50);
+  const estimates = data?.data || [];
+
+  const matchBadge = (status: string | null) => {
+    if (status === "matched") return <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200" data-testid="badge-matched">Matched</Badge>;
+    if (status === "partial") return <Badge className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200" data-testid="badge-partial">Partial</Badge>;
+    return <Badge variant="outline" className="text-muted-foreground" data-testid="badge-unmatched">Unmatched</Badge>;
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg" data-testid="text-bidboard-title">BidBoard Estimates</CardTitle>
+          <div className="flex items-center gap-2">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={handleFileSelect}
+              data-testid="input-bidboard-file"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importMutation.isPending}
+              data-testid="button-bidboard-import"
+            >
+              <Upload className="w-4 h-4 mr-2" />
+              {importMutation.isPending ? "Importing..." : "Import BidBoard Export"}
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-2 mb-4">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <Input
+              placeholder="Search estimates..."
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+              className="pl-9"
+              data-testid="input-bidboard-search"
+            />
+          </div>
+          <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(0); }}>
+            <SelectTrigger className="w-[200px]" data-testid="select-bidboard-status">
+              <SelectValue placeholder="All Statuses" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Statuses</SelectItem>
+              <SelectItem value="Estimate Sent to Client">Estimate Sent</SelectItem>
+              <SelectItem value="Estimate in Progress">In Progress</SelectItem>
+              <SelectItem value="Estimate Under Review">Under Review</SelectItem>
+              <SelectItem value="Service - Estimating">Service - Estimating</SelectItem>
+              <SelectItem value="Service - Sent to Production">Sent to Production</SelectItem>
+              <SelectItem value="Sent to Production">Production</SelectItem>
+              <SelectItem value="Service - Lost">Service - Lost</SelectItem>
+              <SelectItem value="Production Lost">Production Lost</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={matchFilter} onValueChange={(v) => { setMatchFilter(v); setPage(0); }}>
+            <SelectTrigger className="w-[160px]" data-testid="select-bidboard-match">
+              <SelectValue placeholder="All Match Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="matched">Matched</SelectItem>
+              <SelectItem value="partial">Partial Match</SelectItem>
+              <SelectItem value="unmatched">Unmatched</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {isLoading ? (
+          <div className="space-y-2">{[...Array(5)].map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
+        ) : estimates.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground">
+            <Calculator className="w-12 h-12 mx-auto mb-3 opacity-50" />
+            <p className="text-lg font-medium">No BidBoard data imported yet</p>
+            <p className="text-sm mt-1">Export your project list from BidBoard as .xlsx and import it here</p>
+          </div>
+        ) : (
+          <div className="space-y-1">
+            <div className="grid grid-cols-[1fr_150px_180px_120px_100px_100px] gap-2 px-3 py-2 text-xs font-medium text-muted-foreground border-b">
+              <span>Project Name</span>
+              <span>Estimator</span>
+              <span>Status</span>
+              <span>Customer</span>
+              <span>Total Sales</span>
+              <span>Match</span>
+            </div>
+            {estimates.map((est) => (
+              <Collapsible key={est.id} open={openRows.has(est.id)}>
+                <CollapsibleTrigger asChild>
+                  <div
+                    onClick={() => toggleRow(est.id)}
+                    className="grid grid-cols-[1fr_150px_180px_120px_100px_100px] gap-2 px-3 py-2.5 hover:bg-muted/50 cursor-pointer rounded text-sm items-center"
+                    data-testid={`row-bidboard-${est.id}`}
+                  >
+                    <span className="font-medium truncate flex items-center gap-1">
+                      <ChevronDown className={`w-3 h-3 transition-transform ${openRows.has(est.id) ? "rotate-0" : "-rotate-90"}`} />
+                      {stripHtml(est.name)}
+                    </span>
+                    <span className="text-muted-foreground truncate">{est.estimator || "-"}</span>
+                    <Badge variant="outline" className="text-xs w-fit" data-testid={`badge-status-${est.id}`}>
+                      {est.status || "-"}
+                    </Badge>
+                    <span className="text-muted-foreground truncate text-xs">{est.customerName || "-"}</span>
+                    <span className="text-muted-foreground text-xs">
+                      {est.totalSales ? `$${Number(est.totalSales).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "-"}
+                    </span>
+                    {matchBadge(est.matchStatus)}
+                  </div>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className="px-8 py-3 bg-muted/30 rounded-b text-sm space-y-2">
+                    <div className="grid grid-cols-3 gap-4">
+                      <div><span className="text-muted-foreground">Office:</span> {est.office || "-"}</div>
+                      <div><span className="text-muted-foreground">Project #:</span> {est.projectNumber || "-"}</div>
+                      <div><span className="text-muted-foreground">Customer Contact:</span> {est.customerContact || "-"}</div>
+                      <div><span className="text-muted-foreground">Sales Price/Area:</span> {est.salesPricePerArea || "-"}</div>
+                      <div><span className="text-muted-foreground">Project Cost:</span> {est.projectCost ? `$${Number(est.projectCost).toLocaleString()}` : "-"}</div>
+                      <div><span className="text-muted-foreground">Profit Margin:</span> {est.profitMargin ? `${est.profitMargin}%` : "-"}</div>
+                      <div><span className="text-muted-foreground">Created:</span> {est.createdDate ? format(new Date(est.createdDate), "MMM d, yyyy") : "-"}</div>
+                      <div><span className="text-muted-foreground">Due:</span> {est.dueDate ? format(new Date(est.dueDate), "MMM d, yyyy") : "-"}</div>
+                      <div><span className="text-muted-foreground">Procore ID:</span> {est.procoreProjectId || "Not linked"}</div>
+                    </div>
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            ))}
+          </div>
+        )}
+
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between mt-4 pt-4 border-t">
+            <span className="text-sm text-muted-foreground">
+              Page {page + 1} of {totalPages} ({data?.total.toLocaleString()} estimates)
+            </span>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage(p => p - 1)} data-testid="button-bidboard-prev">Previous</Button>
+              <Button variant="outline" size="sm" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)} data-testid="button-bidboard-next">Next</Button>
+            </div>
+          </div>
         )}
       </CardContent>
     </Card>
