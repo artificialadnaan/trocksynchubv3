@@ -467,7 +467,7 @@ function ProcoreConfigDialog({ open, onOpenChange, existingConfig }: {
     mutationFn: async () => {
       const res = await apiRequest("GET", "/api/oauth/procore/authorize");
       const { url } = await res.json();
-      window.location.href = url;
+      window.open(url, "_blank");
     },
     onError: (e: Error) => {
       toast({ title: "Error", description: e.message, variant: "destructive" });
