@@ -4,13 +4,16 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-24: Added HubSpot local database mirror with version control. Full sync pulls all companies, contacts, deals, and custom deal stages/pipelines. 2-week change history tracking with automatic purge.
+- 2026-02-24: HubSpot now uses Replit's built-in OAuth connector (automatic token management).
 - 2026-02-24: Initial implementation of full-stack application with auth, dashboard, sync config, webhook monitor, project mapper, audit logs, and settings pages.
 
 ## Architecture
 - **Backend**: Express.js with PostgreSQL (Drizzle ORM), session auth via connect-pg-simple
 - **Frontend**: React + Vite with Tailwind CSS, shadcn/ui components, TanStack Query, wouter routing, Recharts
 - **Auth**: Session-based with bcrypt password hashing
-- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs
+- **HubSpot Integration**: Replit OAuth connector (server/hubspot.ts) - auto token refresh
+- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history
 
 ## Key Files
 - `shared/schema.ts` - Drizzle schema and Zod validation schemas

@@ -263,8 +263,12 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
 }) {
   const { toast } = useToast();
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-  const [syncType, setSyncType] = useState("deals");
   const [syncResult, setSyncResult] = useState<any>(null);
+
+  const { data: dataCounts, refetch: refetchCounts } = useQuery<any>({
+    queryKey: ["/api/integrations/hubspot/data-counts"],
+    enabled: open,
+  });
 
   const testMutation = useMutation({
     mutationFn: async () => {
@@ -283,18 +287,16 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
   });
 
   const syncMutation = useMutation({
-    mutationFn: async (type: string) => {
-      const res = await fetch(`/api/integrations/hubspot/sync?type=${type}&limit=20`, { credentials: "include" });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message);
-      }
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/hubspot/sync");
       return res.json();
     },
     onSuccess: (data: any) => {
       setSyncResult(data);
+      refetchCounts();
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
-      toast({ title: `Synced ${data.count} ${data.type} from HubSpot` });
+      const total = (data.companies?.synced || 0) + (data.contacts?.synced || 0) + (data.deals?.synced || 0);
+      toast({ title: `Full sync complete`, description: `${total} records synced to local database in ${(data.duration / 1000).toFixed(1)}s` });
     },
     onError: (e: Error) => {
       setSyncResult(null);
@@ -304,7 +306,7 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center">
@@ -313,7 +315,7 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
             HubSpot CRM Configuration
           </DialogTitle>
           <DialogDescription>
-            HubSpot is connected via the Replit integration. Use the buttons below to test the connection and sync data.
+            HubSpot is connected via the Replit integration. Sync Now pulls all companies, contacts, deals, and custom deal stages into your local database with 2-week version history.
           </DialogDescription>
         </DialogHeader>
 
@@ -323,10 +325,35 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
             <p className="text-xs text-muted-foreground">
               Managed automatically via Replit integration with OAuth. Token refresh is handled for you.
             </p>
-            <p className="text-xs text-muted-foreground mt-1">
-              Scopes: deals (read/write), companies (read/write), contacts (read/write), schemas (read)
-            </p>
           </div>
+
+          {dataCounts && (dataCounts.companies > 0 || dataCounts.contacts > 0 || dataCounts.deals > 0) && (
+            <div className="p-3 rounded-lg border bg-muted/30" data-testid="hubspot-data-counts">
+              <p className="text-sm font-medium mb-2">Local Database Mirror</p>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="flex justify-between px-2 py-1 rounded bg-background">
+                  <span className="text-muted-foreground">Companies</span>
+                  <span className="font-medium" data-testid="count-companies">{dataCounts.companies}</span>
+                </div>
+                <div className="flex justify-between px-2 py-1 rounded bg-background">
+                  <span className="text-muted-foreground">Contacts</span>
+                  <span className="font-medium" data-testid="count-contacts">{dataCounts.contacts}</span>
+                </div>
+                <div className="flex justify-between px-2 py-1 rounded bg-background">
+                  <span className="text-muted-foreground">Deals</span>
+                  <span className="font-medium" data-testid="count-deals">{dataCounts.deals}</span>
+                </div>
+                <div className="flex justify-between px-2 py-1 rounded bg-background">
+                  <span className="text-muted-foreground">Pipelines</span>
+                  <span className="font-medium" data-testid="count-pipelines">{dataCounts.pipelines}</span>
+                </div>
+                <div className="flex justify-between px-2 py-1 rounded bg-background col-span-2">
+                  <span className="text-muted-foreground">Change History (14-day)</span>
+                  <span className="font-medium" data-testid="count-history">{dataCounts.changeHistory}</span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {testResult && (
             <TestResultBanner result={testResult} />
@@ -351,59 +378,62 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
           <Separator />
 
           <div>
-            <p className="text-sm font-medium mb-2">Sync Data from HubSpot</p>
-            <p className="text-xs text-muted-foreground mb-3">Pull the latest records from your HubSpot account to verify the integration is working.</p>
-            <div className="flex gap-2">
-              <Select value={syncType} onValueChange={setSyncType}>
-                <SelectTrigger className="w-[140px]" data-testid="select-sync-type">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="deals">Deals</SelectItem>
-                  <SelectItem value="companies">Companies</SelectItem>
-                  <SelectItem value="contacts">Contacts</SelectItem>
-                </SelectContent>
-              </Select>
-              <Button
-                onClick={() => syncMutation.mutate(syncType)}
-                disabled={syncMutation.isPending}
-                className="flex-1"
-                data-testid="button-sync-hubspot"
-              >
-                {syncMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-1" />}
-                {syncMutation.isPending ? "Syncing..." : "Sync Now"}
-              </Button>
-            </div>
+            <p className="text-sm font-medium mb-2">Full Data Sync</p>
+            <p className="text-xs text-muted-foreground mb-3">
+              Pulls all companies, contacts, deals, and custom deal stages/pipelines from HubSpot into the local database. Changes are tracked with 2-week version history.
+            </p>
+            <Button
+              onClick={() => syncMutation.mutate()}
+              disabled={syncMutation.isPending}
+              className="w-full"
+              data-testid="button-sync-hubspot"
+            >
+              {syncMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-1" />}
+              {syncMutation.isPending ? "Syncing all data..." : "Sync Now"}
+            </Button>
           </div>
 
-          {syncResult && (
-            <div className="rounded-lg border overflow-hidden">
-              <div className="px-3 py-2 bg-muted/30 border-b">
-                <p className="text-sm font-medium">
-                  {syncResult.count} {syncResult.type} found
+          {syncResult && syncResult.success && (
+            <div className="rounded-lg border overflow-hidden" data-testid="sync-results-panel">
+              <div className="px-3 py-2 bg-green-500/10 border-b">
+                <p className="text-sm font-medium text-green-700 dark:text-green-400">
+                  Sync Complete ({(syncResult.duration / 1000).toFixed(1)}s)
                 </p>
               </div>
-              <div className="max-h-48 overflow-y-auto">
-                {syncResult.data?.map((item: any, i: number) => (
-                  <div key={item.id || i} className="px-3 py-2 border-b last:border-0 text-sm" data-testid={`sync-result-${i}`}>
-                    <p className="font-medium text-sm">
-                      {item.properties?.dealname || item.properties?.name || `${item.properties?.firstname || ""} ${item.properties?.lastname || ""}`.trim() || `Record #${item.id}`}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      ID: {item.id}
-                      {item.properties?.amount && ` | $${Number(item.properties.amount).toLocaleString()}`}
-                      {item.properties?.dealstage && ` | Stage: ${item.properties.dealstage}`}
-                      {item.properties?.email && ` | ${item.properties.email}`}
-                      {item.properties?.domain && ` | ${item.properties.domain}`}
-                    </p>
+              <div className="p-3 space-y-2 text-xs">
+                <SyncResultRow label="Companies" data={syncResult.companies} />
+                <SyncResultRow label="Contacts" data={syncResult.contacts} />
+                <SyncResultRow label="Deals" data={syncResult.deals} />
+                <div className="flex justify-between px-2 py-1 rounded bg-muted/30">
+                  <span>Pipelines</span>
+                  <span className="font-medium">{syncResult.pipelines} synced</span>
+                </div>
+                {syncResult.purgedHistory > 0 && (
+                  <div className="flex justify-between px-2 py-1 rounded bg-muted/30">
+                    <span>History Purged</span>
+                    <span className="font-medium">{syncResult.purgedHistory} old records removed</span>
                   </div>
-                ))}
+                )}
               </div>
             </div>
           )}
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function SyncResultRow({ label, data }: { label: string; data?: { synced: number; created: number; updated: number; changes: number } }) {
+  if (!data) return null;
+  return (
+    <div className="flex justify-between px-2 py-1 rounded bg-muted/30" data-testid={`sync-row-${label.toLowerCase()}`}>
+      <span>{label}</span>
+      <span className="font-medium">
+        {data.synced} synced
+        {data.created > 0 && <span className="text-green-600 ml-1">(+{data.created} new)</span>}
+        {data.updated > 0 && <span className="text-blue-600 ml-1">({data.updated} updated)</span>}
+      </span>
+    </div>
   );
 }
 

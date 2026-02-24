@@ -7,7 +7,7 @@ import session from "express-session";
 import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
-import { testHubSpotConnection, fetchHubSpotDeals, fetchHubSpotCompanies, fetchHubSpotContacts } from "./hubspot";
+import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines } from "./hubspot";
 
 const PgSession = connectPgSimple(session);
 
@@ -497,44 +497,48 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/integrations/hubspot/sync", requireAuth, async (req, res) => {
+  app.post("/api/integrations/hubspot/sync", requireAuth, async (_req, res) => {
     try {
-      const type = (req.query.type as string) || "deals";
-      const limit = parseInt(req.query.limit as string) || 20;
-
-      let data: any[] = [];
-      let label = "";
-
-      if (type === "deals") {
-        data = await fetchHubSpotDeals(limit);
-        label = "deals";
-      } else if (type === "companies") {
-        data = await fetchHubSpotCompanies(limit);
-        label = "companies";
-      } else if (type === "contacts") {
-        data = await fetchHubSpotContacts(limit);
-        label = "contacts";
-      }
+      const result = await runFullHubSpotSync();
 
       await storage.createAuditLog({
-        action: "hubspot_data_sync",
-        entityType: label,
+        action: "hubspot_full_sync",
+        entityType: "all",
         source: "hubspot",
         status: "success",
-        details: { count: data.length, type: label },
+        details: result,
+        durationMs: result.duration,
       });
 
-      res.json({ success: true, type: label, count: data.length, data });
+      res.json({ success: true, ...result });
     } catch (e: any) {
       await storage.createAuditLog({
-        action: "hubspot_data_sync",
-        entityType: "unknown",
+        action: "hubspot_full_sync",
+        entityType: "all",
         source: "hubspot",
         status: "error",
         errorMessage: e.message,
         details: { error: e.message },
       });
       res.status(500).json({ success: false, message: e.message });
+    }
+  });
+
+  app.get("/api/integrations/hubspot/pipelines", requireAuth, async (_req, res) => {
+    try {
+      const pipelines = await syncHubSpotPipelines();
+      res.json({ success: true, pipelines });
+    } catch (e: any) {
+      res.status(500).json({ success: false, message: e.message });
+    }
+  });
+
+  app.get("/api/integrations/hubspot/data-counts", requireAuth, async (_req, res) => {
+    try {
+      const counts = await storage.getHubspotDataCounts();
+      res.json(counts);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 

@@ -11,6 +11,11 @@ import {
   automationConfig, type AutomationConfig, type InsertAutomationConfig,
   contractCounters, type ContractCounter, type InsertContractCounter,
   pollJobs, type PollJob, type InsertPollJob,
+  hubspotCompanies, type HubspotCompany, type InsertHubspotCompany,
+  hubspotContacts, type HubspotContact, type InsertHubspotContact,
+  hubspotDeals, type HubspotDeal, type InsertHubspotDeal,
+  hubspotPipelines, type HubspotPipeline, type InsertHubspotPipeline,
+  hubspotChangeHistory, type HubspotChangeHistory, type InsertHubspotChangeHistory,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -63,6 +68,17 @@ export interface IStorage {
     recentActivity: AuditLog[];
     syncsByDay: { date: string; count: number; success: number; failed: number }[];
   }>;
+
+  upsertHubspotCompany(data: InsertHubspotCompany): Promise<HubspotCompany>;
+  upsertHubspotContact(data: InsertHubspotContact): Promise<HubspotContact>;
+  upsertHubspotDeal(data: InsertHubspotDeal): Promise<HubspotDeal>;
+  upsertHubspotPipeline(data: InsertHubspotPipeline): Promise<HubspotPipeline>;
+  getHubspotCompanyByHubspotId(hubspotId: string): Promise<HubspotCompany | undefined>;
+  getHubspotContactByHubspotId(hubspotId: string): Promise<HubspotContact | undefined>;
+  getHubspotDealByHubspotId(hubspotId: string): Promise<HubspotDeal | undefined>;
+  createChangeHistory(data: InsertHubspotChangeHistory): Promise<HubspotChangeHistory>;
+  purgeOldChangeHistory(daysToKeep: number): Promise<number>;
+  getHubspotDataCounts(): Promise<{ companies: number; contacts: number; deals: number; pipelines: number; changeHistory: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -297,6 +313,85 @@ export class DatabaseStorage implements IStorage {
       pendingWebhooks: pendingRes[0]?.count || 0,
       recentActivity,
       syncsByDay: dailyStats,
+    };
+  }
+
+  async upsertHubspotCompany(data: InsertHubspotCompany): Promise<HubspotCompany> {
+    const [result] = await db.insert(hubspotCompanies).values(data)
+      .onConflictDoUpdate({
+        target: hubspotCompanies.hubspotId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async upsertHubspotContact(data: InsertHubspotContact): Promise<HubspotContact> {
+    const [result] = await db.insert(hubspotContacts).values(data)
+      .onConflictDoUpdate({
+        target: hubspotContacts.hubspotId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async upsertHubspotDeal(data: InsertHubspotDeal): Promise<HubspotDeal> {
+    const [result] = await db.insert(hubspotDeals).values(data)
+      .onConflictDoUpdate({
+        target: hubspotDeals.hubspotId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async upsertHubspotPipeline(data: InsertHubspotPipeline): Promise<HubspotPipeline> {
+    const [result] = await db.insert(hubspotPipelines).values(data)
+      .onConflictDoUpdate({
+        target: hubspotPipelines.hubspotId,
+        set: { ...data, lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getHubspotCompanyByHubspotId(hubspotId: string): Promise<HubspotCompany | undefined> {
+    const [result] = await db.select().from(hubspotCompanies).where(eq(hubspotCompanies.hubspotId, hubspotId));
+    return result;
+  }
+
+  async getHubspotContactByHubspotId(hubspotId: string): Promise<HubspotContact | undefined> {
+    const [result] = await db.select().from(hubspotContacts).where(eq(hubspotContacts.hubspotId, hubspotId));
+    return result;
+  }
+
+  async getHubspotDealByHubspotId(hubspotId: string): Promise<HubspotDeal | undefined> {
+    const [result] = await db.select().from(hubspotDeals).where(eq(hubspotDeals.hubspotId, hubspotId));
+    return result;
+  }
+
+  async createChangeHistory(data: InsertHubspotChangeHistory): Promise<HubspotChangeHistory> {
+    const [result] = await db.insert(hubspotChangeHistory).values(data).returning();
+    return result;
+  }
+
+  async purgeOldChangeHistory(daysToKeep: number): Promise<number> {
+    const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
+    const deleted = await db.delete(hubspotChangeHistory).where(lte(hubspotChangeHistory.createdAt, cutoff)).returning();
+    return deleted.length;
+  }
+
+  async getHubspotDataCounts(): Promise<{ companies: number; contacts: number; deals: number; pipelines: number; changeHistory: number }> {
+    const [compRes, contRes, dealRes, pipeRes, histRes] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(hubspotCompanies),
+      db.select({ count: sql<number>`count(*)::int` }).from(hubspotContacts),
+      db.select({ count: sql<number>`count(*)::int` }).from(hubspotDeals),
+      db.select({ count: sql<number>`count(*)::int` }).from(hubspotPipelines),
+      db.select({ count: sql<number>`count(*)::int` }).from(hubspotChangeHistory),
+    ]);
+    return {
+      companies: compRes[0]?.count || 0,
+      contacts: contRes[0]?.count || 0,
+      deals: dealRes[0]?.count || 0,
+      pipelines: pipeRes[0]?.count || 0,
+      changeHistory: histRes[0]?.count || 0,
     };
   }
 }
