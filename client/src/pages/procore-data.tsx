@@ -26,6 +26,9 @@ import {
   Search,
   ChevronDown,
   RefreshCw,
+  Gavel,
+  FileText,
+  ClipboardList,
 } from "lucide-react";
 import { useState } from "react";
 import { format } from "date-fns";
@@ -34,14 +37,20 @@ import type {
   ProcoreVendor,
   ProcoreUser,
   ProcoreChangeHistory,
+  ProcoreBidPackage,
+  ProcoreBid,
+  ProcoreBidForm,
 } from "@shared/schema";
 
-type TabType = "projects" | "vendors" | "users" | "history";
+type TabType = "projects" | "vendors" | "users" | "bidPackages" | "bids" | "bidForms" | "history";
 
 const tabs: { id: TabType; label: string; icon: any }[] = [
   { id: "projects", label: "Projects", icon: Building2 },
   { id: "vendors", label: "Vendors", icon: Truck },
   { id: "users", label: "Users", icon: Users },
+  { id: "bidPackages", label: "Bid Packages", icon: Gavel },
+  { id: "bids", label: "Bids", icon: FileText },
+  { id: "bidForms", label: "Bid Forms", icon: ClipboardList },
   { id: "history", label: "Change History", icon: History },
 ];
 
@@ -53,6 +62,9 @@ export default function ProcoreDataPage() {
     vendors: number;
     users: number;
     changeHistory: number;
+    bidPackages: number;
+    bids: number;
+    bidForms: number;
   }>({
     queryKey: ["/api/integrations/procore/data-counts"],
   });
@@ -61,6 +73,9 @@ export default function ProcoreDataPage() {
     projects: counts?.projects || 0,
     vendors: counts?.vendors || 0,
     users: counts?.users || 0,
+    bidPackages: counts?.bidPackages || 0,
+    bids: counts?.bids || 0,
+    bidForms: counts?.bidForms || 0,
     history: counts?.changeHistory || 0,
   };
 
@@ -102,6 +117,9 @@ export default function ProcoreDataPage() {
       {activeTab === "projects" && <ProjectsTab />}
       {activeTab === "vendors" && <VendorsTab />}
       {activeTab === "users" && <UsersTab />}
+      {activeTab === "bidPackages" && <BidPackagesTab />}
+      {activeTab === "bids" && <BidsTab />}
+      {activeTab === "bidForms" && <BidFormsTab />}
       {activeTab === "history" && <ChangeHistoryTab />}
     </div>
   );
@@ -467,6 +485,378 @@ function UsersTab() {
   );
 }
 
+function BidPackagesTab() {
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const limit = 50;
+
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  params.set("limit", String(limit));
+  params.set("offset", String(page * limit));
+
+  const { data, isLoading, refetch } = useQuery<{ data: ProcoreBidPackage[]; total: number }>({
+    queryKey: [`/api/procore/bid-packages?${params.toString()}`],
+  });
+
+  const toggleExpand = (id: number) => {
+    const next = new Set(expandedIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setExpandedIds(next);
+  };
+
+  const formatDate = (dateStr: string | null) => {
+    if (!dateStr) return "—";
+    try { return format(new Date(dateStr), "MMM d, yyyy"); } catch { return dateStr; }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2">
+            <Gavel className="w-4 h-4" />
+            Bid Packages
+            {data && <span className="text-xs font-normal text-muted-foreground">({data.total.toLocaleString()} total)</span>}
+          </CardTitle>
+          <div className="flex gap-2 items-center">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-muted-foreground" />
+              <Input
+                placeholder="Search bid packages..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+                className="h-8 w-[200px] pl-8 text-sm"
+                data-testid="input-search-procore-bid-packages"
+              />
+            </div>
+            <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh-procore-bid-packages">
+              <RefreshCw className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-48 w-full" />
+        ) : !data?.data?.length ? (
+          <p className="text-sm text-muted-foreground py-12 text-center">No bid packages found. Run a Procore sync to pull Bid Board data.</p>
+        ) : (
+          <>
+            <div className="rounded-lg border">
+              <div className="grid grid-cols-[1.5fr_1.2fr_0.8fr_0.8fr_0.6fr_0.6fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+                <span>Title</span>
+                <span>Project</span>
+                <span>Due Date</span>
+                <span>Status</span>
+                <span>Invites</span>
+                <span>Bids</span>
+                <span className="w-8"></span>
+              </div>
+              {data.data.map((pkg) => (
+                <Collapsible key={pkg.id} open={expandedIds.has(pkg.id)} onOpenChange={() => toggleExpand(pkg.id)}>
+                  <CollapsibleTrigger className="w-full" data-testid={`procore-bid-package-row-${pkg.id}`}>
+                    <div className="grid grid-cols-[1.5fr_1.2fr_0.8fr_0.8fr_0.6fr_0.6fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                      <span className="font-medium truncate text-left">{pkg.title || "—"}</span>
+                      <span className="text-muted-foreground truncate text-left">{pkg.projectName || "—"}</span>
+                      <span className="text-muted-foreground text-left">{formatDate(pkg.bidDueDate)}</span>
+                      <span className="text-left">
+                        <Badge variant={pkg.sealed ? "destructive" : "secondary"} className="text-xs">
+                          {pkg.sealed ? "Sealed" : pkg.open ? "Open" : "Closed"}
+                        </Badge>
+                      </span>
+                      <span className="text-center font-medium">{pkg.bidInvitesSentCount ?? 0}</span>
+                      <span className="text-center font-medium">{pkg.bidsReceivedCount ?? 0}</span>
+                      <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedIds.has(pkg.id) ? "rotate-180" : ""}`} />
+                    </div>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="mx-4 mb-2 p-3 rounded-lg border bg-muted/20 space-y-2">
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div><span className="text-muted-foreground">Procore ID:</span> <span className="ml-1 font-mono text-xs">{pkg.procoreId}</span></div>
+                        <div><span className="text-muted-foreground">Project ID:</span> <span className="ml-1 font-mono text-xs">{pkg.projectId || "—"}</span></div>
+                        <div><span className="text-muted-foreground">Package #:</span> <span className="ml-1">{pkg.number ?? "—"}</span></div>
+                        <div><span className="text-muted-foreground">Accounting:</span> <span className="ml-1">{pkg.accountingMethod || "—"}</span></div>
+                        <div><span className="text-muted-foreground">Has Bid Docs:</span> <span className="ml-1">{pkg.hasBidDocs ? "Yes" : "No"}</span></div>
+                        <div><span className="text-muted-foreground">Accept Late:</span> <span className="ml-1">{pkg.acceptPostDueSubmissions ? "Yes" : "No"}</span></div>
+                        <div><span className="text-muted-foreground">Pre-bid Walkthrough:</span> <span className="ml-1">{pkg.enablePrebidWalkthrough ? "Yes" : "No"}</span></div>
+                        <div><span className="text-muted-foreground">Pre-bid RFI:</span> <span className="ml-1">{pkg.enablePrebidRfiDeadline ? "Yes" : "No"}</span></div>
+                      </div>
+                      {pkg.projectLocation && (
+                        <div className="text-sm"><span className="text-muted-foreground">Location:</span> <span className="ml-1">{pkg.projectLocation.replace(/<br\s*\/?>/gi, ", ").replace(/<[^>]*>/g, "")}</span></div>
+                      )}
+                      {!!pkg.properties && (
+                        <details className="text-xs">
+                          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Full Data</summary>
+                          <ScrollArea className="h-40 mt-1 rounded border bg-card p-2">
+                            <pre className="font-mono whitespace-pre-wrap">{String(JSON.stringify(pkg.properties, null, 2))}</pre>
+                          </ScrollArea>
+                        </details>
+                      )}
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
+              ))}
+            </div>
+            <Pagination page={page} setPage={setPage} total={data.total} limit={limit} />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BidsTab() {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(0);
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const limit = 50;
+
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  if (statusFilter !== "all") params.set("bidStatus", statusFilter);
+  params.set("limit", String(limit));
+  params.set("offset", String(page * limit));
+
+  const { data, isLoading, refetch } = useQuery<{ data: ProcoreBid[]; total: number }>({
+    queryKey: [`/api/procore/bids?${params.toString()}`],
+  });
+
+  const toggleExpand = (id: number) => {
+    const next = new Set(expandedIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setExpandedIds(next);
+  };
+
+  const statusColor = (status: string | null) => {
+    const colors: Record<string, string> = {
+      submitted: "bg-green-500/10 text-green-600 border-green-500/20",
+      will_bid: "bg-blue-500/10 text-blue-600 border-blue-500/20",
+      will_not_bid: "bg-red-500/10 text-red-600 border-red-500/20",
+      undecided: "bg-yellow-500/10 text-yellow-600 border-yellow-500/20",
+    };
+    return colors[status || ""] || "";
+  };
+
+  const formatAmount = (val: string | null) => {
+    if (!val || val === "0") return "—";
+    const num = parseFloat(val);
+    if (isNaN(num)) return val;
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(num);
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2">
+            <FileText className="w-4 h-4" />
+            Bids
+            {data && <span className="text-xs font-normal text-muted-foreground">({data.total.toLocaleString()} total)</span>}
+          </CardTitle>
+          <div className="flex gap-2 items-center">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-muted-foreground" />
+              <Input
+                placeholder="Search bids..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+                className="h-8 w-[200px] pl-8 text-sm"
+                data-testid="input-search-procore-bids"
+              />
+            </div>
+            <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(0); }}>
+              <SelectTrigger className="w-[140px] h-8" data-testid="filter-procore-bid-status">
+                <SelectValue placeholder="Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Statuses</SelectItem>
+                <SelectItem value="submitted">Submitted</SelectItem>
+                <SelectItem value="will_bid">Will Bid</SelectItem>
+                <SelectItem value="will_not_bid">Will Not Bid</SelectItem>
+                <SelectItem value="undecided">Undecided</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh-procore-bids">
+              <RefreshCw className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-48 w-full" />
+        ) : !data?.data?.length ? (
+          <p className="text-sm text-muted-foreground py-12 text-center">No bids found. Run a Procore sync to pull Bid Board data.</p>
+        ) : (
+          <>
+            <div className="rounded-lg border">
+              <div className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr_0.7fr_0.6fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+                <span>Vendor</span>
+                <span>Bid Package</span>
+                <span>Bid Form</span>
+                <span>Status</span>
+                <span>Amount</span>
+                <span>Committed</span>
+                <span className="w-8"></span>
+              </div>
+              {data.data.map((bid) => (
+                <Collapsible key={bid.id} open={expandedIds.has(bid.id)} onOpenChange={() => toggleExpand(bid.id)}>
+                  <CollapsibleTrigger className="w-full" data-testid={`procore-bid-row-${bid.id}`}>
+                    <div className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr_0.7fr_0.6fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                      <span className="font-medium truncate text-left">{bid.vendorName || "—"}</span>
+                      <span className="text-muted-foreground truncate text-left">{bid.bidPackageTitle || "—"}</span>
+                      <span className="text-muted-foreground truncate text-left">{bid.bidFormTitle || "—"}</span>
+                      <span className="text-left">
+                        <Badge className={`text-xs ${statusColor(bid.bidStatus)}`}>{bid.bidStatus?.replace(/_/g, " ") || "—"}</Badge>
+                      </span>
+                      <span className="text-left font-medium">{formatAmount(bid.lumpSumAmount)}</span>
+                      <span className="text-center">
+                        {bid.isBidderCommitted ? <Badge variant="secondary" className="text-xs">Yes</Badge> : <span className="text-muted-foreground text-xs">No</span>}
+                      </span>
+                      <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedIds.has(bid.id) ? "rotate-180" : ""}`} />
+                    </div>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="mx-4 mb-2 p-3 rounded-lg border bg-muted/20 space-y-2">
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div><span className="text-muted-foreground">Procore ID:</span> <span className="ml-1 font-mono text-xs">{bid.procoreId}</span></div>
+                        <div><span className="text-muted-foreground">Vendor ID:</span> <span className="ml-1 font-mono text-xs">{bid.vendorId || "—"}</span></div>
+                        <div><span className="text-muted-foreground">Project:</span> <span className="ml-1">{bid.projectName || "—"}</span></div>
+                        <div><span className="text-muted-foreground">Due Date:</span> <span className="ml-1">{bid.dueDate ? format(new Date(bid.dueDate), "MMM d, yyyy") : "—"}</span></div>
+                        <div><span className="text-muted-foreground">Submitted:</span> <span className="ml-1">{bid.submitted ? "Yes" : "No"}</span></div>
+                        <div><span className="text-muted-foreground">Awarded:</span> <span className="ml-1">{bid.awarded === true ? "Yes" : bid.awarded === false ? "No" : "Pending"}</span></div>
+                        <div><span className="text-muted-foreground">Requester:</span> <span className="ml-1">{bid.bidRequesterName || "—"} {bid.bidRequesterEmail ? `(${bid.bidRequesterEmail})` : ""}</span></div>
+                        <div><span className="text-muted-foreground">Company:</span> <span className="ml-1">{bid.bidRequesterCompany || "—"}</span></div>
+                        <div><span className="text-muted-foreground">Invitation Sent:</span> <span className="ml-1">{bid.invitationLastSentAt ? format(new Date(bid.invitationLastSentAt), "MMM d, yyyy h:mm a") : "—"}</span></div>
+                        <div><span className="text-muted-foreground">NDA Required:</span> <span className="ml-1">{bid.requireNda ? "Yes" : "No"}</span></div>
+                      </div>
+                      {bid.bidderComments && (
+                        <div className="text-sm"><span className="text-muted-foreground">Comments:</span> <span className="ml-1">{bid.bidderComments}</span></div>
+                      )}
+                      {!!bid.properties && (
+                        <details className="text-xs">
+                          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Full Data</summary>
+                          <ScrollArea className="h-40 mt-1 rounded border bg-card p-2">
+                            <pre className="font-mono whitespace-pre-wrap">{String(JSON.stringify(bid.properties, null, 2))}</pre>
+                          </ScrollArea>
+                        </details>
+                      )}
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
+              ))}
+            </div>
+            <Pagination page={page} setPage={setPage} total={data.total} limit={limit} />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BidFormsTab() {
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const limit = 50;
+
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  params.set("limit", String(limit));
+  params.set("offset", String(page * limit));
+
+  const { data, isLoading, refetch } = useQuery<{ data: ProcoreBidForm[]; total: number }>({
+    queryKey: [`/api/procore/bid-forms?${params.toString()}`],
+  });
+
+  const toggleExpand = (id: number) => {
+    const next = new Set(expandedIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setExpandedIds(next);
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2">
+            <ClipboardList className="w-4 h-4" />
+            Bid Forms
+            {data && <span className="text-xs font-normal text-muted-foreground">({data.total.toLocaleString()} total)</span>}
+          </CardTitle>
+          <div className="flex gap-2 items-center">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2 w-3.5 h-3.5 text-muted-foreground" />
+              <Input
+                placeholder="Search bid forms..."
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+                className="h-8 w-[200px] pl-8 text-sm"
+                data-testid="input-search-procore-bid-forms"
+              />
+            </div>
+            <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh-procore-bid-forms">
+              <RefreshCw className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-48 w-full" />
+        ) : !data?.data?.length ? (
+          <p className="text-sm text-muted-foreground py-12 text-center">No bid forms found. Run a Procore sync to pull Bid Board data.</p>
+        ) : (
+          <>
+            <div className="rounded-lg border">
+              <div className="grid grid-cols-[1.5fr_1fr_1fr_0.8fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+                <span>Form Title</span>
+                <span>Bid Package ID</span>
+                <span>Project ID</span>
+                <span>Proposal</span>
+                <span className="w-8"></span>
+              </div>
+              {data.data.map((form) => (
+                <Collapsible key={form.id} open={expandedIds.has(form.id)} onOpenChange={() => toggleExpand(form.id)}>
+                  <CollapsibleTrigger className="w-full" data-testid={`procore-bid-form-row-${form.id}`}>
+                    <div className="grid grid-cols-[1.5fr_1fr_1fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                      <span className="font-medium truncate text-left">{form.title || "—"}</span>
+                      <span className="text-muted-foreground truncate text-left font-mono text-xs">{form.bidPackageId || "—"}</span>
+                      <span className="text-muted-foreground truncate text-left font-mono text-xs">{form.projectId || "—"}</span>
+                      <span className="text-muted-foreground text-left">{form.proposalName || "—"}</span>
+                      <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedIds.has(form.id) ? "rotate-180" : ""}`} />
+                    </div>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="mx-4 mb-2 p-3 rounded-lg border bg-muted/20 space-y-2">
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div><span className="text-muted-foreground">Procore ID:</span> <span className="ml-1 font-mono text-xs">{form.procoreId}</span></div>
+                        <div><span className="text-muted-foreground">Proposal ID:</span> <span className="ml-1 font-mono text-xs">{form.proposalId || "—"}</span></div>
+                      </div>
+                      {!!form.properties && (
+                        <details className="text-xs">
+                          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Full Data</summary>
+                          <ScrollArea className="h-40 mt-1 rounded border bg-card p-2">
+                            <pre className="font-mono whitespace-pre-wrap">{String(JSON.stringify(form.properties, null, 2))}</pre>
+                          </ScrollArea>
+                        </details>
+                      )}
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
+              ))}
+            </div>
+            <Pagination page={page} setPage={setPage} total={data.total} limit={limit} />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ChangeHistoryTab() {
   const [entityTypeFilter, setEntityTypeFilter] = useState("all");
   const [changeTypeFilter, setChangeTypeFilter] = useState("all");
@@ -518,6 +908,7 @@ function ChangeHistoryTab() {
                 <SelectItem value="project">Projects</SelectItem>
                 <SelectItem value="vendor">Vendors</SelectItem>
                 <SelectItem value="user">Users</SelectItem>
+                <SelectItem value="bid_package">Bid Packages</SelectItem>
               </SelectContent>
             </Select>
             <Select value={changeTypeFilter} onValueChange={(v) => { setChangeTypeFilter(v); setPage(0); }}>
@@ -529,6 +920,7 @@ function ChangeHistoryTab() {
                 <SelectItem value="created">Created</SelectItem>
                 <SelectItem value="updated">Updated</SelectItem>
                 <SelectItem value="field_changed">Field Changed</SelectItem>
+                <SelectItem value="synced">Synced</SelectItem>
               </SelectContent>
             </Select>
             <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh-procore-history">

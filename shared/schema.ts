@@ -401,6 +401,98 @@ export const insertProcoreUserSchema = createInsertSchema(procoreUsers).omit({ i
 export type InsertProcoreUser = z.infer<typeof insertProcoreUserSchema>;
 export type ProcoreUser = typeof procoreUsers.$inferSelect;
 
+export const procoreBidPackages = pgTable("procore_bid_packages", {
+  id: serial("id").primaryKey(),
+  procoreId: text("procore_id").notNull().unique(),
+  projectId: text("project_id"),
+  projectName: text("project_name"),
+  projectLocation: text("project_location"),
+  title: text("title"),
+  number: integer("number"),
+  bidDueDate: text("bid_due_date"),
+  formattedBidDueDate: text("formatted_bid_due_date"),
+  accountingMethod: text("accounting_method"),
+  open: boolean("open"),
+  hidden: boolean("hidden"),
+  sealed: boolean("sealed"),
+  hasBidDocs: boolean("has_bid_docs"),
+  acceptPostDueSubmissions: boolean("accept_post_due_submissions"),
+  allowBidderSum: boolean("allow_bidder_sum"),
+  enablePrebidWalkthrough: boolean("enable_prebid_walkthrough"),
+  enablePrebidRfiDeadline: boolean("enable_prebid_rfi_deadline"),
+  preBidRfiDeadlineDate: text("pre_bid_rfi_deadline_date"),
+  bidInvitesSentCount: integer("bid_invites_sent_count"),
+  bidsReceivedCount: integer("bids_received_count"),
+  bidEmailMessage: text("bid_email_message"),
+  bidWebMessage: text("bid_web_message"),
+  companyId: text("company_id"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertProcoreBidPackageSchema = createInsertSchema(procoreBidPackages).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProcoreBidPackage = z.infer<typeof insertProcoreBidPackageSchema>;
+export type ProcoreBidPackage = typeof procoreBidPackages.$inferSelect;
+
+export const procoreBids = pgTable("procore_bids", {
+  id: serial("id").primaryKey(),
+  procoreId: text("procore_id").notNull().unique(),
+  bidPackageId: text("bid_package_id"),
+  bidPackageTitle: text("bid_package_title"),
+  bidFormId: text("bid_form_id"),
+  bidFormTitle: text("bid_form_title"),
+  projectId: text("project_id"),
+  projectName: text("project_name"),
+  projectAddress: text("project_address"),
+  vendorId: text("vendor_id"),
+  vendorName: text("vendor_name"),
+  vendorTrades: text("vendor_trades"),
+  bidStatus: text("bid_status"),
+  awarded: boolean("awarded"),
+  submitted: boolean("submitted"),
+  isBidderCommitted: boolean("is_bidder_committed"),
+  lumpSumEnabled: boolean("lump_sum_enabled"),
+  lumpSumAmount: numeric("lump_sum_amount"),
+  bidderComments: text("bidder_comments"),
+  dueDate: text("due_date"),
+  invitationLastSentAt: text("invitation_last_sent_at"),
+  bidRequesterName: text("bid_requester_name"),
+  bidRequesterEmail: text("bid_requester_email"),
+  bidRequesterCompany: text("bid_requester_company"),
+  requireNda: boolean("require_nda"),
+  ndaStatus: text("nda_status"),
+  showBidInEstimating: boolean("show_bid_in_estimating"),
+  companyId: text("company_id"),
+  properties: jsonb("properties"),
+  procoreCreatedAt: text("procore_created_at"),
+  procoreUpdatedAt: text("procore_updated_at"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertProcoreBidSchema = createInsertSchema(procoreBids).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProcoreBid = z.infer<typeof insertProcoreBidSchema>;
+export type ProcoreBid = typeof procoreBids.$inferSelect;
+
+export const procoreBidForms = pgTable("procore_bid_forms", {
+  id: serial("id").primaryKey(),
+  procoreId: text("procore_id").notNull().unique(),
+  bidPackageId: text("bid_package_id"),
+  projectId: text("project_id"),
+  title: text("title"),
+  proposalId: text("proposal_id"),
+  proposalName: text("proposal_name"),
+  companyId: text("company_id"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertProcoreBidFormSchema = createInsertSchema(procoreBidForms).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProcoreBidForm = z.infer<typeof insertProcoreBidFormSchema>;
+export type ProcoreBidForm = typeof procoreBidForms.$inferSelect;
+
 export const procoreChangeHistory = pgTable("procore_change_history", {
   id: serial("id").primaryKey(),
   entityType: text("entity_type").notNull(),

@@ -20,6 +20,9 @@ import {
   procoreVendors, type ProcoreVendor, type InsertProcoreVendor,
   procoreUsers, type ProcoreUser, type InsertProcoreUser,
   procoreChangeHistory, type ProcoreChangeHistory, type InsertProcoreChangeHistory,
+  procoreBidPackages, type ProcoreBidPackage, type InsertProcoreBidPackage,
+  procoreBids, type ProcoreBid, type InsertProcoreBid,
+  procoreBidForms, type ProcoreBidForm, type InsertProcoreBidForm,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -104,8 +107,15 @@ export interface IStorage {
 
   createProcoreChangeHistory(data: InsertProcoreChangeHistory): Promise<ProcoreChangeHistory>;
   getProcoreChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreChangeHistory[]; total: number }>;
-  getProcoreDataCounts(): Promise<{ projects: number; vendors: number; users: number; changeHistory: number }>;
+  getProcoreDataCounts(): Promise<{ projects: number; vendors: number; users: number; changeHistory: number; bidPackages: number; bids: number; bidForms: number }>;
   purgeProcoreChangeHistory(daysToKeep: number): Promise<number>;
+
+  upsertProcoreBidPackage(data: InsertProcoreBidPackage): Promise<ProcoreBidPackage>;
+  getProcoreBidPackages(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBidPackage[]; total: number }>;
+  upsertProcoreBid(data: InsertProcoreBid): Promise<ProcoreBid>;
+  getProcoreBids(filters: { search?: string; bidPackageId?: string; bidStatus?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBid[]; total: number }>;
+  upsertProcoreBidForm(data: InsertProcoreBidForm): Promise<ProcoreBidForm>;
+  getProcoreBidForms(filters: { search?: string; bidPackageId?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBidForm[]; total: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -676,18 +686,24 @@ export class DatabaseStorage implements IStorage {
     return { data, total: countRes[0]?.count || 0 };
   }
 
-  async getProcoreDataCounts(): Promise<{ projects: number; vendors: number; users: number; changeHistory: number }> {
-    const [projRes, vendRes, userRes, histRes] = await Promise.all([
+  async getProcoreDataCounts(): Promise<{ projects: number; vendors: number; users: number; changeHistory: number; bidPackages: number; bids: number; bidForms: number }> {
+    const [projRes, vendRes, userRes, histRes, bpRes, bidRes, bfRes] = await Promise.all([
       db.select({ count: sql<number>`count(*)::int` }).from(procoreProjects),
       db.select({ count: sql<number>`count(*)::int` }).from(procoreVendors),
       db.select({ count: sql<number>`count(*)::int` }).from(procoreUsers),
       db.select({ count: sql<number>`count(*)::int` }).from(procoreChangeHistory),
+      db.select({ count: sql<number>`count(*)::int` }).from(procoreBidPackages),
+      db.select({ count: sql<number>`count(*)::int` }).from(procoreBids),
+      db.select({ count: sql<number>`count(*)::int` }).from(procoreBidForms),
     ]);
     return {
       projects: projRes[0]?.count || 0,
       vendors: vendRes[0]?.count || 0,
       users: userRes[0]?.count || 0,
       changeHistory: histRes[0]?.count || 0,
+      bidPackages: bpRes[0]?.count || 0,
+      bids: bidRes[0]?.count || 0,
+      bidForms: bfRes[0]?.count || 0,
     };
   }
 
@@ -695,6 +711,115 @@ export class DatabaseStorage implements IStorage {
     const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
     const deleted = await db.delete(procoreChangeHistory).where(lte(procoreChangeHistory.createdAt, cutoff)).returning();
     return deleted.length;
+  }
+
+  async upsertProcoreBidPackage(data: InsertProcoreBidPackage): Promise<ProcoreBidPackage> {
+    const [result] = await db.insert(procoreBidPackages).values(data)
+      .onConflictDoUpdate({
+        target: procoreBidPackages.procoreId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getProcoreBidPackages(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBidPackage[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(procoreBidPackages.title, `%${word}%`),
+        ilike(procoreBidPackages.projectName, `%${word}%`),
+        ilike(procoreBidPackages.projectLocation, `%${word}%`),
+        ilike(procoreBidPackages.procoreId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(procoreBidPackages).where(where).orderBy(desc(procoreBidPackages.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(procoreBidPackages).orderBy(desc(procoreBidPackages.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(procoreBidPackages).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(procoreBidPackages),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertProcoreBid(data: InsertProcoreBid): Promise<ProcoreBid> {
+    const [result] = await db.insert(procoreBids).values(data)
+      .onConflictDoUpdate({
+        target: procoreBids.procoreId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getProcoreBids(filters: { search?: string; bidPackageId?: string; bidStatus?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBid[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.bidPackageId) conditions.push(eq(procoreBids.bidPackageId, filters.bidPackageId));
+    if (filters.bidStatus) conditions.push(eq(procoreBids.bidStatus, filters.bidStatus));
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(procoreBids.vendorName, `%${word}%`),
+        ilike(procoreBids.bidPackageTitle, `%${word}%`),
+        ilike(procoreBids.bidFormTitle, `%${word}%`),
+        ilike(procoreBids.projectName, `%${word}%`),
+        ilike(procoreBids.bidStatus, `%${word}%`),
+        ilike(procoreBids.procoreId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(procoreBids).where(where).orderBy(desc(procoreBids.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(procoreBids).orderBy(desc(procoreBids.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(procoreBids).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(procoreBids),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertProcoreBidForm(data: InsertProcoreBidForm): Promise<ProcoreBidForm> {
+    const [result] = await db.insert(procoreBidForms).values(data)
+      .onConflictDoUpdate({
+        target: procoreBidForms.procoreId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getProcoreBidForms(filters: { search?: string; bidPackageId?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBidForm[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.bidPackageId) conditions.push(eq(procoreBidForms.bidPackageId, filters.bidPackageId));
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(procoreBidForms.title, `%${word}%`),
+        ilike(procoreBidForms.proposalName, `%${word}%`),
+        ilike(procoreBidForms.procoreId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(procoreBidForms).where(where).orderBy(desc(procoreBidForms.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(procoreBidForms).orderBy(desc(procoreBidForms.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(procoreBidForms).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(procoreBidForms),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
   }
 }
 

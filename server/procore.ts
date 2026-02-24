@@ -356,10 +356,168 @@ export async function syncProcoreUsers(): Promise<{ synced: number; created: num
   return { synced: allUsers.length, created, updated, changes };
 }
 
+async function fetchProcoreJson(endpoint: string, companyId: string): Promise<any> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const url = `${baseUrl}${endpoint}`;
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Accept': 'application/json',
+      'Procore-Company-Id': companyId,
+    },
+  });
+  if (!response.ok) {
+    if (response.status === 401) throw new Error("Procore token expired or invalid.");
+    const errText = await response.text();
+    throw new Error(`Procore API error ${response.status}: ${errText}`);
+  }
+  return response.json();
+}
+
+export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids: number; bidForms: number }> {
+  const config = await getProcoreConfig();
+  const companyId = config.companyId;
+
+  const bidPackagesResp = await fetchProcoreJson(
+    `/rest/v1.0/companies/${companyId}/bid_packages?per_page=100`,
+    companyId
+  );
+  const allPackages = bidPackagesResp.bidPackages || bidPackagesResp || [];
+  console.log(`Bid Board: fetched ${allPackages.length} bid packages`);
+
+  let totalBids = 0;
+  let totalForms = 0;
+
+  const projectBidMap: Record<string, string[]> = {};
+  for (const pkg of allPackages) {
+    const projId = String(pkg.project_id);
+    if (!projectBidMap[projId]) projectBidMap[projId] = [];
+    projectBidMap[projId].push(String(pkg.id));
+  }
+
+  for (const pkg of allPackages) {
+    const procoreId = String(pkg.id);
+    await storage.upsertProcoreBidPackage({
+      procoreId,
+      projectId: pkg.project_id ? String(pkg.project_id) : null,
+      projectName: pkg.project_name || null,
+      projectLocation: pkg.project_location || null,
+      title: pkg.title || null,
+      number: pkg.number ?? null,
+      bidDueDate: pkg.bid_due_date || null,
+      formattedBidDueDate: pkg.formatted_bid_due_date || null,
+      accountingMethod: pkg.accounting_method || null,
+      open: pkg.open ?? null,
+      hidden: pkg.hidden ?? null,
+      sealed: pkg.sealed ?? null,
+      hasBidDocs: pkg.has_bid_docs ?? null,
+      acceptPostDueSubmissions: pkg.accept_post_due_submissions ?? null,
+      allowBidderSum: pkg.allow_bidder_sum ?? null,
+      enablePrebidWalkthrough: pkg.enable_prebid_walkthrough ?? null,
+      enablePrebidRfiDeadline: pkg.enable_prebid_rfi_deadline ?? null,
+      preBidRfiDeadlineDate: pkg.pre_bid_rfi_deadline_date || null,
+      bidInvitesSentCount: pkg.bid_invites_sent_count ?? null,
+      bidsReceivedCount: pkg.bids_received_count ?? null,
+      bidEmailMessage: pkg.formatted_bid_email_message || null,
+      bidWebMessage: pkg.formatted_bid_web_message || null,
+      companyId: companyId,
+      properties: pkg,
+    });
+
+    await storage.createProcoreChangeHistory({
+      entityType: 'bid_package',
+      entityProcoreId: procoreId,
+      changeType: 'synced',
+      fullSnapshot: pkg,
+      syncedAt: new Date(),
+    });
+  }
+
+  for (const [projId, pkgIds] of Object.entries(projectBidMap)) {
+    for (const pkgId of pkgIds) {
+      try {
+        const bids = await fetchProcoreJson(
+          `/rest/v1.0/projects/${projId}/bid_packages/${pkgId}/bids?per_page=100`,
+          companyId
+        );
+        if (Array.isArray(bids)) {
+          for (const bid of bids) {
+            await storage.upsertProcoreBid({
+              procoreId: String(bid.id),
+              bidPackageId: bid.bid_package_id ? String(bid.bid_package_id) : null,
+              bidPackageTitle: bid.bid_package_title || null,
+              bidFormId: bid.bid_form_id ? String(bid.bid_form_id) : null,
+              bidFormTitle: bid.bid_form_title || null,
+              projectId: projId,
+              projectName: bid.project?.name || null,
+              projectAddress: bid.project?.address || null,
+              vendorId: bid.vendor?.id ? String(bid.vendor.id) : null,
+              vendorName: bid.vendor?.name || null,
+              vendorTrades: bid.vendor?.trades || null,
+              bidStatus: bid.bid_status || null,
+              awarded: bid.awarded ?? null,
+              submitted: bid.submitted ?? null,
+              isBidderCommitted: bid.is_bidder_committed ?? null,
+              lumpSumEnabled: bid.lump_sum_enabled ?? null,
+              lumpSumAmount: bid.lump_sum_amount != null ? String(bid.lump_sum_amount) : null,
+              bidderComments: bid.bidder_comments || null,
+              dueDate: bid.due_date || null,
+              invitationLastSentAt: bid.invitation_last_sent_at || null,
+              bidRequesterName: bid.bid_requester ? `${bid.bid_requester.first_name || ''} ${bid.bid_requester.last_name || ''}`.trim() : null,
+              bidRequesterEmail: bid.bid_requester?.email_address || null,
+              bidRequesterCompany: bid.bid_requester?.company || null,
+              requireNda: bid.require_nda ?? null,
+              ndaStatus: bid.nda_status || null,
+              showBidInEstimating: bid.show_bid_in_estimating ?? null,
+              companyId: companyId,
+              properties: bid,
+              procoreCreatedAt: bid.created_at || null,
+              procoreUpdatedAt: bid.updated_at || null,
+            });
+            totalBids++;
+          }
+        }
+      } catch (e: any) {
+        console.error(`Error fetching bids for project ${projId}/package ${pkgId}: ${e.message}`);
+      }
+
+      try {
+        const forms = await fetchProcoreJson(
+          `/rest/v1.0/projects/${projId}/bid_packages/${pkgId}/bid_forms?per_page=100`,
+          companyId
+        );
+        if (Array.isArray(forms)) {
+          for (const form of forms) {
+            await storage.upsertProcoreBidForm({
+              procoreId: String(form.id),
+              bidPackageId: pkgId,
+              projectId: projId,
+              title: form.title || null,
+              proposalId: form.proposal_id ? String(form.proposal_id) : null,
+              proposalName: form.proposal_name || null,
+              companyId: companyId,
+              properties: form,
+            });
+            totalForms++;
+          }
+        }
+      } catch (e: any) {
+        console.error(`Error fetching bid forms for project ${projId}/package ${pkgId}: ${e.message}`);
+      }
+    }
+  }
+
+  console.log(`Bid Board sync complete: ${allPackages.length} packages, ${totalBids} bids, ${totalForms} forms`);
+  return { bidPackages: allPackages.length, bids: totalBids, bidForms: totalForms };
+}
+
 export async function runFullProcoreSync(): Promise<{
   projects: { synced: number; created: number; updated: number; changes: number };
   vendors: { synced: number; created: number; updated: number; changes: number };
   users: { synced: number; created: number; updated: number; changes: number };
+  bidBoard: { bidPackages: number; bids: number; bidForms: number };
   purgedHistory: number;
   duration: number;
 }> {
@@ -370,6 +528,7 @@ export async function runFullProcoreSync(): Promise<{
     syncProcoreVendors(),
     syncProcoreUsers(),
   ]);
+  const bidBoard = await syncProcoreBidBoard();
 
   const purgedHistory = await storage.purgeProcoreChangeHistory(14);
   const duration = Date.now() - start;
@@ -378,6 +537,7 @@ export async function runFullProcoreSync(): Promise<{
     projects,
     vendors,
     users,
+    bidBoard,
     purgedHistory,
     duration,
   };

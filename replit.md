@@ -4,7 +4,8 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
-- 2026-02-24: Added Procore Data browser page (/procore-data) with tabs for Projects (273), Vendors (629), Users (495), and Change History. Full sync with 2-week version control.
+- 2026-02-24: Added Bid Board sync to Procore engine. Pulls bid packages (8), bids (138), and bid forms (29) via company and project-level API endpoints. Three new DB tables: procore_bid_packages, procore_bids, procore_bid_forms. Three new tabs added to Procore Data page with search, pagination, status filters, and expandable rows.
+- 2026-02-24: Added Procore Data browser page (/procore-data) with tabs for Projects (273), Vendors (629), Users (495), Bid Packages (8), Bids (138), Bid Forms (29), and Change History. Full sync with 2-week version control.
 - 2026-02-24: Created Procore sync engine (server/procore.ts) with OAuth token refresh, paginated API fetching, and change detection.
 - 2026-02-24: Procore OAuth flow updated to read credentials from DB config instead of env vars. Opens in new tab to avoid iframe blocking.
 - 2026-02-24: Added HubSpot Data browser page (/hubspot-data) with tabs for Companies, Contacts, Deals, Pipelines, and Change History. Search, pagination, expandable rows with full details.
@@ -18,7 +19,7 @@ Production-grade middleware application for bidirectional synchronization betwee
 - **Auth**: Session-based with bcrypt password hashing
 - **HubSpot Integration**: Replit OAuth connector (server/hubspot.ts) - auto token refresh
 - **Procore Integration**: OAuth 2.0 with token refresh (server/procore.ts) - credentials stored in automation_config
-- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history
+- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms
 
 ## Key Files
 - `shared/schema.ts` - Drizzle schema and Zod validation schemas
