@@ -8,6 +8,7 @@ import {
   Settings,
   LogOut,
   Zap,
+  Database,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -17,6 +18,7 @@ const navItems = [
   { path: "/sync-config", label: "Sync Config", icon: ArrowLeftRight },
   { path: "/webhooks", label: "Webhook Monitor", icon: Webhook },
   { path: "/projects", label: "Project Mapper", icon: FolderSync },
+  { path: "/hubspot-data", label: "HubSpot Data", icon: Database },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },
 ];

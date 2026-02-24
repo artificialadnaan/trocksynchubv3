@@ -79,6 +79,12 @@ export interface IStorage {
   createChangeHistory(data: InsertHubspotChangeHistory): Promise<HubspotChangeHistory>;
   purgeOldChangeHistory(daysToKeep: number): Promise<number>;
   getHubspotDataCounts(): Promise<{ companies: number; contacts: number; deals: number; pipelines: number; changeHistory: number }>;
+
+  getHubspotCompanies(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotCompany[]; total: number }>;
+  getHubspotContacts(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotContact[]; total: number }>;
+  getHubspotDeals(filters: { search?: string; pipeline?: string; stage?: string; limit?: number; offset?: number }): Promise<{ data: HubspotDeal[]; total: number }>;
+  getHubspotPipelines(): Promise<HubspotPipeline[]>;
+  getHubspotChangeHistoryList(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: HubspotChangeHistory[]; total: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -393,6 +399,100 @@ export class DatabaseStorage implements IStorage {
       pipelines: pipeRes[0]?.count || 0,
       changeHistory: histRes[0]?.count || 0,
     };
+  }
+
+  async getHubspotCompanies(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotCompany[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.search) {
+      conditions.push(or(
+        ilike(hubspotCompanies.name, `%${filters.search}%`),
+        ilike(hubspotCompanies.domain, `%${filters.search}%`),
+        ilike(hubspotCompanies.hubspotId, `%${filters.search}%`)
+      ));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(hubspotCompanies).where(where).orderBy(desc(hubspotCompanies.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(hubspotCompanies).orderBy(desc(hubspotCompanies.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(hubspotCompanies).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(hubspotCompanies),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async getHubspotContacts(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotContact[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.search) {
+      conditions.push(or(
+        ilike(hubspotContacts.firstName, `%${filters.search}%`),
+        ilike(hubspotContacts.lastName, `%${filters.search}%`),
+        ilike(hubspotContacts.email, `%${filters.search}%`),
+        ilike(hubspotContacts.company, `%${filters.search}%`),
+        ilike(hubspotContacts.hubspotId, `%${filters.search}%`)
+      ));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(hubspotContacts).where(where).orderBy(desc(hubspotContacts.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(hubspotContacts).orderBy(desc(hubspotContacts.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(hubspotContacts).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(hubspotContacts),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async getHubspotDeals(filters: { search?: string; pipeline?: string; stage?: string; limit?: number; offset?: number }): Promise<{ data: HubspotDeal[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.search) {
+      conditions.push(or(
+        ilike(hubspotDeals.dealName, `%${filters.search}%`),
+        ilike(hubspotDeals.hubspotId, `%${filters.search}%`)
+      ));
+    }
+    if (filters.pipeline) conditions.push(eq(hubspotDeals.pipeline, filters.pipeline));
+    if (filters.stage) conditions.push(eq(hubspotDeals.dealStage, filters.stage));
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(hubspotDeals).where(where).orderBy(desc(hubspotDeals.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(hubspotDeals).orderBy(desc(hubspotDeals.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(hubspotDeals).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(hubspotDeals),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async getHubspotPipelines(): Promise<HubspotPipeline[]> {
+    return db.select().from(hubspotPipelines).orderBy(hubspotPipelines.displayOrder);
+  }
+
+  async getHubspotChangeHistoryList(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: HubspotChangeHistory[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.entityType) conditions.push(eq(hubspotChangeHistory.entityType, filters.entityType));
+    if (filters.changeType) conditions.push(eq(hubspotChangeHistory.changeType, filters.changeType));
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(hubspotChangeHistory).where(where).orderBy(desc(hubspotChangeHistory.createdAt)).limit(limit).offset(offset)
+        : db.select().from(hubspotChangeHistory).orderBy(desc(hubspotChangeHistory.createdAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(hubspotChangeHistory).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(hubspotChangeHistory),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
   }
 }
 

@@ -542,6 +542,70 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/hubspot/companies", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getHubspotCompanies({
+        search: req.query.search as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/hubspot/contacts", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getHubspotContacts({
+        search: req.query.search as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/hubspot/deals", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getHubspotDeals({
+        search: req.query.search as string,
+        pipeline: req.query.pipeline as string,
+        stage: req.query.stage as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/hubspot/pipelines", requireAuth, async (_req, res) => {
+    try {
+      const pipelines = await storage.getHubspotPipelines();
+      res.json(pipelines);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/hubspot/change-history", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getHubspotChangeHistoryList({
+        entityType: req.query.entityType as string,
+        changeType: req.query.changeType as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.post("/api/integrations/procore/save", requireAuth, async (req, res) => {
     try {
       const { clientId, clientSecret, companyId, environment } = req.body;
