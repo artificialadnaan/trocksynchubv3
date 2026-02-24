@@ -13,6 +13,7 @@ import AuditLogsPage from "@/pages/audit-logs";
 import SettingsPage from "@/pages/settings";
 import HubspotDataPage from "@/pages/hubspot-data";
 import ProcoreDataPage from "@/pages/procore-data";
+import BidDetailPage from "@/pages/bid-detail";
 import NotFound from "@/pages/not-found";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getQueryFn } from "@/lib/queryClient";
@@ -30,6 +31,7 @@ function AuthenticatedLayout() {
           <Route path="/audit-logs" component={AuditLogsPage} />
           <Route path="/hubspot-data" component={HubspotDataPage} />
           <Route path="/procore-data" component={ProcoreDataPage} />
+          <Route path="/procore-data/bids/:bidId" component={BidDetailPage} />
           <Route path="/settings" component={SettingsPage} />
           <Route component={NotFound} />
         </Switch>

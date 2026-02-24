@@ -8,7 +8,7 @@ import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines } from "./hubspot";
-import { runFullProcoreSync, syncProcoreBidBoard } from "./procore";
+import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreBidStatus, fetchProcoreBidDetail, proxyProcoreAttachment } from "./procore";
 
 const PgSession = connectPgSimple(session);
 
@@ -891,6 +891,68 @@ export async function registerRoutes(
         offset: parseInt(req.query.offset as string) || 0,
       });
       res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.patch("/api/procore/bids/:bidId/status", requireAuth, async (req, res) => {
+    try {
+      const { bidId } = req.params;
+      const { awarded } = req.body;
+      const bid = await storage.getProcoreBidByProcoreId(bidId);
+      if (!bid) return res.status(404).json({ message: "Bid not found" });
+      const result = await updateProcoreBidStatus(bid.projectId!, bid.bidPackageId!, bidId, awarded);
+      await storage.upsertProcoreBid({
+        ...bid,
+        awarded: result.awarded ?? null,
+        bidStatus: result.bid_status || bid.bidStatus,
+        properties: result,
+        procoreUpdatedAt: result.updated_at || bid.procoreUpdatedAt,
+      });
+      await storage.createAuditLog({
+        action: "procore_bid_status_update",
+        entityType: "bid",
+        entityId: bidId,
+        source: "procore",
+        status: "success",
+        details: { awarded, vendorName: bid.vendorName, bidPackageTitle: bid.bidPackageTitle },
+      });
+      res.json({ success: true, bid: result });
+    } catch (e: any) {
+      res.status(500).json({ success: false, message: e.message });
+    }
+  });
+
+  app.get("/api/procore/bids/:bidId/detail", requireAuth, async (req, res) => {
+    try {
+      const { bidId } = req.params;
+      const bid = await storage.getProcoreBidByProcoreId(bidId);
+      if (!bid) return res.status(404).json({ message: "Bid not found in local DB" });
+      const detail = await fetchProcoreBidDetail(bid.projectId!, bid.bidPackageId!, bidId);
+      await storage.upsertProcoreBid({
+        ...bid,
+        awarded: detail.awarded ?? null,
+        bidStatus: detail.bid_status || bid.bidStatus,
+        lumpSumAmount: detail.lump_sum_amount != null ? String(detail.lump_sum_amount) : bid.lumpSumAmount,
+        bidderComments: detail.bidder_comments || bid.bidderComments,
+        properties: detail,
+        procoreUpdatedAt: detail.updated_at || bid.procoreUpdatedAt,
+      });
+      res.json(detail);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore/attachments/proxy", requireAuth, async (req, res) => {
+    try {
+      const url = req.query.url as string;
+      if (!url) return res.status(400).json({ message: "url parameter required" });
+      const { buffer, contentType, filename } = await proxyProcoreAttachment(url);
+      res.setHeader("Content-Type", contentType || "application/octet-stream");
+      if (filename) res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+      res.send(buffer);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

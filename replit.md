@@ -4,6 +4,8 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-24: Added bid detail page (/procore-data/bids/:bidId) with full Procore bid data: bid_items, attachments (proxied via backend), bidder notes/comments, inclusions/exclusions, cost codes, vendor/requester details, NDA status, raw JSON. Award status dropdown (Pending/Awarded/Rejected) PATCHes Procore in real-time from both the bids list and detail page. Attachment proxy endpoint handles Procore's S3 redirect URLs.
+- 2026-02-24: Added inline bid award status dropdown to Bids tab on Procore Data page. Each bid row has a select dropdown that writes back to Procore API via PATCH /rest/v1.0/projects/{PID}/bid_packages/{BPID}/bids/{BID_ID}. View Detail button navigates to dedicated bid detail page.
 - 2026-02-24: Added Bid Board sync to Procore engine. Pulls bid packages (8), bids (138), and bid forms (29) via company and project-level API endpoints. Three new DB tables: procore_bid_packages, procore_bids, procore_bid_forms. Three new tabs added to Procore Data page with search, pagination, status filters, and expandable rows.
 - 2026-02-24: Added Procore Data browser page (/procore-data) with tabs for Projects (273), Vendors (629), Users (495), Bid Packages (8), Bids (138), Bid Forms (29), and Change History. Full sync with 2-week version control.
 - 2026-02-24: Created Procore sync engine (server/procore.ts) with OAuth token refresh, paginated API fetching, and change detection.

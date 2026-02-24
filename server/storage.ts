@@ -113,6 +113,7 @@ export interface IStorage {
   upsertProcoreBidPackage(data: InsertProcoreBidPackage): Promise<ProcoreBidPackage>;
   getProcoreBidPackages(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBidPackage[]; total: number }>;
   upsertProcoreBid(data: InsertProcoreBid): Promise<ProcoreBid>;
+  getProcoreBidByProcoreId(procoreId: string): Promise<ProcoreBid | undefined>;
   getProcoreBids(filters: { search?: string; bidPackageId?: string; bidStatus?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBid[]; total: number }>;
   upsertProcoreBidForm(data: InsertProcoreBidForm): Promise<ProcoreBidForm>;
   getProcoreBidForms(filters: { search?: string; bidPackageId?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreBidForm[]; total: number }>;
@@ -754,6 +755,11 @@ export class DatabaseStorage implements IStorage {
         target: procoreBids.procoreId,
         set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
       }).returning();
+    return result;
+  }
+
+  async getProcoreBidByProcoreId(procoreId: string): Promise<ProcoreBid | undefined> {
+    const [result] = await db.select().from(procoreBids).where(eq(procoreBids.procoreId, procoreId));
     return result;
   }
 

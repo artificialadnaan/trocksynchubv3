@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -29,9 +29,13 @@ import {
   Gavel,
   FileText,
   ClipboardList,
+  ExternalLink,
 } from "lucide-react";
 import { useState } from "react";
+import { useLocation } from "wouter";
 import { format } from "date-fns";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import type {
   ProcoreProject,
   ProcoreVendor,
@@ -607,11 +611,55 @@ function BidPackagesTab() {
   );
 }
 
+function BidAwardDropdown({ bid }: { bid: ProcoreBid }) {
+  const { toast } = useToast();
+  const currentValue = bid.awarded === true ? "awarded" : bid.awarded === false ? "rejected" : "pending";
+
+  const mutation = useMutation({
+    mutationFn: async (awarded: boolean | null) => {
+      const res = await apiRequest("PATCH", `/api/procore/bids/${bid.procoreId}/status`, { awarded });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/bids"] });
+      toast({ title: "Bid status updated", description: `${bid.vendorName} — synced to Procore.` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Update failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Select
+      value={currentValue}
+      onValueChange={(v) => {
+        const awarded = v === "awarded" ? true : v === "rejected" ? false : null;
+        mutation.mutate(awarded);
+      }}
+      disabled={mutation.isPending}
+    >
+      <SelectTrigger
+        className="h-7 w-[110px] text-xs"
+        onClick={(e) => e.stopPropagation()}
+        data-testid={`select-bid-award-${bid.procoreId}`}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="pending">Pending</SelectItem>
+        <SelectItem value="awarded">Awarded</SelectItem>
+        <SelectItem value="rejected">Rejected</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
 function BidsTab() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(0);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [, navigate] = useLocation();
   const limit = 50;
 
   const params = new URLSearchParams();
@@ -693,28 +741,42 @@ function BidsTab() {
         ) : (
           <>
             <div className="rounded-lg border">
-              <div className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr_0.7fr_0.6fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+              <div className="grid grid-cols-[1.2fr_1fr_0.8fr_0.7fr_0.7fr_0.7fr_auto_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
                 <span>Vendor</span>
                 <span>Bid Package</span>
-                <span>Bid Form</span>
                 <span>Status</span>
                 <span>Amount</span>
+                <span>Award</span>
                 <span>Committed</span>
+                <span className="w-16 text-center">Detail</span>
                 <span className="w-8"></span>
               </div>
               {data.data.map((bid) => (
                 <Collapsible key={bid.id} open={expandedIds.has(bid.id)} onOpenChange={() => toggleExpand(bid.id)}>
                   <CollapsibleTrigger className="w-full" data-testid={`procore-bid-row-${bid.id}`}>
-                    <div className="grid grid-cols-[1.2fr_1fr_1fr_0.8fr_0.7fr_0.6fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                    <div className="grid grid-cols-[1.2fr_1fr_0.8fr_0.7fr_0.7fr_0.7fr_auto_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
                       <span className="font-medium truncate text-left">{bid.vendorName || "—"}</span>
                       <span className="text-muted-foreground truncate text-left">{bid.bidPackageTitle || "—"}</span>
-                      <span className="text-muted-foreground truncate text-left">{bid.bidFormTitle || "—"}</span>
                       <span className="text-left">
                         <Badge className={`text-xs ${statusColor(bid.bidStatus)}`}>{bid.bidStatus?.replace(/_/g, " ") || "—"}</Badge>
                       </span>
                       <span className="text-left font-medium">{formatAmount(bid.lumpSumAmount)}</span>
+                      <span className="text-left" onClick={(e) => e.stopPropagation()}>
+                        <BidAwardDropdown bid={bid} />
+                      </span>
                       <span className="text-center">
                         {bid.isBidderCommitted ? <Badge variant="secondary" className="text-xs">Yes</Badge> : <span className="text-muted-foreground text-xs">No</span>}
+                      </span>
+                      <span className="w-16 text-center" onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => navigate(`/procore-data/bids/${bid.procoreId}`)}
+                          data-testid={`button-view-bid-${bid.procoreId}`}
+                        >
+                          <ExternalLink className="w-3.5 h-3.5 mr-1" /> View
+                        </Button>
                       </span>
                       <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedIds.has(bid.id) ? "rotate-180" : ""}`} />
                     </div>
@@ -727,7 +789,7 @@ function BidsTab() {
                         <div><span className="text-muted-foreground">Project:</span> <span className="ml-1">{bid.projectName || "—"}</span></div>
                         <div><span className="text-muted-foreground">Due Date:</span> <span className="ml-1">{bid.dueDate ? format(new Date(bid.dueDate), "MMM d, yyyy") : "—"}</span></div>
                         <div><span className="text-muted-foreground">Submitted:</span> <span className="ml-1">{bid.submitted ? "Yes" : "No"}</span></div>
-                        <div><span className="text-muted-foreground">Awarded:</span> <span className="ml-1">{bid.awarded === true ? "Yes" : bid.awarded === false ? "No" : "Pending"}</span></div>
+                        <div><span className="text-muted-foreground">Bid Form:</span> <span className="ml-1">{bid.bidFormTitle || "—"}</span></div>
                         <div><span className="text-muted-foreground">Requester:</span> <span className="ml-1">{bid.bidRequesterName || "—"} {bid.bidRequesterEmail ? `(${bid.bidRequesterEmail})` : ""}</span></div>
                         <div><span className="text-muted-foreground">Company:</span> <span className="ml-1">{bid.bidRequesterCompany || "—"}</span></div>
                         <div><span className="text-muted-foreground">Invitation Sent:</span> <span className="ml-1">{bid.invitationLastSentAt ? format(new Date(bid.invitationLastSentAt), "MMM d, yyyy h:mm a") : "—"}</span></div>

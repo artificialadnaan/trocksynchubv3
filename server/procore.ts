@@ -376,6 +376,65 @@ async function fetchProcoreJson(endpoint: string, companyId: string): Promise<an
   return response.json();
 }
 
+export async function updateProcoreBidStatus(
+  projectId: string,
+  bidPackageId: string,
+  bidId: string,
+  awarded: boolean | null
+): Promise<any> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  const response = await fetch(
+    `${baseUrl}/rest/v1.0/projects/${projectId}/bid_packages/${bidPackageId}/bids/${bidId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Procore-Company-Id': companyId,
+      },
+      body: JSON.stringify({ bid: { awarded } }),
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to update bid status: ${response.status} ${errText}`);
+  }
+
+  return response.json();
+}
+
+export async function fetchProcoreBidDetail(
+  projectId: string,
+  bidPackageId: string,
+  bidId: string
+): Promise<any> {
+  const config = await getProcoreConfig();
+  const companyId = config.companyId;
+  return fetchProcoreJson(
+    `/rest/v1.0/projects/${projectId}/bid_packages/${bidPackageId}/bids/${bidId}`,
+    companyId
+  );
+}
+
+export async function proxyProcoreAttachment(url: string): Promise<{ buffer: Buffer; contentType: string; filename: string }> {
+  const response = await fetch(url, { redirect: 'follow' });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch attachment: ${response.status}`);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get('content-type') || 'application/octet-stream';
+  const disposition = response.headers.get('content-disposition') || '';
+  const filenameMatch = disposition.match(/filename="?([^";\n]+)"?/);
+  const filename = filenameMatch?.[1] || 'attachment';
+  return { buffer, contentType, filename };
+}
+
 export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids: number; bidForms: number }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
