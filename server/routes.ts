@@ -1534,5 +1534,141 @@ export async function registerRoutes(
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "2.0.0" });
   });
 
+  let pollingTimer: ReturnType<typeof setInterval> | null = null;
+  let pollingRunning = false;
+  let lastPollAt: Date | null = null;
+  let lastPollResult: any = null;
+
+  async function runPollingCycle() {
+    if (pollingRunning) {
+      console.log('[Polling] Skipping — previous cycle still running');
+      return;
+    }
+    pollingRunning = true;
+    console.log('[Polling] Starting HubSpot sync cycle...');
+    try {
+      const result = await runFullHubSpotSync();
+      let procoreAutoSync = null;
+      try {
+        procoreAutoSync = await triggerPostSyncProcoreUpdates({
+          companies: result.companies,
+          contacts: result.contacts,
+        });
+      } catch (autoErr: any) {
+        console.error('[Polling] Procore auto-sync failed:', autoErr.message);
+        procoreAutoSync = { error: autoErr.message };
+      }
+
+      lastPollAt = new Date();
+      lastPollResult = {
+        companies: result.companies,
+        contacts: result.contacts,
+        deals: result.deals,
+        procoreAutoSync,
+        duration: result.duration,
+      };
+
+      const hasChanges = result.companies.created > 0 || result.companies.updated > 0 ||
+        result.contacts.created > 0 || result.contacts.updated > 0;
+
+      if (hasChanges) {
+        await storage.createAuditLog({
+          action: 'hubspot_polling_sync',
+          entityType: 'all',
+          source: 'polling',
+          status: 'success',
+          details: lastPollResult as any,
+          durationMs: result.duration,
+        });
+      }
+
+      console.log(`[Polling] Complete in ${(result.duration / 1000).toFixed(1)}s — Companies: ${result.companies.created} new, ${result.companies.updated} updated | Contacts: ${result.contacts.created} new, ${result.contacts.updated} updated`);
+    } catch (e: any) {
+      console.error('[Polling] HubSpot sync failed:', e.message);
+      lastPollAt = new Date();
+      lastPollResult = { error: e.message };
+    } finally {
+      pollingRunning = false;
+    }
+  }
+
+  async function startPolling(intervalMinutes: number) {
+    stopPolling();
+    console.log(`[Polling] Starting automatic HubSpot sync every ${intervalMinutes} minutes`);
+    pollingTimer = setInterval(() => runPollingCycle(), intervalMinutes * 60 * 1000);
+    setTimeout(() => runPollingCycle(), 5000);
+  }
+
+  function stopPolling() {
+    if (pollingTimer) {
+      clearInterval(pollingTimer);
+      pollingTimer = null;
+      console.log('[Polling] Stopped automatic HubSpot sync');
+    }
+  }
+
+  app.get("/api/automation/polling/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("hubspot_polling");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 10,
+        isRunning: pollingTimer !== null,
+        lastPollAt: lastPollAt?.toISOString() || null,
+        lastPollResult,
+        currentlyPolling: pollingRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/polling/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes } = req.body;
+      const interval = intervalMinutes || 10;
+      await storage.upsertAutomationConfig({
+        key: "hubspot_polling",
+        value: { enabled, intervalMinutes: interval },
+        description: "Automatic HubSpot polling sync configuration",
+      });
+
+      if (enabled) {
+        startPolling(interval);
+      } else {
+        stopPolling();
+      }
+
+      res.json({ success: true, enabled, intervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/polling/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (pollingRunning) {
+        return res.json({ message: "Sync already in progress", running: true });
+      }
+      runPollingCycle();
+      res.json({ message: "Sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  (async () => {
+    try {
+      const config = await storage.getAutomationConfig("hubspot_polling");
+      const val = (config?.value as any);
+      if (val?.enabled) {
+        startPolling(val.intervalMinutes || 10);
+      }
+    } catch (e) {
+      console.log('[Polling] No saved config, polling disabled by default');
+    }
+  })();
+
   return httpServer;
 }
