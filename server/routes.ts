@@ -8,6 +8,7 @@ import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines } from "./hubspot";
+import { runFullProcoreSync } from "./procore";
 
 const PgSession = connectPgSimple(session);
 
@@ -750,6 +751,95 @@ export async function registerRoutes(
       });
 
       res.json({ success: true, message: `${provider} disconnected` });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/procore/sync", requireAuth, async (_req, res) => {
+    try {
+      const result = await runFullProcoreSync();
+
+      await storage.createAuditLog({
+        action: "procore_full_sync",
+        entityType: "all",
+        source: "procore",
+        status: "success",
+        details: result,
+        durationMs: result.duration,
+      });
+
+      res.json({ success: true, ...result });
+    } catch (e: any) {
+      await storage.createAuditLog({
+        action: "procore_full_sync",
+        entityType: "all",
+        source: "procore",
+        status: "error",
+        errorMessage: e.message,
+        details: { error: e.message },
+      });
+      res.status(500).json({ success: false, message: e.message });
+    }
+  });
+
+  app.get("/api/integrations/procore/data-counts", requireAuth, async (_req, res) => {
+    try {
+      const counts = await storage.getProcoreDataCounts();
+      res.json(counts);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore/projects", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getProcoreProjects({
+        search: req.query.search as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore/vendors", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getProcoreVendors({
+        search: req.query.search as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore/users", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getProcoreUsers({
+        search: req.query.search as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore/change-history", requireAuth, async (req, res) => {
+    try {
+      const result = await storage.getProcoreChangeHistory({
+        entityType: req.query.entityType as string,
+        changeType: req.query.changeType as string,
+        limit: parseInt(req.query.limit as string) || 50,
+        offset: parseInt(req.query.offset as string) || 0,
+      });
+      res.json(result);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

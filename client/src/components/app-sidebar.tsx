@@ -19,6 +19,7 @@ const navItems = [
   { path: "/webhooks", label: "Webhook Monitor", icon: Webhook },
   { path: "/projects", label: "Project Mapper", icon: FolderSync },
   { path: "/hubspot-data", label: "HubSpot Data", icon: Database },
+  { path: "/procore-data", label: "Procore Data", icon: Database },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },
 ];

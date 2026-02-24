@@ -299,3 +299,120 @@ export const hubspotChangeHistory = pgTable("hubspot_change_history", {
 export const insertHubspotChangeHistorySchema = createInsertSchema(hubspotChangeHistory).omit({ id: true, createdAt: true });
 export type InsertHubspotChangeHistory = z.infer<typeof insertHubspotChangeHistorySchema>;
 export type HubspotChangeHistory = typeof hubspotChangeHistory.$inferSelect;
+
+export const procoreProjects = pgTable("procore_projects", {
+  id: serial("id").primaryKey(),
+  procoreId: text("procore_id").notNull().unique(),
+  name: text("name"),
+  displayName: text("display_name"),
+  projectNumber: text("project_number"),
+  address: text("address"),
+  city: text("city"),
+  stateCode: text("state_code"),
+  zip: text("zip"),
+  countryCode: text("country_code"),
+  phone: text("phone"),
+  active: boolean("active"),
+  stage: text("stage"),
+  projectStageName: text("project_stage_name"),
+  startDate: text("start_date"),
+  completionDate: text("completion_date"),
+  projectedFinishDate: text("projected_finish_date"),
+  estimatedValue: text("estimated_value"),
+  totalValue: text("total_value"),
+  storeNumber: text("store_number"),
+  deliveryMethod: text("delivery_method"),
+  workScope: text("work_scope"),
+  companyId: text("company_id"),
+  companyName: text("company_name"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  procoreUpdatedAt: timestamp("procore_updated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertProcoreProjectSchema = createInsertSchema(procoreProjects).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProcoreProject = z.infer<typeof insertProcoreProjectSchema>;
+export type ProcoreProject = typeof procoreProjects.$inferSelect;
+
+export const procoreVendors = pgTable("procore_vendors", {
+  id: serial("id").primaryKey(),
+  procoreId: text("procore_id").notNull().unique(),
+  name: text("name"),
+  abbreviatedName: text("abbreviated_name"),
+  address: text("address"),
+  city: text("city"),
+  stateCode: text("state_code"),
+  zip: text("zip"),
+  countryCode: text("country_code"),
+  emailAddress: text("email_address"),
+  businessPhone: text("business_phone"),
+  mobilePhone: text("mobile_phone"),
+  faxNumber: text("fax_number"),
+  website: text("website"),
+  legalName: text("legal_name"),
+  licenseNumber: text("license_number"),
+  isActive: boolean("is_active"),
+  tradeName: text("trade_name"),
+  laborUnion: text("labor_union"),
+  contactCount: integer("contact_count"),
+  childrenCount: integer("children_count"),
+  notes: text("notes"),
+  companyId: text("company_id"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  procoreUpdatedAt: timestamp("procore_updated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertProcoreVendorSchema = createInsertSchema(procoreVendors).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProcoreVendor = z.infer<typeof insertProcoreVendorSchema>;
+export type ProcoreVendor = typeof procoreVendors.$inferSelect;
+
+export const procoreUsers = pgTable("procore_users", {
+  id: serial("id").primaryKey(),
+  procoreId: text("procore_id").notNull().unique(),
+  name: text("name"),
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  emailAddress: text("email_address"),
+  jobTitle: text("job_title"),
+  businessPhone: text("business_phone"),
+  mobilePhone: text("mobile_phone"),
+  address: text("address"),
+  city: text("city"),
+  stateCode: text("state_code"),
+  zip: text("zip"),
+  countryCode: text("country_code"),
+  isActive: boolean("is_active"),
+  isEmployee: boolean("is_employee"),
+  lastLoginAt: text("last_login_at"),
+  employeeId: text("employee_id"),
+  vendorId: text("vendor_id"),
+  vendorName: text("vendor_name"),
+  companyId: text("company_id"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  procoreUpdatedAt: timestamp("procore_updated_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertProcoreUserSchema = createInsertSchema(procoreUsers).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProcoreUser = z.infer<typeof insertProcoreUserSchema>;
+export type ProcoreUser = typeof procoreUsers.$inferSelect;
+
+export const procoreChangeHistory = pgTable("procore_change_history", {
+  id: serial("id").primaryKey(),
+  entityType: text("entity_type").notNull(),
+  entityProcoreId: text("entity_procore_id").notNull(),
+  changeType: text("change_type").notNull(),
+  fieldName: text("field_name"),
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  fullSnapshot: jsonb("full_snapshot"),
+  syncedAt: timestamp("synced_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const insertProcoreChangeHistorySchema = createInsertSchema(procoreChangeHistory).omit({ id: true, createdAt: true });
+export type InsertProcoreChangeHistory = z.infer<typeof insertProcoreChangeHistorySchema>;
+export type ProcoreChangeHistory = typeof procoreChangeHistory.$inferSelect;

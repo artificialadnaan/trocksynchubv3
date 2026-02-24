@@ -16,6 +16,10 @@ import {
   hubspotDeals, type HubspotDeal, type InsertHubspotDeal,
   hubspotPipelines, type HubspotPipeline, type InsertHubspotPipeline,
   hubspotChangeHistory, type HubspotChangeHistory, type InsertHubspotChangeHistory,
+  procoreProjects, type ProcoreProject, type InsertProcoreProject,
+  procoreVendors, type ProcoreVendor, type InsertProcoreVendor,
+  procoreUsers, type ProcoreUser, type InsertProcoreUser,
+  procoreChangeHistory, type ProcoreChangeHistory, type InsertProcoreChangeHistory,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -85,6 +89,23 @@ export interface IStorage {
   getHubspotDeals(filters: { search?: string; pipeline?: string; stage?: string; limit?: number; offset?: number }): Promise<{ data: HubspotDeal[]; total: number }>;
   getHubspotPipelines(): Promise<HubspotPipeline[]>;
   getHubspotChangeHistoryList(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: HubspotChangeHistory[]; total: number }>;
+
+  upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
+  getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
+  getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }>;
+
+  upsertProcoreVendor(data: InsertProcoreVendor): Promise<ProcoreVendor>;
+  getProcoreVendorByProcoreId(procoreId: string): Promise<ProcoreVendor | undefined>;
+  getProcoreVendors(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreVendor[]; total: number }>;
+
+  upsertProcoreUser(data: InsertProcoreUser): Promise<ProcoreUser>;
+  getProcoreUserByProcoreId(procoreId: string): Promise<ProcoreUser | undefined>;
+  getProcoreUsers(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreUser[]; total: number }>;
+
+  createProcoreChangeHistory(data: InsertProcoreChangeHistory): Promise<ProcoreChangeHistory>;
+  getProcoreChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreChangeHistory[]; total: number }>;
+  getProcoreDataCounts(): Promise<{ projects: number; vendors: number; users: number; changeHistory: number }>;
+  purgeProcoreChangeHistory(daysToKeep: number): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -501,6 +522,179 @@ export class DatabaseStorage implements IStorage {
         : db.select({ count: sql<number>`count(*)::int` }).from(hubspotChangeHistory),
     ]);
     return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject> {
+    const [result] = await db.insert(procoreProjects).values(data)
+      .onConflictDoUpdate({
+        target: procoreProjects.procoreId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined> {
+    const [result] = await db.select().from(procoreProjects).where(eq(procoreProjects.procoreId, procoreId));
+    return result;
+  }
+
+  async getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(procoreProjects.name, `%${word}%`),
+        ilike(procoreProjects.projectNumber, `%${word}%`),
+        ilike(procoreProjects.city, `%${word}%`),
+        ilike(procoreProjects.stateCode, `%${word}%`),
+        ilike(procoreProjects.stage, `%${word}%`),
+        ilike(procoreProjects.companyName, `%${word}%`),
+        ilike(procoreProjects.procoreId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(procoreProjects).where(where).orderBy(desc(procoreProjects.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(procoreProjects).orderBy(desc(procoreProjects.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(procoreProjects).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(procoreProjects),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertProcoreVendor(data: InsertProcoreVendor): Promise<ProcoreVendor> {
+    const [result] = await db.insert(procoreVendors).values(data)
+      .onConflictDoUpdate({
+        target: procoreVendors.procoreId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getProcoreVendorByProcoreId(procoreId: string): Promise<ProcoreVendor | undefined> {
+    const [result] = await db.select().from(procoreVendors).where(eq(procoreVendors.procoreId, procoreId));
+    return result;
+  }
+
+  async getProcoreVendors(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreVendor[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(procoreVendors.name, `%${word}%`),
+        ilike(procoreVendors.tradeName, `%${word}%`),
+        ilike(procoreVendors.emailAddress, `%${word}%`),
+        ilike(procoreVendors.legalName, `%${word}%`),
+        ilike(procoreVendors.city, `%${word}%`),
+        ilike(procoreVendors.stateCode, `%${word}%`),
+        ilike(procoreVendors.procoreId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(procoreVendors).where(where).orderBy(desc(procoreVendors.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(procoreVendors).orderBy(desc(procoreVendors.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(procoreVendors).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(procoreVendors),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async upsertProcoreUser(data: InsertProcoreUser): Promise<ProcoreUser> {
+    const [result] = await db.insert(procoreUsers).values(data)
+      .onConflictDoUpdate({
+        target: procoreUsers.procoreId,
+        set: { ...data, updatedAt: new Date(), lastSyncedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  async getProcoreUserByProcoreId(procoreId: string): Promise<ProcoreUser | undefined> {
+    const [result] = await db.select().from(procoreUsers).where(eq(procoreUsers.procoreId, procoreId));
+    return result;
+  }
+
+  async getProcoreUsers(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreUser[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.search) {
+      const words = filters.search.trim().split(/\s+/);
+      const wordConditions = words.map(word => or(
+        ilike(procoreUsers.name, `%${word}%`),
+        ilike(procoreUsers.firstName, `%${word}%`),
+        ilike(procoreUsers.lastName, `%${word}%`),
+        ilike(procoreUsers.emailAddress, `%${word}%`),
+        ilike(procoreUsers.jobTitle, `%${word}%`),
+        ilike(procoreUsers.vendorName, `%${word}%`),
+        ilike(procoreUsers.procoreId, `%${word}%`)
+      ));
+      conditions.push(and(...wordConditions));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(procoreUsers).where(where).orderBy(desc(procoreUsers.updatedAt)).limit(limit).offset(offset)
+        : db.select().from(procoreUsers).orderBy(desc(procoreUsers.updatedAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(procoreUsers).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(procoreUsers),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async createProcoreChangeHistory(data: InsertProcoreChangeHistory): Promise<ProcoreChangeHistory> {
+    const [result] = await db.insert(procoreChangeHistory).values(data).returning();
+    return result;
+  }
+
+  async getProcoreChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreChangeHistory[]; total: number }> {
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    const conditions = [];
+    if (filters.entityType) conditions.push(eq(procoreChangeHistory.entityType, filters.entityType));
+    if (filters.changeType) conditions.push(eq(procoreChangeHistory.changeType, filters.changeType));
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      where
+        ? db.select().from(procoreChangeHistory).where(where).orderBy(desc(procoreChangeHistory.createdAt)).limit(limit).offset(offset)
+        : db.select().from(procoreChangeHistory).orderBy(desc(procoreChangeHistory.createdAt)).limit(limit).offset(offset),
+      where
+        ? db.select({ count: sql<number>`count(*)::int` }).from(procoreChangeHistory).where(where)
+        : db.select({ count: sql<number>`count(*)::int` }).from(procoreChangeHistory),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async getProcoreDataCounts(): Promise<{ projects: number; vendors: number; users: number; changeHistory: number }> {
+    const [projRes, vendRes, userRes, histRes] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(procoreProjects),
+      db.select({ count: sql<number>`count(*)::int` }).from(procoreVendors),
+      db.select({ count: sql<number>`count(*)::int` }).from(procoreUsers),
+      db.select({ count: sql<number>`count(*)::int` }).from(procoreChangeHistory),
+    ]);
+    return {
+      projects: projRes[0]?.count || 0,
+      vendors: vendRes[0]?.count || 0,
+      users: userRes[0]?.count || 0,
+      changeHistory: histRes[0]?.count || 0,
+    };
+  }
+
+  async purgeProcoreChangeHistory(daysToKeep: number): Promise<number> {
+    const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000);
+    const deleted = await db.delete(procoreChangeHistory).where(lte(procoreChangeHistory.createdAt, cutoff)).returning();
+    return deleted.length;
   }
 }
 

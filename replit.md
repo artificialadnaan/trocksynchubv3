@@ -4,6 +4,9 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-24: Added Procore Data browser page (/procore-data) with tabs for Projects (273), Vendors (629), Users (495), and Change History. Full sync with 2-week version control.
+- 2026-02-24: Created Procore sync engine (server/procore.ts) with OAuth token refresh, paginated API fetching, and change detection.
+- 2026-02-24: Procore OAuth flow updated to read credentials from DB config instead of env vars. Opens in new tab to avoid iframe blocking.
 - 2026-02-24: Added HubSpot Data browser page (/hubspot-data) with tabs for Companies, Contacts, Deals, Pipelines, and Change History. Search, pagination, expandable rows with full details.
 - 2026-02-24: Added HubSpot local database mirror with version control. Full sync pulls all companies, contacts, deals, and custom deal stages/pipelines. 2-week change history tracking with automatic purge.
 - 2026-02-24: HubSpot now uses Replit's built-in OAuth connector (automatic token management).
@@ -14,14 +17,17 @@ Production-grade middleware application for bidirectional synchronization betwee
 - **Frontend**: React + Vite with Tailwind CSS, shadcn/ui components, TanStack Query, wouter routing, Recharts
 - **Auth**: Session-based with bcrypt password hashing
 - **HubSpot Integration**: Replit OAuth connector (server/hubspot.ts) - auto token refresh
-- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history
+- **Procore Integration**: OAuth 2.0 with token refresh (server/procore.ts) - credentials stored in automation_config
+- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history
 
 ## Key Files
 - `shared/schema.ts` - Drizzle schema and Zod validation schemas
 - `server/storage.ts` - Database CRUD operations
 - `server/routes.ts` - API endpoints and webhook receivers
+- `server/hubspot.ts` - HubSpot sync engine
+- `server/procore.ts` - Procore sync engine with OAuth token refresh
 - `client/src/App.tsx` - Main app with auth flow and routing
-- `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings
+- `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings, HubSpot Data, Procore Data
 
 ## Webhook Endpoints
 - POST `/webhooks/hubspot` - HubSpot webhook receiver
