@@ -376,11 +376,61 @@ async function fetchProcoreJson(endpoint: string, companyId: string): Promise<an
   return response.json();
 }
 
-export async function updateProcoreBidStatus(
+export async function fetchProcoreProjectStages(): Promise<any[]> {
+  const config = await getProcoreConfig();
+  const companyId = config.companyId;
+  try {
+    return await fetchProcoreJson(`/rest/v1.0/companies/${companyId}/project_stages`, companyId);
+  } catch {
+    const projects = await fetchProcoreJson(`/rest/v1.0/projects?company_id=${companyId}&per_page=300`, companyId);
+    const stageMap = new Map<number, string>();
+    for (const p of projects) {
+      if (p.project_stage?.id && p.project_stage?.name) {
+        stageMap.set(p.project_stage.id, p.project_stage.name);
+      }
+    }
+    return Array.from(stageMap.entries()).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  }
+}
+
+export async function updateProcoreProject(
+  projectId: string,
+  fields: Record<string, any>
+): Promise<any> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  const body: any = { project: fields };
+
+  const response = await fetch(
+    `${baseUrl}/rest/v1.0/projects/${projectId}?company_id=${companyId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Procore-Company-Id': companyId,
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to update project: ${response.status} ${errText}`);
+  }
+
+  return response.json();
+}
+
+export async function updateProcoreBid(
   projectId: string,
   bidPackageId: string,
   bidId: string,
-  awarded: boolean | null
+  fields: Record<string, any>
 ): Promise<any> {
   const accessToken = await getAccessToken();
   const config = await getProcoreConfig();
@@ -397,13 +447,13 @@ export async function updateProcoreBidStatus(
         'Accept': 'application/json',
         'Procore-Company-Id': companyId,
       },
-      body: JSON.stringify({ bid: { awarded } }),
+      body: JSON.stringify({ bid: fields }),
     }
   );
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`Failed to update bid status: ${response.status} ${errText}`);
+    throw new Error(`Failed to update bid: ${response.status} ${errText}`);
   }
 
   return response.json();

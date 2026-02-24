@@ -8,7 +8,7 @@ import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines } from "./hubspot";
-import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreBidStatus, fetchProcoreBidDetail, proxyProcoreAttachment } from "./procore";
+import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
 
 const PgSession = connectPgSimple(session);
 
@@ -896,27 +896,113 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/procore/bids/:bidId/status", requireAuth, async (req, res) => {
+  app.get("/api/procore/project-stages", requireAuth, async (req, res) => {
     try {
-      const { bidId } = req.params;
-      const { awarded } = req.body;
-      const bid = await storage.getProcoreBidByProcoreId(bidId);
-      if (!bid) return res.status(404).json({ message: "Bid not found" });
-      const result = await updateProcoreBidStatus(bid.projectId!, bid.bidPackageId!, bidId, awarded);
-      await storage.upsertProcoreBid({
-        ...bid,
-        awarded: result.awarded ?? null,
-        bidStatus: result.bid_status || bid.bidStatus,
+      const stages = await fetchProcoreProjectStages();
+      res.json(stages);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.patch("/api/procore/projects/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const fields = req.body;
+      if (!fields || Object.keys(fields).length === 0) return res.status(400).json({ message: "No fields to update" });
+      const project = await storage.getProcoreProjectByProcoreId(projectId);
+      if (!project) return res.status(404).json({ message: "Project not found in local DB" });
+      const result = await updateProcoreProject(projectId, fields);
+      await storage.upsertProcoreProject({
+        procoreId: project.procoreId,
+        name: result.name || project.name,
+        displayName: result.display_name || project.displayName,
+        projectNumber: result.project_number || project.projectNumber,
+        address: result.address || project.address,
+        city: result.city || project.city,
+        stateCode: result.state_code || project.stateCode,
+        zip: result.zip || project.zip,
+        countryCode: result.country_code || project.countryCode,
+        phone: result.phone || project.phone,
+        active: result.active ?? project.active,
+        stage: result.project_stage?.name || result.stage || project.stage,
+        projectStageName: result.project_stage?.name || project.projectStageName,
+        startDate: result.start_date || project.startDate,
+        completionDate: result.completion_date || project.completionDate,
+        projectedFinishDate: result.projected_finish_date || project.projectedFinishDate,
+        estimatedValue: result.estimated_value != null ? String(result.estimated_value) : project.estimatedValue,
+        totalValue: result.total_value != null ? String(result.total_value) : project.totalValue,
+        storeNumber: project.storeNumber,
+        deliveryMethod: result.delivery_method || project.deliveryMethod,
+        workScope: project.workScope,
+        companyId: project.companyId,
+        companyName: project.companyName,
         properties: result,
-        procoreUpdatedAt: result.updated_at || bid.procoreUpdatedAt,
+        lastSyncedAt: new Date(),
+        procoreUpdatedAt: result.updated_at ? new Date(result.updated_at) : project.procoreUpdatedAt,
       });
       await storage.createAuditLog({
-        action: "procore_bid_status_update",
+        action: "procore_project_update",
+        entityType: "project",
+        entityId: projectId,
+        source: "procore",
+        status: "success",
+        details: { fields: Object.keys(fields), projectName: project.name },
+      });
+      res.json({ success: true, project: result });
+    } catch (e: any) {
+      res.status(500).json({ success: false, message: e.message });
+    }
+  });
+
+  app.patch("/api/procore/bids/:bidId", requireAuth, async (req, res) => {
+    try {
+      const { bidId } = req.params;
+      const fields = req.body;
+      if (!fields || Object.keys(fields).length === 0) return res.status(400).json({ message: "No fields to update" });
+      const bid = await storage.getProcoreBidByProcoreId(bidId);
+      if (!bid) return res.status(404).json({ message: "Bid not found" });
+      const result = await updateProcoreBid(bid.projectId!, bid.bidPackageId!, bidId, fields);
+      await storage.upsertProcoreBid({
+        procoreId: bid.procoreId,
+        bidPackageId: bid.bidPackageId,
+        bidPackageTitle: bid.bidPackageTitle,
+        bidFormId: bid.bidFormId,
+        bidFormTitle: bid.bidFormTitle,
+        projectId: bid.projectId,
+        projectName: bid.projectName,
+        projectAddress: bid.projectAddress,
+        vendorId: bid.vendorId,
+        vendorName: bid.vendorName,
+        vendorTrades: bid.vendorTrades,
+        bidStatus: result.bid_status || bid.bidStatus,
+        awarded: result.awarded ?? null,
+        submitted: result.submitted ?? bid.submitted,
+        isBidderCommitted: result.is_bidder_committed ?? bid.isBidderCommitted,
+        lumpSumEnabled: bid.lumpSumEnabled,
+        lumpSumAmount: result.lump_sum_amount != null ? String(result.lump_sum_amount) : bid.lumpSumAmount,
+        bidderComments: result.bidder_comments || bid.bidderComments,
+        dueDate: bid.dueDate,
+        invitationLastSentAt: bid.invitationLastSentAt,
+        bidRequesterName: bid.bidRequesterName,
+        bidRequesterEmail: bid.bidRequesterEmail,
+        bidRequesterCompany: bid.bidRequesterCompany,
+        requireNda: bid.requireNda,
+        ndaStatus: bid.ndaStatus,
+        showBidInEstimating: bid.showBidInEstimating,
+        companyId: bid.companyId,
+        properties: result,
+        procoreCreatedAt: bid.procoreCreatedAt,
+        procoreUpdatedAt: result.updated_at ? new Date(result.updated_at) : bid.procoreUpdatedAt,
+        lastSyncedAt: new Date(),
+      });
+      await storage.createAuditLog({
+        action: "procore_bid_update",
         entityType: "bid",
         entityId: bidId,
         source: "procore",
         status: "success",
-        details: { awarded, vendorName: bid.vendorName, bidPackageTitle: bid.bidPackageTitle },
+        details: { fields: Object.keys(fields), vendorName: bid.vendorName, bidPackageTitle: bid.bidPackageTitle },
       });
       res.json({ success: true, bid: result });
     } catch (e: any) {
@@ -931,13 +1017,37 @@ export async function registerRoutes(
       if (!bid) return res.status(404).json({ message: "Bid not found in local DB" });
       const detail = await fetchProcoreBidDetail(bid.projectId!, bid.bidPackageId!, bidId);
       await storage.upsertProcoreBid({
-        ...bid,
-        awarded: detail.awarded ?? null,
+        procoreId: bid.procoreId,
+        bidPackageId: bid.bidPackageId,
+        bidPackageTitle: bid.bidPackageTitle,
+        bidFormId: bid.bidFormId,
+        bidFormTitle: bid.bidFormTitle,
+        projectId: bid.projectId,
+        projectName: bid.projectName,
+        projectAddress: bid.projectAddress,
+        vendorId: bid.vendorId,
+        vendorName: bid.vendorName,
+        vendorTrades: bid.vendorTrades,
         bidStatus: detail.bid_status || bid.bidStatus,
+        awarded: detail.awarded ?? null,
+        submitted: detail.submitted ?? bid.submitted,
+        isBidderCommitted: detail.is_bidder_committed ?? bid.isBidderCommitted,
+        lumpSumEnabled: bid.lumpSumEnabled,
         lumpSumAmount: detail.lump_sum_amount != null ? String(detail.lump_sum_amount) : bid.lumpSumAmount,
         bidderComments: detail.bidder_comments || bid.bidderComments,
+        dueDate: bid.dueDate,
+        invitationLastSentAt: bid.invitationLastSentAt,
+        bidRequesterName: bid.bidRequesterName,
+        bidRequesterEmail: bid.bidRequesterEmail,
+        bidRequesterCompany: bid.bidRequesterCompany,
+        requireNda: bid.requireNda,
+        ndaStatus: bid.ndaStatus,
+        showBidInEstimating: bid.showBidInEstimating,
+        companyId: bid.companyId,
         properties: detail,
-        procoreUpdatedAt: detail.updated_at || bid.procoreUpdatedAt,
+        procoreCreatedAt: bid.procoreCreatedAt,
+        procoreUpdatedAt: detail.updated_at ? new Date(detail.updated_at) : bid.procoreUpdatedAt,
+        lastSyncedAt: new Date(),
       });
       res.json(detail);
     } catch (e: any) {

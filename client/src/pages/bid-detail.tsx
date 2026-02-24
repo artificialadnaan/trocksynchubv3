@@ -170,9 +170,24 @@ export default function BidDetailPage() {
     enabled: !!bidId,
   });
 
-  const statusMutation = useMutation({
+  const awardMutation = useMutation({
     mutationFn: async (awarded: boolean | null) => {
-      const res = await apiRequest("PATCH", `/api/procore/bids/${bidId}/status`, { awarded });
+      const res = await apiRequest("PATCH", `/api/procore/bids/${bidId}`, { awarded });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/bids", bidId, "detail"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/bids"] });
+      toast({ title: "Award status updated", description: "Change synced to Procore in real-time." });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to update", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const bidStatusMutation = useMutation({
+    mutationFn: async (bid_status: string) => {
+      const res = await apiRequest("PATCH", `/api/procore/bids/${bidId}`, { bid_status });
       return res.json();
     },
     onSuccess: () => {
@@ -187,7 +202,7 @@ export default function BidDetailPage() {
 
   const handleAwardChange = (value: string) => {
     const awarded = value === "awarded" ? true : value === "rejected" ? false : null;
-    statusMutation.mutate(awarded);
+    awardMutation.mutate(awarded);
   };
 
   const awardedValue = detail?.awarded === true ? "awarded" : detail?.awarded === false ? "rejected" : "pending";
@@ -235,12 +250,23 @@ export default function BidDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <Badge className={`text-sm px-3 py-1 ${statusColor(detail.bid_status)}`}>
-            {detail.bid_status?.replace(/_/g, " ") || "unknown"}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Status:</span>
+            <Select value={detail.bid_status || "undecided"} onValueChange={(v) => bidStatusMutation.mutate(v)} disabled={bidStatusMutation.isPending}>
+              <SelectTrigger className="w-[140px] h-9" data-testid="select-bid-status">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="submitted">Submitted</SelectItem>
+                <SelectItem value="will_bid">Will Bid</SelectItem>
+                <SelectItem value="will_not_bid">Won't Bid</SelectItem>
+                <SelectItem value="undecided">Undecided</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">Award:</span>
-            <Select value={awardedValue} onValueChange={handleAwardChange} disabled={statusMutation.isPending}>
+            <Select value={awardedValue} onValueChange={handleAwardChange} disabled={awardMutation.isPending}>
               <SelectTrigger className="w-[140px] h-9" data-testid="select-bid-award-status">
                 <SelectValue />
               </SelectTrigger>

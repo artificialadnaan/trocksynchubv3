@@ -30,6 +30,7 @@ import {
   FileText,
   ClipboardList,
   ExternalLink,
+  Pencil,
 } from "lucide-react";
 import { useState } from "react";
 import { useLocation } from "wouter";
@@ -129,6 +130,141 @@ export default function ProcoreDataPage() {
   );
 }
 
+function EditableField({ label, value, field, projectId, type = "text" }: {
+  label: string; value: string | null; field: string; projectId: string; type?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(value || "");
+  const { toast } = useToast();
+
+  const mutation = useMutation({
+    mutationFn: async (newValue: string) => {
+      const res = await apiRequest("PATCH", `/api/procore/projects/${projectId}`, { [field]: newValue || null });
+      return res.json();
+    },
+    onSuccess: () => {
+      setEditing(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/projects"] });
+      toast({ title: "Project updated", description: `${label} synced to Procore.` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Update failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1">
+        <span className="text-muted-foreground">{label}:</span>
+        <Input
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          className="h-6 text-xs w-32 px-1"
+          type={type}
+          autoFocus
+          onKeyDown={(e) => {
+            if (e.key === "Enter") mutation.mutate(editValue);
+            if (e.key === "Escape") { setEditing(false); setEditValue(value || ""); }
+          }}
+          disabled={mutation.isPending}
+          data-testid={`input-edit-project-${field}`}
+        />
+        <Button variant="ghost" size="sm" className="h-6 px-1 text-xs" onClick={() => mutation.mutate(editValue)} disabled={mutation.isPending} data-testid={`button-save-project-${field}`}>
+          {mutation.isPending ? "..." : "Save"}
+        </Button>
+        <Button variant="ghost" size="sm" className="h-6 px-1 text-xs text-muted-foreground" onClick={() => { setEditing(false); setEditValue(value || ""); }}>
+          Cancel
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group cursor-pointer" onClick={() => { setEditValue(value || ""); setEditing(true); }}>
+      <span className="text-muted-foreground">{label}:</span>
+      <span className="ml-1 group-hover:underline group-hover:text-primary transition-colors">{value || "—"}</span>
+      <Pencil className="w-3 h-3 ml-1 inline-block opacity-0 group-hover:opacity-50 transition-opacity" />
+    </div>
+  );
+}
+
+function ProjectStageDropdown({ project, stages }: { project: ProcoreProject; stages: { id: number; name: string }[] }) {
+  const { toast } = useToast();
+  const mutation = useMutation({
+    mutationFn: async (stageId: string) => {
+      const res = await apiRequest("PATCH", `/api/procore/projects/${project.procoreId}`, { project_stage_id: parseInt(stageId) });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/projects"] });
+      toast({ title: "Stage updated", description: `${project.name} stage synced to Procore.` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Update failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const currentStage = stages.find(s => s.name === project.projectStageName);
+
+  return (
+    <Select
+      value={currentStage?.id?.toString() || ""}
+      onValueChange={(v) => mutation.mutate(v)}
+      disabled={mutation.isPending}
+    >
+      <SelectTrigger
+        className="h-7 w-[180px] text-xs"
+        onClick={(e) => e.stopPropagation()}
+        data-testid={`select-project-stage-${project.procoreId}`}
+      >
+        <SelectValue placeholder={project.projectStageName || project.stage || "Select stage"} />
+      </SelectTrigger>
+      <SelectContent>
+        {stages.map((s) => (
+          <SelectItem key={s.id} value={s.id.toString()}>{s.name}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function ProjectActiveToggle({ project }: { project: ProcoreProject }) {
+  const { toast } = useToast();
+  const mutation = useMutation({
+    mutationFn: async (active: boolean) => {
+      const res = await apiRequest("PATCH", `/api/procore/projects/${project.procoreId}`, { active });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/projects"] });
+      toast({ title: "Status updated", description: `${project.name} status synced to Procore.` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Update failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Select
+      value={project.active ? "active" : "inactive"}
+      onValueChange={(v) => mutation.mutate(v === "active")}
+      disabled={mutation.isPending}
+    >
+      <SelectTrigger
+        className="h-7 w-[100px] text-xs"
+        onClick={(e) => e.stopPropagation()}
+        data-testid={`select-project-active-${project.procoreId}`}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="active">Active</SelectItem>
+        <SelectItem value="inactive">Inactive</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
 function ProjectsTab() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
@@ -142,6 +278,10 @@ function ProjectsTab() {
 
   const { data, isLoading, refetch } = useQuery<{ data: ProcoreProject[]; total: number }>({
     queryKey: [`/api/procore/projects?${params.toString()}`],
+  });
+
+  const { data: stages } = useQuery<{ id: number; name: string }[]>({
+    queryKey: ["/api/procore/project-stages"],
   });
 
   const toggleExpand = (id: number) => {
@@ -191,7 +331,7 @@ function ProjectsTab() {
         ) : (
           <>
             <div className="rounded-lg border">
-              <div className="grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_1fr_0.8fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+              <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
                 <span>Project Name</span>
                 <span>Number</span>
                 <span>Stage</span>
@@ -202,17 +342,19 @@ function ProjectsTab() {
               </div>
               {data.data.map((project) => (
                 <Collapsible key={project.id} open={expandedIds.has(project.id)} onOpenChange={() => toggleExpand(project.id)}>
-                  <CollapsibleTrigger className="w-full" data-testid={`procore-project-row-${project.id}`}>
-                    <div className="grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_1fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                  <CollapsibleTrigger asChild data-testid={`procore-project-row-${project.id}`}>
+                    <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer">
                       <span className="font-medium truncate text-left">{project.name || "—"}</span>
                       <span className="text-muted-foreground truncate text-left">{project.projectNumber || "—"}</span>
-                      <span className="text-left">
-                        <Badge variant="outline" className="text-xs">{project.stage || "—"}</Badge>
+                      <span className="text-left" onClick={(e) => e.stopPropagation()}>
+                        {stages ? (
+                          <ProjectStageDropdown project={project} stages={stages} />
+                        ) : (
+                          <Badge variant="outline" className="text-xs">{project.projectStageName || project.stage || "—"}</Badge>
+                        )}
                       </span>
-                      <span className="text-left">
-                        <Badge variant={project.active ? "secondary" : "outline"} className="text-xs">
-                          {project.active ? "Active" : "Inactive"}
-                        </Badge>
+                      <span className="text-left" onClick={(e) => e.stopPropagation()}>
+                        <ProjectActiveToggle project={project} />
                       </span>
                       <span className="text-muted-foreground truncate text-left">
                         {[project.city, project.stateCode].filter(Boolean).join(", ") || "—"}
@@ -225,16 +367,19 @@ function ProjectsTab() {
                     <div className="px-4 py-3 bg-muted/10 border-b space-y-2">
                       <div className="grid grid-cols-3 gap-4 text-sm">
                         <div><span className="text-muted-foreground">Procore ID:</span> <span className="font-mono text-xs ml-1">{project.procoreId}</span></div>
-                        <div><span className="text-muted-foreground">Phone:</span> <span className="ml-1">{project.phone || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Address:</span> <span className="ml-1">{project.address || "—"}</span></div>
-                        <div><span className="text-muted-foreground">ZIP:</span> <span className="ml-1">{project.zip || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Start Date:</span> <span className="ml-1">{project.startDate || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Completion Date:</span> <span className="ml-1">{project.completionDate || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Estimated Value:</span> <span className="ml-1">{formatValue(project.estimatedValue)}</span></div>
-                        <div><span className="text-muted-foreground">Total Value:</span> <span className="ml-1">{formatValue(project.totalValue)}</span></div>
-                        <div><span className="text-muted-foreground">Delivery Method:</span> <span className="ml-1">{project.deliveryMethod || "—"}</span></div>
+                        <EditableField label="Phone" value={project.phone} field="phone" projectId={project.procoreId} />
+                        <EditableField label="Address" value={project.address} field="address" projectId={project.procoreId} />
+                        <EditableField label="City" value={project.city} field="city" projectId={project.procoreId} />
+                        <EditableField label="State" value={project.stateCode} field="state_code" projectId={project.procoreId} />
+                        <EditableField label="ZIP" value={project.zip} field="zip" projectId={project.procoreId} />
+                        <EditableField label="Start Date" value={project.startDate} field="start_date" projectId={project.procoreId} type="date" />
+                        <EditableField label="Completion Date" value={project.completionDate} field="completion_date" projectId={project.procoreId} type="date" />
+                        <EditableField label="Projected Finish" value={project.projectedFinishDate} field="projected_finish_date" projectId={project.procoreId} type="date" />
+                        <EditableField label="Estimated Value" value={project.estimatedValue} field="estimated_value" projectId={project.procoreId} />
+                        <EditableField label="Total Value" value={project.totalValue} field="total_value" projectId={project.procoreId} />
+                        <EditableField label="Delivery Method" value={project.deliveryMethod} field="delivery_method" projectId={project.procoreId} />
+                        <EditableField label="Project Number" value={project.projectNumber} field="project_number" projectId={project.procoreId} />
                         <div><span className="text-muted-foreground">Company:</span> <span className="ml-1">{project.companyName || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Stage Name:</span> <span className="ml-1">{project.projectStageName || "—"}</span></div>
                         <div><span className="text-muted-foreground">Last Synced:</span> <span className="ml-1">{project.lastSyncedAt ? format(new Date(project.lastSyncedAt), "MMM d, h:mm a") : "—"}</span></div>
                       </div>
                       {!!project.properties && (
@@ -617,7 +762,7 @@ function BidAwardDropdown({ bid }: { bid: ProcoreBid }) {
 
   const mutation = useMutation({
     mutationFn: async (awarded: boolean | null) => {
-      const res = await apiRequest("PATCH", `/api/procore/bids/${bid.procoreId}/status`, { awarded });
+      const res = await apiRequest("PATCH", `/api/procore/bids/${bid.procoreId}`, { awarded });
       return res.json();
     },
     onSuccess: () => {
@@ -649,6 +794,45 @@ function BidAwardDropdown({ bid }: { bid: ProcoreBid }) {
         <SelectItem value="pending">Pending</SelectItem>
         <SelectItem value="awarded">Awarded</SelectItem>
         <SelectItem value="rejected">Rejected</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
+function BidStatusDropdown({ bid }: { bid: ProcoreBid }) {
+  const { toast } = useToast();
+  const mutation = useMutation({
+    mutationFn: async (bidStatus: string) => {
+      const res = await apiRequest("PATCH", `/api/procore/bids/${bid.procoreId}`, { bid_status: bidStatus });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/bids"] });
+      toast({ title: "Bid status updated", description: `${bid.vendorName} status synced to Procore.` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Update failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  return (
+    <Select
+      value={bid.bidStatus || "undecided"}
+      onValueChange={(v) => mutation.mutate(v)}
+      disabled={mutation.isPending}
+    >
+      <SelectTrigger
+        className="h-7 w-[120px] text-xs"
+        onClick={(e) => e.stopPropagation()}
+        data-testid={`select-bid-status-${bid.procoreId}`}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="submitted">Submitted</SelectItem>
+        <SelectItem value="will_bid">Will Bid</SelectItem>
+        <SelectItem value="will_not_bid">Won't Bid</SelectItem>
+        <SelectItem value="undecided">Undecided</SelectItem>
       </SelectContent>
     </Select>
   );
@@ -741,7 +925,7 @@ function BidsTab() {
         ) : (
           <>
             <div className="rounded-lg border">
-              <div className="grid grid-cols-[1.2fr_1fr_0.8fr_0.7fr_0.7fr_0.7fr_auto_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+              <div className="grid grid-cols-[1.2fr_0.9fr_0.8fr_0.7fr_0.7fr_0.7fr_auto_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
                 <span>Vendor</span>
                 <span>Bid Package</span>
                 <span>Status</span>
@@ -753,12 +937,12 @@ function BidsTab() {
               </div>
               {data.data.map((bid) => (
                 <Collapsible key={bid.id} open={expandedIds.has(bid.id)} onOpenChange={() => toggleExpand(bid.id)}>
-                  <CollapsibleTrigger className="w-full" data-testid={`procore-bid-row-${bid.id}`}>
-                    <div className="grid grid-cols-[1.2fr_1fr_0.8fr_0.7fr_0.7fr_0.7fr_auto_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                  <CollapsibleTrigger asChild data-testid={`procore-bid-row-${bid.id}`}>
+                    <div className="grid grid-cols-[1.2fr_0.9fr_0.8fr_0.7fr_0.7fr_0.7fr_auto_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer">
                       <span className="font-medium truncate text-left">{bid.vendorName || "—"}</span>
                       <span className="text-muted-foreground truncate text-left">{bid.bidPackageTitle || "—"}</span>
-                      <span className="text-left">
-                        <Badge className={`text-xs ${statusColor(bid.bidStatus)}`}>{bid.bidStatus?.replace(/_/g, " ") || "—"}</Badge>
+                      <span className="text-left" onClick={(e) => e.stopPropagation()}>
+                        <BidStatusDropdown bid={bid} />
                       </span>
                       <span className="text-left font-medium">{formatAmount(bid.lumpSumAmount)}</span>
                       <span className="text-left" onClick={(e) => e.stopPropagation()}>
