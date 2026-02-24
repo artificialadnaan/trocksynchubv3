@@ -207,6 +207,25 @@ async function findMatchingVendor(
   return bestMatch;
 }
 
+const STATE_ABBREVIATIONS: Record<string, string> = {
+  'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
+  'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
+  'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+  'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+  'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
+  'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ',
+  'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH',
+  'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+  'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT', 'vermont': 'VT',
+  'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV', 'wisconsin': 'WI', 'wyoming': 'WY',
+};
+
+function normalizeStateCode(state: string): string {
+  const trimmed = state.trim();
+  if (trimmed.length === 2) return trimmed.toUpperCase();
+  return STATE_ABBREVIATIONS[trimmed.toLowerCase()] || trimmed;
+}
+
 function buildVendorFieldsFromCompany(company: HubspotCompany): Record<string, any> {
   const fields: Record<string, any> = {};
   if (company.name) fields.name = company.name;
@@ -214,7 +233,10 @@ function buildVendorFieldsFromCompany(company: HubspotCompany): Record<string, a
   if (company.phone) fields.business_phone = company.phone;
   if (company.address) fields.address = company.address;
   if (company.city) fields.city = company.city;
-  if (company.state) fields.state_code = company.state;
+  if (company.state) {
+    fields.state_code = normalizeStateCode(company.state);
+    fields.country_code = 'US';
+  }
   if (company.zip) fields.zip = company.zip;
   return fields;
 }
@@ -310,7 +332,7 @@ export async function syncHubspotCompanyToProcore(hubspotId: string): Promise<{
       };
     }
 
-    await procoreApiCall('PATCH', `/rest/v1.0/companies/${config.companyId}/vendors/${match.vendor.procoreId}`, { vendor: updates });
+    await procoreApiCall('PATCH', `/rest/v1.0/vendors/${match.vendor.procoreId}?company_id=${config.companyId}`, { vendor: updates });
 
     await storage.createAuditLog({
       action: 'hubspot_procore_vendor_updated',
@@ -344,7 +366,7 @@ export async function syncHubspotCompanyToProcore(hubspotId: string): Promise<{
     return { action: 'skipped', message: `HubSpot company ${hubspotId} has no name — cannot create vendor` };
   }
 
-  const result = await procoreApiCall('POST', `/rest/v1.0/companies/${config.companyId}/vendors`, { vendor: vendorFields });
+  const result = await procoreApiCall('POST', `/rest/v1.0/vendors?company_id=${config.companyId}`, { vendor: vendorFields });
 
   await storage.upsertProcoreVendor({
     procoreId: String(result.id),
@@ -438,7 +460,7 @@ export async function syncHubspotContactToProcore(hubspotId: string): Promise<{
       };
     }
 
-    await procoreApiCall('PATCH', `/rest/v1.0/companies/${config.companyId}/vendors/${match.vendor.procoreId}`, { vendor: updates });
+    await procoreApiCall('PATCH', `/rest/v1.0/vendors/${match.vendor.procoreId}?company_id=${config.companyId}`, { vendor: updates });
 
     await storage.createAuditLog({
       action: 'hubspot_procore_vendor_updated',
@@ -473,7 +495,7 @@ export async function syncHubspotContactToProcore(hubspotId: string): Promise<{
     return { action: 'skipped', message: `HubSpot contact ${hubspotId} has no company or name — cannot create vendor` };
   }
 
-  const result = await procoreApiCall('POST', `/rest/v1.0/companies/${config.companyId}/vendors`, { vendor: contactFields });
+  const result = await procoreApiCall('POST', `/rest/v1.0/vendors?company_id=${config.companyId}`, { vendor: contactFields });
 
   await storage.upsertProcoreVendor({
     procoreId: String(result.id),
@@ -524,7 +546,8 @@ export async function processHubspotWebhookForProcore(
   if (!enabled) return { skipped: true, reason: 'automation_disabled' };
 
   const isCreation = eventType?.includes('creation') || eventType?.includes('create');
-  if (!isCreation) return { skipped: true, reason: 'not_a_creation_event' };
+  const isUpdate = eventType?.includes('update') || eventType?.includes('change') || eventType?.includes('propertyChange');
+  if (!isCreation && !isUpdate) return { skipped: true, reason: 'not_a_creation_or_update_event' };
 
   if (objectType === 'company') {
     return syncHubspotCompanyToProcore(objectId);
@@ -533,6 +556,104 @@ export async function processHubspotWebhookForProcore(
   }
 
   return { skipped: true, reason: `unsupported_object_type: ${objectType}` };
+}
+
+export async function triggerPostSyncProcoreUpdates(
+  syncResult: {
+    companies: { created: number; updated: number };
+    contacts: { created: number; updated: number };
+  }
+): Promise<{ companiesProcessed: number; contactsProcessed: number; results: any[] }> {
+  const automationConfig = await storage.getAutomationConfig("hubspot_procore_auto_sync");
+  const enabled = (automationConfig?.value as any)?.enabled;
+  if (!enabled) return { companiesProcessed: 0, contactsProcessed: 0, results: [] };
+
+  const hasNewOrUpdated =
+    (syncResult.companies.created > 0 || syncResult.companies.updated > 0) ||
+    (syncResult.contacts.created > 0 || syncResult.contacts.updated > 0);
+
+  if (!hasNewOrUpdated) return { companiesProcessed: 0, contactsProcessed: 0, results: [] };
+
+  console.log(`[HubSpot→Procore] Post-sync trigger: ${syncResult.companies.created} new companies, ${syncResult.companies.updated} updated companies, ${syncResult.contacts.created} new contacts, ${syncResult.contacts.updated} updated contacts`);
+
+  const results: any[] = [];
+  let companiesProcessed = 0;
+  let contactsProcessed = 0;
+
+  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+  
+  if (syncResult.companies.created > 0 || syncResult.companies.updated > 0) {
+    const recentChanges = await storage.getHubspotChangeHistoryList({
+      entityType: 'company',
+      limit: 500,
+      offset: 0,
+    });
+    const recentIds = new Set<string>();
+    for (const change of recentChanges.data) {
+      if (change.createdAt && new Date(change.createdAt) >= fiveMinutesAgo) {
+        if (change.changeType === 'created' || change.changeType === 'field_update') {
+          if (change.entityHubspotId) recentIds.add(change.entityHubspotId);
+        }
+      }
+    }
+
+    for (const hubspotId of recentIds) {
+      try {
+        const result = await syncHubspotCompanyToProcore(hubspotId);
+        results.push({ type: 'company', hubspotId, ...result });
+        companiesProcessed++;
+      } catch (e: any) {
+        results.push({ type: 'company', hubspotId, action: 'error', message: e.message });
+        companiesProcessed++;
+      }
+    }
+  }
+
+  if (syncResult.contacts.created > 0 || syncResult.contacts.updated > 0) {
+    const recentChanges = await storage.getHubspotChangeHistoryList({
+      entityType: 'contact',
+      limit: 500,
+      offset: 0,
+    });
+    const recentIds = new Set<string>();
+    for (const change of recentChanges.data) {
+      if (change.createdAt && new Date(change.createdAt) >= fiveMinutesAgo) {
+        if (change.changeType === 'created' || change.changeType === 'field_update') {
+          if (change.entityHubspotId) recentIds.add(change.entityHubspotId);
+        }
+      }
+    }
+
+    for (const hubspotId of recentIds) {
+      try {
+        const result = await syncHubspotContactToProcore(hubspotId);
+        results.push({ type: 'contact', hubspotId, ...result });
+        contactsProcessed++;
+      } catch (e: any) {
+        results.push({ type: 'contact', hubspotId, action: 'error', message: e.message });
+        contactsProcessed++;
+      }
+    }
+  }
+
+  console.log(`[HubSpot→Procore] Post-sync complete: ${companiesProcessed} companies, ${contactsProcessed} contacts processed`);
+
+  await storage.createAuditLog({
+    action: 'hubspot_procore_post_sync',
+    entityType: 'automation',
+    source: 'automation',
+    status: 'success',
+    details: {
+      companiesProcessed,
+      contactsProcessed,
+      created: results.filter(r => r.action === 'created').length,
+      updated: results.filter(r => r.action === 'updated').length,
+      skipped: results.filter(r => r.action === 'skipped').length,
+      errors: results.filter(r => r.action === 'error').length,
+    } as any,
+  });
+
+  return { companiesProcessed, contactsProcessed, results };
 }
 
 export async function runBulkHubspotToProcoreSync(type: 'companies' | 'contacts' | 'both'): Promise<{

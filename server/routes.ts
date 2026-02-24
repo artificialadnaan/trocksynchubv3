@@ -10,7 +10,7 @@ import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, updateHubSpotDealStage } from "./hubspot";
 import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
 import { runFullCompanycamSync } from "./companycam";
-import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact } from "./hubspot-procore-sync";
+import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact, triggerPostSyncProcoreUpdates } from "./hubspot-procore-sync";
 
 const PgSession = connectPgSimple(session);
 
@@ -528,7 +528,18 @@ export async function registerRoutes(
         durationMs: result.duration,
       });
 
-      res.json({ success: true, ...result });
+      let procoreAutoSync = null;
+      try {
+        procoreAutoSync = await triggerPostSyncProcoreUpdates({
+          companies: result.companies,
+          contacts: result.contacts,
+        });
+      } catch (autoErr: any) {
+        console.error('[HubSpot→Procore] Post-sync auto-trigger failed:', autoErr.message);
+        procoreAutoSync = { error: autoErr.message };
+      }
+
+      res.json({ success: true, ...result, procoreAutoSync });
     } catch (e: any) {
       await storage.createAuditLog({
         action: "hubspot_full_sync",
