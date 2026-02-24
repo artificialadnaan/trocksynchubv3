@@ -429,6 +429,222 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/integrations/config", requireAuth, async (_req, res) => {
+    try {
+      const [hubspot, procore, companycam] = await Promise.all([
+        storage.getAutomationConfig("hubspot_config"),
+        storage.getAutomationConfig("procore_config"),
+        storage.getAutomationConfig("companycam_config"),
+      ]);
+      res.json({
+        hubspot: hubspot?.value || {},
+        procore: procore?.value || {},
+        companycam: companycam?.value || {},
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/hubspot/save", requireAuth, async (req, res) => {
+    try {
+      const { accessToken, portalId, webhookUrl } = req.body;
+      if (!accessToken) return res.status(400).json({ message: "Access token is required" });
+
+      await storage.upsertOAuthToken({
+        provider: "hubspot",
+        accessToken,
+        tokenType: "Bearer",
+      });
+
+      await storage.upsertAutomationConfig({
+        key: "hubspot_config",
+        value: { portalId, webhookUrl, configuredAt: new Date().toISOString() },
+        description: "HubSpot CRM configuration",
+        isActive: true,
+      });
+
+      await storage.createAuditLog({
+        action: "integration_configured",
+        entityType: "hubspot",
+        source: "settings",
+        status: "success",
+        details: { portalId, hasAccessToken: true },
+      });
+
+      res.json({ success: true, message: "HubSpot configuration saved" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/hubspot/test", requireAuth, async (_req, res) => {
+    try {
+      const token = await storage.getOAuthToken("hubspot");
+      const accessToken = token?.accessToken || process.env.HUBSPOT_ACCESS_TOKEN;
+      if (!accessToken) return res.status(400).json({ success: false, message: "No HubSpot access token configured" });
+
+      const axios = (await import("axios")).default;
+      const response = await axios.get("https://api.hubapi.com/crm/v3/objects/deals?limit=1", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 10000,
+      });
+
+      res.json({
+        success: true,
+        message: `Connected! Found ${response.data.total || 0} deals in your HubSpot account.`,
+      });
+    } catch (e: any) {
+      const msg = e.response?.status === 401
+        ? "Invalid access token. Please check your HubSpot Private App token."
+        : e.response?.data?.message || e.message;
+      res.json({ success: false, message: msg });
+    }
+  });
+
+  app.post("/api/integrations/procore/save", requireAuth, async (req, res) => {
+    try {
+      const { clientId, clientSecret, companyId, environment } = req.body;
+      if (!clientId || !clientSecret) return res.status(400).json({ message: "Client ID and Client Secret are required" });
+
+      await storage.upsertAutomationConfig({
+        key: "procore_config",
+        value: {
+          clientId,
+          clientSecret,
+          companyId,
+          environment: environment || "production",
+          configuredAt: new Date().toISOString(),
+        },
+        description: "Procore configuration",
+        isActive: true,
+      });
+
+      await storage.createAuditLog({
+        action: "integration_configured",
+        entityType: "procore",
+        source: "settings",
+        status: "success",
+        details: { companyId, environment, hasCredentials: true },
+      });
+
+      res.json({ success: true, message: "Procore configuration saved" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/procore/test", requireAuth, async (_req, res) => {
+    try {
+      const token = await storage.getOAuthToken("procore");
+      if (!token?.accessToken) {
+        return res.json({ success: false, message: "No Procore OAuth token found. Use the OAuth flow to connect." });
+      }
+
+      const config = await storage.getAutomationConfig("procore_config");
+      const env = (config?.value as any)?.environment || "production";
+      const baseUrl = env === "sandbox" ? "https://sandbox.procore.com" : "https://api.procore.com";
+
+      const axios = (await import("axios")).default;
+      const response = await axios.get(`${baseUrl}/rest/v1.0/me`, {
+        headers: { Authorization: `Bearer ${token.accessToken}` },
+        timeout: 10000,
+      });
+
+      res.json({
+        success: true,
+        message: `Connected as ${response.data.name || response.data.login}`,
+      });
+    } catch (e: any) {
+      const msg = e.response?.status === 401
+        ? "Token expired or invalid. Please re-authenticate via OAuth."
+        : e.response?.data?.message || e.message;
+      res.json({ success: false, message: msg });
+    }
+  });
+
+  app.post("/api/integrations/companycam/save", requireAuth, async (req, res) => {
+    try {
+      const { apiToken, webhookUrl } = req.body;
+      if (!apiToken) return res.status(400).json({ message: "API token is required" });
+
+      await storage.upsertOAuthToken({
+        provider: "companycam",
+        accessToken: apiToken,
+        tokenType: "Bearer",
+      });
+
+      await storage.upsertAutomationConfig({
+        key: "companycam_config",
+        value: { webhookUrl, configuredAt: new Date().toISOString() },
+        description: "CompanyCam configuration",
+        isActive: true,
+      });
+
+      await storage.createAuditLog({
+        action: "integration_configured",
+        entityType: "companycam",
+        source: "settings",
+        status: "success",
+        details: { hasApiToken: true },
+      });
+
+      res.json({ success: true, message: "CompanyCam configuration saved" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/companycam/test", requireAuth, async (_req, res) => {
+    try {
+      const token = await storage.getOAuthToken("companycam");
+      const apiToken = token?.accessToken || process.env.COMPANYCAM_API_TOKEN;
+      if (!apiToken) return res.json({ success: false, message: "No CompanyCam API token configured" });
+
+      const axios = (await import("axios")).default;
+      const response = await axios.get("https://api.companycam.com/v2/projects?per_page=1", {
+        headers: { Authorization: `Bearer ${apiToken}` },
+        timeout: 10000,
+      });
+
+      res.json({
+        success: true,
+        message: `Connected! Found ${response.data.length > 0 ? "projects" : "no projects yet"} in your CompanyCam account.`,
+      });
+    } catch (e: any) {
+      const msg = e.response?.status === 401
+        ? "Invalid API token. Please check your CompanyCam token."
+        : e.response?.data?.message || e.message;
+      res.json({ success: false, message: msg });
+    }
+  });
+
+  app.post("/api/integrations/:provider/disconnect", requireAuth, async (req, res) => {
+    try {
+      const provider = req.params.provider;
+      const token = await storage.getOAuthToken(provider);
+      if (token) {
+        await storage.upsertOAuthToken({
+          provider,
+          accessToken: "",
+          tokenType: "Bearer",
+        });
+      }
+
+      await storage.createAuditLog({
+        action: "integration_disconnected",
+        entityType: provider,
+        source: "settings",
+        status: "success",
+        details: { disconnectedAt: new Date().toISOString() },
+      });
+
+      res.json({ success: true, message: `${provider} disconnected` });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "2.0.0" });
   });

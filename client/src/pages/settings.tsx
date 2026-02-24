@@ -3,32 +3,56 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Settings, Link2, Clock, Shield, Activity } from "lucide-react";
+import {
+  Link2,
+  Clock,
+  Shield,
+  Activity,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Settings2,
+  Unplug,
+} from "lucide-react";
+import { useState } from "react";
 import type { PollJob } from "@shared/schema";
 
 export default function SettingsPage() {
   const { toast } = useToast();
+  const [hubspotDialogOpen, setHubspotDialogOpen] = useState(false);
+  const [procoreDialogOpen, setProcoreDialogOpen] = useState(false);
+  const [companycamDialogOpen, setCompanycamDialogOpen] = useState(false);
 
   const { data: connections, isLoading: connLoading } = useQuery<any>({
     queryKey: ["/api/dashboard/connections"],
   });
 
-  const { data: pollJobs, isLoading: jobsLoading } = useQuery<PollJob[]>({
-    queryKey: ["/api/poll-jobs"],
+  const { data: integrationConfig } = useQuery<any>({
+    queryKey: ["/api/integrations/config"],
   });
 
-  const connectProcore = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("GET", "/api/oauth/procore/authorize");
-      const { url } = await res.json();
-      window.location.href = url;
-    },
-    onError: (e: Error) => {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    },
+  const { data: pollJobs, isLoading: jobsLoading } = useQuery<PollJob[]>({
+    queryKey: ["/api/poll-jobs"],
   });
 
   const toggleJobMutation = useMutation({
@@ -39,6 +63,18 @@ export default function SettingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/poll-jobs"] });
       toast({ title: "Poll job updated" });
+    },
+  });
+
+  const disconnectMutation = useMutation({
+    mutationFn: async (provider: string) => {
+      const res = await apiRequest("POST", `/api/integrations/${provider}/disconnect`);
+      return res.json();
+    },
+    onSuccess: (_data, provider) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/connections"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/config"] });
+      toast({ title: `${provider} disconnected` });
     },
   });
 
@@ -65,26 +101,26 @@ export default function SettingsPage() {
                 name="HubSpot CRM"
                 description="Deals, Companies, Contacts, Attachments"
                 connected={connections?.hubspot?.connected}
-                onConnect={() => toast({ title: "HubSpot is connected via Replit integration" })}
-                buttonLabel="Connected via Integration"
+                configuredAt={(integrationConfig?.hubspot as any)?.configuredAt}
+                onConfigure={() => setHubspotDialogOpen(true)}
+                onDisconnect={() => disconnectMutation.mutate("hubspot")}
               />
               <ConnectionCard
                 name="Procore"
                 description="Bid Board, Projects, Contracts, Directory, Webhooks"
                 connected={connections?.procore?.connected}
                 expiresAt={connections?.procore?.expiresAt}
-                onConnect={() => connectProcore.mutate()}
-                buttonLabel={connectProcore.isPending ? "Redirecting..." : "Connect with OAuth"}
+                configuredAt={(integrationConfig?.procore as any)?.configuredAt}
+                onConfigure={() => setProcoreDialogOpen(true)}
+                onDisconnect={() => disconnectMutation.mutate("procore")}
               />
               <ConnectionCard
                 name="CompanyCam"
                 description="Projects, Photos, Webhooks"
                 connected={connections?.companycam?.connected}
-                onConnect={() => toast({
-                  title: "CompanyCam Setup",
-                  description: "Add your COMPANYCAM_API_TOKEN to the Secrets tab to connect.",
-                })}
-                buttonLabel="Configure API Token"
+                configuredAt={(integrationConfig?.companycam as any)?.configuredAt}
+                onConfigure={() => setCompanycamDialogOpen(true)}
+                onDisconnect={() => disconnectMutation.mutate("companycam")}
               />
             </>
           )}
@@ -159,34 +195,35 @@ export default function SettingsPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <EndpointRow
-            name="HubSpot Webhook"
-            url="/webhooks/hubspot"
-            method="POST"
-          />
-          <EndpointRow
-            name="Procore Webhook"
-            url="/webhooks/procore"
-            method="POST"
-          />
-          <EndpointRow
-            name="CompanyCam Webhook"
-            url="/webhooks/companycam"
-            method="POST"
-          />
-          <EndpointRow
-            name="Health Check"
-            url="/api/health"
-            method="GET"
-          />
+          <EndpointRow name="HubSpot Webhook" url="/webhooks/hubspot" method="POST" />
+          <EndpointRow name="Procore Webhook" url="/webhooks/procore" method="POST" />
+          <EndpointRow name="CompanyCam Webhook" url="/webhooks/companycam" method="POST" />
+          <EndpointRow name="Health Check" url="/api/health" method="GET" />
         </CardContent>
       </Card>
+
+      <HubSpotConfigDialog
+        open={hubspotDialogOpen}
+        onOpenChange={setHubspotDialogOpen}
+        existingConfig={integrationConfig?.hubspot}
+      />
+      <ProcoreConfigDialog
+        open={procoreDialogOpen}
+        onOpenChange={setProcoreDialogOpen}
+        existingConfig={integrationConfig?.procore}
+      />
+      <CompanyCamConfigDialog
+        open={companycamDialogOpen}
+        onOpenChange={setCompanycamDialogOpen}
+        existingConfig={integrationConfig?.companycam}
+      />
     </div>
   );
 }
 
-function ConnectionCard({ name, description, connected, expiresAt, onConnect, buttonLabel }: {
-  name: string; description: string; connected?: boolean; expiresAt?: string; onConnect: () => void; buttonLabel: string;
+function ConnectionCard({ name, description, connected, expiresAt, configuredAt, onConfigure, onDisconnect }: {
+  name: string; description: string; connected?: boolean; expiresAt?: string; configuredAt?: string;
+  onConfigure: () => void; onDisconnect: () => void;
 }) {
   return (
     <div className="flex items-center justify-between py-3 px-4 rounded-lg border" data-testid={`connection-${name.toLowerCase().replace(/\s+/g, "-")}`}>
@@ -201,12 +238,416 @@ function ConnectionCard({ name, description, connected, expiresAt, onConnect, bu
         {expiresAt && (
           <p className="text-xs text-muted-foreground">Token expires: {new Date(expiresAt).toLocaleString()}</p>
         )}
+        {configuredAt && (
+          <p className="text-xs text-muted-foreground">Configured: {new Date(configuredAt).toLocaleString()}</p>
+        )}
       </div>
-      {!connected && (
-        <Button variant="outline" size="sm" onClick={onConnect} data-testid={`button-connect-${name.toLowerCase().replace(/\s+/g, "-")}`}>
-          {buttonLabel}
+      <div className="flex items-center gap-2">
+        {connected && (
+          <Button variant="ghost" size="sm" onClick={onDisconnect} data-testid={`button-disconnect-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+            <Unplug className="w-4 h-4 text-muted-foreground" />
+          </Button>
+        )}
+        <Button variant="outline" size="sm" onClick={onConfigure} data-testid={`button-configure-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+          <Settings2 className="w-4 h-4 mr-1" />
+          {connected ? "Configure" : "Set Up"}
         </Button>
-      )}
+      </div>
+    </div>
+  );
+}
+
+function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
+  open: boolean; onOpenChange: (open: boolean) => void; existingConfig?: any;
+}) {
+  const { toast } = useToast();
+  const [accessToken, setAccessToken] = useState("");
+  const [portalId, setPortalId] = useState(existingConfig?.portalId || "");
+  const [webhookUrl, setWebhookUrl] = useState(existingConfig?.webhookUrl || "");
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/hubspot/save", { accessToken, portalId, webhookUrl });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/connections"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/config"] });
+      toast({ title: "HubSpot configuration saved" });
+      onOpenChange(false);
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/hubspot/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setTestResult(data);
+    },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center">
+              <span className="text-orange-600 font-bold text-sm">HS</span>
+            </div>
+            HubSpot CRM Configuration
+          </DialogTitle>
+          <DialogDescription>
+            Connect your HubSpot account using a Private App access token. You can create one in HubSpot under Settings &gt; Integrations &gt; Private Apps.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 pt-2">
+          <div className="space-y-2">
+            <Label htmlFor="hs-token">Private App Access Token</Label>
+            <Input
+              id="hs-token"
+              type="password"
+              placeholder="pat-na1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              value={accessToken}
+              onChange={(e) => setAccessToken(e.target.value)}
+              data-testid="input-hubspot-token"
+            />
+            <p className="text-xs text-muted-foreground">Required scopes: crm.objects.deals.read, crm.objects.deals.write, crm.objects.companies.read, crm.objects.contacts.read</p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="hs-portal">Portal ID (Hub ID)</Label>
+            <Input
+              id="hs-portal"
+              placeholder="e.g., 12345678"
+              value={portalId}
+              onChange={(e) => setPortalId(e.target.value)}
+              data-testid="input-hubspot-portal-id"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="hs-webhook">Webhook Target URL (optional)</Label>
+            <Input
+              id="hs-webhook"
+              placeholder="Auto-detected from your deployment URL"
+              value={webhookUrl}
+              onChange={(e) => setWebhookUrl(e.target.value)}
+              data-testid="input-hubspot-webhook-url"
+            />
+            <p className="text-xs text-muted-foreground">Leave blank to auto-detect. This is the URL HubSpot will send webhook events to.</p>
+          </div>
+
+          {testResult && (
+            <TestResultBanner result={testResult} />
+          )}
+
+          <Separator />
+
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              variant="outline"
+              onClick={() => testMutation.mutate()}
+              disabled={testMutation.isPending}
+              data-testid="button-test-hubspot"
+            >
+              {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+              Test Connection
+            </Button>
+            <Button
+              onClick={() => saveMutation.mutate()}
+              disabled={!accessToken || saveMutation.isPending}
+              data-testid="button-save-hubspot"
+            >
+              {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : null}
+              Save Configuration
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ProcoreConfigDialog({ open, onOpenChange, existingConfig }: {
+  open: boolean; onOpenChange: (open: boolean) => void; existingConfig?: any;
+}) {
+  const { toast } = useToast();
+  const [clientId, setClientId] = useState(existingConfig?.clientId || "");
+  const [clientSecret, setClientSecret] = useState("");
+  const [companyId, setCompanyId] = useState(existingConfig?.companyId || "");
+  const [environment, setEnvironment] = useState(existingConfig?.environment || "production");
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/procore/save", { clientId, clientSecret, companyId, environment });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/connections"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/config"] });
+      toast({ title: "Procore configuration saved" });
+      onOpenChange(false);
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const oauthMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("GET", "/api/oauth/procore/authorize");
+      const { url } = await res.json();
+      window.location.href = url;
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/procore/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setTestResult(data);
+    },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+              <span className="text-blue-600 font-bold text-sm">PC</span>
+            </div>
+            Procore Configuration
+          </DialogTitle>
+          <DialogDescription>
+            Connect to Procore using OAuth 2.0. First save your app credentials, then authorize via the OAuth flow.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 pt-2">
+          <div className="space-y-2">
+            <Label htmlFor="pc-env">Environment</Label>
+            <Select value={environment} onValueChange={setEnvironment}>
+              <SelectTrigger data-testid="select-procore-environment">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="production">Production</SelectItem>
+                <SelectItem value="sandbox">Sandbox (Development)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pc-client-id">Client ID (App ID)</Label>
+            <Input
+              id="pc-client-id"
+              placeholder="Your Procore app client ID"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              data-testid="input-procore-client-id"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pc-client-secret">Client Secret</Label>
+            <Input
+              id="pc-client-secret"
+              type="password"
+              placeholder="Your Procore app client secret"
+              value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)}
+              data-testid="input-procore-client-secret"
+            />
+            <p className="text-xs text-muted-foreground">Found in your Procore Developer Portal under App Management.</p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pc-company">Company ID</Label>
+            <Input
+              id="pc-company"
+              placeholder="e.g., 12345"
+              value={companyId}
+              onChange={(e) => setCompanyId(e.target.value)}
+              data-testid="input-procore-company-id"
+            />
+          </div>
+
+          {testResult && (
+            <TestResultBanner result={testResult} />
+          )}
+
+          <Separator />
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => testMutation.mutate()}
+                disabled={testMutation.isPending}
+                data-testid="button-test-procore"
+              >
+                {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+                Test
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => oauthMutation.mutate()}
+                disabled={oauthMutation.isPending || !clientId}
+                data-testid="button-oauth-procore"
+              >
+                {oauthMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Link2 className="w-4 h-4 mr-1" />}
+                Authorize OAuth
+              </Button>
+            </div>
+            <Button
+              onClick={() => saveMutation.mutate()}
+              disabled={!clientId || !clientSecret || saveMutation.isPending}
+              data-testid="button-save-procore"
+            >
+              {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : null}
+              Save
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CompanyCamConfigDialog({ open, onOpenChange, existingConfig }: {
+  open: boolean; onOpenChange: (open: boolean) => void; existingConfig?: any;
+}) {
+  const { toast } = useToast();
+  const [apiToken, setApiToken] = useState("");
+  const [webhookUrl, setWebhookUrl] = useState(existingConfig?.webhookUrl || "");
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/companycam/save", { apiToken, webhookUrl });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/connections"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/config"] });
+      toast({ title: "CompanyCam configuration saved" });
+      onOpenChange(false);
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/companycam/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setTestResult(data);
+    },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center">
+              <span className="text-purple-600 font-bold text-sm">CC</span>
+            </div>
+            CompanyCam Configuration
+          </DialogTitle>
+          <DialogDescription>
+            Connect CompanyCam using your API token. You can generate one from your CompanyCam account settings.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 pt-2">
+          <div className="space-y-2">
+            <Label htmlFor="cc-token">API Token</Label>
+            <Input
+              id="cc-token"
+              type="password"
+              placeholder="Your CompanyCam API token"
+              value={apiToken}
+              onChange={(e) => setApiToken(e.target.value)}
+              data-testid="input-companycam-token"
+            />
+            <p className="text-xs text-muted-foreground">Find this in your CompanyCam account under Developer Settings or contact CompanyCam support.</p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="cc-webhook">Webhook URL (optional)</Label>
+            <Input
+              id="cc-webhook"
+              placeholder="Auto-detected from your deployment URL"
+              value={webhookUrl}
+              onChange={(e) => setWebhookUrl(e.target.value)}
+              data-testid="input-companycam-webhook-url"
+            />
+            <p className="text-xs text-muted-foreground">Leave blank to auto-detect. CompanyCam will send project creation events to this URL.</p>
+          </div>
+
+          {testResult && (
+            <TestResultBanner result={testResult} />
+          )}
+
+          <Separator />
+
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              variant="outline"
+              onClick={() => testMutation.mutate()}
+              disabled={testMutation.isPending}
+              data-testid="button-test-companycam"
+            >
+              {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+              Test Connection
+            </Button>
+            <Button
+              onClick={() => saveMutation.mutate()}
+              disabled={!apiToken || saveMutation.isPending}
+              data-testid="button-save-companycam"
+            >
+              {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : null}
+              Save Configuration
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TestResultBanner({ result }: { result: { success: boolean; message: string } }) {
+  return (
+    <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${result.success ? "bg-green-500/10 text-green-700 dark:text-green-400" : "bg-red-500/10 text-red-700 dark:text-red-400"}`} data-testid="test-result-banner">
+      {result.success ? <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+      <span>{result.message}</span>
     </div>
   );
 }
