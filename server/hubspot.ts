@@ -1,47 +1,16 @@
 import { Client } from '@hubspot/api-client';
 import { storage } from './storage';
 
-let connectionSettings: any;
-
-async function getAccessToken(): Promise<string> {
-  if (connectionSettings && connectionSettings.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-    return connectionSettings.settings.access_token;
+function getAccessToken(): string {
+  const token = process.env.HUBSPOT_ACCESS_TOKEN;
+  if (!token) {
+    throw new Error('HUBSPOT_ACCESS_TOKEN environment variable is not set. Add your HubSpot Personal Access Key to Replit Secrets.');
   }
-
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY
-    ? 'repl ' + process.env.REPL_IDENTITY
-    : process.env.WEB_REPL_RENEWAL
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL
-    : null;
-
-  if (!xReplitToken || !hostname) {
-    throw new Error('Replit connector environment not available. Make sure HubSpot integration is set up.');
-  }
-
-  const response = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=hubspot',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X-Replit-Token': xReplitToken
-      }
-    }
-  );
-
-  const data = await response.json();
-  connectionSettings = data.items?.[0];
-
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
-
-  if (!connectionSettings || !accessToken) {
-    throw new Error('HubSpot not connected via Replit integration. Please set up the HubSpot connection.');
-  }
-  return accessToken;
+  return token;
 }
 
 export async function getHubSpotClient(): Promise<Client> {
-  const accessToken = await getAccessToken();
+  const accessToken = getAccessToken();
   return new Client({ accessToken });
 }
 
@@ -141,7 +110,7 @@ export async function syncHubSpotCompanies(): Promise<{ synced: number; created:
 
 async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   const ownerMap = new Map<string, string>();
-  const accessToken = await getAccessToken();
+  const accessToken = getAccessToken();
 
   try {
     const response = await fetch('https://api.hubapi.com/crm/v3/owners?limit=500', {
@@ -188,7 +157,7 @@ async function fetchContactCompanyAssociations(contactIds: string[]): Promise<Ma
   const assocMap = new Map<string, string>();
   if (!contactIds.length) return assocMap;
   try {
-    const accessToken = await getAccessToken();
+    const accessToken = getAccessToken();
     const batchSize = 100;
     for (let i = 0; i < contactIds.length; i += batchSize) {
       const batch = contactIds.slice(i, i + batchSize);
@@ -223,7 +192,7 @@ async function fetchDealCompanyAssociations(dealIds: string[]): Promise<Map<stri
   const assocMap = new Map<string, string>();
   if (!dealIds.length) return assocMap;
   try {
-    const accessToken = await getAccessToken();
+    const accessToken = getAccessToken();
     const batchSize = 100;
     for (let i = 0; i < dealIds.length; i += batchSize) {
       const batch = dealIds.slice(i, i + batchSize);
