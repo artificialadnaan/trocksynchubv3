@@ -274,20 +274,22 @@ function ContactsTab() {
         ) : (
           <>
             <div className="rounded-lg border">
-              <div className="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+              <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
                 <span>Name</span>
                 <span>Email</span>
-                <span>Company</span>
+                <span>Contact Owner</span>
+                <span>Primary Company</span>
                 <span>Job Title</span>
                 <span className="w-8"></span>
               </div>
               {data.data.map((contact) => (
                 <Collapsible key={contact.id} open={expandedIds.has(contact.id)} onOpenChange={() => toggleExpand(contact.id)}>
                   <CollapsibleTrigger className="w-full" data-testid={`contact-row-${contact.id}`}>
-                    <div className="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                    <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
                       <span className="font-medium truncate text-left">{[contact.firstName, contact.lastName].filter(Boolean).join(" ") || "—"}</span>
                       <span className="text-muted-foreground truncate text-left">{contact.email || "—"}</span>
-                      <span className="text-muted-foreground truncate text-left">{contact.company || "—"}</span>
+                      <span className="text-muted-foreground truncate text-left" data-testid={`contact-owner-${contact.id}`}>{contact.ownerName || (contact.ownerId ? `Owner #${contact.ownerId}` : "No owner")}</span>
+                      <span className="text-muted-foreground truncate text-left" data-testid={`contact-company-${contact.id}`}>{contact.associatedCompanyName || contact.company || "—"}</span>
                       <span className="text-muted-foreground truncate text-left">{contact.jobTitle || "—"}</span>
                       <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedIds.has(contact.id) ? "rotate-180" : ""}`} />
                     </div>
@@ -298,8 +300,8 @@ function ContactsTab() {
                         <div><span className="text-muted-foreground">HubSpot ID:</span> <span className="font-mono text-xs ml-1">{contact.hubspotId}</span></div>
                         <div><span className="text-muted-foreground">Phone:</span> <span className="ml-1">{contact.phone || "—"}</span></div>
                         <div><span className="text-muted-foreground">Lifecycle Stage:</span> <span className="ml-1">{contact.lifecycleStage || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Owner ID:</span> <span className="ml-1">{contact.ownerId || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Associated Company:</span> <span className="ml-1">{contact.associatedCompanyId || "—"}</span></div>
+                        <div><span className="text-muted-foreground">Contact Owner:</span> <span className="ml-1">{contact.ownerName || (contact.ownerId ? `Owner #${contact.ownerId}` : "—")}</span></div>
+                        <div><span className="text-muted-foreground">Primary Company:</span> <span className="ml-1">{contact.associatedCompanyName || contact.associatedCompanyId || "—"}</span></div>
                         <div><span className="text-muted-foreground">Last Synced:</span> <span className="ml-1">{contact.lastSyncedAt ? format(new Date(contact.lastSyncedAt), "MMM d, h:mm a") : "—"}</span></div>
                       </div>
                       {!!contact.properties && (
@@ -385,23 +387,25 @@ function DealsTab() {
         ) : (
           <>
             <div className="rounded-lg border">
-              <div className="grid grid-cols-[1.5fr_0.8fr_1fr_1fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+              <div className="grid grid-cols-[1.5fr_0.8fr_1fr_1fr_1fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
                 <span>Deal Name</span>
                 <span>Amount</span>
                 <span>Stage</span>
                 <span>Pipeline</span>
+                <span>Company</span>
                 <span className="w-8"></span>
               </div>
               {data.data.map((deal) => (
                 <Collapsible key={deal.id} open={expandedIds.has(deal.id)} onOpenChange={() => toggleExpand(deal.id)}>
                   <CollapsibleTrigger className="w-full" data-testid={`deal-row-${deal.id}`}>
-                    <div className="grid grid-cols-[1.5fr_0.8fr_1fr_1fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
+                    <div className="grid grid-cols-[1.5fr_0.8fr_1fr_1fr_1fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
                       <span className="font-medium truncate text-left">{deal.dealName || "—"}</span>
                       <span className="text-left font-medium">{formatAmount(deal.amount)}</span>
                       <span className="text-left">
                         <Badge variant="outline" className="text-xs">{deal.dealStageName || deal.dealStage || "—"}</Badge>
                       </span>
                       <span className="text-muted-foreground truncate text-left">{deal.pipelineName || deal.pipeline || "—"}</span>
+                      <span className="text-muted-foreground truncate text-left" data-testid={`deal-company-${deal.id}`}>{deal.associatedCompanyName || "—"}</span>
                       <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedIds.has(deal.id) ? "rotate-180" : ""}`} />
                     </div>
                   </CollapsibleTrigger>
@@ -410,8 +414,8 @@ function DealsTab() {
                       <div className="grid grid-cols-3 gap-4 text-sm">
                         <div><span className="text-muted-foreground">HubSpot ID:</span> <span className="font-mono text-xs ml-1">{deal.hubspotId}</span></div>
                         <div><span className="text-muted-foreground">Close Date:</span> <span className="ml-1">{deal.closeDate || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Owner ID:</span> <span className="ml-1">{deal.ownerId || "—"}</span></div>
-                        <div><span className="text-muted-foreground">Associated Company:</span> <span className="ml-1">{deal.associatedCompanyId || "—"}</span></div>
+                        <div><span className="text-muted-foreground">Deal Owner:</span> <span className="ml-1">{deal.ownerName || (deal.ownerId ? `Owner #${deal.ownerId}` : "—")}</span></div>
+                        <div><span className="text-muted-foreground">Associated Company:</span> <span className="ml-1">{deal.associatedCompanyName || deal.associatedCompanyId || "—"}</span></div>
                         <div><span className="text-muted-foreground">Associated Contacts:</span> <span className="ml-1">{deal.associatedContactIds || "—"}</span></div>
                         <div><span className="text-muted-foreground">Last Synced:</span> <span className="ml-1">{deal.lastSyncedAt ? format(new Date(deal.lastSyncedAt), "MMM d, h:mm a") : "—"}</span></div>
                       </div>

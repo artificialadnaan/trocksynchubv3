@@ -51,8 +51,8 @@ export async function testHubSpotConnection(): Promise<{ success: boolean; messa
     const response = await client.crm.deals.basicApi.getPage(1);
     return {
       success: true,
-      message: `Connected! Found ${response.total || 0} deals in your HubSpot account.`,
-      data: { totalDeals: response.total }
+      message: `Connected! Found ${(response as any).total || response.results?.length || 0} deals in your HubSpot account.`,
+      data: { totalDeals: (response as any).total || response.results?.length || 0 }
     };
   } catch (e: any) {
     return {
@@ -139,6 +139,96 @@ export async function syncHubSpotCompanies(): Promise<{ synced: number; created:
   return { synced: allCompanies.length, created, updated, changes };
 }
 
+async function fetchHubSpotOwners(): Promise<Map<string, string>> {
+  const ownerMap = new Map<string, string>();
+  try {
+    const accessToken = await getAccessToken();
+    const response = await fetch('https://api.hubapi.com/owners/v2/owners', {
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
+    });
+    if (!response.ok) throw new Error(`Owners API: ${response.status}`);
+    const owners = await response.json();
+    for (const owner of owners) {
+      const name = [owner.firstName, owner.lastName].filter(Boolean).join(' ');
+      const display = owner.email ? `${name} (${owner.email})` : name;
+      ownerMap.set(String(owner.ownerId), display);
+    }
+  } catch (e) {
+    console.error('Failed to fetch HubSpot owners:', e);
+  }
+  return ownerMap;
+}
+
+async function fetchContactCompanyAssociations(contactIds: string[]): Promise<Map<string, string>> {
+  const assocMap = new Map<string, string>();
+  if (!contactIds.length) return assocMap;
+  try {
+    const accessToken = await getAccessToken();
+    const batchSize = 100;
+    for (let i = 0; i < contactIds.length; i += batchSize) {
+      const batch = contactIds.slice(i, i + batchSize);
+      const response = await fetch('https://api.hubapi.com/crm/v4/associations/contact/company/batch/read', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ inputs: batch.map(id => ({ id })) }),
+      });
+      if (!response.ok) {
+        console.error(`Associations batch API: ${response.status}`);
+        continue;
+      }
+      const data = await response.json();
+      for (const result of data.results || []) {
+        const contactId = result.from?.id;
+        const companyId = result.to?.[0]?.toObjectId;
+        if (contactId && companyId) {
+          assocMap.set(String(contactId), String(companyId));
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch contact-company associations:', e);
+  }
+  return assocMap;
+}
+
+async function fetchDealCompanyAssociations(dealIds: string[]): Promise<Map<string, string>> {
+  const assocMap = new Map<string, string>();
+  if (!dealIds.length) return assocMap;
+  try {
+    const accessToken = await getAccessToken();
+    const batchSize = 100;
+    for (let i = 0; i < dealIds.length; i += batchSize) {
+      const batch = dealIds.slice(i, i + batchSize);
+      const response = await fetch('https://api.hubapi.com/crm/v4/associations/deal/company/batch/read', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ inputs: batch.map(id => ({ id })) }),
+      });
+      if (!response.ok) {
+        console.error(`Deal associations batch API: ${response.status}`);
+        continue;
+      }
+      const data = await response.json();
+      for (const result of data.results || []) {
+        const dealId = result.from?.id;
+        const companyId = result.to?.[0]?.toObjectId;
+        if (dealId && companyId) {
+          assocMap.set(String(dealId), String(companyId));
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch deal-company associations:', e);
+  }
+  return assocMap;
+}
+
 export async function syncHubSpotContacts(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
   const client = await getHubSpotClient();
   const properties = ['firstname', 'lastname', 'email', 'phone', 'company', 'jobtitle', 'lifecyclestage', 'hubspot_owner_id', 'associatedcompanyid', 'hs_lastmodifieddate'];
@@ -147,12 +237,36 @@ export async function syncHubSpotContacts(): Promise<{ synced: number; created: 
     client.crm.contacts.basicApi.getPage(100, after, properties)
   );
 
+  const ownerMap = await fetchHubSpotOwners();
+
+  const contactIds = allContacts.map(c => c.id);
+  const contactCompanyMap = await fetchContactCompanyAssociations(contactIds);
+
+  const companyNameCache = new Map<string, string>();
+
   let created = 0, updated = 0, changes = 0;
 
   for (const contact of allContacts) {
     const hubspotId = contact.id;
     const props = contact.properties || {};
     const existing = await storage.getHubspotContactByHubspotId(hubspotId);
+
+    let associatedCompanyId = contactCompanyMap.get(hubspotId) || props.associatedcompanyid || null;
+
+    let associatedCompanyName: string | null = null;
+    if (associatedCompanyId) {
+      if (companyNameCache.has(associatedCompanyId)) {
+        associatedCompanyName = companyNameCache.get(associatedCompanyId) || null;
+      } else {
+        const company = await storage.getHubspotCompanyByHubspotId(associatedCompanyId);
+        if (company?.name) {
+          associatedCompanyName = company.name;
+          companyNameCache.set(associatedCompanyId, company.name);
+        }
+      }
+    }
+
+    const ownerName = props.hubspot_owner_id ? (ownerMap.get(props.hubspot_owner_id) || null) : null;
 
     const data = {
       hubspotId,
@@ -164,13 +278,15 @@ export async function syncHubSpotContacts(): Promise<{ synced: number; created: 
       jobTitle: props.jobtitle || null,
       lifecycleStage: props.lifecyclestage || null,
       ownerId: props.hubspot_owner_id || null,
-      associatedCompanyId: props.associatedcompanyid || null,
+      ownerName,
+      associatedCompanyId,
+      associatedCompanyName,
       properties: props,
       hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
     };
 
     if (existing) {
-      const changedFields = detectChanges(existing, data, ['firstName', 'lastName', 'email', 'phone', 'company', 'jobTitle', 'lifecycleStage', 'ownerId']);
+      const changedFields = detectChanges(existing, data, ['firstName', 'lastName', 'email', 'phone', 'company', 'jobTitle', 'lifecycleStage', 'ownerId', 'ownerName', 'associatedCompanyId', 'associatedCompanyName']);
       for (const change of changedFields) {
         await storage.createChangeHistory({
           entityType: 'contact',
@@ -211,6 +327,8 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
     client.crm.deals.basicApi.getPage(100, after, properties)
   );
 
+  const ownerMap = await fetchHubSpotOwners();
+
   const pipelines = await syncHubSpotPipelines();
   const stageMap = new Map<string, { stageName: string; pipelineName: string; pipelineId: string }>();
   for (const p of pipelines) {
@@ -220,6 +338,10 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
     }
   }
 
+  const dealIds = allDeals.map(d => d.id);
+  const dealCompanyMap = await fetchDealCompanyAssociations(dealIds);
+
+  const companyNameCache = new Map<string, string>();
   let created = 0, updated = 0, changes = 0;
 
   for (const deal of allDeals) {
@@ -227,6 +349,23 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
     const props = deal.properties || {};
     const existing = await storage.getHubspotDealByHubspotId(hubspotId);
     const stageInfo = stageMap.get(props.dealstage);
+
+    const associatedCompanyId = dealCompanyMap.get(hubspotId) || null;
+
+    let associatedCompanyName: string | null = null;
+    if (associatedCompanyId) {
+      if (companyNameCache.has(associatedCompanyId)) {
+        associatedCompanyName = companyNameCache.get(associatedCompanyId) || null;
+      } else {
+        const company = await storage.getHubspotCompanyByHubspotId(associatedCompanyId);
+        if (company?.name) {
+          associatedCompanyName = company.name;
+          companyNameCache.set(associatedCompanyId, company.name);
+        }
+      }
+    }
+
+    const ownerName = props.hubspot_owner_id ? (ownerMap.get(props.hubspot_owner_id) || null) : null;
 
     const data = {
       hubspotId,
@@ -238,12 +377,15 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
       pipelineName: stageInfo?.pipelineName || null,
       closeDate: props.closedate || null,
       ownerId: props.hubspot_owner_id || null,
+      ownerName,
+      associatedCompanyId,
+      associatedCompanyName,
       properties: props,
       hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
     };
 
     if (existing) {
-      const changedFields = detectChanges(existing, data, ['dealName', 'amount', 'dealStage', 'dealStageName', 'pipeline', 'pipelineName', 'closeDate', 'ownerId']);
+      const changedFields = detectChanges(existing, data, ['dealName', 'amount', 'dealStage', 'dealStageName', 'pipeline', 'pipelineName', 'closeDate', 'ownerId', 'ownerName', 'associatedCompanyId', 'associatedCompanyName']);
       for (const change of changedFields) {
         await storage.createChangeHistory({
           entityType: 'deal',
@@ -313,8 +455,9 @@ export async function runFullHubSpotSync(): Promise<{
 }> {
   const start = Date.now();
 
-  const [companies, contacts, deals] = await Promise.all([
-    syncHubSpotCompanies(),
+  const companies = await syncHubSpotCompanies();
+
+  const [contacts, deals] = await Promise.all([
     syncHubSpotContacts(),
     syncHubSpotDeals(),
   ]);

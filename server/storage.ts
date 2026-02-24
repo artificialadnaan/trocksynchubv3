@@ -434,6 +434,8 @@ export class DatabaseStorage implements IStorage {
         ilike(hubspotContacts.lastName, `%${filters.search}%`),
         ilike(hubspotContacts.email, `%${filters.search}%`),
         ilike(hubspotContacts.company, `%${filters.search}%`),
+        ilike(hubspotContacts.ownerName, `%${filters.search}%`),
+        ilike(hubspotContacts.associatedCompanyName, `%${filters.search}%`),
         ilike(hubspotContacts.hubspotId, `%${filters.search}%`)
       ));
     }
