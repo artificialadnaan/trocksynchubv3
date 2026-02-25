@@ -35,6 +35,7 @@ import {
   Calculator,
   Link2,
   Loader2,
+  Camera,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { useLocation } from "wouter";
@@ -264,7 +265,7 @@ function ProjectActiveToggle({ project }: { project: ProcoreProject }) {
   );
 }
 
-type SyncLookupEntry = { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null };
+type SyncLookupEntry = { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null; companycamProjectId: string | null };
 
 const PROCORE_COMPANY_ID = "598134325683880";
 
@@ -352,6 +353,7 @@ function ProjectsTab() {
                 const linked = syncLookup?.[`procore:${project.procoreId}`];
                 const procoreUrl = `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${project.procoreId}/tools/projecthome`;
                 const hubspotDealUrl = linked?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${linked.hubspotDealId}` : null;
+                const companycamUrl = linked?.companycamProjectId ? `https://app.companycam.com/projects/${linked.companycamProjectId}` : null;
                 return (
                 <Collapsible key={project.id} open={expandedIds.has(project.id)} onOpenChange={() => toggleExpand(project.id)}>
                   <div className="grid grid-cols-[auto_1fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer" data-testid={`procore-project-row-${project.id}`}>
@@ -362,6 +364,13 @@ function ProjectsTab() {
                       {hubspotDealUrl ? (
                         <a href={hubspotDealUrl} target="_blank" rel="noopener noreferrer" title={`HubSpot Deal: ${linked?.hubspotDealName || ''}`} data-testid={`link-hubspot-deal-${project.id}`} className="text-[#ff7a59] hover:text-[#ff5c35] p-1 rounded hover:bg-orange-50 dark:hover:bg-orange-950 inline-flex" onClick={(e) => { e.stopPropagation(); e.preventDefault(); window.open(hubspotDealUrl, '_blank', 'noopener,noreferrer'); }}>
                           <Link2 className="w-4 h-4" />
+                        </a>
+                      ) : (
+                        <span className="w-[24px]" />
+                      )}
+                      {companycamUrl ? (
+                        <a href={companycamUrl} target="_blank" rel="noopener noreferrer" title="Open in CompanyCam" data-testid={`link-companycam-${project.id}`} className="text-green-600 hover:text-green-700 p-1 rounded hover:bg-green-50 dark:hover:bg-green-950 inline-flex" onClick={(e) => { e.stopPropagation(); e.preventDefault(); window.open(companycamUrl, '_blank', 'noopener,noreferrer'); }}>
+                          <Camera className="w-4 h-4" />
                         </a>
                       ) : (
                         <span className="w-[24px]" />

@@ -152,25 +152,21 @@ export async function registerRoutes(
   app.get("/api/sync-mappings/lookup", requireAuth, async (_req, res) => {
     try {
       const mappings = await storage.getSyncMappings();
-      const lookup: Record<string, { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null }> = {};
+      const lookup: Record<string, { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null; companycamProjectId: string | null }> = {};
       for (const m of mappings) {
+        const entry = {
+          hubspotDealId: m.hubspotDealId,
+          hubspotDealName: m.hubspotDealName,
+          procoreProjectId: m.procoreProjectId,
+          procoreProjectName: m.procoreProjectName,
+          procoreProjectNumber: m.procoreProjectNumber,
+          companycamProjectId: m.companyCamProjectId,
+        };
         if (m.procoreProjectId) {
-          lookup[`procore:${m.procoreProjectId}`] = {
-            hubspotDealId: m.hubspotDealId,
-            hubspotDealName: m.hubspotDealName,
-            procoreProjectId: m.procoreProjectId,
-            procoreProjectName: m.procoreProjectName,
-            procoreProjectNumber: m.procoreProjectNumber,
-          };
+          lookup[`procore:${m.procoreProjectId}`] = entry;
         }
         if (m.hubspotDealId) {
-          lookup[`hubspot:${m.hubspotDealId}`] = {
-            hubspotDealId: m.hubspotDealId,
-            hubspotDealName: m.hubspotDealName,
-            procoreProjectId: m.procoreProjectId,
-            procoreProjectName: m.procoreProjectName,
-            procoreProjectNumber: m.procoreProjectNumber,
-          };
+          lookup[`hubspot:${m.hubspotDealId}`] = entry;
         }
       }
       res.json(lookup);
