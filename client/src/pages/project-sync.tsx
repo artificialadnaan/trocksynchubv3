@@ -95,7 +95,7 @@ export default function ProjectSyncPage() {
     onSuccess: (data) => {
       toast({
         title: "Sync Complete",
-        description: `Matched ${data.matched} projects. ${data.newMappings} new, ${data.updatedMappings} updated, ${data.hubspotUpdates} HubSpot writes, ${data.conflicts} conflicts.`,
+        description: `Matched ${data.matched} projects. ${data.hubspotCreated || 0} created in HubSpot, ${data.hubspotUpdates} updated, ${data.conflicts} conflicts.`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/overview"] });
       queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/mappings"] });

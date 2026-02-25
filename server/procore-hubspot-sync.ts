@@ -9,6 +9,7 @@ interface SyncResult {
   newMappings: number;
   updatedMappings: number;
   hubspotUpdates: number;
+  hubspotCreated: number;
   conflicts: number;
   unmatchedProcore: number;
   unmatchedHubspot: number;
@@ -39,10 +40,28 @@ function normalizeNameForMatch(name: string | null): string {
   return name.toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
+const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
+  'Estimating': 'closedlost',
+  'Estimating - Sent to Client': 'appointmentscheduled',
+  'Estimating - Canceled': '3200448216',
+  'Service - Estimating': 'closedwon',
+  'Service - Close Out': 'presentationscheduled',
+  'Service - Close Out Final Invoice': 'presentationscheduled',
+  'Service - Won': 'presentationscheduled',
+  'Closed Won': '3200448214',
+  'Closed Lost': '3200448215',
+  'On Hold': 'contractsent',
+};
+
+function mapProcoreStageToHubspot(procoreStage: string | null): string {
+  if (!procoreStage) return 'decisionmakerboughtin';
+  return PROCORE_TO_HUBSPOT_STAGE[procoreStage] || 'decisionmakerboughtin';
+}
+
 export async function syncProcoreToHubspot(): Promise<SyncResult> {
   const start = Date.now();
   const details: SyncDetail[] = [];
-  let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, conflicts = 0;
+  let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0;
 
   const allProcore = await db.select().from(procoreProjects);
   const allHubspot = await db.select().from(hubspotDeals);
@@ -80,6 +99,7 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
   const hubspotIdsUsedThisRun = new Set<string>();
 
   const pendingHubspotUpdates: Array<{ id: string; properties: Record<string, string> }> = [];
+  const pendingHubspotCreates: Array<{ project: typeof allProcore[0]; properties: Record<string, string> }> = [];
 
   for (const project of allProcore) {
     const procoreId = project.procoreId;
@@ -116,15 +136,18 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
     }
 
     if (!matchedDeal) {
-      details.push({
-        procoreProjectId: procoreId,
-        procoreProjectName: project.name || '',
-        procoreProjectNumber: project.projectNumber,
-        hubspotDealId: null,
-        hubspotDealName: null,
-        matchType: 'unmatched',
-        action: 'skipped',
-      });
+      const createProps: Record<string, string> = {
+        dealname: project.name || 'Unnamed Procore Project',
+        pipeline: 'default',
+        dealstage: mapProcoreStageToHubspot(project.stage),
+      };
+      if (project.projectNumber) createProps.project_number = project.projectNumber;
+      const procoreLocation = [project.city, project.stateCode].filter(Boolean).join(', ');
+      if (procoreLocation) createProps.project_location = procoreLocation;
+      if (project.estimatedValue && parseFloat(project.estimatedValue) > 0) {
+        createProps.amount = project.estimatedValue;
+      }
+      pendingHubspotCreates.push({ project, properties: createProps });
       continue;
     }
 
@@ -258,8 +281,138 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
     }
   }
 
+  if (pendingHubspotCreates.length > 0) {
+    try {
+      const accessToken = await getAccessToken();
+      for (const item of pendingHubspotCreates) {
+        const project = item.project;
+        try {
+          const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ properties: item.properties }),
+          });
+          if (response.ok) {
+            const created = await response.json();
+            hubspotCreated++;
+            matched++;
+
+            await storage.createSyncMapping({
+              hubspotDealId: created.id,
+              hubspotDealName: created.properties?.dealname || project.name,
+              procoreProjectId: project.procoreId,
+              procoreProjectName: project.name,
+              procoreProjectNumber: project.projectNumber,
+              procoreCompanyId: project.companyId,
+              lastSyncAt: new Date(),
+              lastSyncStatus: 'synced',
+              lastSyncDirection: 'procore_to_hubspot',
+              metadata: {
+                matchType: 'created_in_hubspot',
+                conflicts: [],
+                procoreStage: project.stage,
+                procoreCity: project.city,
+                procoreState: project.stateCode,
+                procoreEstimatedValue: project.estimatedValue,
+                hubspotStage: item.properties.dealstage,
+                hubspotAmount: item.properties.amount || null,
+                hubspotPipeline: 'Sales Pipeline',
+                updatedFields: Object.keys(item.properties),
+                lastSyncTimestamp: new Date().toISOString(),
+              },
+            });
+            newMappings++;
+
+            details.push({
+              procoreProjectId: project.procoreId,
+              procoreProjectName: project.name || '',
+              procoreProjectNumber: project.projectNumber,
+              hubspotDealId: created.id,
+              hubspotDealName: created.properties?.dealname || project.name,
+              matchType: 'exact_name',
+              action: 'created',
+            });
+          } else {
+            const errBody = await response.json().catch(() => ({}));
+            const isUniqueConflict = errBody?.category === 'VALIDATION_ERROR' &&
+              JSON.stringify(errBody).includes('CONFLICTING_UNIQUE_VALUE');
+            if (isUniqueConflict && item.properties.project_number) {
+              delete item.properties.project_number;
+              const retryResponse = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${accessToken}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ properties: item.properties }),
+              });
+              if (retryResponse.ok) {
+                const created = await retryResponse.json();
+                hubspotCreated++;
+                matched++;
+
+                await storage.createSyncMapping({
+                  hubspotDealId: created.id,
+                  hubspotDealName: created.properties?.dealname || project.name,
+                  procoreProjectId: project.procoreId,
+                  procoreProjectName: project.name,
+                  procoreProjectNumber: project.projectNumber,
+                  procoreCompanyId: project.companyId,
+                  lastSyncAt: new Date(),
+                  lastSyncStatus: 'synced',
+                  lastSyncDirection: 'procore_to_hubspot',
+                  metadata: {
+                    matchType: 'created_in_hubspot',
+                    conflicts: [{ field: 'project_number', procoreValue: project.projectNumber, hubspotValue: 'duplicate_skipped', resolution: 'kept_both' }],
+                    procoreStage: project.stage,
+                    procoreCity: project.city,
+                    procoreState: project.stateCode,
+                    procoreEstimatedValue: project.estimatedValue,
+                    lastSyncTimestamp: new Date().toISOString(),
+                  },
+                });
+                newMappings++;
+                details.push({
+                  procoreProjectId: project.procoreId,
+                  procoreProjectName: project.name || '',
+                  procoreProjectNumber: project.projectNumber,
+                  hubspotDealId: created.id,
+                  hubspotDealName: created.properties?.dealname || project.name,
+                  matchType: 'exact_name',
+                  action: 'created',
+                  conflicts: [{ field: 'project_number', procoreValue: project.projectNumber, hubspotValue: 'duplicate_skipped', resolution: 'kept_both' as const }],
+                });
+              } else {
+                console.error(`[procore-hubspot-sync] Failed to create deal (retry) for ${project.name}`);
+              }
+            } else {
+              console.error(`[procore-hubspot-sync] Failed to create deal for ${project.name}:`, errBody?.message || 'Unknown error');
+              details.push({
+                procoreProjectId: project.procoreId,
+                procoreProjectName: project.name || '',
+                procoreProjectNumber: project.projectNumber,
+                hubspotDealId: null,
+                hubspotDealName: null,
+                matchType: 'unmatched',
+                action: 'skipped',
+              });
+            }
+          }
+        } catch (e: any) {
+          console.error(`[procore-hubspot-sync] Error creating deal for ${project.name}:`, e.message);
+        }
+      }
+      console.log(`[procore-hubspot-sync] Created ${hubspotCreated} new HubSpot deals`);
+    } catch (e: any) {
+      console.error('[procore-hubspot-sync] HubSpot create error:', e.message);
+    }
+  }
+
   const unmatchedHubspot = allHubspot.filter(d => !hubspotIdsUsedThisRun.has(d.hubspotId)).length;
-  const unmatchedProcore = allProcore.filter(p => !details.find(d => d.procoreProjectId === p.procoreId && d.matchType !== 'unmatched')).length;
+  const unmatchedProcore = pendingHubspotCreates.length - hubspotCreated;
 
   const duration = Date.now() - start;
 
@@ -274,6 +427,7 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
       newMappings,
       updatedMappings,
       hubspotUpdates,
+      hubspotCreated,
       conflicts,
       unmatchedProcore,
       unmatchedHubspot,
@@ -283,13 +437,14 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
     durationMs: duration,
   });
 
-  console.log(`[procore-hubspot-sync] Complete in ${(duration / 1000).toFixed(1)}s — Matched: ${matched}, New: ${newMappings}, Updated: ${updatedMappings}, HubSpot writes: ${hubspotUpdates}, Conflicts: ${conflicts}`);
+  console.log(`[procore-hubspot-sync] Complete in ${(duration / 1000).toFixed(1)}s — Matched: ${matched}, New mappings: ${newMappings}, Updated: ${updatedMappings}, HubSpot writes: ${hubspotUpdates}, Created: ${hubspotCreated}, Conflicts: ${conflicts}`);
 
   return {
     matched,
     newMappings,
     updatedMappings,
     hubspotUpdates,
+    hubspotCreated,
     conflicts,
     unmatchedProcore,
     unmatchedHubspot,
