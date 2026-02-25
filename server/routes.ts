@@ -380,7 +380,7 @@ export async function registerRoutes(
   app.post("/webhooks/procore", async (req, res) => {
     try {
       const event = req.body;
-      const idempotencyKey = `pc_${event.id || event.resource_id}_${Date.now()}`;
+      const idempotencyKey = `pc_${event.id || event.resource_id}_${event.timestamp || Date.now()}`;
       const existing = await storage.checkIdempotencyKey(idempotencyKey);
       if (existing) return res.status(200).json({ received: true });
 
@@ -411,10 +411,48 @@ export async function registerRoutes(
         idempotencyKey,
       });
 
-      await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
       res.status(200).json({ received: true });
+
+      const resourceName = (event.resource_name || "").toLowerCase().replace(/\s+/g, '_');
+      const eventType = (event.event_type || "").toLowerCase();
+
+      if (resourceName === "project_role_assignments" && (eventType === "create" || eventType === "update")) {
+        try {
+          const projectId = String(event.project_id || "");
+          if (projectId) {
+            console.log(`[webhook] Project Role Assignment ${eventType} for project ${projectId}, fetching details...`);
+            const result = await syncProcoreRoleAssignments([projectId]);
+            if (result.newAssignments.length > 0) {
+              const { sendRoleAssignmentEmails } = await import('./email-notifications');
+              const emailResult = await sendRoleAssignmentEmails(result.newAssignments);
+              console.log(`[webhook] Role assignment email result: ${emailResult.sent} sent, ${emailResult.skipped} skipped, ${emailResult.failed} failed`);
+            }
+            await storage.createAuditLog({
+              action: "webhook_role_assignment_processed",
+              entityType: "project_role_assignment",
+              entityId: String(event.resource_id || ""),
+              source: "procore",
+              status: "success",
+              details: { projectId, synced: result.synced, newAssignments: result.newAssignments.length, eventType },
+            });
+          }
+        } catch (err: any) {
+          console.error(`[webhook] Error processing role assignment webhook:`, err.message);
+          await storage.createAuditLog({
+            action: "webhook_role_assignment_processed",
+            entityType: "project_role_assignment",
+            entityId: String(event.resource_id || ""),
+            source: "procore",
+            status: "error",
+            errorMessage: err.message,
+            details: event,
+          });
+        }
+      }
+
+      await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
     } catch (e: any) {
-      res.status(500).json({ message: e.message });
+      res.status(200).json({ received: true });
     }
   });
 
