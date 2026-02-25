@@ -274,6 +274,10 @@ function ProjectActiveToggle({ project }: { project: ProcoreProject }) {
   );
 }
 
+type SyncLookupEntry = { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null };
+
+const PROCORE_COMPANY_ID = "598134325683880";
+
 function ProjectsTab() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
@@ -291,6 +295,10 @@ function ProjectsTab() {
 
   const { data: stages } = useQuery<{ id: number; name: string }[]>({
     queryKey: ["/api/procore/project-stages"],
+  });
+
+  const { data: syncLookup } = useQuery<Record<string, SyncLookupEntry>>({
+    queryKey: ["/api/sync-mappings/lookup"],
   });
 
   const toggleExpand = (id: number) => {
@@ -349,11 +357,27 @@ function ProjectsTab() {
                 <span>Value</span>
                 <span className="w-8"></span>
               </div>
-              {data.data.map((project) => (
+              {data.data.map((project) => {
+                const linked = syncLookup?.[`procore:${project.procoreId}`];
+                const procoreUrl = `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${project.procoreId}/tools/projecthome`;
+                const hubspotDealUrl = linked?.hubspotDealId ? `https://app.hubspot.com/contacts/45644695/deal/${linked.hubspotDealId}` : null;
+                return (
                 <Collapsible key={project.id} open={expandedIds.has(project.id)} onOpenChange={() => toggleExpand(project.id)}>
                   <CollapsibleTrigger asChild data-testid={`procore-project-row-${project.id}`}>
                     <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer">
-                      <span className="font-medium truncate text-left">{project.name || "—"}</span>
+                      <span className="font-medium truncate text-left flex items-center gap-1.5">
+                        {project.name || "—"}
+                        <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <a href={procoreUrl} target="_blank" rel="noopener noreferrer" title="Open in Procore" data-testid={`link-procore-project-${project.id}`} className="text-orange-500 hover:text-orange-600">
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                          {hubspotDealUrl && (
+                            <a href={hubspotDealUrl} target="_blank" rel="noopener noreferrer" title={`HubSpot Deal: ${linked?.hubspotDealName || ''}`} data-testid={`link-hubspot-deal-${project.id}`} className="text-[#ff7a59] hover:text-[#ff5c35]">
+                              <Link2 className="w-3.5 h-3.5" />
+                            </a>
+                          )}
+                        </span>
+                      </span>
                       <span className="text-muted-foreground truncate text-left">{project.projectNumber || "—"}</span>
                       <span className="text-left" onClick={(e) => e.stopPropagation()}>
                         {stages ? (
@@ -375,7 +399,18 @@ function ProjectsTab() {
                   <CollapsibleContent>
                     <div className="px-4 py-3 bg-muted/10 border-b space-y-2">
                       <div className="grid grid-cols-3 gap-4 text-sm">
-                        <div><span className="text-muted-foreground">Procore ID:</span> <span className="font-mono text-xs ml-1">{project.procoreId}</span></div>
+                        <div><span className="text-muted-foreground">Procore ID:</span> <span className="font-mono text-xs ml-1">{project.procoreId}</span>
+                          <a href={procoreUrl} target="_blank" rel="noopener noreferrer" className="ml-2 text-orange-500 hover:text-orange-600 inline-flex items-center gap-1 text-xs" data-testid={`link-procore-ext-${project.id}`}>
+                            Open in Procore <ExternalLink className="w-3 h-3" />
+                          </a>
+                        </div>
+                        {linked?.hubspotDealId && (
+                          <div><span className="text-muted-foreground">HubSpot Deal:</span>
+                            <a href={hubspotDealUrl!} target="_blank" rel="noopener noreferrer" className="ml-1 text-[#ff7a59] hover:text-[#ff5c35] inline-flex items-center gap-1 text-xs" data-testid={`link-hubspot-ext-${project.id}`}>
+                              {linked.hubspotDealName || linked.hubspotDealId} <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </div>
+                        )}
                         <EditableField label="Phone" value={project.phone} field="phone" projectId={project.procoreId} />
                         <EditableField label="Address" value={project.address} field="address" projectId={project.procoreId} />
                         <EditableField label="City" value={project.city} field="city" projectId={project.procoreId} />
@@ -402,7 +437,8 @@ function ProjectsTab() {
                     </div>
                   </CollapsibleContent>
                 </Collapsible>
-              ))}
+                );
+              })}
             </div>
             <Pagination page={page} setPage={setPage} total={data.total} limit={limit} />
           </>

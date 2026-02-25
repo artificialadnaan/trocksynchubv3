@@ -149,6 +149,36 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/sync-mappings/lookup", requireAuth, async (_req, res) => {
+    try {
+      const mappings = await storage.getSyncMappings();
+      const lookup: Record<string, { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null }> = {};
+      for (const m of mappings) {
+        if (m.procoreProjectId) {
+          lookup[`procore:${m.procoreProjectId}`] = {
+            hubspotDealId: m.hubspotDealId,
+            hubspotDealName: m.hubspotDealName,
+            procoreProjectId: m.procoreProjectId,
+            procoreProjectName: m.procoreProjectName,
+            procoreProjectNumber: m.procoreProjectNumber,
+          };
+        }
+        if (m.hubspotDealId) {
+          lookup[`hubspot:${m.hubspotDealId}`] = {
+            hubspotDealId: m.hubspotDealId,
+            hubspotDealName: m.hubspotDealName,
+            procoreProjectId: m.procoreProjectId,
+            procoreProjectName: m.procoreProjectName,
+            procoreProjectNumber: m.procoreProjectNumber,
+          };
+        }
+      }
+      res.json(lookup);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.get("/api/stage-mappings", requireAuth, async (_req, res) => {
     try {
       const mappings = await storage.getStageMappings();

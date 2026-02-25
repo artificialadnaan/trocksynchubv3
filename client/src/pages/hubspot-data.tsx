@@ -27,6 +27,8 @@ import {
   Search,
   ChevronDown,
   RefreshCw,
+  ExternalLink,
+  Link2,
 } from "lucide-react";
 import { useState } from "react";
 import { format } from "date-fns";
@@ -325,6 +327,11 @@ function ContactsTab() {
   );
 }
 
+type SyncLookupEntry = { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null };
+
+const PROCORE_COMPANY_ID = "598134325683880";
+const HUBSPOT_PORTAL_ID = "45644695";
+
 function DealsTab() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
@@ -338,6 +345,10 @@ function DealsTab() {
 
   const { data, isLoading, refetch } = useQuery<{ data: HubspotDeal[]; total: number }>({
     queryKey: [`/api/hubspot/deals?${params.toString()}`],
+  });
+
+  const { data: syncLookup } = useQuery<Record<string, SyncLookupEntry>>({
+    queryKey: ["/api/sync-mappings/lookup"],
   });
 
   const toggleExpand = (id: number) => {
@@ -395,11 +406,27 @@ function DealsTab() {
                 <span>Company</span>
                 <span className="w-8"></span>
               </div>
-              {data.data.map((deal) => (
+              {data.data.map((deal) => {
+                const linked = syncLookup?.[`hubspot:${deal.hubspotId}`];
+                const hubspotUrl = `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/deal/${deal.hubspotId}`;
+                const procoreUrl = linked?.procoreProjectId ? `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${linked.procoreProjectId}/tools/projecthome` : null;
+                return (
                 <Collapsible key={deal.id} open={expandedIds.has(deal.id)} onOpenChange={() => toggleExpand(deal.id)}>
                   <CollapsibleTrigger className="w-full" data-testid={`deal-row-${deal.id}`}>
                     <div className="grid grid-cols-[1.5fr_0.8fr_1fr_1fr_1fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0">
-                      <span className="font-medium truncate text-left">{deal.dealName || "—"}</span>
+                      <span className="font-medium truncate text-left flex items-center gap-1.5">
+                        {deal.dealName || "—"}
+                        <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <a href={hubspotUrl} target="_blank" rel="noopener noreferrer" title="Open in HubSpot" data-testid={`link-hubspot-deal-${deal.id}`} className="text-[#ff7a59] hover:text-[#ff5c35]">
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                          {procoreUrl && (
+                            <a href={procoreUrl} target="_blank" rel="noopener noreferrer" title={`Procore: ${linked?.procoreProjectName || ''}`} data-testid={`link-procore-deal-${deal.id}`} className="text-orange-500 hover:text-orange-600">
+                              <Link2 className="w-3.5 h-3.5" />
+                            </a>
+                          )}
+                        </span>
+                      </span>
                       <span className="text-left font-medium">{formatAmount(deal.amount)}</span>
                       <span className="text-left">
                         <Badge variant="outline" className="text-xs">{deal.dealStageName || deal.dealStage || "—"}</Badge>
@@ -412,7 +439,18 @@ function DealsTab() {
                   <CollapsibleContent>
                     <div className="px-4 py-3 bg-muted/10 border-b space-y-2">
                       <div className="grid grid-cols-3 gap-4 text-sm">
-                        <div><span className="text-muted-foreground">HubSpot ID:</span> <span className="font-mono text-xs ml-1">{deal.hubspotId}</span></div>
+                        <div><span className="text-muted-foreground">HubSpot ID:</span> <span className="font-mono text-xs ml-1">{deal.hubspotId}</span>
+                          <a href={hubspotUrl} target="_blank" rel="noopener noreferrer" className="ml-2 text-[#ff7a59] hover:text-[#ff5c35] inline-flex items-center gap-1 text-xs">
+                            Open in HubSpot <ExternalLink className="w-3 h-3" />
+                          </a>
+                        </div>
+                        {linked?.procoreProjectId && (
+                          <div><span className="text-muted-foreground">Procore Project:</span>
+                            <a href={procoreUrl!} target="_blank" rel="noopener noreferrer" className="ml-1 text-orange-500 hover:text-orange-600 inline-flex items-center gap-1 text-xs">
+                              {linked.procoreProjectName || linked.procoreProjectId} <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </div>
+                        )}
                         <div><span className="text-muted-foreground">Close Date:</span> <span className="ml-1">{deal.closeDate || "—"}</span></div>
                         <div><span className="text-muted-foreground">Deal Owner:</span> <span className="ml-1">{deal.ownerName || (deal.ownerId ? `Owner #${deal.ownerId}` : "—")}</span></div>
                         <div><span className="text-muted-foreground">Associated Company:</span> <span className="ml-1">{deal.associatedCompanyName || deal.associatedCompanyId || "—"}</span></div>
@@ -430,7 +468,8 @@ function DealsTab() {
                     </div>
                   </CollapsibleContent>
                 </Collapsible>
-              ))}
+                );
+              })}
             </div>
             <Pagination page={page} setPage={setPage} total={data.total} limit={limit} />
           </>
