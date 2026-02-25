@@ -65,7 +65,7 @@ const tabs: { id: TabType; label: string; icon: any }[] = [
   { id: "history", label: "Change History", icon: History },
 ];
 
-export default function ProcoreDataPage() {
+export function ProcoreDataContent() {
   const [activeTab, setActiveTab] = useState<TabType>("projects");
 
   const { data: counts, isLoading: countsLoading } = useQuery<{
@@ -93,18 +93,8 @@ export default function ProcoreDataPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold flex items-center gap-2" data-testid="text-procore-data-title">
-          <Database className="w-6 h-6" />
-          Procore Data
-        </h2>
-        <p className="text-muted-foreground text-sm mt-1">
-          Browse all data from the last Procore sync with 2-week change history
-        </p>
-      </div>
-
-      <div className="flex gap-2 border-b pb-0">
+    <div className="space-y-4">
+      <div className="flex gap-2 border-b pb-0 flex-wrap">
         {tabs.map((tab) => (
           <button
             key={tab.id}

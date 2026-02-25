@@ -11,9 +11,7 @@ import WebhooksPage from "@/pages/webhooks";
 import ProjectsPage from "@/pages/projects";
 import AuditLogsPage from "@/pages/audit-logs";
 import SettingsPage from "@/pages/settings";
-import HubspotDataPage from "@/pages/hubspot-data";
-import ProcoreDataPage from "@/pages/procore-data";
-import CompanyCamDataPage from "@/pages/companycam-data";
+import DataBrowserPage from "@/pages/data-browser";
 import BidDetailPage from "@/pages/bid-detail";
 import EmailNotificationsPage from "@/pages/email-notifications";
 import ProjectSyncPage from "@/pages/project-sync";
@@ -32,10 +30,8 @@ function AuthenticatedLayout() {
           <Route path="/webhooks" component={WebhooksPage} />
           <Route path="/projects" component={ProjectsPage} />
           <Route path="/audit-logs" component={AuditLogsPage} />
-          <Route path="/hubspot-data" component={HubspotDataPage} />
-          <Route path="/procore-data" component={ProcoreDataPage} />
+          <Route path="/data-browser" component={DataBrowserPage} />
           <Route path="/procore-data/bids/:bidId" component={BidDetailPage} />
-          <Route path="/companycam-data" component={CompanyCamDataPage} />
           <Route path="/project-sync" component={ProjectSyncPage} />
           <Route path="/email-notifications" component={EmailNotificationsPage} />
           <Route path="/settings" component={SettingsPage} />

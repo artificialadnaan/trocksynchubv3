@@ -9,7 +9,6 @@ import {
   LogOut,
   Zap,
   Database,
-  Camera,
   Mail,
   Link2,
 } from "lucide-react";
@@ -21,9 +20,7 @@ const navItems = [
   { path: "/sync-config", label: "Sync Config", icon: ArrowLeftRight },
   { path: "/webhooks", label: "Webhook Monitor", icon: Webhook },
   { path: "/projects", label: "Project Mapper", icon: FolderSync },
-  { path: "/hubspot-data", label: "HubSpot Data", icon: Database },
-  { path: "/procore-data", label: "Procore Data", icon: Database },
-  { path: "/companycam-data", label: "CompanyCam Data", icon: Camera },
+  { path: "/data-browser", label: "Data Browser", icon: Database },
   { path: "/project-sync", label: "Project Sync", icon: Link2 },
   { path: "/email-notifications", label: "Email Notifications", icon: Mail },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
