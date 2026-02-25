@@ -628,3 +628,55 @@ export const companycamChangeHistory = pgTable("companycam_change_history", {
 export const insertCompanycamChangeHistorySchema = createInsertSchema(companycamChangeHistory).omit({ id: true, createdAt: true });
 export type InsertCompanycamChangeHistory = z.infer<typeof insertCompanycamChangeHistorySchema>;
 export type CompanycamChangeHistory = typeof companycamChangeHistory.$inferSelect;
+
+export const procoreRoleAssignments = pgTable("procore_role_assignments", {
+  id: serial("id").primaryKey(),
+  procoreProjectId: text("procore_project_id").notNull(),
+  projectName: text("project_name"),
+  roleId: text("role_id"),
+  roleName: text("role_name").notNull(),
+  assigneeId: text("assignee_id"),
+  assigneeName: text("assignee_name"),
+  assigneeEmail: text("assignee_email"),
+  assigneeCompany: text("assignee_company"),
+  properties: jsonb("properties"),
+  lastSyncedAt: timestamp("last_synced_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertProcoreRoleAssignmentSchema = createInsertSchema(procoreRoleAssignments).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertProcoreRoleAssignment = z.infer<typeof insertProcoreRoleAssignmentSchema>;
+export type ProcoreRoleAssignment = typeof procoreRoleAssignments.$inferSelect;
+
+export const emailTemplates = pgTable("email_templates", {
+  id: serial("id").primaryKey(),
+  templateKey: text("template_key").notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description"),
+  subject: text("subject").notNull(),
+  bodyHtml: text("body_html").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  variables: jsonb("variables"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertEmailTemplateSchema = createInsertSchema(emailTemplates).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertEmailTemplate = z.infer<typeof insertEmailTemplateSchema>;
+export type EmailTemplate = typeof emailTemplates.$inferSelect;
+
+export const emailSendLog = pgTable("email_send_log", {
+  id: serial("id").primaryKey(),
+  templateKey: text("template_key").notNull(),
+  recipientEmail: text("recipient_email").notNull(),
+  recipientName: text("recipient_name"),
+  subject: text("subject").notNull(),
+  dedupeKey: text("dedupe_key").notNull().unique(),
+  status: text("status").notNull().default("sent"),
+  errorMessage: text("error_message"),
+  metadata: jsonb("metadata"),
+  sentAt: timestamp("sent_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const insertEmailSendLogSchema = createInsertSchema(emailSendLog).omit({ id: true, createdAt: true });
+export type InsertEmailSendLog = z.infer<typeof insertEmailSendLogSchema>;
+export type EmailSendLog = typeof emailSendLog.$inferSelect;

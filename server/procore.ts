@@ -668,11 +668,97 @@ export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids
   return { bidPackages: allPackages.length, bids: totalBids, bidForms: totalForms };
 }
 
+export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
+  const config = await getProcoreConfig();
+  const companyId = config.companyId;
+
+  let projectsToSync: Array<{ procoreId: string; name: string }> = [];
+
+  if (projectIds && projectIds.length > 0) {
+    for (const pid of projectIds) {
+      const p = await storage.getProcoreProjectByProcoreId(pid);
+      if (p) projectsToSync.push({ procoreId: pid, name: p.name || '' });
+    }
+  } else {
+    const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
+    projectsToSync = allProjects
+      .filter(p => p.active !== false)
+      .map(p => ({ procoreId: p.procoreId, name: p.name || '' }));
+  }
+
+  console.log(`[procore] Syncing role assignments for ${projectsToSync.length} active projects...`);
+  let synced = 0;
+  const newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> = [];
+
+  for (const project of projectsToSync) {
+    try {
+      const assignments = await fetchProcoreJson(
+        `/rest/v1.0/projects/${project.procoreId}/project_role_assignments`,
+        companyId
+      ) as any[];
+
+      if (!Array.isArray(assignments)) continue;
+
+      const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
+      const existingKeys = new Set(existingAssignments.map(a => `${a.roleName}||${a.assigneeId}`));
+
+      for (const assignment of assignments) {
+        const roleName = assignment.project_role?.name || assignment.role?.name || 'Unknown Role';
+        const person = assignment.party || assignment.user || {};
+        const personId = person.id ? String(person.id) : null;
+        if (!personId) continue;
+        const assigneeId = personId;
+        const assigneeName = person.name || `${person.first_name || ''} ${person.last_name || ''}`.trim() || '';
+        const assigneeEmail = person.email_address || person.email || '';
+        const assigneeCompany = person.company?.name || person.vendor?.name || '';
+
+        const isNew = !existingKeys.has(`${roleName}||${assigneeId}`);
+
+        await storage.upsertProcoreRoleAssignment({
+          procoreProjectId: project.procoreId,
+          projectName: project.name,
+          roleId: assignment.project_role?.id ? String(assignment.project_role.id) : null,
+          roleName,
+          assigneeId,
+          assigneeName,
+          assigneeEmail,
+          assigneeCompany,
+          properties: assignment,
+          lastSyncedAt: new Date(),
+        });
+
+        if (isNew && assigneeEmail) {
+          newAssignments.push({
+            procoreProjectId: project.procoreId,
+            projectName: project.name,
+            roleName,
+            assigneeId,
+            assigneeName,
+            assigneeEmail,
+            assigneeCompany,
+          });
+        }
+
+        synced++;
+      }
+    } catch (err: any) {
+      if (err.message?.includes('403') || err.message?.includes('404')) {
+        continue;
+      }
+      console.error(`[procore] Error fetching role assignments for project ${project.procoreId}:`, err.message);
+    }
+  }
+
+  console.log(`[procore] Synced ${synced} role assignments, ${newAssignments.length} new assignments`);
+  return { synced, newAssignments };
+}
+
 export async function runFullProcoreSync(): Promise<{
   projects: { synced: number; created: number; updated: number; changes: number };
   vendors: { synced: number; created: number; updated: number; changes: number };
   users: { synced: number; created: number; updated: number; changes: number };
   bidBoard: { bidPackages: number; bids: number; bidForms: number };
+  roleAssignments: { synced: number; newAssignments: number };
   purgedHistory: number;
   duration: number;
 }> {
@@ -685,6 +771,22 @@ export async function runFullProcoreSync(): Promise<{
   ]);
   const bidBoard = await syncProcoreBidBoard();
 
+  let roleAssignmentResult = { synced: 0, newAssignments: [] as any[] };
+  try {
+    roleAssignmentResult = await syncProcoreRoleAssignments();
+  } catch (err: any) {
+    console.error(`[procore] Role assignment sync failed:`, err.message);
+  }
+
+  if (roleAssignmentResult.newAssignments.length > 0) {
+    try {
+      const { sendRoleAssignmentEmails } = await import('./email-notifications');
+      await sendRoleAssignmentEmails(roleAssignmentResult.newAssignments);
+    } catch (err: any) {
+      console.error(`[procore] Email notifications failed:`, err.message);
+    }
+  }
+
   const purgedHistory = await storage.purgeProcoreChangeHistory(14);
   const duration = Date.now() - start;
 
@@ -693,6 +795,7 @@ export async function runFullProcoreSync(): Promise<{
     vendors,
     users,
     bidBoard,
+    roleAssignments: { synced: roleAssignmentResult.synced, newAssignments: roleAssignmentResult.newAssignments.length },
     purgedHistory,
     duration,
   };

@@ -39,4 +39,4 @@ args = "npm run dev"
 waitForPort = 5000
 
 [agent]
-integrations = ["hubspot:1.0.0"]
+integrations = ["hubspot:1.0.0", "google-mail:1.0.0"]

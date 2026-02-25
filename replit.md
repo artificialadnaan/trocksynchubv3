@@ -4,6 +4,9 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-25: Added Procore project role assignment sync. Fetches role assignments (Superintendent, Project Manager, etc.) for all active projects via `/rest/v1.0/projects/{id}/project_role_assignments`. New DB table: `procore_role_assignments` with composite unique index (project_id, role_name, assignee_id). Integrated into `runFullProcoreSync()` — runs after projects/vendors/users/bidboard.
+- 2026-02-25: Added email notification system using Gmail (Replit OAuth connector). When new team members are assigned to Procore projects, sends templated email notification. Deduplication via `email_send_log.dedupe_key` prevents duplicate sends. New files: `server/gmail.ts` (Gmail client), `server/email-notifications.ts` (notification logic). DB tables: `email_templates`, `email_send_log`.
+- 2026-02-25: Added Email Notifications page (`/email-notifications`) with editable templates and send history. Templates support variable substitution (`{{projectName}}`, `{{roleName}}`, etc.), enable/disable toggle, inline preview, and test email sending. Designed to be extensible for future notification types.
 - 2026-02-24: Added automatic HubSpot polling (every 10 min configurable). When enabled, runs HubSpot full sync on a timer and auto-pushes new/updated companies and contacts to Procore vendor directory. Toggle + interval selector + Sync Now button in Settings (Automatic Polling card). Config stored in automation_config key="hubspot_polling". Resumes on server restart if previously enabled.
 - 2026-02-24: Added HubSpot → Procore Directory Sync automation (server/hubspot-procore-sync.ts). When a new company or contact is created in HubSpot, automatically creates/updates the Procore vendor directory. Multi-criteria matching (email, domain, company name, legal/trade name, person name) with scoring to prevent duplicates. Non-destructive updates only fill empty fields. Toggle enable/disable in Settings. Manual bulk sync button for all companies/contacts. Webhook handler auto-triggers on company/contact creation/update events. State name normalization (e.g., "texas" → "TX") with automatic country_code. Procore vendor API uses user-level endpoints (/rest/v1.0/vendors?company_id=...).
 - 2026-02-24: Added CompanyCam Data browser page (/companycam-data) with tabs for Projects, Users, Photos, and Change History. Full sync engine (server/companycam.ts) pulls all data via CompanyCam API with paginated fetching, change detection, and 2-week history. 4 new DB tables: companycam_projects, companycam_users, companycam_photos, companycam_change_history.
@@ -29,7 +32,8 @@ Production-grade middleware application for bidirectional synchronization betwee
 - **HubSpot Integration**: Replit OAuth connector (server/hubspot.ts) - auto token refresh
 - **Procore Integration**: OAuth 2.0 with token refresh (server/procore.ts) - credentials stored in automation_config
 - **CompanyCam Integration**: Bearer token auth (server/companycam.ts) - token stored in oauth_tokens table
-- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms, bidboard_estimates, companycam_projects, companycam_users, companycam_photos, companycam_change_history
+- **Email Notifications**: Gmail via Replit OAuth connector (server/gmail.ts) - templated emails with deduplication
+- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms, bidboard_estimates, companycam_projects, companycam_users, companycam_photos, companycam_change_history, procore_role_assignments, email_templates, email_send_log
 
 ## Key Files
 - `shared/schema.ts` - Drizzle schema and Zod validation schemas
@@ -38,8 +42,10 @@ Production-grade middleware application for bidirectional synchronization betwee
 - `server/hubspot.ts` - HubSpot sync engine
 - `server/procore.ts` - Procore sync engine with OAuth token refresh
 - `server/companycam.ts` - CompanyCam sync engine with paginated fetching and change detection
+- `server/gmail.ts` - Gmail client using Replit OAuth connector (never cache client)
+- `server/email-notifications.ts` - Email notification logic with template rendering and dedup
 - `client/src/App.tsx` - Main app with auth flow and routing
-- `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings, HubSpot Data, Procore Data, CompanyCam Data
+- `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings, HubSpot Data, Procore Data, CompanyCam Data, Email Notifications
 
 ## Webhook Endpoints
 - POST `/webhooks/hubspot` - HubSpot webhook receiver

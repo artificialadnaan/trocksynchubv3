@@ -28,6 +28,9 @@ import {
   companycamUsers, type CompanycamUser, type InsertCompanycamUser,
   companycamPhotos, type CompanycamPhoto, type InsertCompanycamPhoto,
   companycamChangeHistory, type CompanycamChangeHistory, type InsertCompanycamChangeHistory,
+  procoreRoleAssignments, type ProcoreRoleAssignment, type InsertProcoreRoleAssignment,
+  emailTemplates, type EmailTemplate, type InsertEmailTemplate,
+  emailSendLog, type EmailSendLog, type InsertEmailSendLog,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -143,6 +146,20 @@ export interface IStorage {
   getCompanycamChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamChangeHistory[]; total: number }>;
   getCompanycamDataCounts(): Promise<{ projects: number; users: number; photos: number; changeHistory: number }>;
   purgeCompanycamChangeHistory(olderThan: Date): Promise<number>;
+
+  upsertProcoreRoleAssignment(data: InsertProcoreRoleAssignment): Promise<ProcoreRoleAssignment>;
+  getProcoreRoleAssignmentsByProject(procoreProjectId: string): Promise<ProcoreRoleAssignment[]>;
+  getProcoreRoleAssignments(filters: { search?: string; roleName?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreRoleAssignment[]; total: number }>;
+  deleteProcoreRoleAssignment(procoreProjectId: string, roleName: string, assigneeId: string): Promise<void>;
+
+  getEmailTemplates(): Promise<EmailTemplate[]>;
+  getEmailTemplate(templateKey: string): Promise<EmailTemplate | undefined>;
+  updateEmailTemplate(id: number, data: Partial<InsertEmailTemplate>): Promise<EmailTemplate | undefined>;
+
+  createEmailSendLog(data: InsertEmailSendLog): Promise<EmailSendLog>;
+  checkEmailDedupeKey(dedupeKey: string): Promise<boolean>;
+  getEmailSendLogs(filters: { templateKey?: string; limit?: number; offset?: number }): Promise<{ data: EmailSendLog[]; total: number }>;
+  getEmailSendLogCounts(): Promise<{ total: number; sent: number; failed: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1074,6 +1091,98 @@ export class DatabaseStorage implements IStorage {
   async purgeCompanycamChangeHistory(olderThan: Date): Promise<number> {
     const deleted = await db.delete(companycamChangeHistory).where(lte(companycamChangeHistory.createdAt, olderThan)).returning();
     return deleted.length;
+  }
+
+  async upsertProcoreRoleAssignment(data: InsertProcoreRoleAssignment): Promise<ProcoreRoleAssignment> {
+    const [result] = await db
+      .insert(procoreRoleAssignments)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [procoreRoleAssignments.procoreProjectId, procoreRoleAssignments.roleName, procoreRoleAssignments.assigneeId],
+        set: {
+          ...data,
+          updatedAt: new Date(),
+          lastSyncedAt: new Date(),
+        },
+      })
+      .returning();
+    return result;
+  }
+
+  async getProcoreRoleAssignmentsByProject(procoreProjectId: string): Promise<ProcoreRoleAssignment[]> {
+    return db.select().from(procoreRoleAssignments).where(eq(procoreRoleAssignments.procoreProjectId, procoreProjectId));
+  }
+
+  async getProcoreRoleAssignments(filters: { search?: string; roleName?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreRoleAssignment[]; total: number }> {
+    const conditions: any[] = [];
+    if (filters.search) {
+      conditions.push(or(
+        ilike(procoreRoleAssignments.projectName, `%${filters.search}%`),
+        ilike(procoreRoleAssignments.assigneeName, `%${filters.search}%`),
+        ilike(procoreRoleAssignments.assigneeEmail, `%${filters.search}%`),
+      ));
+    }
+    if (filters.roleName) {
+      conditions.push(eq(procoreRoleAssignments.roleName, filters.roleName));
+    }
+    const where = conditions.length > 0 ? and(...conditions) : undefined;
+    const [countResult] = await db.select({ count: sql<number>`count(*)::int` }).from(procoreRoleAssignments).where(where);
+    const data = await db.select().from(procoreRoleAssignments).where(where).orderBy(desc(procoreRoleAssignments.createdAt)).limit(filters.limit || 50).offset(filters.offset || 0);
+    return { data, total: countResult?.count || 0 };
+  }
+
+  async deleteProcoreRoleAssignment(procoreProjectId: string, roleName: string, assigneeId: string): Promise<void> {
+    await db.delete(procoreRoleAssignments).where(and(
+      eq(procoreRoleAssignments.procoreProjectId, procoreProjectId),
+      eq(procoreRoleAssignments.roleName, roleName),
+      eq(procoreRoleAssignments.assigneeId, assigneeId),
+    ));
+  }
+
+  async getEmailTemplates(): Promise<EmailTemplate[]> {
+    return db.select().from(emailTemplates).orderBy(emailTemplates.name);
+  }
+
+  async getEmailTemplate(templateKey: string): Promise<EmailTemplate | undefined> {
+    const [result] = await db.select().from(emailTemplates).where(eq(emailTemplates.templateKey, templateKey));
+    return result;
+  }
+
+  async updateEmailTemplate(id: number, data: Partial<InsertEmailTemplate>): Promise<EmailTemplate | undefined> {
+    const [result] = await db.update(emailTemplates).set({ ...data, updatedAt: new Date() }).where(eq(emailTemplates.id, id)).returning();
+    return result;
+  }
+
+  async createEmailSendLog(data: InsertEmailSendLog): Promise<EmailSendLog> {
+    const [result] = await db.insert(emailSendLog).values(data).returning();
+    return result;
+  }
+
+  async checkEmailDedupeKey(dedupeKey: string): Promise<boolean> {
+    const [result] = await db.select({ count: sql<number>`count(*)::int` }).from(emailSendLog).where(eq(emailSendLog.dedupeKey, dedupeKey));
+    return (result?.count || 0) > 0;
+  }
+
+  async getEmailSendLogs(filters: { templateKey?: string; limit?: number; offset?: number }): Promise<{ data: EmailSendLog[]; total: number }> {
+    const conditions: any[] = [];
+    if (filters.templateKey) {
+      conditions.push(eq(emailSendLog.templateKey, filters.templateKey));
+    }
+    const where = conditions.length > 0 ? and(...conditions) : undefined;
+    const [countResult] = await db.select({ count: sql<number>`count(*)::int` }).from(emailSendLog).where(where);
+    const data = await db.select().from(emailSendLog).where(where).orderBy(desc(emailSendLog.sentAt)).limit(filters.limit || 50).offset(filters.offset || 0);
+    return { data, total: countResult?.count || 0 };
+  }
+
+  async getEmailSendLogCounts(): Promise<{ total: number; sent: number; failed: number }> {
+    const [totalRes] = await db.select({ count: sql<number>`count(*)::int` }).from(emailSendLog);
+    const [sentRes] = await db.select({ count: sql<number>`count(*)::int` }).from(emailSendLog).where(eq(emailSendLog.status, "sent"));
+    const [failedRes] = await db.select({ count: sql<number>`count(*)::int` }).from(emailSendLog).where(eq(emailSendLog.status, "failed"));
+    return {
+      total: totalRes?.count || 0,
+      sent: sentRes?.count || 0,
+      failed: failedRes?.count || 0,
+    };
   }
 }
 

@@ -8,9 +8,11 @@ import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, updateHubSpotDealStage } from "./hubspot";
-import { runFullProcoreSync, syncProcoreBidBoard, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
+import { runFullProcoreSync, syncProcoreBidBoard, syncProcoreRoleAssignments, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
 import { runFullCompanycamSync } from "./companycam";
 import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact, triggerPostSyncProcoreUpdates } from "./hubspot-procore-sync";
+import { sendRoleAssignmentEmails } from "./email-notifications";
+import { sendEmail, isGmailConnected } from "./gmail";
 
 const PgSession = connectPgSimple(session);
 
@@ -1735,6 +1737,89 @@ export async function registerRoutes(
   app.get("/api/stage-mapping/bidboard-statuses", requireAuth, async (_req, res) => {
     try {
       const result = await storage.getBidboardDistinctStatuses();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/email/templates", requireAuth, async (_req, res) => {
+    try {
+      const templates = await storage.getEmailTemplates();
+      res.json(templates);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.patch("/api/email/templates/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const result = await storage.updateEmailTemplate(id, req.body);
+      if (!result) return res.status(404).json({ message: "Template not found" });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/email/send-log", requireAuth, async (req, res) => {
+    try {
+      const { templateKey, limit, offset } = req.query;
+      const result = await storage.getEmailSendLogs({
+        templateKey: templateKey as string,
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/email/stats", requireAuth, async (_req, res) => {
+    try {
+      const counts = await storage.getEmailSendLogCounts();
+      const connected = await isGmailConnected();
+      res.json({ ...counts, gmailConnected: connected });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/email/test", requireAuth, async (req, res) => {
+    try {
+      const { to, templateKey } = req.body;
+      if (!to) return res.status(400).json({ message: "Recipient email required" });
+      const template = templateKey ? await storage.getEmailTemplate(templateKey) : null;
+      const subject = template ? template.subject.replace(/\{\{.*?\}\}/g, '[Test Value]') : 'Test Email from T-Rock Sync Hub';
+      const htmlBody = template
+        ? template.bodyHtml.replace(/\{\{(\w+)\}\}/g, (_, key) => `[${key}]`)
+        : '<div style="font-family: Arial; padding: 20px;"><h2>Test Email</h2><p>This is a test email from T-Rock Sync Hub. If you received this, email notifications are working correctly.</p></div>';
+      const result = await sendEmail({ to, subject, htmlBody, fromName: 'T-Rock Sync Hub' });
+      if (result.success) {
+        res.json({ success: true, messageId: result.messageId });
+      } else {
+        res.status(500).json({ success: false, message: result.error });
+      }
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore/role-assignments", requireAuth, async (req, res) => {
+    try {
+      const { search, roleName, projectId, limit, offset } = req.query;
+      if (projectId) {
+        const data = await storage.getProcoreRoleAssignmentsByProject(projectId as string);
+        return res.json({ data, total: data.length });
+      }
+      const result = await storage.getProcoreRoleAssignments({
+        search: search as string,
+        roleName: roleName as string,
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
