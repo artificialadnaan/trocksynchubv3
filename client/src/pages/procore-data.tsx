@@ -348,7 +348,8 @@ function ProjectsTab() {
         ) : (
           <>
             <div className="rounded-lg border">
-              <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+              <div className="grid grid-cols-[auto_1fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-2.5 bg-muted/50 text-xs font-medium text-muted-foreground border-b">
+                <span className="w-12"></span>
                 <span>Project Name</span>
                 <span>Number</span>
                 <span>Stage</span>
@@ -363,21 +364,22 @@ function ProjectsTab() {
                 const hubspotDealUrl = linked?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${linked.hubspotDealId}` : null;
                 return (
                 <Collapsible key={project.id} open={expandedIds.has(project.id)} onOpenChange={() => toggleExpand(project.id)}>
-                  <CollapsibleTrigger asChild data-testid={`procore-project-row-${project.id}`}>
-                    <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer">
-                      <span className="font-medium truncate text-left flex items-center gap-1.5">
-                        {project.name || "—"}
-                        <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
-                          <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); window.open(procoreUrl, '_blank'); }} title="Open in Procore" data-testid={`link-procore-project-${project.id}`} className="text-orange-500 hover:text-orange-600 p-0.5 rounded hover:bg-orange-50 dark:hover:bg-orange-950">
-                            <ExternalLink className="w-3.5 h-3.5" />
-                          </button>
-                          {hubspotDealUrl && (
-                            <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); window.open(hubspotDealUrl, '_blank'); }} title={`HubSpot Deal: ${linked?.hubspotDealName || ''}`} data-testid={`link-hubspot-deal-${project.id}`} className="text-[#ff7a59] hover:text-[#ff5c35] p-0.5 rounded hover:bg-orange-50 dark:hover:bg-orange-950">
-                              <Link2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </span>
-                      </span>
+                  <div className="grid grid-cols-[auto_1fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer" data-testid={`procore-project-row-${project.id}`}>
+                    <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <a href={procoreUrl} target="_blank" rel="noopener noreferrer" title="Open in Procore" data-testid={`link-procore-project-${project.id}`} className="text-orange-500 hover:text-orange-600 p-1 rounded hover:bg-orange-50 dark:hover:bg-orange-950 inline-flex" onClick={(e) => { e.stopPropagation(); e.preventDefault(); window.open(procoreUrl, '_blank', 'noopener,noreferrer'); }}>
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                      {hubspotDealUrl ? (
+                        <a href={hubspotDealUrl} target="_blank" rel="noopener noreferrer" title={`HubSpot Deal: ${linked?.hubspotDealName || ''}`} data-testid={`link-hubspot-deal-${project.id}`} className="text-[#ff7a59] hover:text-[#ff5c35] p-1 rounded hover:bg-orange-50 dark:hover:bg-orange-950 inline-flex" onClick={(e) => { e.stopPropagation(); e.preventDefault(); window.open(hubspotDealUrl, '_blank', 'noopener,noreferrer'); }}>
+                          <Link2 className="w-4 h-4" />
+                        </a>
+                      ) : (
+                        <span className="w-[24px]" />
+                      )}
+                    </span>
+                    <CollapsibleTrigger asChild>
+                      <span className="font-medium truncate text-left cursor-pointer">{project.name || "—"}</span>
+                    </CollapsibleTrigger>
                       <span className="text-muted-foreground truncate text-left">{project.projectNumber || "—"}</span>
                       <span className="text-left" onClick={(e) => e.stopPropagation()}>
                         {stages ? (
@@ -393,9 +395,10 @@ function ProjectsTab() {
                         {[project.city, project.stateCode].filter(Boolean).join(", ") || "—"}
                       </span>
                       <span className="text-left font-medium">{formatValue(project.totalValue || project.estimatedValue)}</span>
-                      <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${expandedIds.has(project.id) ? "rotate-180" : ""}`} />
+                      <CollapsibleTrigger asChild>
+                        <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform cursor-pointer ${expandedIds.has(project.id) ? "rotate-180" : ""}`} />
+                      </CollapsibleTrigger>
                     </div>
-                  </CollapsibleTrigger>
                   <CollapsibleContent>
                     <div className="px-4 py-3 bg-muted/10 border-b space-y-2">
                       <div className="grid grid-cols-3 gap-4 text-sm">
