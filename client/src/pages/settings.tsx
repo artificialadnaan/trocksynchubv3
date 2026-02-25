@@ -36,6 +36,9 @@ import {
   RefreshCw,
   ArrowRightLeft,
   Save,
+  UserPlus,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import type { PollJob } from "@shared/schema";
@@ -195,6 +198,8 @@ export default function SettingsPage() {
       <HubspotProcoreSyncCard />
 
       <PollingCard />
+
+      <RolePollingCard />
 
       <Card>
         <CardHeader className="pb-3">
@@ -1063,6 +1068,181 @@ function PollingCard() {
                 <span className="font-medium text-foreground">Procore push:</span>{" "}
                 {lastResult.procoreAutoSync.results?.filter((r: any) => r.action === 'created').length || 0} created,{" "}
                 {lastResult.procoreAutoSync.results?.filter((r: any) => r.action === 'updated').length || 0} updated
+              </div>
+            )}
+            {lastResult?.error && (
+              <p className="text-xs text-red-600">Error: {lastResult.error}</p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RolePollingCard() {
+  const { toast } = useToast();
+
+  const { data: config, isLoading } = useQuery<{
+    enabled: boolean;
+    intervalMinutes: number;
+    isRunning: boolean;
+    lastPollAt: string | null;
+    lastPollResult: any;
+    currentlyPolling: boolean;
+    lastWebhookEventAt: string | null;
+    webhookActive: boolean;
+  }>({
+    queryKey: ["/api/automation/role-polling/config"],
+    refetchInterval: 30000,
+  });
+
+  const [enabled, setEnabled] = useState(false);
+  const [interval, setIntervalVal] = useState(5);
+
+  useEffect(() => {
+    if (config) {
+      setEnabled(config.enabled);
+      setIntervalVal(config.intervalMinutes);
+    }
+  }, [config]);
+
+  const saveConfig = useMutation({
+    mutationFn: async (cfg: { enabled: boolean; intervalMinutes: number }) => {
+      const res = await apiRequest("POST", "/api/automation/role-polling/config", cfg);
+      return res.json();
+    },
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/automation/role-polling/config"] });
+      toast({ title: vars.enabled ? `Role polling enabled (every ${vars.intervalMinutes} min)` : "Role polling disabled" });
+    },
+  });
+
+  const triggerNow = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/automation/role-polling/trigger", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Role assignment sync triggered" });
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/automation/role-polling/config"] }), 5000);
+    },
+  });
+
+  const handleToggle = (val: boolean) => {
+    setEnabled(val);
+    saveConfig.mutate({ enabled: val, intervalMinutes: interval });
+  };
+
+  const handleIntervalChange = (val: string) => {
+    const mins = parseInt(val);
+    setIntervalVal(mins);
+    if (enabled) {
+      saveConfig.mutate({ enabled: true, intervalMinutes: mins });
+    }
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  const lastResult = config?.lastPollResult;
+  const lastPollTime = config?.lastPollAt ? new Date(config.lastPollAt) : null;
+  const lastWebhookTime = config?.lastWebhookEventAt ? new Date(config.lastWebhookEventAt) : null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2" data-testid="text-role-polling-title">
+            <UserPlus className="w-4 h-4" />
+            Role Assignment Sync
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {enabled ? (
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse" />
+                  Active
+                </span>
+              ) : "Off"}
+            </span>
+            <Switch
+              checked={enabled}
+              onCheckedChange={handleToggle}
+              data-testid="switch-role-polling-enabled"
+            />
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground mt-1">
+          Polls Procore for new project role assignments and sends email notifications. Webhooks are the primary notification method; polling acts as a reliable fallback.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center gap-2 text-xs">
+          {config?.webhookActive ? (
+            <Badge variant="outline" className="text-green-600 border-green-300 gap-1">
+              <Wifi className="w-3 h-3" /> Webhook Active
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-amber-600 border-amber-300 gap-1">
+              <WifiOff className="w-3 h-3" /> Webhook Inactive
+            </Badge>
+          )}
+          {lastWebhookTime && (
+            <span className="text-muted-foreground">
+              Last event: {lastWebhookTime.toLocaleString()}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3">
+          <Label className="text-xs whitespace-nowrap">Poll every</Label>
+          <Select value={String(interval)} onValueChange={handleIntervalChange}>
+            <SelectTrigger className="w-32 h-8" data-testid="select-role-polling-interval">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="2">2 minutes</SelectItem>
+              <SelectItem value="5">5 minutes</SelectItem>
+              <SelectItem value="10">10 minutes</SelectItem>
+              <SelectItem value="15">15 minutes</SelectItem>
+              <SelectItem value="30">30 minutes</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => triggerNow.mutate()}
+            disabled={config?.currentlyPolling || triggerNow.isPending}
+            data-testid="button-trigger-role-poll-now"
+          >
+            {config?.currentlyPolling ? (
+              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Syncing...</>
+            ) : (
+              <><RefreshCw className="w-3 h-3 mr-1" /> Sync Now</>
+            )}
+          </Button>
+        </div>
+
+        {lastPollTime && (
+          <div className="rounded-md bg-muted/50 p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium">Last Poll</p>
+              <span className="text-[10px] text-muted-foreground">{lastPollTime.toLocaleString()}</span>
+            </div>
+            {lastResult && !lastResult.error && (
+              <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                <div>
+                  <span className="font-medium text-foreground">Synced:</span>{" "}
+                  {lastResult.synced || 0} roles
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">New:</span>{" "}
+                  {lastResult.newAssignments || 0} assignments
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Emails:</span>{" "}
+                  {lastResult.emails?.sent || 0} sent
+                </div>
               </div>
             )}
             {lastResult?.error && (

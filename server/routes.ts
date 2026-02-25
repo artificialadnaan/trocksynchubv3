@@ -418,10 +418,11 @@ export async function registerRoutes(
 
       const roleRelatedResources = ["project_role_assignments", "project_roles", "project_users"];
       if (roleRelatedResources.includes(resourceName) && (eventType === "create" || eventType === "update")) {
+        if (typeof recordWebhookRoleEvent === 'function') recordWebhookRoleEvent();
         try {
           const projectId = String(event.project_id || "");
           if (projectId) {
-            console.log(`[webhook] Project Role Assignment ${eventType} for project ${projectId}, fetching details...`);
+            console.log(`[webhook] ${resourceName} ${eventType} for project ${projectId}, syncing role assignments...`);
             const result = await syncProcoreRoleAssignments([projectId]);
             if (result.newAssignments.length > 0) {
               const { sendRoleAssignmentEmails } = await import('./email-notifications');
@@ -2021,6 +2022,143 @@ export async function registerRoutes(
       }
     } catch (e) {
       console.log('[Polling] No saved config, polling disabled by default');
+    }
+  })();
+
+  let rolePollingTimer: ReturnType<typeof setInterval> | null = null;
+  let rolePollingRunning = false;
+  let lastRolePollAt: Date | null = null;
+  let lastRolePollResult: any = null;
+  let lastWebhookRoleEventAt: Date | null = null;
+
+  async function runRolePollingCycle() {
+    if (rolePollingRunning) {
+      console.log('[RolePolling] Skipping — previous cycle still running');
+      return;
+    }
+    rolePollingRunning = true;
+    const startTime = Date.now();
+    try {
+      const result = await syncProcoreRoleAssignments();
+      let emailResult = { sent: 0, skipped: 0, failed: 0 };
+      if (result.newAssignments.length > 0) {
+        try {
+          const { sendRoleAssignmentEmails } = await import('./email-notifications');
+          emailResult = await sendRoleAssignmentEmails(result.newAssignments);
+        } catch (emailErr: any) {
+          console.error('[RolePolling] Email notifications failed:', emailErr.message);
+        }
+      }
+      const duration = Date.now() - startTime;
+      lastRolePollAt = new Date();
+      lastRolePollResult = {
+        synced: result.synced,
+        newAssignments: result.newAssignments.length,
+        emails: emailResult,
+        duration,
+      };
+      if (result.newAssignments.length > 0) {
+        await storage.createAuditLog({
+          action: 'role_assignment_polling_sync',
+          entityType: 'project_role_assignment',
+          source: 'polling',
+          status: 'success',
+          details: lastRolePollResult as any,
+          durationMs: duration,
+        });
+        console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s — ${result.newAssignments.length} new assignments, ${emailResult.sent} emails sent`);
+      } else {
+        console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s — no new assignments`);
+      }
+    } catch (e: any) {
+      console.error('[RolePolling] Role assignment sync failed:', e.message);
+      lastRolePollAt = new Date();
+      lastRolePollResult = { error: e.message };
+    } finally {
+      rolePollingRunning = false;
+    }
+  }
+
+  function startRolePolling(intervalMinutes: number) {
+    stopRolePolling();
+    console.log(`[RolePolling] Starting automatic role assignment sync every ${intervalMinutes} minutes`);
+    rolePollingTimer = setInterval(() => runRolePollingCycle(), intervalMinutes * 60 * 1000);
+  }
+
+  function stopRolePolling() {
+    if (rolePollingTimer) {
+      clearInterval(rolePollingTimer);
+      rolePollingTimer = null;
+      console.log('[RolePolling] Stopped automatic role assignment sync');
+    }
+  }
+
+  function recordWebhookRoleEvent() {
+    lastWebhookRoleEventAt = new Date();
+  }
+
+  app.get("/api/automation/role-polling/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("role_assignment_polling");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 5,
+        isRunning: rolePollingTimer !== null,
+        lastPollAt: lastRolePollAt?.toISOString() || null,
+        lastPollResult: lastRolePollResult,
+        currentlyPolling: rolePollingRunning,
+        lastWebhookEventAt: lastWebhookRoleEventAt?.toISOString() || null,
+        webhookActive: lastWebhookRoleEventAt
+          ? (Date.now() - lastWebhookRoleEventAt.getTime()) < 30 * 60 * 1000
+          : false,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/role-polling/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes } = req.body;
+      const interval = intervalMinutes || 5;
+      await storage.upsertAutomationConfig({
+        key: "role_assignment_polling",
+        value: { enabled, intervalMinutes: interval },
+        description: "Automatic Procore role assignment polling configuration",
+      });
+      if (enabled) {
+        startRolePolling(interval);
+      } else {
+        stopRolePolling();
+      }
+      res.json({ success: true, enabled, intervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/role-polling/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (rolePollingRunning) {
+        return res.json({ message: "Role assignment sync already in progress", running: true });
+      }
+      runRolePollingCycle();
+      res.json({ message: "Role assignment sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  (async () => {
+    try {
+      const config = await storage.getAutomationConfig("role_assignment_polling");
+      const val = (config?.value as any);
+      if (val?.enabled) {
+        startRolePolling(val.intervalMinutes || 5);
+      }
+    } catch (e) {
+      console.log('[RolePolling] No saved config, role polling disabled by default');
     }
   })();
 
