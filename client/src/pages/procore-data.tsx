@@ -360,21 +360,21 @@ function ProjectsTab() {
               {data.data.map((project) => {
                 const linked = syncLookup?.[`procore:${project.procoreId}`];
                 const procoreUrl = `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${project.procoreId}/tools/projecthome`;
-                const hubspotDealUrl = linked?.hubspotDealId ? `https://app.hubspot.com/contacts/45644695/deal/${linked.hubspotDealId}` : null;
+                const hubspotDealUrl = linked?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${linked.hubspotDealId}` : null;
                 return (
                 <Collapsible key={project.id} open={expandedIds.has(project.id)} onOpenChange={() => toggleExpand(project.id)}>
                   <CollapsibleTrigger asChild data-testid={`procore-project-row-${project.id}`}>
                     <div className="grid grid-cols-[1.5fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer">
                       <span className="font-medium truncate text-left flex items-center gap-1.5">
                         {project.name || "—"}
-                        <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-                          <a href={procoreUrl} target="_blank" rel="noopener noreferrer" title="Open in Procore" data-testid={`link-procore-project-${project.id}`} className="text-orange-500 hover:text-orange-600">
+                        <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+                          <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); window.open(procoreUrl, '_blank'); }} title="Open in Procore" data-testid={`link-procore-project-${project.id}`} className="text-orange-500 hover:text-orange-600 p-0.5 rounded hover:bg-orange-50 dark:hover:bg-orange-950">
                             <ExternalLink className="w-3.5 h-3.5" />
-                          </a>
+                          </button>
                           {hubspotDealUrl && (
-                            <a href={hubspotDealUrl} target="_blank" rel="noopener noreferrer" title={`HubSpot Deal: ${linked?.hubspotDealName || ''}`} data-testid={`link-hubspot-deal-${project.id}`} className="text-[#ff7a59] hover:text-[#ff5c35]">
+                            <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); window.open(hubspotDealUrl, '_blank'); }} title={`HubSpot Deal: ${linked?.hubspotDealName || ''}`} data-testid={`link-hubspot-deal-${project.id}`} className="text-[#ff7a59] hover:text-[#ff5c35] p-0.5 rounded hover:bg-orange-50 dark:hover:bg-orange-950">
                               <Link2 className="w-3.5 h-3.5" />
-                            </a>
+                            </button>
                           )}
                         </span>
                       </span>
