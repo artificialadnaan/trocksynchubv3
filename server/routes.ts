@@ -416,7 +416,8 @@ export async function registerRoutes(
       const resourceName = (event.resource_name || "").toLowerCase().replace(/\s+/g, '_');
       const eventType = (event.event_type || "").toLowerCase();
 
-      if (resourceName === "project_role_assignments" && (eventType === "create" || eventType === "update")) {
+      const roleRelatedResources = ["project_role_assignments", "project_roles", "project_users"];
+      if (roleRelatedResources.includes(resourceName) && (eventType === "create" || eventType === "update")) {
         try {
           const projectId = String(event.project_id || "");
           if (projectId) {
@@ -1849,7 +1850,16 @@ export async function registerRoutes(
     try {
       const { projectIds } = req.body || {};
       const result = await syncProcoreRoleAssignments(projectIds);
-      res.json(result);
+      let emailResult = { sent: 0, skipped: 0, failed: 0 };
+      if (result.newAssignments.length > 0) {
+        try {
+          const { sendRoleAssignmentEmails } = await import('./email-notifications');
+          emailResult = await sendRoleAssignmentEmails(result.newAssignments);
+        } catch (emailErr: any) {
+          console.error(`[procore] Email notifications failed:`, emailErr.message);
+        }
+      }
+      res.json({ ...result, emails: emailResult });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
