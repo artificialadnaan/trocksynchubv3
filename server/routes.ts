@@ -13,6 +13,7 @@ import { runFullCompanycamSync } from "./companycam";
 import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact, triggerPostSyncProcoreUpdates } from "./hubspot-procore-sync";
 import { sendRoleAssignmentEmails } from "./email-notifications";
 import { sendEmail, isGmailConnected } from "./gmail";
+import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
 
 const PgSession = connectPgSimple(session);
 
@@ -369,6 +370,14 @@ export async function registerRoutes(
           await processHubspotWebhookForProcore(eventType, objectType, objectId);
         } catch (autoErr: any) {
           console.error(`HubSpot→Procore auto-sync error for ${objectType} ${objectId}:`, autoErr.message);
+        }
+
+        if (objectType === "deal" && (eventType.includes("creation") || eventType.includes("create"))) {
+          try {
+            await processNewDealWebhook(objectId);
+          } catch (pnErr: any) {
+            console.error(`[project-number] Webhook error for deal ${objectId}:`, pnErr.message);
+          }
         }
       }
       res.status(200).json({ received: true });
@@ -1880,6 +1889,53 @@ export async function registerRoutes(
         offset: offset ? parseInt(offset as string) : 0,
       });
       res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/deal-project-number/assign", requireAuth, async (req, res) => {
+    try {
+      const { hubspotDealId } = req.body;
+      if (!hubspotDealId) return res.status(400).json({ message: "hubspotDealId is required" });
+      const result = await assignProjectNumber(hubspotDealId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/deal-project-number/registry", requireAuth, async (req, res) => {
+    try {
+      const { search, limit, offset } = req.query;
+      const result = await getProjectNumberRegistry({
+        search: search as string,
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/deal-project-number/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("deal_project_number");
+      res.json(config?.value || { enabled: false });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/deal-project-number/config", requireAuth, async (req, res) => {
+    try {
+      await storage.upsertAutomationConfig({
+        key: "deal_project_number",
+        value: req.body,
+        description: "Auto-assign project numbers to new HubSpot deals",
+      });
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

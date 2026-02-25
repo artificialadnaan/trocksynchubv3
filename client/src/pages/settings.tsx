@@ -39,6 +39,7 @@ import {
   UserPlus,
   Wifi,
   WifiOff,
+  Hash,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import type { PollJob } from "@shared/schema";
@@ -200,6 +201,8 @@ export default function SettingsPage() {
       <PollingCard />
 
       <RolePollingCard />
+
+      <ProjectNumberCard />
 
       <Card>
         <CardHeader className="pb-3">
@@ -1403,6 +1406,138 @@ function StageMappingCard() {
             )}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProjectNumberCard() {
+  const { toast } = useToast();
+
+  const { data: config, isLoading } = useQuery<{ enabled: boolean }>({
+    queryKey: ["/api/deal-project-number/config"],
+  });
+
+  const { data: registry } = useQuery<{ data: any[]; total: number }>({
+    queryKey: ["/api/deal-project-number/registry"],
+    refetchInterval: 30000,
+  });
+
+  const [enabled, setEnabled] = useState(false);
+  const [testDealId, setTestDealId] = useState("");
+
+  useEffect(() => {
+    if (config) {
+      setEnabled(config.enabled);
+    }
+  }, [config]);
+
+  const saveConfig = useMutation({
+    mutationFn: async (cfg: { enabled: boolean }) => {
+      const res = await apiRequest("POST", "/api/deal-project-number/config", cfg);
+      return res.json();
+    },
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/deal-project-number/config"] });
+      toast({ title: vars.enabled ? "Project number auto-assign enabled" : "Project number auto-assign disabled" });
+    },
+  });
+
+  const assignNow = useMutation({
+    mutationFn: async (hubspotDealId: string) => {
+      const res = await apiRequest("POST", "/api/deal-project-number/assign", { hubspotDealId });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/deal-project-number/registry"] });
+      toast({
+        title: data.alreadyAssigned ? "Already assigned" : "Project number assigned",
+        description: data.projectNumber ? `Project Number: ${data.projectNumber}` : data.message,
+      });
+      setTestDealId("");
+    },
+    onError: (err: any) => {
+      toast({ title: "Assignment failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const handleToggle = (val: boolean) => {
+    setEnabled(val);
+    saveConfig.mutate({ enabled: val });
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2" data-testid="text-project-number-title">
+            <Hash className="w-4 h-4" />
+            Deal Project Number Assignment
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {enabled ? (
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse" />
+                  Active
+                </span>
+              ) : "Off"}
+            </span>
+            <Switch
+              checked={enabled}
+              onCheckedChange={handleToggle}
+              data-testid="switch-project-number-enabled"
+            />
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground mt-1">
+          Automatically assigns a project number (dayOfYear + 2-digit year + suffix) to new HubSpot deals. Updates the deal's Project Number field and sends an email notification.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="HubSpot Deal ID"
+            value={testDealId}
+            onChange={(e) => setTestDealId(e.target.value)}
+            className="h-8 text-sm max-w-xs"
+            data-testid="input-deal-id"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => testDealId && assignNow.mutate(testDealId)}
+            disabled={assignNow.isPending || !testDealId}
+            data-testid="button-assign-project-number"
+          >
+            {assignNow.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+            Assign Now
+          </Button>
+        </div>
+
+        {registry && registry.data.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-muted-foreground mb-2">
+              Recent Assignments ({registry.total} total)
+            </p>
+            <div className="space-y-1 max-h-40 overflow-y-auto">
+              {registry.data.slice(0, 10).map((entry: any) => (
+                <div key={entry.id} className="flex items-center justify-between text-xs py-1 px-2 rounded bg-muted/50" data-testid={`row-registry-${entry.id}`}>
+                  <span className="font-mono font-medium">{entry.fullProjectNumber}</span>
+                  <span className="text-muted-foreground truncate max-w-[200px] ml-2">{entry.hubspotDealName || entry.hubspotDealId}</span>
+                  <span className="text-muted-foreground ml-2">{entry.assignedAt ? new Date(entry.assignedAt).toLocaleDateString() : ""}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="text-xs text-muted-foreground border-t pt-3">
+          <p><strong>Format:</strong> DDD + YY + suffix (e.g., 05626-aa for day 56 of 2026)</p>
+          <p>Replaces the Zapier "New Deal → Run JavaScript → Create Record → Update Deal → Send Email" zap.</p>
+        </div>
       </CardContent>
     </Card>
   );

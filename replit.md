@@ -4,6 +4,7 @@
 Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
 
 ## Recent Changes
+- 2026-02-25: Added Deal Project Number auto-assignment (replaces Zapier zap). When a new deal is created in HubSpot (via webhook or manual trigger), generates a project number in format DDD+YY+suffix (e.g., 05226-aa for day 52 of 2026, suffix increments aa→ab→ac for same-day duplicates). Writes project number back to HubSpot's `project_number` custom property. Sends email notification via Gmail. DB table: `project_number_registry`. Config stored in `automation_config` key="deal_project_number". Settings card with enable/disable toggle, manual deal ID input, and recent assignments list. New file: `server/deal-project-number.ts`. Email template: `new_deal_project_number`.
 - 2026-02-25: Added role assignment polling (5-min default, configurable). Polls all active Procore projects for new role assignments and sends email notifications. Toggle + interval selector + Sync Now in Settings (Role Assignment Sync card). Shows webhook status badge (active/inactive based on last 30min). Config stored in automation_config key="role_assignment_polling". Resumes on server restart if enabled.
 - 2026-02-25: Procore webhook investigation complete. "Project Users" webhooks fire correctly (24 deliveries confirmed, all outcome=ok). "Project Role Assignments" and "Project Roles" webhooks do NOT fire for role assignment changes — Procore triggers "Project Users" CREATE events instead. Webhook hook 11477439 now has 6 triggers: Project Users (CREATE/UPDATE), Project Roles (CREATE/UPDATE), Project Role Assignments (CREATE/UPDATE). Webhook handler processes all three resource types.
 - 2026-02-25: Manual role assignment sync (POST /api/procore/sync-role-assignments) now sends email notifications for new assignments automatically.
@@ -47,6 +48,7 @@ Production-grade middleware application for bidirectional synchronization betwee
 - `server/companycam.ts` - CompanyCam sync engine with paginated fetching and change detection
 - `server/gmail.ts` - Gmail client using Replit OAuth connector (never cache client)
 - `server/email-notifications.ts` - Email notification logic with template rendering and dedup
+- `server/deal-project-number.ts` - Auto-assign project numbers to new HubSpot deals (replaces Zapier zap)
 - `client/src/App.tsx` - Main app with auth flow and routing
 - `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings, HubSpot Data, Procore Data, CompanyCam Data, Email Notifications
 

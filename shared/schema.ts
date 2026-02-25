@@ -180,6 +180,31 @@ export const insertContractCounterSchema = createInsertSchema(contractCounters).
 export type InsertContractCounter = z.infer<typeof insertContractCounterSchema>;
 export type ContractCounter = typeof contractCounters.$inferSelect;
 
+export const projectNumberRegistry = pgTable("project_number_registry", {
+  id: serial("id").primaryKey(),
+  hubspotDealId: text("hubspot_deal_id").notNull().unique(),
+  hubspotDealName: text("hubspot_deal_name"),
+  baseNumber: text("base_number").notNull(),
+  suffix: text("suffix").notNull().default("aa"),
+  fullProjectNumber: text("full_project_number").notNull().unique(),
+  officeLocation: text("office_location"),
+  projectTypes: text("project_types"),
+  estimator: text("estimator"),
+  ownerName: text("owner_name"),
+  ownerEmail: text("owner_email"),
+  createdDate: timestamp("created_date"),
+  assignedAt: timestamp("assigned_at").defaultNow(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertProjectNumberRegistrySchema = createInsertSchema(projectNumberRegistry).omit({
+  id: true,
+  assignedAt: true,
+  createdAt: true,
+});
+export type InsertProjectNumberRegistry = z.infer<typeof insertProjectNumberRegistrySchema>;
+export type ProjectNumberRegistry = typeof projectNumberRegistry.$inferSelect;
+
 export const pollJobs = pgTable("poll_jobs", {
   id: serial("id").primaryKey(),
   jobName: text("job_name").notNull().unique(),
