@@ -344,7 +344,7 @@ export async function syncHubSpotContacts(): Promise<{ synced: number; created: 
   return { synced: allContacts.length, created, updated, changes };
 }
 
-export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
+export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number; newDealIds: string[] }> {
   const client = await getHubSpotClient();
   const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate'];
 
@@ -368,6 +368,7 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
 
   const companyNameCache = new Map<string, string>();
   let created = 0, updated = 0, changes = 0;
+  const newDealIds: string[] = [];
 
   for (const deal of allDeals) {
     const hubspotId = deal.id;
@@ -435,12 +436,13 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
       });
       created++;
       changes++;
+      newDealIds.push(hubspotId);
     }
 
     await storage.upsertHubspotDeal(data);
   }
 
-  return { synced: allDeals.length, created, updated, changes };
+  return { synced: allDeals.length, created, updated, changes, newDealIds };
 }
 
 export async function syncHubSpotPipelines(): Promise<any[]> {

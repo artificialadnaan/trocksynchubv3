@@ -1970,12 +1970,27 @@ export async function registerRoutes(
         procoreAutoSync = { error: autoErr.message };
       }
 
+      let projectNumberResults: any[] = [];
+      if (result.deals.newDealIds && result.deals.newDealIds.length > 0) {
+        console.log(`[Polling] ${result.deals.newDealIds.length} new deal(s) detected, assigning project numbers...`);
+        for (const dealId of result.deals.newDealIds) {
+          try {
+            const pnResult = await processNewDealWebhook(dealId);
+            projectNumberResults.push({ dealId, result: pnResult });
+          } catch (pnErr: any) {
+            console.error(`[Polling] Project number assignment failed for deal ${dealId}:`, pnErr.message);
+            projectNumberResults.push({ dealId, error: pnErr.message });
+          }
+        }
+      }
+
       lastPollAt = new Date();
       lastPollResult = {
         companies: result.companies,
         contacts: result.contacts,
         deals: result.deals,
         procoreAutoSync,
+        projectNumberResults: projectNumberResults.length > 0 ? projectNumberResults : undefined,
         duration: result.duration,
       };
 
