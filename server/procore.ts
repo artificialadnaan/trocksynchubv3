@@ -693,7 +693,7 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
   for (const project of projectsToSync) {
     try {
       const assignments = await fetchProcoreJson(
-        `/rest/v1.0/projects/${project.procoreId}/project_role_assignments`,
+        `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}`,
         companyId
       ) as any[];
 
@@ -703,21 +703,24 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
       const existingKeys = new Set(existingAssignments.map(a => `${a.roleName}||${a.assigneeId}`));
 
       for (const assignment of assignments) {
-        const roleName = assignment.project_role?.name || assignment.role?.name || 'Unknown Role';
-        const person = assignment.party || assignment.user || {};
-        const personId = person.id ? String(person.id) : null;
-        if (!personId) continue;
-        const assigneeId = personId;
-        const assigneeName = person.name || `${person.first_name || ''} ${person.last_name || ''}`.trim() || '';
-        const assigneeEmail = person.email_address || person.email || '';
-        const assigneeCompany = person.company?.name || person.vendor?.name || '';
+        const roleName = assignment.role || 'Unknown Role';
+        const assigneeId = assignment.user_id ? String(assignment.user_id) : (assignment.contact_id ? String(assignment.contact_id) : null);
+        if (!assigneeId) continue;
+        const nameParts = (assignment.name || '').split(' (');
+        const assigneeName = nameParts[0] || '';
+        const assigneeCompany = nameParts[1] ? nameParts[1].replace(')', '') : '';
+        let assigneeEmail = assignment.email_address || assignment.email || '';
+        if (!assigneeEmail) {
+          const user = await storage.getProcoreUserByProcoreId(assigneeId);
+          assigneeEmail = user?.emailAddress || '';
+        }
 
         const isNew = !existingKeys.has(`${roleName}||${assigneeId}`);
 
         await storage.upsertProcoreRoleAssignment({
           procoreProjectId: project.procoreId,
           projectName: project.name,
-          roleId: assignment.project_role?.id ? String(assignment.project_role.id) : null,
+          roleId: assignment.id ? String(assignment.id) : null,
           roleName,
           assigneeId,
           assigneeName,
@@ -727,7 +730,7 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
           lastSyncedAt: new Date(),
         });
 
-        if (isNew && assigneeEmail) {
+        if (isNew) {
           newAssignments.push({
             procoreProjectId: project.procoreId,
             projectName: project.name,

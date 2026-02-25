@@ -1807,6 +1807,16 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/procore/sync-role-assignments", requireAuth, async (req, res) => {
+    try {
+      const { projectIds } = req.body || {};
+      const result = await syncProcoreRoleAssignments(projectIds);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.get("/api/procore/role-assignments", requireAuth, async (req, res) => {
     try {
       const { search, roleName, projectId, limit, offset } = req.query;
