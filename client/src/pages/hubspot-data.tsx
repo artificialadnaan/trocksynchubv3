@@ -330,7 +330,7 @@ function ContactsTab() {
 type SyncLookupEntry = { hubspotDealId: string | null; hubspotDealName: string | null; procoreProjectId: string | null; procoreProjectName: string | null; procoreProjectNumber: string | null };
 
 const PROCORE_COMPANY_ID = "598134325683880";
-const HUBSPOT_PORTAL_ID = "45644695";
+const HUBSPOT_PORTAL_ID = "245227962";
 
 function DealsTab() {
   const [search, setSearch] = useState("");

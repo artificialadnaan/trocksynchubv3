@@ -361,7 +361,7 @@ function ProjectsTab() {
               {data.data.map((project) => {
                 const linked = syncLookup?.[`procore:${project.procoreId}`];
                 const procoreUrl = `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${project.procoreId}/tools/projecthome`;
-                const hubspotDealUrl = linked?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${linked.hubspotDealId}` : null;
+                const hubspotDealUrl = linked?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${linked.hubspotDealId}` : null;
                 return (
                 <Collapsible key={project.id} open={expandedIds.has(project.id)} onOpenChange={() => toggleExpand(project.id)}>
                   <div className="grid grid-cols-[auto_1fr_0.8fr_1fr_0.6fr_0.8fr_0.8fr_auto] gap-3 px-4 py-3 text-sm hover:bg-muted/30 transition-colors items-center border-b last:border-0 cursor-pointer" data-testid={`procore-project-row-${project.id}`}>
