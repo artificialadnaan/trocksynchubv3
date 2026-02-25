@@ -42,7 +42,7 @@ export async function sendRoleAssignmentEmails(
       assigneeEmail: assignment.assigneeEmail,
       projectId: assignment.procoreProjectId,
       companyId: '598134325683880',
-      projectUrl: `https://app.procore.com/598134325683880/project/${assignment.procoreProjectId}`,
+      projectUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${assignment.procoreProjectId}/tools/projecthome`,
     };
 
     const subject = renderTemplate(template.subject, variables);
