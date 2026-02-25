@@ -16,6 +16,7 @@ import ProcoreDataPage from "@/pages/procore-data";
 import CompanyCamDataPage from "@/pages/companycam-data";
 import BidDetailPage from "@/pages/bid-detail";
 import EmailNotificationsPage from "@/pages/email-notifications";
+import ProjectSyncPage from "@/pages/project-sync";
 import NotFound from "@/pages/not-found";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getQueryFn } from "@/lib/queryClient";
@@ -35,6 +36,7 @@ function AuthenticatedLayout() {
           <Route path="/procore-data" component={ProcoreDataPage} />
           <Route path="/procore-data/bids/:bidId" component={BidDetailPage} />
           <Route path="/companycam-data" component={CompanyCamDataPage} />
+          <Route path="/project-sync" component={ProjectSyncPage} />
           <Route path="/email-notifications" component={EmailNotificationsPage} />
           <Route path="/settings" component={SettingsPage} />
           <Route component={NotFound} />

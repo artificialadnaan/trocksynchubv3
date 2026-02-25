@@ -11,6 +11,7 @@ import {
   Database,
   Camera,
   Mail,
+  Link2,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,7 @@ const navItems = [
   { path: "/hubspot-data", label: "HubSpot Data", icon: Database },
   { path: "/procore-data", label: "Procore Data", icon: Database },
   { path: "/companycam-data", label: "CompanyCam Data", icon: Camera },
+  { path: "/project-sync", label: "Project Sync", icon: Link2 },
   { path: "/email-notifications", label: "Email Notifications", icon: Mail },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },

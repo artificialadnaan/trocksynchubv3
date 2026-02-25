@@ -14,6 +14,7 @@ import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubsp
 import { sendRoleAssignmentEmails } from "./email-notifications";
 import { sendEmail, isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
+import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects } from "./procore-hubspot-sync";
 
 const PgSession = connectPgSimple(session);
 
@@ -1889,6 +1890,72 @@ export async function registerRoutes(
         offset: offset ? parseInt(offset as string) : 0,
       });
       res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/procore-hubspot/sync", requireAuth, async (_req, res) => {
+    try {
+      const result = await syncProcoreToHubspot();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore-hubspot/overview", requireAuth, async (_req, res) => {
+    try {
+      const result = await getSyncOverview();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore-hubspot/mappings", requireAuth, async (req, res) => {
+    try {
+      const { search } = req.query;
+      if (search) {
+        const result = await storage.searchSyncMappings(search as string);
+        return res.json({ data: result, total: result.length });
+      }
+      const result = await storage.getSyncMappings();
+      res.json({ data: result, total: result.length });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/procore-hubspot/unmatched", requireAuth, async (_req, res) => {
+    try {
+      const result = await getUnmatchedProjects();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/procore-hubspot/manual-link", requireAuth, async (req, res) => {
+    try {
+      const { procoreProjectId, hubspotDealId, writeProjectNumber } = req.body;
+      if (!procoreProjectId || !hubspotDealId) {
+        return res.status(400).json({ message: "Both procoreProjectId and hubspotDealId are required" });
+      }
+      const result = await createManualMapping(procoreProjectId, hubspotDealId, writeProjectNumber !== false);
+      if (!result.success) return res.status(400).json(result);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.delete("/api/procore-hubspot/mappings/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const success = await unlinkMapping(id);
+      if (!success) return res.status(404).json({ message: "Mapping not found" });
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
