@@ -2103,6 +2103,18 @@ export async function registerRoutes(
 
       console.log(`[Polling] Complete in ${(result.duration / 1000).toFixed(1)}s — Companies: ${result.companies.created} new, ${result.companies.updated} updated | Contacts: ${result.contacts.created} new, ${result.contacts.updated} updated`);
     } catch (e: any) {
+      const isAuthError = e.message?.includes('expired') || e.message?.includes('401') || e.message?.includes('Unauthorized') || e.message?.includes('EXPIRED_AUTHENTICATION');
+      if (isAuthError) {
+        console.error('[Polling] HubSpot auth failed (token expired or invalid) — disabling polling. Please reconnect HubSpot.');
+        stopPolling();
+        try {
+          await storage.upsertAutomationConfig({
+            key: "hubspot_polling",
+            value: { enabled: false, intervalMinutes: 10, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
+            description: "Automatic HubSpot polling sync configuration",
+          });
+        } catch (_) {}
+      }
       console.error('[Polling] HubSpot sync failed:', e.message);
       lastPollAt = new Date();
       lastPollResult = { error: e.message };
@@ -2186,6 +2198,138 @@ export async function registerRoutes(
       }
     } catch (e) {
       console.log('[Polling] No saved config, polling disabled by default');
+    }
+  })();
+
+  let procorePollingTimer: ReturnType<typeof setInterval> | null = null;
+  let procorePollingRunning = false;
+  let lastProcorePollAt: Date | null = null;
+  let lastProcorePollResult: any = null;
+
+  async function runProcorePollingCycle() {
+    if (procorePollingRunning) {
+      console.log('[ProcorePolling] Skipping — previous cycle still running');
+      return;
+    }
+    procorePollingRunning = true;
+    const startTime = Date.now();
+    console.log('[ProcorePolling] Starting Procore data sync cycle...');
+    try {
+      const result = await runFullProcoreSync();
+      const duration = Date.now() - startTime;
+      lastProcorePollAt = new Date();
+      lastProcorePollResult = { ...result, duration };
+
+      const hasChanges = result.projects.created > 0 || result.projects.updated > 0 ||
+        result.vendors.created > 0 || result.vendors.updated > 0 ||
+        result.users.created > 0 || result.users.updated > 0;
+
+      if (hasChanges) {
+        await storage.createAuditLog({
+          action: 'procore_polling_sync',
+          entityType: 'all',
+          source: 'polling',
+          status: 'success',
+          details: lastProcorePollResult as any,
+          durationMs: duration,
+        });
+      }
+
+      console.log(`[ProcorePolling] Complete in ${(duration / 1000).toFixed(1)}s — Projects: ${result.projects.created} new, ${result.projects.updated} updated | Vendors: ${result.vendors.created} new, ${result.vendors.updated} updated | Users: ${result.users.created} new, ${result.users.updated} updated`);
+    } catch (e: any) {
+      const isAuthError = e.message?.includes('expired') || e.message?.includes('401') || e.message?.includes('Unauthorized');
+      if (isAuthError) {
+        console.error('[ProcorePolling] Procore auth failed — disabling polling. Please re-authenticate Procore.');
+        stopProcorePolling();
+        try {
+          await storage.upsertAutomationConfig({
+            key: "procore_polling",
+            value: { enabled: false, intervalMinutes: 15, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
+            description: "Automatic Procore data polling sync configuration",
+          });
+        } catch (_) {}
+      }
+      console.error('[ProcorePolling] Procore sync failed:', e.message);
+      lastProcorePollAt = new Date();
+      lastProcorePollResult = { error: e.message };
+    } finally {
+      procorePollingRunning = false;
+    }
+  }
+
+  function startProcorePolling(intervalMinutes: number) {
+    stopProcorePolling();
+    console.log(`[ProcorePolling] Starting automatic Procore sync every ${intervalMinutes} minutes`);
+    procorePollingTimer = setInterval(() => runProcorePollingCycle(), intervalMinutes * 60 * 1000);
+    setTimeout(() => runProcorePollingCycle(), 15000);
+  }
+
+  function stopProcorePolling() {
+    if (procorePollingTimer) {
+      clearInterval(procorePollingTimer);
+      procorePollingTimer = null;
+      console.log('[ProcorePolling] Stopped automatic Procore sync');
+    }
+  }
+
+  app.get("/api/automation/procore-polling/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("procore_polling");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 15,
+        isRunning: procorePollingTimer !== null,
+        lastPollAt: lastProcorePollAt?.toISOString() || null,
+        lastPollResult: lastProcorePollResult,
+        currentlyPolling: procorePollingRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/procore-polling/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes } = req.body;
+      const interval = intervalMinutes || 15;
+      await storage.upsertAutomationConfig({
+        key: "procore_polling",
+        value: { enabled, intervalMinutes: interval },
+        description: "Automatic Procore data polling sync configuration",
+      });
+      if (enabled) {
+        startProcorePolling(interval);
+      } else {
+        stopProcorePolling();
+      }
+      res.json({ success: true, enabled, intervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/procore-polling/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (procorePollingRunning) {
+        return res.json({ message: "Procore sync already in progress", running: true });
+      }
+      runProcorePollingCycle();
+      res.json({ message: "Procore sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  (async () => {
+    try {
+      const config = await storage.getAutomationConfig("procore_polling");
+      const val = (config?.value as any);
+      if (val?.enabled) {
+        startProcorePolling(val.intervalMinutes || 15);
+      }
+    } catch (e) {
+      console.log('[ProcorePolling] No saved config, Procore polling disabled by default');
     }
   })();
 

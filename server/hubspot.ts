@@ -12,6 +12,8 @@ export async function getAccessToken(): Promise<string> {
     return connectionSettings.settings.access_token;
   }
 
+  connectionSettings = null;
+
   const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
   const xReplitToken = process.env.REPL_IDENTITY
     ? 'repl ' + process.env.REPL_IDENTITY
@@ -41,6 +43,16 @@ export async function getAccessToken(): Promise<string> {
   if (!connectionSettings || !accessToken) {
     throw new Error('HubSpot not connected. Set HUBSPOT_ACCESS_TOKEN env var or configure Replit HubSpot integration.');
   }
+
+  const expiresAt = connectionSettings.settings?.expires_at;
+  if (expiresAt) {
+    const expiresTime = new Date(expiresAt).getTime();
+    if (expiresTime <= Date.now()) {
+      connectionSettings = null;
+      throw new Error('HubSpot OAuth token is expired. Please reconnect HubSpot in the integrations panel.');
+    }
+  }
+
   return accessToken;
 }
 
