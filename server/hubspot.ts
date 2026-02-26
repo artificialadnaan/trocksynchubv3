@@ -4,6 +4,10 @@ import { storage } from './storage';
 let connectionSettings: any;
 
 export async function getAccessToken(): Promise<string> {
+  if (process.env.HUBSPOT_ACCESS_TOKEN) {
+    return process.env.HUBSPOT_ACCESS_TOKEN;
+  }
+
   if (connectionSettings && connectionSettings.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
     return connectionSettings.settings.access_token;
   }
@@ -16,7 +20,7 @@ export async function getAccessToken(): Promise<string> {
     : null;
 
   if (!xReplitToken || !hostname) {
-    throw new Error('Replit connector environment not available. Make sure HubSpot integration is set up.');
+    throw new Error('HubSpot token not available. Set HUBSPOT_ACCESS_TOKEN env var or configure Replit HubSpot integration.');
   }
 
   const response = await fetch(
@@ -35,7 +39,7 @@ export async function getAccessToken(): Promise<string> {
   const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
 
   if (!connectionSettings || !accessToken) {
-    throw new Error('HubSpot not connected via Replit integration. Please set up the HubSpot connection.');
+    throw new Error('HubSpot not connected. Set HUBSPOT_ACCESS_TOKEN env var or configure Replit HubSpot integration.');
   }
   return accessToken;
 }

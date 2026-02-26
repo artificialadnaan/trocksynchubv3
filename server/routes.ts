@@ -299,7 +299,7 @@ export async function registerRoutes(
     const config = await storage.getAutomationConfig("procore_config");
     const clientId = (config?.value as any)?.clientId;
     const env = (config?.value as any)?.environment || "production";
-    const host = process.env.REPLIT_DEV_DOMAIN ? 'https://' + process.env.REPLIT_DEV_DOMAIN : 'http://localhost:5000';
+    const host = process.env.APP_URL || (process.env.REPLIT_DEV_DOMAIN ? 'https://' + process.env.REPLIT_DEV_DOMAIN : `http://localhost:${process.env.PORT || 5000}`);
     const redirectUri = `${host}/api/oauth/procore/callback`;
     const baseUrl = env === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
     if (!clientId) return res.status(400).json({ message: "Procore Client ID not configured. Save your credentials first." });
@@ -315,7 +315,7 @@ export async function registerRoutes(
       const clientId = (config?.value as any)?.clientId;
       const clientSecret = (config?.value as any)?.clientSecret;
       const env = (config?.value as any)?.environment || "production";
-      const host = process.env.REPLIT_DEV_DOMAIN ? 'https://' + process.env.REPLIT_DEV_DOMAIN : 'http://localhost:5000';
+      const host = process.env.APP_URL || (process.env.REPLIT_DEV_DOMAIN ? 'https://' + process.env.REPLIT_DEV_DOMAIN : `http://localhost:${process.env.PORT || 5000}`);
       const redirectUri = `${host}/api/oauth/procore/callback`;
       const baseUrl = env === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
 

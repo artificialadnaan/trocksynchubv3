@@ -3,6 +3,10 @@ import { google } from 'googleapis';
 let connectionSettings: any;
 
 async function getAccessToken() {
+  if (process.env.GMAIL_ACCESS_TOKEN) {
+    return process.env.GMAIL_ACCESS_TOKEN;
+  }
+
   if (connectionSettings?.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
     const cachedToken = connectionSettings.settings?.access_token || connectionSettings.settings?.oauth?.credentials?.access_token;
     if (cachedToken) return cachedToken;
@@ -16,8 +20,8 @@ async function getAccessToken() {
     ? 'depl ' + process.env.WEB_REPL_RENEWAL
     : null;
 
-  if (!xReplitToken) {
-    throw new Error('X-Replit-Token not found for repl/depl');
+  if (!xReplitToken || !hostname) {
+    throw new Error('Gmail token not available. Set GMAIL_ACCESS_TOKEN env var or configure Replit Google Mail integration.');
   }
 
   connectionSettings = await fetch(
@@ -33,7 +37,7 @@ async function getAccessToken() {
   const accessToken = connectionSettings?.settings?.access_token || connectionSettings.settings?.oauth?.credentials?.access_token;
 
   if (!connectionSettings || !accessToken) {
-    throw new Error('Gmail not connected');
+    throw new Error('Gmail not connected. Set GMAIL_ACCESS_TOKEN env var or configure Replit Google Mail integration.');
   }
   return accessToken;
 }

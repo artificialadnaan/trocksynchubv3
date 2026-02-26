@@ -1,65 +1,7 @@
 # Trock Sync Hub 2.0
 
 ## Overview
-Production-grade middleware application for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. Built with Node.js/Express backend and React frontend.
-
-## Recent Changes
-- 2026-02-25: Unified Data Browser page (/data-browser). Merged HubSpot Data, Procore Data, and CompanyCam Data into a single page with top-level platform tabs (HubSpot/Procore/CompanyCam). Each platform's sub-tabs (Companies, Contacts, Deals, Projects, Vendors, Users, etc.) appear below the platform selector. Single sidebar entry "Data Browser" replaces three separate entries. Old pages retained as exported components. HubSpot portal ID corrected to 245227962.
-- 2026-02-25: Added cross-linking between data pages. Procore Data projects show clickable icons to open project in Procore (orange ExternalLink) and linked HubSpot deal (orange Link2). HubSpot Data deals show clickable icons to open deal in HubSpot and linked Procore project. New API: GET /api/sync-mappings/lookup returns all sync mappings as a keyed lookup map. Expanded details also show "Open in Procore" / "Open in HubSpot" / "Procore Project" links. 60 new HubSpot deals auto-created from unmatched Procore projects (individual create with unique constraint retry).
-- 2026-02-25: Added Procore → HubSpot Project Sync (server/procore-hubspot-sync.ts). Matches Procore projects to HubSpot deals by project_number (existing link) then exact name match. Writes Procore project_number to HubSpot deals as persistent link. Uses HubSpot batch update API for efficiency (446 matches in 4.4s). Conflict detection for project_number, project_location, amount — Procore wins for project_number, both values kept for other fields. Stores detailed metadata (stages, values, conflicts) in sync_mappings. Manual linking dialog for unmatched projects. New page: /project-sync. New sidebar entry: "Project Sync". 305 HubSpot deals updated with project numbers, 26 conflicts detected.
-- 2026-02-25: Added Deal Project Number auto-assignment (replaces Zapier zap). When a new deal is created in HubSpot (via webhook or manual trigger), generates a project number in format DDD+YY+suffix (e.g., 05226-aa for day 52 of 2026, suffix increments aa→ab→ac for same-day duplicates). Writes project number back to HubSpot's `project_number` custom property. Sends email notification via Gmail. DB table: `project_number_registry`. Config stored in `automation_config` key="deal_project_number". Settings card with enable/disable toggle, manual deal ID input, and recent assignments list. New file: `server/deal-project-number.ts`. Email template: `new_deal_project_number`.
-- 2026-02-25: Added role assignment polling (5-min default, configurable). Polls all active Procore projects for new role assignments and sends email notifications. Toggle + interval selector + Sync Now in Settings (Role Assignment Sync card). Shows webhook status badge (active/inactive based on last 30min). Config stored in automation_config key="role_assignment_polling". Resumes on server restart if enabled.
-- 2026-02-25: Procore webhook investigation complete. "Project Users" webhooks fire correctly (24 deliveries confirmed, all outcome=ok). "Project Role Assignments" and "Project Roles" webhooks do NOT fire for role assignment changes — Procore triggers "Project Users" CREATE events instead. Webhook hook 11477439 now has 6 triggers: Project Users (CREATE/UPDATE), Project Roles (CREATE/UPDATE), Project Role Assignments (CREATE/UPDATE). Webhook handler processes all three resource types.
-- 2026-02-25: Manual role assignment sync (POST /api/procore/sync-role-assignments) now sends email notifications for new assignments automatically.
-- 2026-02-25: Fixed Procore project role assignment sync. Correct endpoint is `GET /rest/v1.0/project_roles?project_id={PID}&company_id={CID}` (root-level with query params, NOT nested). Returns role name, user_id, contact_id, name with company. Emails enriched from synced procore_users table. 219 assignments synced across 16 role types. New route: `POST /api/procore/sync-role-assignments` for independent sync. DB table: `procore_role_assignments` with composite unique index (project_id, role_name, assignee_id). Integrated into `runFullProcoreSync()`.
-- 2026-02-25: Added email notification system using Gmail (Replit OAuth connector). When new team members are assigned to Procore projects, sends templated email notification. Deduplication via `email_send_log.dedupe_key` prevents duplicate sends. New files: `server/gmail.ts` (Gmail client), `server/email-notifications.ts` (notification logic). DB tables: `email_templates`, `email_send_log`.
-- 2026-02-25: Added Email Notifications page (`/email-notifications`) with editable templates and send history. Templates support variable substitution (`{{projectName}}`, `{{roleName}}`, etc.), enable/disable toggle, inline preview, and test email sending. Designed to be extensible for future notification types.
-- 2026-02-24: Added automatic HubSpot polling (every 10 min configurable). When enabled, runs HubSpot full sync on a timer and auto-pushes new/updated companies and contacts to Procore vendor directory. Toggle + interval selector + Sync Now button in Settings (Automatic Polling card). Config stored in automation_config key="hubspot_polling". Resumes on server restart if previously enabled.
-- 2026-02-24: Added HubSpot → Procore Directory Sync automation (server/hubspot-procore-sync.ts). When a new company or contact is created in HubSpot, automatically creates/updates the Procore vendor directory. Multi-criteria matching (email, domain, company name, legal/trade name, person name) with scoring to prevent duplicates. Non-destructive updates only fill empty fields. Toggle enable/disable in Settings. Manual bulk sync button for all companies/contacts. Webhook handler auto-triggers on company/contact creation/update events. State name normalization (e.g., "texas" → "TX") with automatic country_code. Procore vendor API uses user-level endpoints (/rest/v1.0/vendors?company_id=...).
-- 2026-02-24: Added CompanyCam Data browser page (/companycam-data) with tabs for Projects, Users, Photos, and Change History. Full sync engine (server/companycam.ts) pulls all data via CompanyCam API with paginated fetching, change detection, and 2-week history. 4 new DB tables: companycam_projects, companycam_users, companycam_photos, companycam_change_history.
-- 2026-02-24: Added BidBoard → HubSpot stage mapping feature. Configurable mapping page in Settings lets user map BidBoard statuses to HubSpot deal stages. On BidBoard CSV re-import, detects status changes and automatically pushes matching HubSpot deals to the mapped stage via API. Mapping stored in automation_config table. Toggle to enable/disable auto-sync.
-- 2026-02-24: Added BidBoard CSV/XLSX import feature. New bidboard_estimates DB table stores imported data with auto-matching to Procore projects (exact and fuzzy name matching). Upload via BidBoard tab on Procore Data page. Each re-import clears and replaces previous data. 378 estimates imported, 188 matched to Procore, 190 BidBoard-only.
-- 2026-02-24: Upgraded Procore project sync to use company-level endpoint (/rest/v1.0/companies/{CID}/projects) which returns 505 projects vs 273 from user-level endpoint. Detailed data enriched from user-level endpoint where available. Company-level returns simplified structure (nested address, stage_name, status_name).
-- 2026-02-24: Fixed bid PATCH routes to explicitly construct upsert objects instead of using `...bid` spread (which carried DB Date objects causing `value.toISOString is not a function`).
-- 2026-02-24: Added bid detail page (/procore-data/bids/:bidId) with full Procore bid data: bid_items, attachments (proxied via backend), bidder notes/comments, inclusions/exclusions, cost codes, vendor/requester details, NDA status, raw JSON. Award status dropdown (Pending/Awarded/Rejected) PATCHes Procore in real-time from both the bids list and detail page. Attachment proxy endpoint handles Procore's S3 redirect URLs.
-- 2026-02-24: Added inline bid award status dropdown to Bids tab on Procore Data page. Each bid row has a select dropdown that writes back to Procore API via PATCH /rest/v1.0/projects/{PID}/bid_packages/{BPID}/bids/{BID_ID}. View Detail button navigates to dedicated bid detail page.
-- 2026-02-24: Added Bid Board sync to Procore engine. Pulls bid packages (8), bids (138), and bid forms (29) via company and project-level API endpoints. Three new DB tables: procore_bid_packages, procore_bids, procore_bid_forms. Three new tabs added to Procore Data page with search, pagination, status filters, and expandable rows.
-- 2026-02-24: Added Procore Data browser page (/procore-data) with tabs for Projects (505), Vendors (629), Users (496), Bid Packages (8), Bids (138), Bid Forms (29), BidBoard Estimates (378), and Change History. Full sync with 2-week version control.
-- 2026-02-24: Created Procore sync engine (server/procore.ts) with OAuth token refresh, paginated API fetching, and change detection.
-- 2026-02-24: Procore OAuth flow updated to read credentials from DB config instead of env vars. Opens in new tab to avoid iframe blocking.
-- 2026-02-24: Added HubSpot Data browser page (/hubspot-data) with tabs for Companies, Contacts, Deals, Pipelines, and Change History. Search, pagination, expandable rows with full details.
-- 2026-02-24: Added HubSpot local database mirror with version control. Full sync pulls all companies, contacts, deals, and custom deal stages/pipelines. 2-week change history tracking with automatic purge.
-- 2026-02-24: HubSpot now uses Replit's built-in OAuth connector (automatic token management).
-- 2026-02-24: Initial implementation of full-stack application with auth, dashboard, sync config, webhook monitor, project mapper, audit logs, and settings pages.
-
-## Architecture
-- **Backend**: Express.js with PostgreSQL (Drizzle ORM), session auth via connect-pg-simple
-- **Frontend**: React + Vite with Tailwind CSS, shadcn/ui components, TanStack Query, wouter routing, Recharts
-- **Auth**: Session-based with bcrypt password hashing
-- **HubSpot Integration**: Replit OAuth connector (server/hubspot.ts) - auto token refresh
-- **Procore Integration**: OAuth 2.0 with token refresh (server/procore.ts) - credentials stored in automation_config
-- **CompanyCam Integration**: Bearer token auth (server/companycam.ts) - token stored in oauth_tokens table
-- **Email Notifications**: Gmail via Replit OAuth connector (server/gmail.ts) - templated emails with deduplication
-- **Database**: PostgreSQL with tables: users, sync_mappings, stage_mappings, webhook_logs, audit_logs, idempotency_keys, oauth_tokens, automation_config, contract_counters, poll_jobs, hubspot_companies, hubspot_contacts, hubspot_deals, hubspot_pipelines, hubspot_change_history, procore_projects, procore_vendors, procore_users, procore_change_history, procore_bid_packages, procore_bids, procore_bid_forms, bidboard_estimates, companycam_projects, companycam_users, companycam_photos, companycam_change_history, procore_role_assignments, email_templates, email_send_log
-
-## Key Files
-- `shared/schema.ts` - Drizzle schema and Zod validation schemas
-- `server/storage.ts` - Database CRUD operations
-- `server/routes.ts` - API endpoints and webhook receivers
-- `server/hubspot.ts` - HubSpot sync engine
-- `server/procore.ts` - Procore sync engine with OAuth token refresh
-- `server/companycam.ts` - CompanyCam sync engine with paginated fetching and change detection
-- `server/gmail.ts` - Gmail client using Replit OAuth connector (never cache client)
-- `server/email-notifications.ts` - Email notification logic with template rendering and dedup
-- `server/procore-hubspot-sync.ts` - Procore → HubSpot project sync with batch updates, conflict detection, and manual linking
-- `server/deal-project-number.ts` - Auto-assign project numbers to new HubSpot deals (replaces Zapier zap)
-- `client/src/App.tsx` - Main app with auth flow and routing
-- `client/src/pages/` - Dashboard, Sync Config, Webhooks, Projects, Audit Logs, Settings, HubSpot Data, Procore Data, CompanyCam Data, Email Notifications
-
-## Webhook Endpoints
-- POST `/webhooks/hubspot` - HubSpot webhook receiver
-- POST `/webhooks/procore` - Procore webhook receiver
-- POST `/webhooks/companycam` - CompanyCam webhook receiver
+Trock Sync Hub 2.0 is a production-grade middleware application designed for bidirectional synchronization between HubSpot CRM, Procore construction management, and CompanyCam. It aims to streamline operations by connecting these critical business platforms, automating data flow, and providing a unified view of information across systems. The project enhances data consistency, reduces manual effort, and improves decision-making by ensuring that key business data is always up-to-date across all integrated platforms.
 
 ## User Preferences
 - Custom Node.js/Express middleware (no third-party platforms like Make.com or n8n)
@@ -67,3 +9,32 @@ Production-grade middleware application for bidirectional synchronization betwee
 - Single admin role user management
 - Railway deployment target with env var secrets
 - Hybrid webhook + polling approach
+
+## System Architecture
+The application features a Node.js/Express backend and a React frontend. The UI is built with Tailwind CSS, `shadcn/ui` components, TanStack Query, wouter for routing, and Recharts for data visualization. Authentication is session-based with bcrypt for password hashing.
+
+**Key Integrations & Features:**
+- **HubSpot Integration:** Supports dual-mode authentication via Replit OAuth connector or environment variables. It mirrors HubSpot data (companies, contacts, deals, pipelines) to a local PostgreSQL database with 2-week change history tracking and automated purging. Includes HubSpot to Procore vendor directory sync and automatic deal project number assignment, replacing external Zapier integrations.
+- **Procore Integration:** Utilizes OAuth 2.0 with token refresh, storing credentials in the `automation_config` table. It includes comprehensive data browsing for projects, vendors, users, bid packages, bids, bid forms, and bid board estimates, all mirrored locally with change detection. Features Procore to HubSpot project sync with conflict detection and automated role assignment polling and notifications.
+- **CompanyCam Integration:** Uses bearer token authentication, with tokens stored in `oauth_tokens` or environment variables. It provides a data browser for projects, users, photos, and change history, with full sync and 2-week history.
+- **Email Notifications:** Implemented using Gmail, supporting templated emails with variable substitution and deduplication, accessible via a dedicated page for template management and send history.
+- **BidBoard Integration:** Facilitates CSV/XLSX import of BidBoard estimates, matching them to Procore projects and automatically mapping BidBoard statuses to HubSpot deal stages.
+- **Data Browser:** A unified interface `/data-browser` allows users to explore data from HubSpot, Procore, and CompanyCam, with cross-linking functionality between related records (e.g., Procore projects to HubSpot deals).
+- **Automation & Polling:** Configurable polling mechanisms for HubSpot and Procore (e.g., role assignments) ensure data freshness and trigger automated workflows.
+- **Webhook Handlers:** Dedicated endpoints for HubSpot, Procore, and CompanyCam webhooks to enable real-time data synchronization and trigger automations.
+
+**Database Schema Highlights:**
+The PostgreSQL database (managed with Drizzle ORM) includes tables for:
+- `users`, `sync_mappings`, `stage_mappings`, `webhook_logs`, `audit_logs`, `idempotency_keys`, `oauth_tokens`, `automation_config`, `contract_counters`, `poll_jobs`.
+- Dedicated tables for mirrored data: `hubspot_companies`, `hubspot_contacts`, `hubspot_deals`, `hubspot_pipelines`, `hubspot_change_history`.
+- `procore_projects`, `procore_vendors`, `procore_users`, `procore_change_history`, `procore_bid_packages`, `procore_bids`, `procore_bid_forms`, `procore_role_assignments`.
+- `bidboard_estimates`.
+- `companycam_projects`, `companycam_users`, `companycam_photos`, `companycam_change_history`.
+- `email_templates`, `email_send_log`, `project_number_registry`.
+
+## External Dependencies
+- **HubSpot API:** For CRM data synchronization.
+- **Procore API:** For construction management data synchronization.
+- **CompanyCam API:** For project photos and related data synchronization.
+- **Gmail API:** For sending email notifications.
+- **PostgreSQL:** Primary database for all application data and session storage.
