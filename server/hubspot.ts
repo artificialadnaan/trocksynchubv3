@@ -4,16 +4,6 @@ import { storage } from './storage';
 let connectionSettings: any;
 
 export async function getAccessToken(): Promise<string> {
-  if (process.env.HUBSPOT_ACCESS_TOKEN) {
-    return process.env.HUBSPOT_ACCESS_TOKEN;
-  }
-
-  if (connectionSettings && connectionSettings.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-    return connectionSettings.settings.access_token;
-  }
-
-  connectionSettings = null;
-
   const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
   const xReplitToken = process.env.REPL_IDENTITY
     ? 'repl ' + process.env.REPL_IDENTITY
@@ -21,39 +11,49 @@ export async function getAccessToken(): Promise<string> {
     ? 'depl ' + process.env.WEB_REPL_RENEWAL
     : null;
 
-  if (!xReplitToken || !hostname) {
-    throw new Error('HubSpot token not available. Set HUBSPOT_ACCESS_TOKEN env var or configure Replit HubSpot integration.');
-  }
+  if (xReplitToken && hostname) {
+    if (connectionSettings && connectionSettings.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
+      return connectionSettings.settings.access_token;
+    }
 
-  const response = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=hubspot',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X-Replit-Token': xReplitToken
+    connectionSettings = null;
+
+    const response = await fetch(
+      'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=hubspot',
+      {
+        headers: {
+          'Accept': 'application/json',
+          'X-Replit-Token': xReplitToken
+        }
+      }
+    );
+
+    const data = await response.json();
+    connectionSettings = data.items?.[0];
+
+    const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
+
+    if (!connectionSettings || !accessToken) {
+      throw new Error('HubSpot not connected via Replit connector. Falling back to env var.');
+    }
+
+    const expiresAt = connectionSettings.settings?.expires_at;
+    if (expiresAt) {
+      const expiresTime = new Date(expiresAt).getTime();
+      if (expiresTime <= Date.now()) {
+        connectionSettings = null;
+        throw new Error('HubSpot OAuth token is expired. Please reconnect HubSpot in the integrations panel.');
       }
     }
-  );
 
-  const data = await response.json();
-  connectionSettings = data.items?.[0];
-
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
-
-  if (!connectionSettings || !accessToken) {
-    throw new Error('HubSpot not connected. Set HUBSPOT_ACCESS_TOKEN env var or configure Replit HubSpot integration.');
+    return accessToken;
   }
 
-  const expiresAt = connectionSettings.settings?.expires_at;
-  if (expiresAt) {
-    const expiresTime = new Date(expiresAt).getTime();
-    if (expiresTime <= Date.now()) {
-      connectionSettings = null;
-      throw new Error('HubSpot OAuth token is expired. Please reconnect HubSpot in the integrations panel.');
-    }
+  if (process.env.HUBSPOT_ACCESS_TOKEN) {
+    return process.env.HUBSPOT_ACCESS_TOKEN;
   }
 
-  return accessToken;
+  throw new Error('HubSpot token not available. Configure Replit HubSpot integration or set HUBSPOT_ACCESS_TOKEN env var.');
 }
 
 export async function getHubSpotClient(): Promise<Client> {
@@ -540,12 +540,50 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
     const ownerId = deal.properties?.hubspot_owner_id;
     if (!ownerId) return { ownerId: null, ownerName: null, ownerEmail: null };
 
-    const ownersResponse = await client.crm.owners.ownersApi.getById(parseInt(ownerId));
-    return {
-      ownerId,
-      ownerName: `${ownersResponse.firstName || ''} ${ownersResponse.lastName || ''}`.trim() || null,
-      ownerEmail: ownersResponse.email || null,
-    };
+    const accessToken = await getAccessToken();
+
+    try {
+      const ownerResp = await fetch(`https://api.hubapi.com/crm/v3/owners/${ownerId}?idProperty=id`, {
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
+      });
+      if (ownerResp.ok) {
+        const ownerData = await ownerResp.json();
+        return {
+          ownerId,
+          ownerName: `${ownerData.firstName || ''} ${ownerData.lastName || ''}`.trim() || null,
+          ownerEmail: ownerData.email || null,
+        };
+      }
+      console.warn(`[HubSpot] Owner lookup returned ${ownerResp.status}, trying owners list...`);
+    } catch (ownerErr: any) {
+      console.warn(`[HubSpot] Owner lookup failed: ${ownerErr.message?.slice(0, 80)}`);
+    }
+
+    try {
+      const listResp = await fetch(`https://api.hubapi.com/crm/v3/owners/?limit=100`, {
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
+      });
+      if (listResp.ok) {
+        const listData = await listResp.json();
+        const owner = listData.results?.find((o: any) => String(o.id) === String(ownerId));
+        if (owner) {
+          return {
+            ownerId,
+            ownerName: `${owner.firstName || ''} ${owner.lastName || ''}`.trim() || null,
+            ownerEmail: owner.email || null,
+          };
+        }
+      }
+    } catch (listErr: any) {
+      console.warn(`[HubSpot] Owner list lookup failed: ${listErr.message?.slice(0, 80)}`);
+    }
+
+    const localDeal = await storage.getHubspotDealByHubspotId(hubspotDealId);
+    if (localDeal?.ownerName) {
+      return { ownerId, ownerName: localDeal.ownerName || null, ownerEmail: null };
+    }
+
+    return { ownerId, ownerName: null, ownerEmail: null };
   } catch (e: any) {
     console.error(`[HubSpot] Failed to get deal owner for ${hubspotDealId}:`, e.message);
     return { ownerId: null, ownerName: null, ownerEmail: null };
