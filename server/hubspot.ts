@@ -533,6 +533,25 @@ export async function updateHubSpotDealStage(hubspotDealId: string, stageId: str
   }
 }
 
+export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId: string | null; ownerName: string | null; ownerEmail: string | null }> {
+  try {
+    const client = await getHubSpotClient();
+    const deal = await client.crm.deals.basicApi.getById(hubspotDealId, ['hubspot_owner_id']);
+    const ownerId = deal.properties?.hubspot_owner_id;
+    if (!ownerId) return { ownerId: null, ownerName: null, ownerEmail: null };
+
+    const ownersResponse = await client.crm.owners.ownersApi.getById(parseInt(ownerId));
+    return {
+      ownerId,
+      ownerName: `${ownersResponse.firstName || ''} ${ownersResponse.lastName || ''}`.trim() || null,
+      ownerEmail: ownersResponse.email || null,
+    };
+  } catch (e: any) {
+    console.error(`[HubSpot] Failed to get deal owner for ${hubspotDealId}:`, e.message);
+    return { ownerId: null, ownerName: null, ownerEmail: null };
+  }
+}
+
 function detectChanges(existing: any, newData: any, fields: string[]): { field: string; oldValue: string; newValue: string }[] {
   const changes: { field: string; oldValue: string; newValue: string }[] = [];
   for (const field of fields) {

@@ -53,7 +53,7 @@ const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
   'On Hold': 'contractsent',
 };
 
-function mapProcoreStageToHubspot(procoreStage: string | null): string {
+export function mapProcoreStageToHubspot(procoreStage: string | null): string {
   if (!procoreStage) return 'decisionmakerboughtin';
   return PROCORE_TO_HUBSPOT_STAGE[procoreStage] || 'decisionmakerboughtin';
 }

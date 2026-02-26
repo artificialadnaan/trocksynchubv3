@@ -439,6 +439,12 @@ export async function fetchProcoreProjectStages(): Promise<any[]> {
   }
 }
 
+export async function fetchProcoreProjectDetail(projectId: string): Promise<any> {
+  const config = await getProcoreConfig();
+  const companyId = config.companyId;
+  return fetchProcoreJson(`/rest/v1.0/projects/${projectId}?company_id=${companyId}`, companyId);
+}
+
 export async function updateProcoreProject(
   projectId: string,
   fields: Record<string, any>

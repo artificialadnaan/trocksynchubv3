@@ -11,10 +11,10 @@ import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, update
 import { runFullProcoreSync, syncProcoreBidBoard, syncProcoreRoleAssignments, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
 import { runFullCompanycamSync } from "./companycam";
 import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact, triggerPostSyncProcoreUpdates } from "./hubspot-procore-sync";
-import { sendRoleAssignmentEmails } from "./email-notifications";
+import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifications";
 import { sendEmail, isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
-import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects } from "./procore-hubspot-sync";
+import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot } from "./procore-hubspot-sync";
 
 const PgSession = connectPgSimple(session);
 
@@ -482,6 +482,104 @@ export async function registerRoutes(
             entityId: String(event.resource_id || ""),
             source: "procore",
             status: "error",
+            errorMessage: err.message,
+            details: event,
+          });
+        }
+      }
+
+      if (resourceName === "projects" && eventType === "update") {
+        try {
+          const projectId = String(event.project_id || event.resource_id || "");
+          if (projectId) {
+            console.log(`[webhook] Project update detected for ${projectId}, checking for stage change...`);
+
+            const project = await storage.getProcoreProjectByProcoreId(projectId);
+            if (!project) {
+              console.log(`[webhook] Project ${projectId} not found locally, skipping stage change check`);
+            } else {
+              const { fetchProcoreProjectDetail } = await import('./procore');
+              const freshProject = await fetchProcoreProjectDetail(projectId);
+              const newStage = freshProject?.stage_name || freshProject?.project_stage?.name || null;
+              const oldStage = project.stage || null;
+
+              if (newStage && oldStage && newStage.trim() !== oldStage.trim()) {
+                console.log(`[webhook] Stage change detected: "${oldStage}" → "${newStage}" for project ${project.name}`);
+
+                await storage.upsertProcoreProject({
+                  ...project,
+                  stage: newStage,
+                  lastSyncedAt: new Date(),
+                });
+
+                const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+                if (mapping?.hubspotDealId) {
+                  const hubspotStageId = mapProcoreStageToHubspot(newStage);
+
+                  const hubspotPipelines = await storage.getHubspotPipelines();
+                  let hubspotStageName = hubspotStageId;
+                  for (const pipeline of hubspotPipelines) {
+                    const stages = (pipeline.stages as any[]) || [];
+                    const found = stages.find((s: any) => s.stageId === hubspotStageId);
+                    if (found) { hubspotStageName = found.label || found.stageName || hubspotStageId; break; }
+                  }
+
+                  const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
+                  console.log(`[webhook] HubSpot deal ${mapping.hubspotDealId} stage updated: ${updateResult.message}`);
+
+                  const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+
+                  const emailResult = await sendStageChangeEmail({
+                    hubspotDealId: mapping.hubspotDealId,
+                    dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
+                    procoreProjectId: projectId,
+                    procoreProjectName: project.name || 'Unknown Project',
+                    oldStage: oldStage,
+                    newStage: newStage,
+                    hubspotStageName,
+                  });
+
+                  await storage.createAuditLog({
+                    action: 'webhook_stage_change_processed',
+                    entityType: 'project_stage',
+                    entityId: projectId,
+                    source: 'procore',
+                    status: 'success',
+                    details: {
+                      projectId,
+                      projectName: project.name,
+                      oldStage,
+                      newStage,
+                      hubspotDealId: mapping.hubspotDealId,
+                      hubspotStageId,
+                      hubspotStageName,
+                      hubspotUpdateSuccess: updateResult.success,
+                      emailSent: emailResult.sent,
+                      emailRecipient: emailResult.ownerEmail,
+                    },
+                  });
+                } else {
+                  console.log(`[webhook] No HubSpot mapping found for project ${projectId}, stage change logged but not synced`);
+                  await storage.createAuditLog({
+                    action: 'webhook_stage_change_processed',
+                    entityType: 'project_stage',
+                    entityId: projectId,
+                    source: 'procore',
+                    status: 'success',
+                    details: { projectId, projectName: project.name, oldStage, newStage, hubspotDealId: null, reason: 'no_hubspot_mapping' },
+                  });
+                }
+              }
+            }
+          }
+        } catch (err: any) {
+          console.error(`[webhook] Error processing project stage change:`, err.message);
+          await storage.createAuditLog({
+            action: 'webhook_stage_change_processed',
+            entityType: 'project_stage',
+            entityId: String(event.resource_id || ""),
+            source: 'procore',
+            status: 'error',
             errorMessage: err.message,
             details: event,
           });
