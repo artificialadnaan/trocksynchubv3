@@ -182,7 +182,7 @@ function projectDataFromApi(project: any): any {
   };
 }
 
-export async function syncProcoreProjects(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
+export async function syncProcoreProjects(): Promise<{ synced: number; created: number; updated: number; changes: number; stageChanges: Array<{ procoreId: string; projectName: string; oldStage: string; newStage: string }> }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 
@@ -204,6 +204,7 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
   }
 
   let created = 0, updated = 0, changes = 0;
+  const stageChanges: Array<{ procoreId: string; projectName: string; oldStage: string; newStage: string }> = [];
 
   for (const project of companyProjects) {
     const procoreId = String(project.id);
@@ -228,6 +229,14 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
           syncedAt: new Date(),
         });
         changes++;
+        if (change.field === 'stage' || change.field === 'projectStageName') {
+          stageChanges.push({
+            procoreId,
+            projectName: data.name || 'Unknown',
+            oldStage: change.oldValue,
+            newStage: change.newValue,
+          });
+        }
       }
       if (changedFields.length > 0) updated++;
     } else {
@@ -245,7 +254,7 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
     await storage.upsertProcoreProject(data);
   }
 
-  return { synced: companyProjects.length, created, updated, changes };
+  return { synced: companyProjects.length, created, updated, changes, stageChanges };
 }
 
 export async function syncProcoreVendors(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
@@ -793,6 +802,57 @@ export async function runFullProcoreSync(): Promise<{
       await sendRoleAssignmentEmails(roleAssignmentResult.newAssignments);
     } catch (err: any) {
       console.error(`[procore] Email notifications failed:`, err.message);
+    }
+  }
+
+  if (projects.stageChanges && projects.stageChanges.length > 0) {
+    console.log(`[procore] Detected ${projects.stageChanges.length} stage change(s) during polling, processing...`);
+    try {
+      const { sendStageChangeEmail } = await import('./email-notifications');
+      const { mapProcoreStageToHubspot } = await import('./procore-hubspot-sync');
+      const { updateHubSpotDealStage } = await import('./hubspot');
+
+      for (const sc of projects.stageChanges) {
+        const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
+        if (mapping?.hubspotDealId) {
+          const hubspotStageId = mapProcoreStageToHubspot(sc.newStage);
+
+          const hubspotPipelines = await storage.getHubspotPipelines();
+          let hubspotStageName = hubspotStageId;
+          for (const pipeline of hubspotPipelines) {
+            const stages = (pipeline.stages as any[]) || [];
+            const found = stages.find((s: any) => s.stageId === hubspotStageId);
+            if (found) { hubspotStageName = found.label || found.stageName || hubspotStageId; break; }
+          }
+
+          const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
+          console.log(`[procore] Polling stage change: HubSpot deal ${mapping.hubspotDealId} updated to ${hubspotStageName}: ${updateResult.message}`);
+
+          const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+          await sendStageChangeEmail({
+            hubspotDealId: mapping.hubspotDealId,
+            dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
+            procoreProjectId: sc.procoreId,
+            procoreProjectName: sc.projectName,
+            oldStage: sc.oldStage,
+            newStage: sc.newStage,
+            hubspotStageName,
+          });
+
+          await storage.createAuditLog({
+            action: 'polling_stage_change_processed',
+            entityType: 'project_stage',
+            entityId: sc.procoreId,
+            source: 'polling',
+            status: 'success',
+            details: { procoreId: sc.procoreId, projectName: sc.projectName, oldStage: sc.oldStage, newStage: sc.newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName },
+          });
+        } else {
+          console.log(`[procore] Stage change for ${sc.projectName} (${sc.procoreId}) has no HubSpot mapping, skipping email`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[procore] Stage change email processing failed:`, err.message);
     }
   }
 

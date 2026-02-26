@@ -8,7 +8,7 @@ import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, updateHubSpotDealStage } from "./hubspot";
-import { runFullProcoreSync, syncProcoreBidBoard, syncProcoreRoleAssignments, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages } from "./procore";
+import { runFullProcoreSync, syncProcoreBidBoard, syncProcoreRoleAssignments, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages, fetchProcoreProjectDetail } from "./procore";
 import { runFullCompanycamSync } from "./companycam";
 import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact, triggerPostSyncProcoreUpdates } from "./hubspot-procore-sync";
 import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifications";
@@ -500,8 +500,8 @@ export async function registerRoutes(
             } else {
               const { fetchProcoreProjectDetail } = await import('./procore');
               const freshProject = await fetchProcoreProjectDetail(projectId);
-              const newStage = freshProject?.stage_name || freshProject?.project_stage?.name || null;
-              const oldStage = project.stage || null;
+              const newStage = freshProject?.project_stage?.name || freshProject?.stage_name || freshProject?.stage || null;
+              const oldStage = project.projectStageName || project.stage || null;
 
               if (newStage && oldStage && newStage.trim() !== oldStage.trim()) {
                 console.log(`[webhook] Stage change detected: "${oldStage}" → "${newStage}" for project ${project.name}`);
@@ -509,6 +509,7 @@ export async function registerRoutes(
                 await storage.upsertProcoreProject({
                   ...project,
                   stage: newStage,
+                  projectStageName: newStage,
                   lastSyncedAt: new Date(),
                 });
 
@@ -1246,6 +1247,86 @@ export async function registerRoutes(
       const stages = await fetchProcoreProjectStages();
       res.json(stages);
     } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/procore/check-stage-change/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const localProject = await storage.getProcoreProjectByProcoreId(projectId);
+      if (!localProject) return res.status(404).json({ message: "Project not found locally" });
+
+      const freshProject = await fetchProcoreProjectDetail(projectId);
+      const newStage = freshProject?.project_stage?.name || freshProject?.stage_name || freshProject?.stage || null;
+      const oldStage = localProject.projectStageName || localProject.stage || null;
+
+      const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+
+      if (!newStage) {
+        return res.json({ message: "No stage found on Procore project", oldStage, newStage: null, mapping: mapping?.hubspotDealId || null });
+      }
+
+      if (!oldStage || newStage.trim() === oldStage.trim()) {
+        return res.json({ message: "No stage change detected", oldStage, newStage, mapping: mapping?.hubspotDealId || null });
+      }
+
+      console.log(`[manual] Stage change detected for ${localProject.name}: "${oldStage}" → "${newStage}"`);
+
+      await storage.upsertProcoreProject({
+        ...localProject,
+        stage: newStage,
+        projectStageName: newStage,
+        lastSyncedAt: new Date(),
+      });
+
+      let hubspotUpdate = null;
+      let emailResult = null;
+
+      if (mapping?.hubspotDealId) {
+        const hubspotStageId = mapProcoreStageToHubspot(newStage);
+        const hubspotPipelines = await storage.getHubspotPipelines();
+        let hubspotStageName = hubspotStageId;
+        for (const pipeline of hubspotPipelines) {
+          const stages = (pipeline.stages as any[]) || [];
+          const found = stages.find((s: any) => s.stageId === hubspotStageId);
+          if (found) { hubspotStageName = found.label || found.stageName || hubspotStageId; break; }
+        }
+
+        hubspotUpdate = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
+        const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+
+        emailResult = await sendStageChangeEmail({
+          hubspotDealId: mapping.hubspotDealId,
+          dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
+          procoreProjectId: projectId,
+          procoreProjectName: localProject.name || 'Unknown Project',
+          oldStage,
+          newStage,
+          hubspotStageName,
+        });
+
+        await storage.createAuditLog({
+          action: 'manual_stage_change_processed',
+          entityType: 'project_stage',
+          entityId: projectId,
+          source: 'manual',
+          status: 'success',
+          details: { projectId, projectName: localProject.name, oldStage, newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName, emailSent: emailResult?.sent },
+        });
+      }
+
+      res.json({
+        message: "Stage change processed",
+        projectName: localProject.name,
+        oldStage,
+        newStage,
+        hubspotDealId: mapping?.hubspotDealId || null,
+        hubspotUpdate,
+        emailResult,
+      });
+    } catch (e: any) {
+      console.error(`[manual] Stage change check failed:`, e.message);
       res.status(500).json({ message: e.message });
     }
   });
