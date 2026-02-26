@@ -30,11 +30,8 @@ app.get("/_health", (_req, res) => {
 });
 
 app.use((req, res, next) => {
-  if (!appReady) {
-    if (req.path === "/" || req.path === "/_health") {
-      return res.status(200).send("ok");
-    }
-    return res.status(503).send("Starting up...");
+  if (!appReady && req.path.startsWith("/api")) {
+    return res.status(503).json({ message: "Starting up..." });
   }
   next();
 });
