@@ -4,6 +4,23 @@ import { storage } from './storage';
 let connectionSettings: any;
 
 export async function getAccessToken(): Promise<string> {
+  // First, check for access token stored in database from OAuth flow
+  const storedToken = await storage.getOAuthToken("hubspot");
+  if (storedToken?.accessToken) {
+    // Check if token is expired
+    if (storedToken.expiresAt && new Date(storedToken.expiresAt).getTime() <= Date.now()) {
+      console.log('[hubspot] Database token expired, checking other sources...');
+    } else {
+      return storedToken.accessToken;
+    }
+  }
+
+  // Check environment variable
+  if (process.env.HUBSPOT_ACCESS_TOKEN) {
+    return process.env.HUBSPOT_ACCESS_TOKEN;
+  }
+
+  // Fallback to Replit connector (for Replit deployments)
   const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
   const xReplitToken = process.env.REPL_IDENTITY
     ? 'repl ' + process.env.REPL_IDENTITY
@@ -34,7 +51,7 @@ export async function getAccessToken(): Promise<string> {
     const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
 
     if (!connectionSettings || !accessToken) {
-      throw new Error('HubSpot not connected via Replit connector. Falling back to env var.');
+      throw new Error('HubSpot not connected via Replit connector.');
     }
 
     const expiresAt = connectionSettings.settings?.expires_at;
@@ -49,11 +66,7 @@ export async function getAccessToken(): Promise<string> {
     return accessToken;
   }
 
-  if (process.env.HUBSPOT_ACCESS_TOKEN) {
-    return process.env.HUBSPOT_ACCESS_TOKEN;
-  }
-
-  throw new Error('HubSpot token not available. Configure Replit HubSpot integration or set HUBSPOT_ACCESS_TOKEN env var.');
+  throw new Error('HubSpot token not available. Set HUBSPOT_ACCESS_TOKEN env var or connect via OAuth.');
 }
 
 export async function getHubSpotClient(): Promise<Client> {
