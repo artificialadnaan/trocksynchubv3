@@ -45,9 +45,12 @@ export interface IStorage {
   getSyncMappings(): Promise<SyncMapping[]>;
   getSyncMappingByHubspotDealId(dealId: string): Promise<SyncMapping | undefined>;
   getSyncMappingByProcoreProjectId(projectId: string): Promise<SyncMapping | undefined>;
+  getSyncMappingByBidboardProjectId(bidboardProjectId: string): Promise<SyncMapping | undefined>;
+  getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined>;
   createSyncMapping(mapping: InsertSyncMapping): Promise<SyncMapping>;
   updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined>;
   searchSyncMappings(query: string): Promise<SyncMapping[]>;
+  transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined>;
 
   getStageMappings(): Promise<StageMapping[]>;
   createStageMapping(mapping: InsertStageMapping): Promise<StageMapping>;
@@ -208,6 +211,16 @@ export class DatabaseStorage implements IStorage {
     return mapping;
   }
 
+  async getSyncMappingByBidboardProjectId(bidboardProjectId: string): Promise<SyncMapping | undefined> {
+    const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.bidboardProjectId, bidboardProjectId));
+    return mapping;
+  }
+
+  async getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined> {
+    const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.portfolioProjectId, portfolioProjectId));
+    return mapping;
+  }
+
   async createSyncMapping(mapping: InsertSyncMapping): Promise<SyncMapping> {
     const [result] = await db.insert(syncMappings).values(mapping).returning();
     return result;
@@ -226,6 +239,38 @@ export class DatabaseStorage implements IStorage {
         ilike(syncMappings.procoreProjectNumber, `%${query}%`)
       )
     ).orderBy(desc(syncMappings.lastSyncAt));
+  }
+
+  async transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined> {
+    // Find mapping by bidboard project ID
+    let mapping = await this.getSyncMappingByBidboardProjectId(bidboardProjectId);
+    
+    // Fallback: check if procoreProjectId matches (for backwards compatibility)
+    if (!mapping) {
+      mapping = await this.getSyncMappingByProcoreProjectId(bidboardProjectId);
+    }
+    
+    if (!mapping) {
+      console.log(`[transition] No mapping found for BidBoard project ${bidboardProjectId}`);
+      return undefined;
+    }
+    
+    // Update the mapping with portfolio info
+    const [result] = await db.update(syncMappings)
+      .set({
+        portfolioProjectId,
+        portfolioProjectName: portfolioProjectName || mapping.procoreProjectName,
+        procoreProjectId: portfolioProjectId, // Update main project ID to portfolio
+        projectPhase: 'portfolio',
+        sentToPortfolioAt: new Date(),
+        lastSyncAt: new Date(),
+        lastSyncStatus: 'portfolio_transition',
+      })
+      .where(eq(syncMappings.id, mapping.id))
+      .returning();
+    
+    console.log(`[transition] Updated mapping ${mapping.id}: BidBoard ${bidboardProjectId} → Portfolio ${portfolioProjectId}`);
+    return result;
   }
 
   async getStageMappings(): Promise<StageMapping[]> {

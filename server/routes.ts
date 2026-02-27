@@ -3614,6 +3614,132 @@ export async function registerRoutes(
   });
 
   // ============================================
+  // BidBoard ↔ HubSpot Deal Linking
+  // ============================================
+
+  // Link a HubSpot deal to a BidBoard project (before portfolio)
+  app.post("/api/bidboard/link-deal", requireAuth, async (req, res) => {
+    try {
+      const { hubspotDealId, bidboardProjectId, bidboardProjectName, hubspotDealName } = req.body;
+      
+      if (!hubspotDealId || !bidboardProjectId) {
+        return res.status(400).json({ message: "hubspotDealId and bidboardProjectId are required" });
+      }
+      
+      // Check if mapping already exists
+      let mapping = await storage.getSyncMappingByHubspotDealId(hubspotDealId);
+      
+      if (mapping) {
+        // Update existing mapping
+        const updated = await storage.updateSyncMapping(mapping.id, {
+          bidboardProjectId,
+          bidboardProjectName: bidboardProjectName || mapping.bidboardProjectName,
+          procoreProjectId: bidboardProjectId, // For backwards compatibility
+          procoreProjectName: bidboardProjectName || mapping.procoreProjectName,
+          projectPhase: 'bidboard',
+          lastSyncAt: new Date(),
+        });
+        
+        await storage.createAuditLog({
+          action: "bidboard_deal_linked",
+          entityType: "sync_mapping",
+          entityId: String(mapping.id),
+          source: "api",
+          status: "success",
+          details: { hubspotDealId, bidboardProjectId, action: "updated" },
+        });
+        
+        return res.json({ success: true, mapping: updated, action: "updated" });
+      }
+      
+      // Create new mapping
+      const newMapping = await storage.createSyncMapping({
+        hubspotDealId,
+        hubspotDealName,
+        bidboardProjectId,
+        bidboardProjectName,
+        procoreProjectId: bidboardProjectId,
+        procoreProjectName: bidboardProjectName,
+        projectPhase: 'bidboard',
+        lastSyncAt: new Date(),
+        lastSyncStatus: 'linked',
+      });
+      
+      await storage.createAuditLog({
+        action: "bidboard_deal_linked",
+        entityType: "sync_mapping",
+        entityId: String(newMapping.id),
+        source: "api",
+        status: "success",
+        details: { hubspotDealId, bidboardProjectId, action: "created" },
+      });
+      
+      res.json({ success: true, mapping: newMapping, action: "created" });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Transition a project from BidBoard to Portfolio
+  app.post("/api/bidboard/transition-to-portfolio", requireAuth, async (req, res) => {
+    try {
+      const { bidboardProjectId, portfolioProjectId, portfolioProjectName } = req.body;
+      
+      if (!bidboardProjectId || !portfolioProjectId) {
+        return res.status(400).json({ message: "bidboardProjectId and portfolioProjectId are required" });
+      }
+      
+      const mapping = await storage.transitionToPortfolio(bidboardProjectId, portfolioProjectId, portfolioProjectName);
+      
+      if (!mapping) {
+        return res.status(404).json({ message: "No mapping found for BidBoard project" });
+      }
+      
+      await storage.createAuditLog({
+        action: "portfolio_transition",
+        entityType: "sync_mapping",
+        entityId: String(mapping.id),
+        source: "api",
+        status: "success",
+        details: { bidboardProjectId, portfolioProjectId, hubspotDealId: mapping.hubspotDealId },
+      });
+      
+      res.json({ success: true, mapping });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Get project phase info for a HubSpot deal
+  app.get("/api/deals/:dealId/project-phase", requireAuth, async (req, res) => {
+    try {
+      const { dealId } = req.params;
+      const mapping = await storage.getSyncMappingByHubspotDealId(dealId);
+      
+      if (!mapping) {
+        return res.json({ 
+          phase: null, 
+          message: "No project linked to this deal" 
+        });
+      }
+      
+      res.json({
+        phase: mapping.projectPhase || 'unknown',
+        bidboardProjectId: mapping.bidboardProjectId,
+        bidboardProjectName: mapping.bidboardProjectName,
+        portfolioProjectId: mapping.portfolioProjectId,
+        portfolioProjectName: mapping.portfolioProjectName,
+        sentToPortfolioAt: mapping.sentToPortfolioAt,
+        // Backwards compatibility
+        procoreProjectId: mapping.procoreProjectId,
+        procoreProjectName: mapping.procoreProjectName,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ============================================
   // Reporting Dashboard Endpoints
   // ============================================
 

@@ -67,6 +67,13 @@ export const syncMappings = pgTable("sync_mappings", {
   hubspotDealName: text("hubspot_deal_name"),
   procoreProjectName: text("procore_project_name"),
   procoreProjectNumber: text("procore_project_number"),
+  // BidBoard vs Portfolio distinction
+  bidboardProjectId: text("bidboard_project_id"),
+  bidboardProjectName: text("bidboard_project_name"),
+  portfolioProjectId: text("portfolio_project_id"),
+  portfolioProjectName: text("portfolio_project_name"),
+  projectPhase: text("project_phase").default("bidboard"), // 'bidboard' | 'portfolio' | 'both'
+  sentToPortfolioAt: timestamp("sent_to_portfolio_at"),
   lastSyncAt: timestamp("last_sync_at"),
   lastSyncStatus: text("last_sync_status").default("pending"),
   lastSyncDirection: text("last_sync_direction"),
