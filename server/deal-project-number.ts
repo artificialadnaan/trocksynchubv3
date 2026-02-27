@@ -1,6 +1,6 @@
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken } from './hubspot';
-import { sendEmail, renderTemplate } from './gmail';
+import { sendEmail, renderTemplate } from './email-service';
 import { db } from './db';
 import { projectNumberRegistry } from '@shared/schema';
 import { eq, like, desc } from 'drizzle-orm';

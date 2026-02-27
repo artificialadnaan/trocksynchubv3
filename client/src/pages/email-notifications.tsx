@@ -9,6 +9,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Mail,
   Send,
   FileText,
@@ -21,29 +28,36 @@ import {
   X,
   Loader2,
   AlertCircle,
+  Settings2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { format } from "date-fns";
 
-type TabType = "templates" | "sendLog";
+type TabType = "config" | "templates" | "sendLog";
 
 const tabs: { id: TabType; label: string; icon: any }[] = [
+  { id: "config", label: "Configuration", icon: Settings2 },
   { id: "templates", label: "Templates", icon: FileText },
   { id: "sendLog", label: "Send History", icon: History },
 ];
 
 export default function EmailNotificationsPage() {
-  const [activeTab, setActiveTab] = useState<TabType>("templates");
+  const [activeTab, setActiveTab] = useState<TabType>("config");
 
   const { data: stats, isLoading: statsLoading } = useQuery<{
     total: number;
     sent: number;
     failed: number;
     gmailConnected: boolean;
+    outlookConnected: boolean;
+    activeProvider: string;
   }>({
     queryKey: ["/api/email/stats"],
   });
+
+  const activeProvider = stats?.activeProvider || 'gmail';
+  const isConnected = activeProvider === 'gmail' ? stats?.gmailConnected : stats?.outlookConnected;
 
   return (
     <div className="space-y-6">
@@ -62,16 +76,18 @@ export default function EmailNotificationsPage() {
           ) : (
             <>
               <Badge
-                variant={stats?.gmailConnected ? "default" : "destructive"}
+                variant={isConnected ? "default" : "destructive"}
                 className="gap-1"
-                data-testid="badge-gmail-status"
+                data-testid="badge-email-status"
               >
-                {stats?.gmailConnected ? (
+                {isConnected ? (
                   <CheckCircle className="w-3 h-3" />
                 ) : (
                   <AlertCircle className="w-3 h-3" />
                 )}
-                {stats?.gmailConnected ? "Gmail Connected" : "Gmail Not Connected"}
+                {isConnected 
+                  ? `${activeProvider === 'gmail' ? 'Gmail' : 'Outlook'} Connected` 
+                  : `${activeProvider === 'gmail' ? 'Gmail' : 'Outlook'} Not Connected`}
               </Badge>
               <Badge variant="outline" data-testid="badge-emails-sent">
                 {stats?.sent || 0} Sent
@@ -107,8 +123,177 @@ export default function EmailNotificationsPage() {
         })}
       </div>
 
+      {activeTab === "config" && <ConfigTab />}
       {activeTab === "templates" && <TemplatesTab />}
       {activeTab === "sendLog" && <SendLogTab />}
+    </div>
+  );
+}
+
+function ConfigTab() {
+  const { toast } = useToast();
+
+  const { data: config, isLoading } = useQuery<{
+    activeProvider: string;
+    gmailConnected: boolean;
+    gmailEmail?: string;
+    outlookConnected: boolean;
+    outlookEmail?: string;
+  }>({
+    queryKey: ["/api/email/config"],
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: async (provider: string) => {
+      const res = await apiRequest("POST", "/api/email/config", { activeProvider: provider });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/email/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/email/stats"] });
+      toast({ title: "Email provider updated" });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async (data: { to: string }) => {
+      const res = await apiRequest("POST", "/api/email/test", data);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      if (data.success) {
+        toast({ title: "Test email sent successfully" });
+      } else {
+        toast({ title: "Test failed", description: data.error, variant: "destructive" });
+      }
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const [testEmail, setTestEmail] = useState("");
+
+  if (isLoading) {
+    return <Skeleton className="h-64 w-full" />;
+  }
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Mail className="w-4 h-4" />
+            Email Provider
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Active Email Provider</Label>
+            <Select
+              value={config?.activeProvider || "gmail"}
+              onValueChange={(value) => saveMutation.mutate(value)}
+              disabled={saveMutation.isPending}
+            >
+              <SelectTrigger className="w-64" data-testid="select-email-provider">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="gmail">
+                  <div className="flex items-center gap-2">
+                    <span className="w-4 h-4 rounded bg-red-500/20 flex items-center justify-center text-[10px] font-bold text-red-600">G</span>
+                    Gmail
+                    {config?.gmailConnected && <Badge variant="outline" className="ml-2 text-xs">Connected</Badge>}
+                  </div>
+                </SelectItem>
+                <SelectItem value="outlook">
+                  <div className="flex items-center gap-2">
+                    <span className="w-4 h-4 rounded bg-blue-500/20 flex items-center justify-center text-[10px] font-bold text-blue-600">O</span>
+                    Outlook
+                    {config?.outlookConnected && <Badge variant="outline" className="ml-2 text-xs">Connected</Badge>}
+                  </div>
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              All automated emails will be sent through the selected provider.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 pt-2">
+            <div className={`p-4 rounded-lg border ${config?.activeProvider === 'gmail' ? 'border-primary bg-primary/5' : ''}`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-6 h-6 rounded bg-red-500/20 flex items-center justify-center text-xs font-bold text-red-600">G</span>
+                  <span className="font-medium text-sm">Gmail</span>
+                </div>
+                <Badge variant={config?.gmailConnected ? "default" : "secondary"} className={config?.gmailConnected ? "bg-green-500/10 text-green-600" : ""}>
+                  {config?.gmailConnected ? "Connected" : "Not Connected"}
+                </Badge>
+              </div>
+              {config?.gmailEmail && (
+                <p className="text-xs text-muted-foreground">{config.gmailEmail}</p>
+              )}
+              {!config?.gmailConnected && (
+                <p className="text-xs text-muted-foreground mt-1">Configure in Settings → API Connections</p>
+              )}
+            </div>
+
+            <div className={`p-4 rounded-lg border ${config?.activeProvider === 'outlook' ? 'border-primary bg-primary/5' : ''}`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-6 h-6 rounded bg-blue-500/20 flex items-center justify-center text-xs font-bold text-blue-600">O</span>
+                  <span className="font-medium text-sm">Outlook</span>
+                </div>
+                <Badge variant={config?.outlookConnected ? "default" : "secondary"} className={config?.outlookConnected ? "bg-green-500/10 text-green-600" : ""}>
+                  {config?.outlookConnected ? "Connected" : "Not Connected"}
+                </Badge>
+              </div>
+              {config?.outlookEmail && (
+                <p className="text-xs text-muted-foreground">{config.outlookEmail}</p>
+              )}
+              {!config?.outlookConnected && (
+                <p className="text-xs text-muted-foreground mt-1">Configure in Settings → API Connections</p>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Send className="w-4 h-4" />
+            Test Email
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Send a test email using the currently selected provider ({config?.activeProvider === 'outlook' ? 'Outlook' : 'Gmail'}).
+          </p>
+          <div className="flex gap-2">
+            <Input
+              type="email"
+              placeholder="recipient@example.com"
+              value={testEmail}
+              onChange={(e) => setTestEmail(e.target.value)}
+              className="max-w-sm"
+              data-testid="input-test-email"
+            />
+            <Button
+              onClick={() => testMutation.mutate({ to: testEmail })}
+              disabled={!testEmail || testMutation.isPending}
+              data-testid="button-send-test"
+            >
+              {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Send className="w-4 h-4 mr-1" />}
+              Send Test
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

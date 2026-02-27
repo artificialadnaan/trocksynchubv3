@@ -11,6 +11,7 @@ import {
   Database,
   Mail,
   Link2,
+  Archive,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,7 @@ const navItems = [
   { path: "/data-browser", label: "Data Browser", icon: Database },
   { path: "/project-sync", label: "Project Sync", icon: Link2 },
   { path: "/email-notifications", label: "Email Notifications", icon: Mail },
+  { path: "/project-archive", label: "Project Archive", icon: Archive },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },
 ];

@@ -397,6 +397,324 @@ export async function syncBidBoardDocumentsToPortfolio(
   return result;
 }
 
+// ============= Archive Export Functions =============
+
+export interface ArchiveExportResult {
+  success: boolean;
+  files: DocumentInfo[];
+  errors: string[];
+}
+
+export async function exportSpecificationsViaUI(
+  page: Page,
+  projectId: string,
+  outputDir: string
+): Promise<ArchiveExportResult> {
+  const result: ArchiveExportResult = {
+    success: false,
+    files: [],
+    errors: [],
+  };
+
+  try {
+    await ensureTempDir();
+
+    // Navigate to project specifications
+    const specsUrl = `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/specifications`;
+    await page.goto(specsUrl, { waitUntil: "networkidle" });
+    await randomDelay(2000, 3000);
+
+    // Check if specifications tab exists
+    const specsContent = await page.$('[data-testid="specifications-list"], .specifications-container, [class*="specification"]');
+    if (!specsContent) {
+      result.errors.push("Specifications page not found or no specifications available");
+      return result;
+    }
+
+    // Try to find export/download all button
+    const exportAllButton = await page.$('[data-testid="export-specs"], button:has-text("Export"), button:has-text("Download All"), .bulk-download');
+
+    if (exportAllButton) {
+      const [download] = await Promise.all([
+        page.waitForEvent("download", { timeout: 60000 }),
+        exportAllButton.click(),
+      ]);
+
+      const fileName = download.suggestedFilename() || `specifications-${projectId}.zip`;
+      const downloadPath = path.join(outputDir, fileName);
+      await download.saveAs(downloadPath);
+
+      result.files.push({
+        name: fileName,
+        localPath: downloadPath,
+        type: "specifications",
+      });
+
+      log(`Exported specifications for project ${projectId}`, "playwright");
+    } else {
+      // Try to download individual specifications
+      const specItems = await page.$$('[data-testid="spec-item"], .specification-item, .spec-row');
+
+      for (const item of specItems) {
+        try {
+          const downloadBtn = await item.$('button[data-testid="download"], a[download], .download-button');
+          if (downloadBtn) {
+            const [download] = await Promise.all([
+              page.waitForEvent("download", { timeout: 30000 }),
+              downloadBtn.click(),
+            ]);
+
+            const fileName = download.suggestedFilename() || `spec-${Date.now()}.pdf`;
+            const downloadPath = path.join(outputDir, fileName);
+            await download.saveAs(downloadPath);
+
+            result.files.push({
+              name: fileName,
+              localPath: downloadPath,
+              type: "specification",
+            });
+          }
+          await randomDelay(500, 1000);
+        } catch (e) {
+          // Continue with other specs
+        }
+      }
+    }
+
+    result.success = result.files.length > 0;
+    log(`Downloaded ${result.files.length} specification files for project ${projectId}`, "playwright");
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    result.errors.push(errorMessage);
+    log(`Error exporting specifications: ${errorMessage}`, "playwright");
+  }
+
+  return result;
+}
+
+export async function exportDrawingSetPdfsViaUI(
+  page: Page,
+  projectId: string,
+  outputDir: string
+): Promise<ArchiveExportResult> {
+  const result: ArchiveExportResult = {
+    success: false,
+    files: [],
+    errors: [],
+  };
+
+  try {
+    await ensureTempDir();
+
+    // Navigate to project drawings
+    const drawingsUrl = `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/drawings`;
+    await page.goto(drawingsUrl, { waitUntil: "networkidle" });
+    await randomDelay(2000, 3000);
+
+    // Try to find bulk export button
+    const exportButton = await page.$('[data-testid="export-drawings"], button:has-text("Export"), button:has-text("Download All"), .drawing-export-button');
+
+    if (exportButton) {
+      const [download] = await Promise.all([
+        page.waitForEvent("download", { timeout: 120000 }), // Drawings can be large
+        exportButton.click(),
+      ]);
+
+      const fileName = download.suggestedFilename() || `drawings-${projectId}.zip`;
+      const downloadPath = path.join(outputDir, fileName);
+      await download.saveAs(downloadPath);
+
+      result.files.push({
+        name: fileName,
+        localPath: downloadPath,
+        type: "drawings",
+      });
+
+      log(`Exported drawing set for project ${projectId}`, "playwright");
+    } else {
+      result.errors.push("Bulk drawing export button not found - individual downloads may be required");
+    }
+
+    result.success = result.files.length > 0;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    result.errors.push(errorMessage);
+    log(`Error exporting drawings via UI: ${errorMessage}`, "playwright");
+  }
+
+  return result;
+}
+
+export async function exportProjectReportViaUI(
+  page: Page,
+  projectId: string,
+  reportType: "budget" | "submittal_log" | "rfi_log" | "daily_log",
+  outputDir: string
+): Promise<ArchiveExportResult> {
+  const result: ArchiveExportResult = {
+    success: false,
+    files: [],
+    errors: [],
+  };
+
+  try {
+    await ensureTempDir();
+
+    const reportUrls: Record<string, string> = {
+      budget: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/budget`,
+      submittal_log: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/submittals`,
+      rfi_log: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/rfis`,
+      daily_log: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/daily_log`,
+    };
+
+    await page.goto(reportUrls[reportType], { waitUntil: "networkidle" });
+    await randomDelay(2000, 3000);
+
+    // Look for export menu/button
+    const exportTrigger = await page.$('[data-testid="export-menu"], button:has-text("Export"), button:has-text("Report"), .export-dropdown-trigger');
+
+    if (exportTrigger) {
+      await exportTrigger.click();
+      await randomDelay(500, 1000);
+
+      // Look for PDF export option
+      const pdfOption = await page.$('button:has-text("PDF"), [data-testid="export-pdf"], a:has-text("PDF")');
+
+      if (pdfOption) {
+        const [download] = await Promise.all([
+          page.waitForEvent("download", { timeout: 60000 }),
+          pdfOption.click(),
+        ]);
+
+        const fileName = download.suggestedFilename() || `${reportType}-report-${projectId}.pdf`;
+        const downloadPath = path.join(outputDir, fileName);
+        await download.saveAs(downloadPath);
+
+        result.files.push({
+          name: fileName,
+          localPath: downloadPath,
+          type: reportType,
+        });
+
+        log(`Exported ${reportType} report for project ${projectId}`, "playwright");
+      } else {
+        // Try Excel export as fallback
+        const excelOption = await page.$('button:has-text("Excel"), button:has-text("CSV"), [data-testid="export-excel"]');
+
+        if (excelOption) {
+          const [download] = await Promise.all([
+            page.waitForEvent("download", { timeout: 60000 }),
+            excelOption.click(),
+          ]);
+
+          const fileName = download.suggestedFilename() || `${reportType}-report-${projectId}.xlsx`;
+          const downloadPath = path.join(outputDir, fileName);
+          await download.saveAs(downloadPath);
+
+          result.files.push({
+            name: fileName,
+            localPath: downloadPath,
+            type: reportType,
+          });
+
+          log(`Exported ${reportType} report (Excel) for project ${projectId}`, "playwright");
+        } else {
+          result.errors.push(`No export option found for ${reportType}`);
+        }
+      }
+    } else {
+      result.errors.push(`Export button not found for ${reportType}`);
+    }
+
+    result.success = result.files.length > 0;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    result.errors.push(errorMessage);
+    log(`Error exporting ${reportType} report: ${errorMessage}`, "playwright");
+  }
+
+  return result;
+}
+
+export async function exportAllProjectDataViaUI(
+  page: Page,
+  projectId: string,
+  outputDir: string,
+  options: {
+    includeSpecs?: boolean;
+    includeDrawings?: boolean;
+    includeBudgetReport?: boolean;
+    includeSubmittalLog?: boolean;
+    includeRfiLog?: boolean;
+    includeDailyLog?: boolean;
+  } = {}
+): Promise<ArchiveExportResult> {
+  const result: ArchiveExportResult = {
+    success: false,
+    files: [],
+    errors: [],
+  };
+
+  const opts = {
+    includeSpecs: options.includeSpecs ?? true,
+    includeDrawings: options.includeDrawings ?? true,
+    includeBudgetReport: options.includeBudgetReport ?? true,
+    includeSubmittalLog: options.includeSubmittalLog ?? true,
+    includeRfiLog: options.includeRfiLog ?? true,
+    includeDailyLog: options.includeDailyLog ?? false,
+  };
+
+  // Create output directory
+  await fs.mkdir(outputDir, { recursive: true });
+
+  log(`Starting UI-based export for project ${projectId}`, "playwright");
+
+  // Export specifications (API not available)
+  if (opts.includeSpecs) {
+    const specsResult = await exportSpecificationsViaUI(page, projectId, path.join(outputDir, "Specifications"));
+    result.files.push(...specsResult.files);
+    result.errors.push(...specsResult.errors);
+  }
+
+  // Export full drawing set PDFs
+  if (opts.includeDrawings) {
+    const drawingsResult = await exportDrawingSetPdfsViaUI(page, projectId, path.join(outputDir, "Drawings"));
+    result.files.push(...drawingsResult.files);
+    result.errors.push(...drawingsResult.errors);
+  }
+
+  // Export reports
+  if (opts.includeBudgetReport) {
+    const budgetResult = await exportProjectReportViaUI(page, projectId, "budget", path.join(outputDir, "Reports"));
+    result.files.push(...budgetResult.files);
+    result.errors.push(...budgetResult.errors);
+  }
+
+  if (opts.includeSubmittalLog) {
+    const submittalResult = await exportProjectReportViaUI(page, projectId, "submittal_log", path.join(outputDir, "Reports"));
+    result.files.push(...submittalResult.files);
+    result.errors.push(...submittalResult.errors);
+  }
+
+  if (opts.includeRfiLog) {
+    const rfiResult = await exportProjectReportViaUI(page, projectId, "rfi_log", path.join(outputDir, "Reports"));
+    result.files.push(...rfiResult.files);
+    result.errors.push(...rfiResult.errors);
+  }
+
+  if (opts.includeDailyLog) {
+    const dailyResult = await exportProjectReportViaUI(page, projectId, "daily_log", path.join(outputDir, "Reports"));
+    result.files.push(...dailyResult.files);
+    result.errors.push(...dailyResult.errors);
+  }
+
+  result.success = result.files.length > 0;
+
+  log(`UI export complete for project ${projectId}: ${result.files.length} files, ${result.errors.length} errors`, "playwright");
+
+  return result;
+}
+
 export async function exportAndSaveEstimatePdf(
   page: Page,
   bidboardProjectId: string,

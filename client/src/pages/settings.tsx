@@ -49,9 +49,19 @@ export default function SettingsPage() {
   const [hubspotDialogOpen, setHubspotDialogOpen] = useState(false);
   const [procoreDialogOpen, setProcoreDialogOpen] = useState(false);
   const [companycamDialogOpen, setCompanycamDialogOpen] = useState(false);
+  const [microsoftDialogOpen, setMicrosoftDialogOpen] = useState(false);
+  const [gmailDialogOpen, setGmailDialogOpen] = useState(false);
 
   const { data: connections, isLoading: connLoading } = useQuery<any>({
     queryKey: ["/api/dashboard/connections"],
+  });
+
+  const { data: microsoftStatus } = useQuery<{ connected: boolean; email?: string; userName?: string }>({
+    queryKey: ["/api/integrations/microsoft/status"],
+  });
+
+  const { data: gmailStatus } = useQuery<{ connected: boolean; email?: string; userName?: string; method?: string }>({
+    queryKey: ["/api/integrations/gmail/status"],
   });
 
   const { data: integrationConfig } = useQuery<any>({
@@ -128,6 +138,26 @@ export default function SettingsPage() {
                 configuredAt={(integrationConfig?.companycam as any)?.configuredAt}
                 onConfigure={() => setCompanycamDialogOpen(true)}
                 onDisconnect={() => disconnectMutation.mutate("companycam")}
+              />
+
+              <Separator className="my-2" />
+              <p className="text-xs text-muted-foreground font-medium mb-2">Email & Cloud Storage</p>
+
+              <ConnectionCard
+                name="Gmail"
+                description="Send emails via Gmail API"
+                connected={gmailStatus?.connected}
+                email={gmailStatus?.email}
+                onConfigure={() => setGmailDialogOpen(true)}
+                onDisconnect={() => disconnectMutation.mutate("gmail")}
+              />
+              <ConnectionCard
+                name="Microsoft 365"
+                description="OneDrive file storage, Outlook email"
+                connected={microsoftStatus?.connected}
+                email={microsoftStatus?.email}
+                onConfigure={() => setMicrosoftDialogOpen(true)}
+                onDisconnect={() => disconnectMutation.mutate("microsoft")}
               />
             </>
           )}
@@ -234,12 +264,22 @@ export default function SettingsPage() {
         onOpenChange={setCompanycamDialogOpen}
         existingConfig={integrationConfig?.companycam}
       />
+      <MicrosoftConfigDialog
+        open={microsoftDialogOpen}
+        onOpenChange={setMicrosoftDialogOpen}
+        status={microsoftStatus}
+      />
+      <GmailConfigDialog
+        open={gmailDialogOpen}
+        onOpenChange={setGmailDialogOpen}
+        status={gmailStatus}
+      />
     </div>
   );
 }
 
-function ConnectionCard({ name, description, connected, expiresAt, configuredAt, onConfigure, onDisconnect }: {
-  name: string; description: string; connected?: boolean; expiresAt?: string; configuredAt?: string;
+function ConnectionCard({ name, description, connected, expiresAt, configuredAt, email, onConfigure, onDisconnect }: {
+  name: string; description: string; connected?: boolean; expiresAt?: string; configuredAt?: string; email?: string;
   onConfigure: () => void; onDisconnect: () => void;
 }) {
   return (
@@ -252,6 +292,9 @@ function ConnectionCard({ name, description, connected, expiresAt, configuredAt,
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+        {email && (
+          <p className="text-xs text-muted-foreground">Account: {email}</p>
+        )}
         {expiresAt && (
           <p className="text-xs text-muted-foreground">Token expires: {new Date(expiresAt).toLocaleString()}</p>
         )}
@@ -710,6 +753,207 @@ function CompanyCamConfigDialog({ open, onOpenChange, existingConfig }: {
             >
               {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : null}
               Save Configuration
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MicrosoftConfigDialog({ open, onOpenChange, status }: {
+  open: boolean; onOpenChange: (open: boolean) => void; status?: { connected: boolean; email?: string; userName?: string };
+}) {
+  const { toast } = useToast();
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const oauthMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("GET", "/api/oauth/microsoft/authorize");
+      const { url } = await res.json();
+      window.open(url, "_blank");
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/microsoft/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setTestResult(data);
+    },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+              <span className="text-blue-600 font-bold text-sm">MS</span>
+            </div>
+            Microsoft 365 Configuration
+          </DialogTitle>
+          <DialogDescription>
+            Connect to Microsoft 365 for OneDrive file storage and Outlook email sending.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 pt-2">
+          {status?.connected ? (
+            <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+              <p className="text-sm font-medium text-green-700 dark:text-green-400">Connected</p>
+              {status.email && <p className="text-xs text-muted-foreground mt-1">Account: {status.email}</p>}
+              {status.userName && <p className="text-xs text-muted-foreground">Name: {status.userName}</p>}
+            </div>
+          ) : (
+            <div className="p-3 rounded-lg bg-muted/50 border">
+              <p className="text-sm font-medium mb-1">Setup Required</p>
+              <p className="text-xs text-muted-foreground">
+                Set <code className="bg-muted px-1 rounded">MICROSOFT_CLIENT_ID</code> and <code className="bg-muted px-1 rounded">MICROSOFT_CLIENT_SECRET</code> environment variables, then click Authorize.
+              </p>
+            </div>
+          )}
+
+          <div className="p-3 rounded-lg bg-muted/30 border">
+            <p className="text-xs font-medium mb-2">Enabled Features:</p>
+            <ul className="text-xs text-muted-foreground space-y-1">
+              <li>• <strong>OneDrive:</strong> Store project archives and documents</li>
+              <li>• <strong>Outlook:</strong> Send email notifications</li>
+            </ul>
+          </div>
+
+          {testResult && (
+            <TestResultBanner result={testResult} />
+          )}
+
+          <Separator />
+
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              variant="outline"
+              onClick={() => testMutation.mutate()}
+              disabled={testMutation.isPending || !status?.connected}
+              data-testid="button-test-microsoft"
+            >
+              {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+              Test Connection
+            </Button>
+            <Button
+              onClick={() => oauthMutation.mutate()}
+              disabled={oauthMutation.isPending}
+              data-testid="button-oauth-microsoft"
+            >
+              {oauthMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Link2 className="w-4 h-4 mr-1" />}
+              {status?.connected ? "Re-authorize" : "Authorize with Microsoft"}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function GmailConfigDialog({ open, onOpenChange, status }: {
+  open: boolean; onOpenChange: (open: boolean) => void; status?: { connected: boolean; email?: string; userName?: string; method?: string };
+}) {
+  const { toast } = useToast();
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const oauthMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("GET", "/api/oauth/google/authorize");
+      const { url } = await res.json();
+      window.open(url, "_blank");
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/gmail/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setTestResult(data);
+    },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center">
+              <span className="text-red-600 font-bold text-sm">G</span>
+            </div>
+            Gmail Configuration
+          </DialogTitle>
+          <DialogDescription>
+            Connect Gmail to send email notifications via Google's API.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 pt-2">
+          {status?.connected ? (
+            <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+              <p className="text-sm font-medium text-green-700 dark:text-green-400">Connected</p>
+              {status.email && <p className="text-xs text-muted-foreground mt-1">Account: {status.email}</p>}
+              {status.method && <p className="text-xs text-muted-foreground">Method: {status.method === 'oauth' ? 'OAuth' : status.method === 'env' ? 'Environment Variable' : 'Replit Integration'}</p>}
+            </div>
+          ) : (
+            <div className="p-3 rounded-lg bg-muted/50 border">
+              <p className="text-sm font-medium mb-1">Setup Required</p>
+              <p className="text-xs text-muted-foreground">
+                Set <code className="bg-muted px-1 rounded">GOOGLE_CLIENT_ID</code> and <code className="bg-muted px-1 rounded">GOOGLE_CLIENT_SECRET</code> environment variables, then click Authorize.
+              </p>
+            </div>
+          )}
+
+          <div className="p-3 rounded-lg bg-muted/30 border">
+            <p className="text-xs font-medium mb-2">Connection Methods (in priority order):</p>
+            <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
+              <li>OAuth authentication (recommended)</li>
+              <li>GMAIL_ACCESS_TOKEN environment variable</li>
+              <li>Replit Google Mail integration</li>
+            </ol>
+          </div>
+
+          {testResult && (
+            <TestResultBanner result={testResult} />
+          )}
+
+          <Separator />
+
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              variant="outline"
+              onClick={() => testMutation.mutate()}
+              disabled={testMutation.isPending}
+              data-testid="button-test-gmail"
+            >
+              {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+              Test Connection
+            </Button>
+            <Button
+              onClick={() => oauthMutation.mutate()}
+              disabled={oauthMutation.isPending}
+              data-testid="button-oauth-gmail"
+            >
+              {oauthMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Link2 className="w-4 h-4 mr-1" />}
+              {status?.connected && status.method === 'oauth' ? "Re-authorize" : "Authorize with Google"}
             </Button>
           </div>
         </div>

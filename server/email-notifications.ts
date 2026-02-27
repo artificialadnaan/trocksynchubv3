@@ -1,5 +1,5 @@
 import { storage } from './storage';
-import { sendEmail, renderTemplate } from './gmail';
+import { sendEmail, renderTemplate } from './email-service';
 import { getDealOwnerInfo } from './hubspot';
 
 export async function sendRoleAssignmentEmails(

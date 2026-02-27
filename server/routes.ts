@@ -12,7 +12,8 @@ import { runFullProcoreSync, syncProcoreBidBoard, syncProcoreRoleAssignments, up
 import { runFullCompanycamSync } from "./companycam";
 import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact, triggerPostSyncProcoreUpdates } from "./hubspot-procore-sync";
 import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifications";
-import { sendEmail, isGmailConnected } from "./gmail";
+import { sendEmail } from "./email-service";
+import { isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
 import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot } from "./procore-hubspot-sync";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject } from "./bidboard-automation";
@@ -362,6 +363,158 @@ export async function registerRoutes(
       res.redirect("/#/settings?procore=connected");
     } catch (e: any) {
       res.redirect("/#/settings?procore=error&message=" + encodeURIComponent(e.message));
+    }
+  });
+
+  // ============= Microsoft OAuth (OneDrive + Outlook) =============
+  app.get("/api/oauth/microsoft/authorize", async (_req, res) => {
+    try {
+      const { getMicrosoftAuthUrl } = await import("./microsoft");
+      const url = getMicrosoftAuthUrl();
+      res.json({ url });
+    } catch (e: any) {
+      res.status(400).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/oauth/microsoft/callback", async (req, res) => {
+    try {
+      const { code, error, error_description } = req.query;
+      if (error) {
+        return res.redirect(`/#/settings?microsoft=error&message=${encodeURIComponent(error_description as string || error as string)}`);
+      }
+      if (!code) {
+        return res.redirect("/#/settings?microsoft=error&message=Missing%20authorization%20code");
+      }
+
+      const { exchangeMicrosoftCode } = await import("./microsoft");
+      await exchangeMicrosoftCode(code as string);
+
+      await storage.createAuditLog({
+        action: "oauth_connect",
+        entityType: "microsoft",
+        source: "oauth",
+        status: "success",
+        details: { message: "Microsoft OAuth connected (OneDrive + Outlook)" },
+      });
+
+      res.redirect("/#/settings?microsoft=connected");
+    } catch (e: any) {
+      console.error("[Microsoft OAuth] Callback error:", e);
+      res.redirect("/#/settings?microsoft=error&message=" + encodeURIComponent(e.message));
+    }
+  });
+
+  app.get("/api/integrations/microsoft/status", requireAuth, async (_req, res) => {
+    try {
+      const { isMicrosoftConnected } = await import("./microsoft");
+      const status = await isMicrosoftConnected();
+      res.json(status);
+    } catch (e: any) {
+      res.json({ connected: false, error: e.message });
+    }
+  });
+
+  app.post("/api/integrations/microsoft/disconnect", requireAuth, async (_req, res) => {
+    try {
+      const { disconnectMicrosoft } = await import("./microsoft");
+      await disconnectMicrosoft();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/microsoft/test", requireAuth, async (_req, res) => {
+    try {
+      const { getMicrosoftTokens, listOneDriveFolder } = await import("./microsoft");
+      const tokens = await getMicrosoftTokens();
+      if (!tokens) {
+        return res.json({ success: false, message: "Microsoft not connected" });
+      }
+
+      // Test OneDrive access
+      try {
+        await listOneDriveFolder("");
+      } catch (e: any) {
+        return res.json({ success: false, message: `OneDrive access failed: ${e.message}` });
+      }
+
+      res.json({ success: true, message: `Connected as ${tokens.userEmail}` });
+    } catch (e: any) {
+      res.json({ success: false, message: e.message });
+    }
+  });
+
+  // ============= Google OAuth (Gmail) =============
+  app.get("/api/oauth/google/authorize", async (_req, res) => {
+    try {
+      const { getGmailAuthUrl } = await import("./gmail");
+      const url = getGmailAuthUrl();
+      res.json({ url });
+    } catch (e: any) {
+      res.status(400).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/oauth/google/callback", async (req, res) => {
+    try {
+      const { code, error, error_description } = req.query;
+      if (error) {
+        return res.redirect(`/#/settings?gmail=error&message=${encodeURIComponent(error_description as string || error as string)}`);
+      }
+      if (!code) {
+        return res.redirect("/#/settings?gmail=error&message=Missing%20authorization%20code");
+      }
+
+      const { exchangeGoogleCode } = await import("./gmail");
+      await exchangeGoogleCode(code as string);
+
+      await storage.createAuditLog({
+        action: "oauth_connect",
+        entityType: "gmail",
+        source: "oauth",
+        status: "success",
+        details: { message: "Gmail OAuth connected" },
+      });
+
+      res.redirect("/#/settings?gmail=connected");
+    } catch (e: any) {
+      console.error("[Gmail OAuth] Callback error:", e);
+      res.redirect("/#/settings?gmail=error&message=" + encodeURIComponent(e.message));
+    }
+  });
+
+  app.get("/api/integrations/gmail/status", requireAuth, async (_req, res) => {
+    try {
+      const { getGmailConnectionStatus } = await import("./gmail");
+      const status = await getGmailConnectionStatus();
+      res.json(status);
+    } catch (e: any) {
+      res.json({ connected: false, error: e.message });
+    }
+  });
+
+  app.post("/api/integrations/gmail/disconnect", requireAuth, async (_req, res) => {
+    try {
+      const { disconnectGmail } = await import("./gmail");
+      await disconnectGmail();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/gmail/test", requireAuth, async (_req, res) => {
+    try {
+      const { getGmailConnectionStatus, isGmailConnected } = await import("./gmail");
+      const status = await getGmailConnectionStatus();
+      if (!status.connected) {
+        return res.json({ success: false, message: "Gmail not connected" });
+      }
+      res.json({ success: true, message: `Connected${status.email ? ` as ${status.email}` : ''} via ${status.method}` });
+    } catch (e: any) {
+      res.json({ success: false, message: e.message });
     }
   });
 
@@ -2046,9 +2199,29 @@ export async function registerRoutes(
 
   app.get("/api/email/stats", requireAuth, async (_req, res) => {
     try {
-      const counts = await storage.getEmailSendLogCounts();
-      const connected = await isGmailConnected();
-      res.json({ ...counts, gmailConnected: connected });
+      const { getEmailStats } = await import("./email-service");
+      const stats = await getEmailStats();
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/email/config", requireAuth, async (_req, res) => {
+    try {
+      const { getEmailConfig } = await import("./email-service");
+      const config = await getEmailConfig();
+      res.json(config);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/email/config", requireAuth, async (req, res) => {
+    try {
+      const { setEmailConfig } = await import("./email-service");
+      await setEmailConfig(req.body);
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
@@ -2070,6 +2243,121 @@ export async function registerRoutes(
         res.status(500).json({ success: false, message: result.error });
       }
     } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ============= Project Archive API =============
+  app.get("/api/archive/projects", requireAuth, async (_req, res) => {
+    try {
+      const { getArchivableProjects } = await import("./project-archive");
+      const projects = await getArchivableProjects();
+      res.json(projects);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/archive/project/:projectId/summary", requireAuth, async (req, res) => {
+    try {
+      const { getProjectDocumentSummary } = await import("./project-archive");
+      const summary = await getProjectDocumentSummary(req.params.projectId);
+      res.json(summary);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/archive/start", requireAuth, async (req, res) => {
+    try {
+      const { projectId, options } = req.body;
+      if (!projectId) {
+        return res.status(400).json({ message: "Project ID required" });
+      }
+
+      const { startProjectArchive } = await import("./project-archive");
+      const { archiveId } = await startProjectArchive(projectId, options);
+      res.json({ archiveId });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/archive/progress/:archiveId", requireAuth, async (req, res) => {
+    try {
+      const { getArchiveProgress } = await import("./project-archive");
+      const progress = getArchiveProgress(req.params.archiveId);
+      if (!progress) {
+        return res.status(404).json({ message: "Archive not found" });
+      }
+      res.json(progress);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/archive/onedrive/status", requireAuth, async (_req, res) => {
+    try {
+      const { isMicrosoftConnected } = await import("./microsoft");
+      const status = await isMicrosoftConnected();
+      res.json(status);
+    } catch (e: any) {
+      res.json({ connected: false, error: e.message });
+    }
+  });
+
+  // Playwright-based document export (for API-unavailable data like specs)
+  app.post("/api/archive/export-via-ui", requireAuth, async (req, res) => {
+    try {
+      const { projectId, options } = req.body;
+      if (!projectId) {
+        return res.status(400).json({ message: "Project ID required" });
+      }
+
+      const { ensureLoggedIn } = await import("./playwright/auth");
+      const { exportAllProjectDataViaUI } = await import("./playwright/documents");
+      const fs = await import("fs/promises");
+      const path = await import("path");
+
+      // Check if Procore browser credentials are configured
+      const credentialsConfig = await storage.getAutomationConfig("procore_browser_credentials");
+      if (!credentialsConfig?.value || !(credentialsConfig.value as any).email) {
+        return res.status(400).json({
+          message: "Procore browser credentials not configured. Set up in BidBoard Automation settings.",
+        });
+      }
+
+      // Ensure logged in
+      const loginResult = await ensureLoggedIn();
+      if (!loginResult.success) {
+        return res.status(500).json({ message: loginResult.error || "Failed to log in to Procore" });
+      }
+
+      // Create temp directory for exports
+      const outputDir = path.join(process.cwd(), ".playwright-temp", `export-${projectId}-${Date.now()}`);
+      await fs.mkdir(outputDir, { recursive: true });
+
+      // Run UI-based exports
+      const result = await exportAllProjectDataViaUI(
+        loginResult.page,
+        projectId,
+        outputDir,
+        options
+      );
+
+      res.json({
+        success: result.success,
+        filesExported: result.files.length,
+        files: result.files.map((f) => ({
+          name: f.name,
+          type: f.type,
+          localPath: f.localPath,
+        })),
+        errors: result.errors,
+        outputDir,
+      });
+    } catch (e: any) {
+      console.error("[Archive] UI export error:", e);
       res.status(500).json({ message: e.message });
     }
   });
