@@ -153,14 +153,14 @@ export default function TestingPage() {
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 md:space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl md:text-3xl font-bold text-slate-100">Testing & Configuration</h1>
-          <p className="text-slate-400 text-sm md:text-base">Test email notifications and Playwright automation</p>
+          <h1 className="text-xl md:text-2xl font-bold">Testing & Configuration</h1>
+          <p className="text-muted-foreground text-xs md:text-sm mt-1">Test email notifications and Playwright automation</p>
         </div>
         {testingMode?.enabled && (
-          <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-sm px-3 py-1">
+          <Badge variant="destructive" className="text-sm px-3 py-1">
             <AlertTriangle className="w-4 h-4 mr-2" />
             Testing Mode Active
           </Badge>
@@ -168,13 +168,13 @@ export default function TestingPage() {
       </div>
 
       <Tabs defaultValue="email" className="space-y-4">
-        <TabsList className="bg-slate-800/50 border border-slate-700/50 w-full md:w-auto">
-          <TabsTrigger value="email" className="flex-1 md:flex-none data-[state=active]:bg-red-600">
+        <TabsList className="w-full md:w-auto">
+          <TabsTrigger value="email" className="flex-1 md:flex-none">
             <Mail className="w-4 h-4 mr-2" />
             <span className="hidden sm:inline">Email Testing</span>
             <span className="sm:hidden">Email</span>
           </TabsTrigger>
-          <TabsTrigger value="playwright" className="flex-1 md:flex-none data-[state=active]:bg-red-600">
+          <TabsTrigger value="playwright" className="flex-1 md:flex-none">
             <Play className="w-4 h-4 mr-2" />
             <span className="hidden sm:inline">Playwright</span>
             <span className="sm:hidden">Browser</span>
@@ -184,10 +184,10 @@ export default function TestingPage() {
         {/* Email Testing Tab */}
         <TabsContent value="email" className="space-y-4">
           {/* Testing Mode Toggle */}
-          <Card className="bg-slate-800/50 border-slate-700/50">
+          <Card>
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <Settings className="w-5 h-5 text-amber-500" />
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <Settings className="w-5 h-5 text-primary" />
                 Testing Mode
               </CardTitle>
               <CardDescription>
@@ -199,12 +199,12 @@ export default function TestingPage() {
                 <Skeleton className="h-10 w-full" />
               ) : (
                 <>
-                  <div className="flex items-center justify-between p-4 bg-slate-900/50 rounded-lg border border-slate-700/50">
+                  <div className="flex items-center justify-between p-4 rounded-lg border bg-muted/30">
                     <div className="flex items-center gap-3">
-                      <div className={`w-3 h-3 rounded-full ${testingMode?.enabled ? 'bg-amber-500 animate-pulse' : 'bg-slate-600'}`} />
+                      <div className={`w-3 h-3 rounded-full ${testingMode?.enabled ? 'bg-destructive animate-pulse' : 'bg-muted-foreground/30'}`} />
                       <div>
-                        <p className="font-medium text-slate-200">Testing Mode</p>
-                        <p className="text-sm text-slate-400">
+                        <p className="font-medium">Testing Mode</p>
+                        <p className="text-sm text-muted-foreground">
                           {testingMode?.enabled 
                             ? `All emails redirect to ${testingMode.testEmail}` 
                             : 'Emails sent to actual recipients'}
@@ -228,13 +228,11 @@ export default function TestingPage() {
                         value={testEmail}
                         onChange={(e) => setTestEmail(e.target.value)}
                         placeholder="adnaan.iqbal@gmail.com"
-                        className="bg-slate-900/50 border-slate-700"
                       />
                       <Button
                         onClick={() => toggleTestingMode.mutate({ enabled: true, email: testEmail })}
                         disabled={toggleTestingMode.isPending || !testEmail}
                         variant="outline"
-                        className="border-slate-700"
                       >
                         {toggleTestingMode.isPending ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -250,10 +248,10 @@ export default function TestingPage() {
           </Card>
 
           {/* Send Test Email */}
-          <Card className="bg-slate-800/50 border-slate-700/50">
+          <Card>
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <Mail className="w-5 h-5 text-blue-500" />
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <Mail className="w-5 h-5 text-primary" />
                 Send Test Email
               </CardTitle>
               <CardDescription>
@@ -265,7 +263,7 @@ export default function TestingPage() {
                 <div className="space-y-2">
                   <Label>Email Template</Label>
                   <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
-                    <SelectTrigger className="bg-slate-900/50 border-slate-700">
+                    <SelectTrigger>
                       <SelectValue placeholder="Select a template" />
                     </SelectTrigger>
                     <SelectContent>
@@ -283,7 +281,6 @@ export default function TestingPage() {
                     value={testEmail}
                     onChange={(e) => setTestEmail(e.target.value)}
                     placeholder="adnaan.iqbal@gmail.com"
-                    className="bg-slate-900/50 border-slate-700"
                   />
                 </div>
               </div>
@@ -291,7 +288,7 @@ export default function TestingPage() {
               <Button
                 onClick={() => sendTestEmail.mutate({ templateKey: selectedTemplate, recipient: testEmail })}
                 disabled={sendTestEmail.isPending || !selectedTemplate}
-                className="w-full md:w-auto bg-gradient-to-r from-blue-600 to-blue-700"
+                className="w-full md:w-auto"
               >
                 {sendTestEmail.isPending ? (
                   <>
@@ -309,14 +306,14 @@ export default function TestingPage() {
               {sendTestEmail.isSuccess && (
                 <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg flex items-center gap-2">
                   <CheckCircle2 className="w-5 h-5 text-green-500" />
-                  <span className="text-green-400">Test email sent successfully via {sendTestEmail.data.provider}</span>
+                  <span className="text-green-600 dark:text-green-400">Test email sent successfully via {sendTestEmail.data.provider}</span>
                 </div>
               )}
               
               {sendTestEmail.isError && (
-                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center gap-2">
-                  <AlertCircle className="w-5 h-5 text-red-500" />
-                  <span className="text-red-400">Failed to send test email</span>
+                <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 text-destructive" />
+                  <span className="text-destructive">Failed to send test email</span>
                 </div>
               )}
             </CardContent>
@@ -326,10 +323,10 @@ export default function TestingPage() {
         {/* Playwright Testing Tab */}
         <TabsContent value="playwright" className="space-y-4">
           {/* Playwright Status */}
-          <Card className="bg-slate-800/50 border-slate-700/50">
+          <Card>
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <Play className="w-5 h-5 text-purple-500" />
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <Play className="w-5 h-5 text-primary" />
                 Playwright Status
               </CardTitle>
               <CardDescription>
@@ -341,29 +338,29 @@ export default function TestingPage() {
                 <Skeleton className="h-20 w-full" />
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700/50">
+                  <div className="p-4 rounded-lg border bg-muted/30">
                     <div className="flex items-center gap-2 mb-2">
                       {playwrightStatus?.playwrightInstalled ? (
                         <CheckCircle2 className="w-5 h-5 text-green-500" />
                       ) : (
-                        <AlertCircle className="w-5 h-5 text-red-500" />
+                        <AlertCircle className="w-5 h-5 text-destructive" />
                       )}
-                      <span className="font-medium text-slate-200">Playwright</span>
+                      <span className="font-medium">Playwright</span>
                     </div>
-                    <p className="text-sm text-slate-400">
+                    <p className="text-sm text-muted-foreground">
                       {playwrightStatus?.playwrightInstalled ? 'Installed' : 'Not installed'}
                     </p>
                   </div>
-                  <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700/50">
+                  <div className="p-4 rounded-lg border bg-muted/30">
                     <div className="flex items-center gap-2 mb-2">
                       {playwrightStatus?.browserAvailable ? (
                         <CheckCircle2 className="w-5 h-5 text-green-500" />
                       ) : (
-                        <AlertCircle className="w-5 h-5 text-red-500" />
+                        <AlertCircle className="w-5 h-5 text-destructive" />
                       )}
-                      <span className="font-medium text-slate-200">Browser</span>
+                      <span className="font-medium">Browser</span>
                     </div>
-                    <p className="text-sm text-slate-400">
+                    <p className="text-sm text-muted-foreground">
                       {playwrightStatus?.browserAvailable 
                         ? `Chromium ${playwrightStatus.browserVersion}` 
                         : playwrightStatus?.error || 'Not available'}
@@ -375,10 +372,10 @@ export default function TestingPage() {
           </Card>
 
           {/* Screenshot Tests */}
-          <Card className="bg-slate-800/50 border-slate-700/50">
+          <Card>
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <Camera className="w-5 h-5 text-cyan-500" />
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <Camera className="w-5 h-5 text-primary" />
                 Capture Screenshots
               </CardTitle>
               <CardDescription>
@@ -392,7 +389,6 @@ export default function TestingPage() {
                   value={projectId}
                   onChange={(e) => setProjectId(e.target.value)}
                   placeholder="Enter Procore Project ID"
-                  className="bg-slate-900/50 border-slate-700"
                 />
               </div>
               
@@ -401,7 +397,6 @@ export default function TestingPage() {
                   onClick={() => bidboardScreenshot.mutate(projectId || undefined)}
                   disabled={bidboardScreenshot.isPending}
                   variant="outline"
-                  className="border-slate-700"
                 >
                   {bidboardScreenshot.isPending ? (
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -414,7 +409,6 @@ export default function TestingPage() {
                   onClick={() => portfolioScreenshot.mutate(projectId || undefined)}
                   disabled={portfolioScreenshot.isPending}
                   variant="outline"
-                  className="border-slate-700"
                 >
                   {portfolioScreenshot.isPending ? (
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -428,10 +422,10 @@ export default function TestingPage() {
           </Card>
 
           {/* Data Extraction Tests */}
-          <Card className="bg-slate-800/50 border-slate-700/50">
+          <Card>
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <FileText className="w-5 h-5 text-orange-500" />
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <FileText className="w-5 h-5 text-primary" />
                 Data Extraction Tests
               </CardTitle>
               <CardDescription>
@@ -445,7 +439,6 @@ export default function TestingPage() {
                   value={projectId}
                   onChange={(e) => setProjectId(e.target.value)}
                   placeholder="Enter Procore Project ID"
-                  className="bg-slate-900/50 border-slate-700"
                 />
               </div>
               
@@ -454,7 +447,6 @@ export default function TestingPage() {
                   onClick={() => bidboardExtract.mutate(projectId)}
                   disabled={bidboardExtract.isPending || !projectId}
                   variant="outline"
-                  className="border-slate-700"
                 >
                   {bidboardExtract.isPending ? (
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -467,7 +459,6 @@ export default function TestingPage() {
                   onClick={() => documentsExtract.mutate(projectId)}
                   disabled={documentsExtract.isPending || !projectId}
                   variant="outline"
-                  className="border-slate-700"
                 >
                   {documentsExtract.isPending ? (
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -480,9 +471,9 @@ export default function TestingPage() {
               
               {/* Extraction Results */}
               {extractionResult && (
-                <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700/50 overflow-auto max-h-64">
-                  <p className="text-sm font-medium text-slate-300 mb-2">Extraction Results:</p>
-                  <pre className="text-xs text-slate-400 whitespace-pre-wrap">
+                <div className="p-4 rounded-lg border bg-muted/30 overflow-auto max-h-64">
+                  <p className="text-sm font-medium mb-2">Extraction Results:</p>
+                  <pre className="text-xs text-muted-foreground whitespace-pre-wrap">
                     {JSON.stringify(extractionResult, null, 2)}
                   </pre>
                 </div>
@@ -492,12 +483,12 @@ export default function TestingPage() {
 
           {/* Screenshot Preview */}
           {screenshotResult && (
-            <Card className="bg-slate-800/50 border-slate-700/50">
+            <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Screenshot Preview</CardTitle>
+                <CardTitle className="text-base font-semibold">Screenshot Preview</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="border border-slate-700 rounded-lg overflow-hidden">
+                <div className="border rounded-lg overflow-hidden">
                   <img 
                     src={screenshotResult} 
                     alt="Screenshot" 
@@ -507,7 +498,7 @@ export default function TestingPage() {
                 <Button
                   onClick={() => setScreenshotResult(null)}
                   variant="outline"
-                  className="mt-4 border-slate-700"
+                  className="mt-4"
                 >
                   Clear Screenshot
                 </Button>
