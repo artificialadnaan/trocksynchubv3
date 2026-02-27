@@ -2427,6 +2427,7 @@ export async function registerRoutes(
   // Dedicated endpoint to refresh HubSpot pipelines
   app.post("/api/stage-mapping/refresh-hubspot-pipelines", requireAuth, async (_req, res) => {
     try {
+      console.log('[refresh-pipelines] Starting pipeline refresh...');
       const { syncHubSpotPipelines } = await import('./hubspot');
       const pipelines = await syncHubSpotPipelines();
       
@@ -2443,6 +2444,8 @@ export async function registerRoutes(
         }
       }
       
+      console.log('[refresh-pipelines] Complete:', pipelines.length, 'pipelines,', stages.length, 'stages');
+      
       res.json({ 
         success: true, 
         message: `Synced ${pipelines.length} pipelines with ${stages.length} stages`,
@@ -2450,7 +2453,84 @@ export async function registerRoutes(
         stages 
       });
     } catch (e: any) {
+      console.error('[refresh-pipelines] Error:', e.message);
       res.status(500).json({ success: false, message: e.message });
+    }
+  });
+  
+  // Diagnostic endpoint to debug HubSpot pipeline issues
+  app.get("/api/debug/hubspot-pipelines", requireAuth, async (_req, res) => {
+    const results: any = {
+      timestamp: new Date().toISOString(),
+      tokenStatus: 'unknown',
+      apiResponse: null,
+      error: null,
+      databasePipelines: [],
+    };
+    
+    try {
+      // Check token status
+      const token = await storage.getOAuthToken("hubspot");
+      results.tokenStatus = {
+        hasToken: !!token?.accessToken,
+        tokenLength: token?.accessToken?.length || 0,
+        tokenPrefix: token?.accessToken?.substring(0, 20) + '...',
+        hasRefreshToken: !!token?.refreshToken,
+        expiresAt: token?.expiresAt,
+        isExpired: token?.expiresAt ? new Date(token.expiresAt).getTime() < Date.now() : 'no expiry set',
+      };
+      
+      // Check env var
+      results.envVarSet = !!process.env.HUBSPOT_ACCESS_TOKEN;
+      
+      // Try to fetch pipelines directly from HubSpot API
+      const { getAccessToken } = await import('./hubspot');
+      const accessToken = await getAccessToken();
+      results.resolvedTokenLength = accessToken.length;
+      results.resolvedTokenPrefix = accessToken.substring(0, 20) + '...';
+      
+      // Make direct API call to HubSpot
+      console.log('[debug] Making direct API call to HubSpot pipelines endpoint...');
+      const apiResponse = await fetch('https://api.hubapi.com/crm/v3/pipelines/deals', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+        },
+      });
+      
+      results.apiStatusCode = apiResponse.status;
+      results.apiStatusText = apiResponse.statusText;
+      
+      if (apiResponse.ok) {
+        const data = await apiResponse.json();
+        results.apiResponse = {
+          pipelineCount: data.results?.length || 0,
+          pipelines: data.results?.map((p: any) => ({
+            id: p.id,
+            label: p.label,
+            stageCount: p.stages?.length || 0,
+            stages: p.stages?.map((s: any) => ({ id: s.id, label: s.label })),
+          })),
+        };
+      } else {
+        const errorText = await apiResponse.text();
+        results.apiError = errorText;
+      }
+      
+      // Check what's in the database
+      const dbPipelines = await storage.getHubspotPipelines();
+      results.databasePipelines = dbPipelines.map(p => ({
+        id: p.id,
+        hubspotId: p.hubspotId,
+        label: p.label,
+        stageCount: (p.stages as any[])?.length || 0,
+      }));
+      
+      res.json(results);
+    } catch (e: any) {
+      results.error = e.message;
+      results.errorStack = e.stack?.split('\n').slice(0, 5);
+      res.json(results);
     }
   });
 
