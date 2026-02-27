@@ -1249,27 +1249,128 @@ export class DatabaseStorage implements IStorage {
   async seedEmailTemplates(): Promise<void> {
     const existingTemplates = await this.getEmailTemplates();
     
+    // T-Rock branded email wrapper
+    const emailWrapper = (content: string) => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>T-Rock Construction</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f4f4f5; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f4f4f5;">
+    <tr>
+      <td style="padding: 40px 20px;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="margin: 0 auto; max-width: 600px;">
+          
+          <!-- Header with Logo -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 30px 40px; border-radius: 12px 12px 0 0; text-align: center;">
+              <img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction" width="180" style="max-width: 180px; height: auto;">
+            </td>
+          </tr>
+          
+          <!-- Orange Accent Bar -->
+          <tr>
+            <td style="background: linear-gradient(90deg, #f97316 0%, #fb923c 100%); height: 4px;"></td>
+          </tr>
+          
+          <!-- Main Content -->
+          <tr>
+            <td style="background-color: #ffffff; padding: 40px;">
+              ${content}
+            </td>
+          </tr>
+          
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #1a1a2e; padding: 30px 40px; border-radius: 0 0 12px 12px;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr>
+                  <td style="text-align: center;">
+                    <p style="color: #94a3b8; font-size: 13px; margin: 0 0 10px 0; line-height: 1.5;">
+                      T-Rock Construction, LLC<br>
+                      3001 Long Prairie Rd. Ste. 200, Flower Mound, TX 75022
+                    </p>
+                    <p style="color: #64748b; font-size: 12px; margin: 0;">
+                      <a href="tel:2145484733" style="color: #f97316; text-decoration: none;">(214) 548-4733</a> &nbsp;|&nbsp;
+                      <a href="https://trockgc.com" style="color: #f97316; text-decoration: none;">trockgc.com</a>
+                    </p>
+                    <p style="color: #475569; font-size: 11px; margin: 20px 0 0 0;">
+                      © ${new Date().getFullYear()} T-Rock Construction. All rights reserved.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
     const defaultTemplates = [
       {
         templateKey: "project_role_assignment",
         name: "Project Role Assignment",
         description: "Sent when a user is assigned a role on a Procore project",
-        subject: "You've been assigned to {{projectName}}",
-        bodyHtml: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #333;">Project Role Assignment</h2>
-            <p>Hello {{assigneeName}},</p>
-            <p>You have been assigned the role of <strong>{{roleName}}</strong> on the project <strong>{{projectName}}</strong>.</p>
-            <p>
-              <a href="{{projectUrl}}" style="display: inline-block; background-color: #f97316; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">
-                View Project in Procore
-              </a>
-            </p>
-            <p style="color: #666; font-size: 14px; margin-top: 24px;">
-              This is an automated notification from T-Rock Sync Hub.
-            </p>
-          </div>
-        `,
+        subject: "🏗️ You've been assigned to {{projectName}} | T-Rock Construction",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #f97316 0%, #fb923c 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">👷</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                New Project Assignment
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                You've been added to a project team
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Hello <strong style="color: #1a1a2e;">{{assigneeName}}</strong>,
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                You have been assigned a new role on one of our active projects. Please review the details below:
+              </p>
+              
+              <!-- Info Card -->
+              <div style="background: linear-gradient(135deg, #fef3c7 0%, #fef9c3 100%); border-left: 4px solid #f97316; border-radius: 8px; padding: 20px; margin: 0 0 32px 0;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 8px 0;">
+                      <span style="color: #92400e; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project</span><br>
+                      <span style="color: #1a1a2e; font-size: 18px; font-weight: 700;">{{projectName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; border-top: 1px solid #fcd34d;">
+                      <span style="color: #92400e; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Your Role</span><br>
+                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{roleName}}</span>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- CTA Button -->
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="{{projectUrl}}" style="display: inline-block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(249, 115, 22, 0.4);">
+                  View Project in Procore →
+                </a>
+              </div>
+              
+              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 32px 0 0 0; text-align: center;">
+                If you have questions about this assignment, please contact your project manager.
+              </p>
+        `),
         enabled: true,
         variables: ["assigneeName", "projectName", "roleName", "projectUrl", "projectId", "companyId"],
       },
@@ -1277,21 +1378,51 @@ export class DatabaseStorage implements IStorage {
         templateKey: "stage_change_notification",
         name: "Deal Stage Change",
         description: "Sent when a deal/project stage changes",
-        subject: "{{projectName}} - Stage Updated to {{newStage}}",
-        bodyHtml: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #333;">Project Stage Update</h2>
-            <p>Hello,</p>
-            <p>The project <strong>{{projectName}}</strong> has been updated:</p>
-            <ul>
-              <li>Previous Stage: {{previousStage}}</li>
-              <li>New Stage: <strong>{{newStage}}</strong></li>
-            </ul>
-            <p style="color: #666; font-size: 14px; margin-top: 24px;">
-              This is an automated notification from T-Rock Sync Hub.
-            </p>
-          </div>
-        `,
+        subject: "📊 Stage Update: {{projectName}} → {{newStage}}",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #34d399 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">📈</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                Project Stage Updated
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                A project has moved to a new stage
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                The following project has progressed to a new stage in the pipeline:
+              </p>
+              
+              <!-- Project Name Card -->
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;">
+                <span style="color: #94a3b8; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project</span>
+                <h2 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 8px 0 0 0;">{{projectName}}</h2>
+              </div>
+              
+              <!-- Stage Change Visual -->
+              <div style="display: table; width: 100%; margin: 0 0 32px 0;">
+                <div style="display: table-cell; width: 45%; vertical-align: middle; text-align: center; padding: 20px; background-color: #fee2e2; border-radius: 8px;">
+                  <span style="color: #991b1b; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Previous Stage</span>
+                  <p style="color: #7f1d1d; font-size: 16px; font-weight: 700; margin: 8px 0 0 0;">{{previousStage}}</p>
+                </div>
+                <div style="display: table-cell; width: 10%; vertical-align: middle; text-align: center;">
+                  <span style="color: #f97316; font-size: 24px;">→</span>
+                </div>
+                <div style="display: table-cell; width: 45%; vertical-align: middle; text-align: center; padding: 20px; background-color: #dcfce7; border-radius: 8px;">
+                  <span style="color: #166534; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">New Stage</span>
+                  <p style="color: #14532d; font-size: 16px; font-weight: 700; margin: 8px 0 0 0;">{{newStage}}</p>
+                </div>
+              </div>
+              
+              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 0; text-align: center; padding: 20px; background-color: #f8fafc; border-radius: 8px;">
+                This notification was automatically generated by T-Rock Sync Hub when the project stage was updated.
+              </p>
+        `),
         enabled: true,
         variables: ["projectName", "previousStage", "newStage"],
       },
@@ -1299,21 +1430,53 @@ export class DatabaseStorage implements IStorage {
         templateKey: "bidboard_sync_summary",
         name: "BidBoard Sync Summary",
         description: "Daily/hourly summary of BidBoard sync activities",
-        subject: "BidBoard Sync Summary - {{date}}",
-        bodyHtml: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #333;">BidBoard Sync Summary</h2>
-            <p>Here's a summary of recent BidBoard sync activities:</p>
-            <ul>
-              <li>Projects Scanned: {{projectsScanned}}</li>
-              <li>Stage Changes Detected: {{stageChanges}}</li>
-              <li>Portfolio Transitions: {{portfolioTransitions}}</li>
-            </ul>
-            <p style="color: #666; font-size: 14px; margin-top: 24px;">
-              Generated on {{date}} by T-Rock Sync Hub.
-            </p>
-          </div>
-        `,
+        subject: "📋 BidBoard Sync Report | {{date}}",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">📊</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                BidBoard Sync Summary
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                Automated sync report for {{date}}
+              </p>
+              
+              <!-- Stats Grid -->
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 32px 0;">
+                <tr>
+                  <td style="padding: 8px; width: 33.33%;">
+                    <div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-radius: 12px; padding: 24px; text-align: center;">
+                      <span style="font-size: 32px; font-weight: 800; color: #1d4ed8;">{{projectsScanned}}</span>
+                      <p style="color: #1e40af; font-size: 12px; text-transform: uppercase; font-weight: 600; margin: 8px 0 0 0; letter-spacing: 0.5px;">Projects Scanned</p>
+                    </div>
+                  </td>
+                  <td style="padding: 8px; width: 33.33%;">
+                    <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; padding: 24px; text-align: center;">
+                      <span style="font-size: 32px; font-weight: 800; color: #d97706;">{{stageChanges}}</span>
+                      <p style="color: #b45309; font-size: 12px; text-transform: uppercase; font-weight: 600; margin: 8px 0 0 0; letter-spacing: 0.5px;">Stage Changes</p>
+                    </div>
+                  </td>
+                  <td style="padding: 8px; width: 33.33%;">
+                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 24px; text-align: center;">
+                      <span style="font-size: 32px; font-weight: 800; color: #15803d;">{{portfolioTransitions}}</span>
+                      <p style="color: #166534; font-size: 12px; text-transform: uppercase; font-weight: 600; margin: 8px 0 0 0; letter-spacing: 0.5px;">Portfolio Moves</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+              
+              <div style="background-color: #f8fafc; border-radius: 8px; padding: 20px; text-align: center;">
+                <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 0;">
+                  This automated report provides an overview of BidBoard synchronization activities.<br>
+                  <span style="color: #94a3b8; font-size: 12px;">Generated by T-Rock Sync Hub</span>
+                </p>
+              </div>
+        `),
         enabled: false,
         variables: ["date", "projectsScanned", "stageChanges", "portfolioTransitions"],
       },
