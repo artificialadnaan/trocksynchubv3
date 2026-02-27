@@ -657,14 +657,69 @@ export async function registerRoutes(
         try {
           const projectId = String(event.project_id || event.resource_id || "");
           if (projectId) {
-            console.log(`[webhook] Project update detected for ${projectId}, checking for stage change...`);
+            console.log(`[webhook] Project update detected for ${projectId}, checking for changes...`);
 
             const project = await storage.getProcoreProjectByProcoreId(projectId);
             if (!project) {
-              console.log(`[webhook] Project ${projectId} not found locally, skipping stage change check`);
+              console.log(`[webhook] Project ${projectId} not found locally, skipping change check`);
             } else {
               const { fetchProcoreProjectDetail } = await import('./procore');
               const freshProject = await fetchProcoreProjectDetail(projectId);
+              
+              // Check for project deactivation (status changed to inactive)
+              const wasActive = project.active ?? true;
+              const isNowActive = freshProject?.active ?? true;
+              
+              if (wasActive && !isNowActive) {
+                console.log(`[webhook] Project ${project.name} (${projectId}) was DEACTIVATED - triggering archive & data extraction...`);
+                
+                // Update local project record first
+                await storage.upsertProcoreProject({
+                  ...project,
+                  active: false,
+                  lastSyncedAt: new Date(),
+                });
+                
+                // Trigger archive and data extraction
+                try {
+                  const { runProjectCloseout } = await import('./closeout-automation');
+                  const closeoutResult = await runProjectCloseout(projectId, {
+                    sendSurvey: true,
+                    archiveToOneDrive: true,
+                    deactivateProject: false, // Already deactivated in Procore
+                    updateHubSpotStage: true,
+                  });
+                  
+                  console.log(`[webhook] Closeout automation completed for deactivated project ${projectId}:`, closeoutResult);
+                  
+                  await storage.createAuditLog({
+                    action: 'project_deactivation_closeout',
+                    entityType: 'project',
+                    entityId: projectId,
+                    source: 'procore',
+                    status: 'success',
+                    details: {
+                      projectId,
+                      projectName: project.name,
+                      closeoutResult,
+                      triggeredBy: 'procore_webhook',
+                    },
+                  });
+                } catch (closeoutErr: any) {
+                  console.error(`[webhook] Closeout automation failed for project ${projectId}:`, closeoutErr.message);
+                  await storage.createAuditLog({
+                    action: 'project_deactivation_closeout',
+                    entityType: 'project',
+                    entityId: projectId,
+                    source: 'procore',
+                    status: 'error',
+                    errorMessage: closeoutErr.message,
+                    details: { projectId, projectName: project.name },
+                  });
+                }
+              }
+              
+              // Check for stage changes
               const newStage = freshProject?.project_stage?.name || freshProject?.stage_name || freshProject?.stage || null;
               const oldStage = project.projectStageName || project.stage || null;
 
