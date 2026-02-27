@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { storage } from "./storage";
 
 const app = express();
 const httpServer = createServer(app);
@@ -86,6 +87,13 @@ httpServer.listen(
 
 (async () => {
   await registerRoutes(httpServer, app);
+
+  // Seed default email templates if they don't exist
+  try {
+    await storage.seedEmailTemplates();
+  } catch (e) {
+    console.log("[seed] Email templates seeding skipped or failed:", e);
+  }
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

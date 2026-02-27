@@ -1245,6 +1245,88 @@ export class DatabaseStorage implements IStorage {
       .returning();
     return result;
   }
+
+  async seedEmailTemplates(): Promise<void> {
+    const existingTemplates = await this.getEmailTemplates();
+    
+    const defaultTemplates = [
+      {
+        templateKey: "project_role_assignment",
+        name: "Project Role Assignment",
+        description: "Sent when a user is assigned a role on a Procore project",
+        subject: "You've been assigned to {{projectName}}",
+        bodyHtml: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #333;">Project Role Assignment</h2>
+            <p>Hello {{assigneeName}},</p>
+            <p>You have been assigned the role of <strong>{{roleName}}</strong> on the project <strong>{{projectName}}</strong>.</p>
+            <p>
+              <a href="{{projectUrl}}" style="display: inline-block; background-color: #f97316; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px;">
+                View Project in Procore
+              </a>
+            </p>
+            <p style="color: #666; font-size: 14px; margin-top: 24px;">
+              This is an automated notification from T-Rock Sync Hub.
+            </p>
+          </div>
+        `,
+        enabled: true,
+        variables: ["assigneeName", "projectName", "roleName", "projectUrl", "projectId", "companyId"],
+      },
+      {
+        templateKey: "stage_change_notification",
+        name: "Deal Stage Change",
+        description: "Sent when a deal/project stage changes",
+        subject: "{{projectName}} - Stage Updated to {{newStage}}",
+        bodyHtml: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #333;">Project Stage Update</h2>
+            <p>Hello,</p>
+            <p>The project <strong>{{projectName}}</strong> has been updated:</p>
+            <ul>
+              <li>Previous Stage: {{previousStage}}</li>
+              <li>New Stage: <strong>{{newStage}}</strong></li>
+            </ul>
+            <p style="color: #666; font-size: 14px; margin-top: 24px;">
+              This is an automated notification from T-Rock Sync Hub.
+            </p>
+          </div>
+        `,
+        enabled: true,
+        variables: ["projectName", "previousStage", "newStage"],
+      },
+      {
+        templateKey: "bidboard_sync_summary",
+        name: "BidBoard Sync Summary",
+        description: "Daily/hourly summary of BidBoard sync activities",
+        subject: "BidBoard Sync Summary - {{date}}",
+        bodyHtml: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #333;">BidBoard Sync Summary</h2>
+            <p>Here's a summary of recent BidBoard sync activities:</p>
+            <ul>
+              <li>Projects Scanned: {{projectsScanned}}</li>
+              <li>Stage Changes Detected: {{stageChanges}}</li>
+              <li>Portfolio Transitions: {{portfolioTransitions}}</li>
+            </ul>
+            <p style="color: #666; font-size: 14px; margin-top: 24px;">
+              Generated on {{date}} by T-Rock Sync Hub.
+            </p>
+          </div>
+        `,
+        enabled: false,
+        variables: ["date", "projectsScanned", "stageChanges", "portfolioTransitions"],
+      },
+    ];
+
+    for (const template of defaultTemplates) {
+      const exists = existingTemplates.find(t => t.templateKey === template.templateKey);
+      if (!exists) {
+        await db.insert(emailTemplates).values(template);
+        console.log(`[seed] Created email template: ${template.templateKey}`);
+      }
+    }
+  }
 }
 
 export const storage = new DatabaseStorage();
