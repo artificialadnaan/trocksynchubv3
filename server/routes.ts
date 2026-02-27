@@ -446,6 +446,98 @@ export async function registerRoutes(
     }
   });
 
+  // ============= SharePoint Configuration =============
+  app.get("/api/integrations/sharepoint/config", requireAuth, async (_req, res) => {
+    try {
+      const { getSharePointConfig, isSharePointConnected } = await import("./microsoft");
+      const config = await getSharePointConfig();
+      const connected = await isSharePointConnected();
+      res.json({ config, connected });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/sharepoint/config", requireAuth, async (req, res) => {
+    try {
+      const { siteUrl, siteName, documentLibrary } = req.body;
+      
+      if (!siteUrl || !siteName) {
+        return res.status(400).json({ message: "Site URL and Site Name are required" });
+      }
+
+      const { setSharePointConfig } = await import("./microsoft");
+      await setSharePointConfig({
+        siteUrl: siteUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        siteName,
+        documentLibrary: documentLibrary || 'Documents',
+      });
+
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/integrations/sharepoint/sites", requireAuth, async (_req, res) => {
+    try {
+      const { listSharePointSites, isMicrosoftConnected } = await import("./microsoft");
+      const msStatus = await isMicrosoftConnected();
+      if (!msStatus.connected) {
+        return res.status(400).json({ message: "Microsoft not connected. Please connect Microsoft 365 first." });
+      }
+      const sites = await listSharePointSites();
+      res.json(sites);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/integrations/sharepoint/drives", requireAuth, async (req, res) => {
+    try {
+      const { listSharePointDrives, isMicrosoftConnected, getSharePointSiteId } = await import("./microsoft");
+      const msStatus = await isMicrosoftConnected();
+      if (!msStatus.connected) {
+        return res.status(400).json({ message: "Microsoft not connected" });
+      }
+      
+      const siteId = req.query.siteId as string || await getSharePointSiteId();
+      if (!siteId) {
+        return res.status(400).json({ message: "SharePoint site not configured" });
+      }
+      
+      const drives = await listSharePointDrives(siteId);
+      res.json(drives);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/integrations/sharepoint/test", requireAuth, async (_req, res) => {
+    try {
+      const { isSharePointConnected, getSharePointConfig, listSharePointFolder } = await import("./microsoft");
+      
+      const connected = await isSharePointConnected();
+      if (!connected) {
+        const config = await getSharePointConfig();
+        if (!config) {
+          return res.json({ success: false, message: "SharePoint not configured. Please configure site URL and name." });
+        }
+        return res.json({ success: false, message: "Unable to connect to SharePoint site. Please verify configuration." });
+      }
+
+      // Test folder access
+      try {
+        await listSharePointFolder("");
+        res.json({ success: true, message: "SharePoint connection verified" });
+      } catch (e: any) {
+        res.json({ success: false, message: `SharePoint access failed: ${e.message}` });
+      }
+    } catch (e: any) {
+      res.json({ success: false, message: e.message });
+    }
+  });
+
   // ============= Google OAuth (Gmail) =============
   app.get("/api/oauth/google/authorize", async (_req, res) => {
     try {
@@ -685,7 +777,7 @@ export async function registerRoutes(
                   const { runProjectCloseout } = await import('./closeout-automation');
                   const closeoutResult = await runProjectCloseout(projectId, {
                     sendSurvey: true,
-                    archiveToOneDrive: true,
+                    archiveToSharePoint: true,
                     deactivateProject: false, // Already deactivated in Procore
                     updateHubSpotStage: true,
                   });
@@ -2382,11 +2474,18 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/archive/onedrive/status", requireAuth, async (_req, res) => {
+  app.get("/api/archive/sharepoint/status", requireAuth, async (_req, res) => {
     try {
-      const { isMicrosoftConnected } = await import("./microsoft");
-      const status = await isMicrosoftConnected();
-      res.json(status);
+      const { isSharePointConnected, getSharePointConfig, isMicrosoftConnected } = await import("./microsoft");
+      const microsoftStatus = await isMicrosoftConnected();
+      const config = await getSharePointConfig();
+      const connected = await isSharePointConnected();
+      res.json({ 
+        connected, 
+        microsoftConnected: microsoftStatus.connected,
+        email: microsoftStatus.email,
+        config 
+      });
     } catch (e: any) {
       res.json({ connected: false, error: e.message });
     }
@@ -3550,11 +3649,11 @@ export async function registerRoutes(
   app.post("/api/closeout/run/:projectId", requireAuth, async (req, res) => {
     try {
       const { projectId } = req.params;
-      const { sendSurvey, archiveToOneDrive, deactivateProject, updateHubSpotStage, googleReviewLink } = req.body;
+      const { sendSurvey, archiveToSharePoint, deactivateProject, updateHubSpotStage, googleReviewLink } = req.body;
       const { runProjectCloseout } = await import('./closeout-automation');
       const result = await runProjectCloseout(projectId, {
         sendSurvey,
-        archiveToOneDrive,
+        archiveToSharePoint,
         deactivateProject,
         updateHubSpotStage,
         googleReviewLink,

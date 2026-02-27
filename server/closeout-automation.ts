@@ -164,7 +164,7 @@ export async function runProjectCloseout(
   projectId: string,
   options: {
     sendSurvey?: boolean;
-    archiveToOneDrive?: boolean;
+    archiveToSharePoint?: boolean;
     deactivateProject?: boolean;
     updateHubSpotStage?: boolean;
     googleReviewLink?: string;
@@ -194,7 +194,7 @@ export async function runProjectCloseout(
       }
     }
 
-    if (options.archiveToOneDrive !== false) {
+    if (options.archiveToSharePoint !== false) {
       try {
         const archiveResult = await startProjectArchive(projectId, {
           includeDocuments: true,
@@ -233,7 +233,7 @@ export async function runProjectCloseout(
     }
 
     if (options.deactivateProject !== false) {
-      if (options.archiveToOneDrive !== false && results.archiveResult?.archiveId) {
+      if (options.archiveToSharePoint !== false && results.archiveResult?.archiveId) {
         console.log('[closeout] Waiting for archive to complete before deactivation...');
       } else {
         try {

@@ -41,7 +41,7 @@ import {
   WifiOff,
   Hash,
 } from "lucide-react";
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import type { PollJob } from "@shared/schema";
 
 export default function SettingsPage() {
@@ -153,7 +153,7 @@ export default function SettingsPage() {
               />
               <ConnectionCard
                 name="Microsoft 365"
-                description="OneDrive file storage, Outlook email"
+                description="SharePoint file storage, Outlook email"
                 connected={microsoftStatus?.connected}
                 email={microsoftStatus?.email}
                 onConfigure={() => setMicrosoftDialogOpen(true)}
@@ -766,6 +766,25 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
 }) {
   const { toast } = useToast();
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [spTestResult, setSpTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [siteUrl, setSiteUrl] = useState("");
+  const [siteName, setSiteName] = useState("");
+  const [documentLibrary, setDocumentLibrary] = useState("Documents");
+
+  // Fetch SharePoint config
+  const { data: spConfig, refetch: refetchSpConfig } = useQuery({
+    queryKey: ["/api/integrations/sharepoint/config"],
+    enabled: open && status?.connected,
+  });
+
+  // Initialize form values when config loads
+  React.useEffect(() => {
+    if (spConfig?.config) {
+      setSiteUrl(spConfig.config.siteUrl || "");
+      setSiteName(spConfig.config.siteName || "");
+      setDocumentLibrary(spConfig.config.documentLibrary || "Documents");
+    }
+  }, [spConfig]);
 
   const oauthMutation = useMutation({
     mutationFn: async () => {
@@ -791,9 +810,44 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
     },
   });
 
+  const saveSpConfigMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/sharepoint/config", {
+        siteUrl,
+        siteName,
+        documentLibrary,
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || "Failed to save configuration");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "SharePoint Configuration Saved" });
+      refetchSpConfig();
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testSpMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/sharepoint/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setSpTestResult(data);
+    },
+    onError: (e: Error) => {
+      setSpTestResult({ success: false, message: e.message });
+    },
+  });
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
@@ -802,7 +856,7 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
             Microsoft 365 Configuration
           </DialogTitle>
           <DialogDescription>
-            Connect to Microsoft 365 for OneDrive file storage and Outlook email sending.
+            Connect to Microsoft 365 for SharePoint file storage and Outlook email sending.
           </DialogDescription>
         </DialogHeader>
 
@@ -825,7 +879,7 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
           <div className="p-3 rounded-lg bg-muted/30 border">
             <p className="text-xs font-medium mb-2">Enabled Features:</p>
             <ul className="text-xs text-muted-foreground space-y-1">
-              <li>• <strong>OneDrive:</strong> Store project archives and documents</li>
+              <li>• <strong>SharePoint:</strong> Store project archives and documents</li>
               <li>• <strong>Outlook:</strong> Send email notifications</li>
             </ul>
           </div>
@@ -833,8 +887,6 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
           {testResult && (
             <TestResultBanner result={testResult} />
           )}
-
-          <Separator />
 
           <div className="flex items-center justify-between gap-3">
             <Button
@@ -855,6 +907,88 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
               {status?.connected ? "Re-authorize" : "Authorize with Microsoft"}
             </Button>
           </div>
+
+          {status?.connected && (
+            <>
+              <Separator />
+              
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded bg-green-600/10 flex items-center justify-center">
+                    <span className="text-green-600 font-bold text-xs">SP</span>
+                  </div>
+                  <h4 className="font-medium text-sm">SharePoint Configuration</h4>
+                  {spConfig?.connected && (
+                    <span className="ml-auto text-xs text-green-600 bg-green-600/10 px-2 py-0.5 rounded">Connected</span>
+                  )}
+                </div>
+                
+                <p className="text-xs text-muted-foreground">
+                  Configure your SharePoint site for project archives. Archives will be stored in the specified document library.
+                </p>
+
+                <div className="space-y-3">
+                  <div>
+                    <Label htmlFor="sp-site-url" className="text-xs">SharePoint Site URL</Label>
+                    <Input
+                      id="sp-site-url"
+                      placeholder="e.g., trockgc.sharepoint.com"
+                      value={siteUrl}
+                      onChange={(e) => setSiteUrl(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">Your SharePoint domain (without https://)</p>
+                  </div>
+
+                  <div>
+                    <Label htmlFor="sp-site-name" className="text-xs">Site Name</Label>
+                    <Input
+                      id="sp-site-name"
+                      placeholder="e.g., TRockProjects"
+                      value={siteName}
+                      onChange={(e) => setSiteName(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">The name of your SharePoint site</p>
+                  </div>
+
+                  <div>
+                    <Label htmlFor="sp-doc-lib" className="text-xs">Document Library</Label>
+                    <Input
+                      id="sp-doc-lib"
+                      placeholder="Documents"
+                      value={documentLibrary}
+                      onChange={(e) => setDocumentLibrary(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">The document library for archives (default: Documents)</p>
+                  </div>
+                </div>
+
+                {spTestResult && (
+                  <TestResultBanner result={spTestResult} />
+                )}
+
+                <div className="flex items-center justify-between gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={() => testSpMutation.mutate()}
+                    disabled={testSpMutation.isPending || !siteUrl || !siteName}
+                  >
+                    {testSpMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+                    Test SharePoint
+                  </Button>
+                  <Button
+                    onClick={() => saveSpConfigMutation.mutate()}
+                    disabled={saveSpConfigMutation.isPending || !siteUrl || !siteName}
+                  >
+                    {saveSpConfigMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Save className="w-4 h-4 mr-1" />}
+                    Save Configuration
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>

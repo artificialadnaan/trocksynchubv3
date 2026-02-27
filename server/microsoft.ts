@@ -37,6 +37,8 @@ export function getMicrosoftAuthUrl(): string {
     'Mail.Send',
     'Mail.ReadWrite',
     'User.Read',
+    'Sites.ReadWrite.All',        // SharePoint site access
+    'Sites.Manage.All',           // SharePoint management
   ].join(' ');
 
   const params = new URLSearchParams({
@@ -445,4 +447,406 @@ export async function listOneDriveFolder(folderPath: string): Promise<any[]> {
 export async function isOneDriveConnected(): Promise<boolean> {
   const status = await isMicrosoftConnected();
   return status.connected;
+}
+
+// ============= SHAREPOINT =============
+
+interface SharePointConfig {
+  siteUrl: string;       // e.g., "trockgc.sharepoint.com"
+  siteName: string;      // e.g., "TRockProjects" 
+  documentLibrary: string; // e.g., "Project Archives" (defaults to "Documents")
+}
+
+export async function getSharePointConfig(): Promise<SharePointConfig | null> {
+  const config = await storage.getAutomationConfig('sharepoint_config');
+  if (!config?.value) return null;
+  return config.value as SharePointConfig;
+}
+
+export async function setSharePointConfig(config: SharePointConfig): Promise<void> {
+  await storage.upsertAutomationConfig({
+    key: 'sharepoint_config',
+    value: config,
+    description: 'SharePoint site configuration for project archives',
+    isActive: true,
+  });
+  console.log(`[SharePoint] Configuration saved: ${config.siteUrl}/${config.siteName}`);
+}
+
+export async function isSharePointConfigured(): Promise<boolean> {
+  const config = await getSharePointConfig();
+  return !!(config?.siteUrl && config?.siteName);
+}
+
+export async function getSharePointSiteId(): Promise<string | null> {
+  const tokens = await getMicrosoftTokens();
+  if (!tokens) return null;
+
+  const config = await getSharePointConfig();
+  if (!config) return null;
+
+  try {
+    // Get site by hostname and site name
+    const response = await fetch(
+      `${GRAPH_API_URL}/sites/${config.siteUrl}:/sites/${config.siteName}`,
+      {
+        headers: { Authorization: `Bearer ${tokens.accessToken}` },
+      }
+    );
+
+    if (!response.ok) {
+      // Try alternative format for root site or different path
+      const altResponse = await fetch(
+        `${GRAPH_API_URL}/sites/${config.siteUrl}:/${config.siteName}`,
+        {
+          headers: { Authorization: `Bearer ${tokens.accessToken}` },
+        }
+      );
+      
+      if (altResponse.ok) {
+        const data = await altResponse.json();
+        return data.id;
+      }
+      
+      console.error('[SharePoint] Site not found:', await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+    return data.id;
+  } catch (error) {
+    console.error('[SharePoint] Error getting site ID:', error);
+    return null;
+  }
+}
+
+export async function getSharePointDriveId(): Promise<string | null> {
+  const tokens = await getMicrosoftTokens();
+  if (!tokens) return null;
+
+  const siteId = await getSharePointSiteId();
+  if (!siteId) return null;
+
+  const config = await getSharePointConfig();
+  const libraryName = config?.documentLibrary || 'Documents';
+
+  try {
+    // Get drives (document libraries) for the site
+    const response = await fetch(
+      `${GRAPH_API_URL}/sites/${siteId}/drives`,
+      {
+        headers: { Authorization: `Bearer ${tokens.accessToken}` },
+      }
+    );
+
+    if (!response.ok) {
+      console.error('[SharePoint] Failed to get drives:', await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+    const drives = data.value || [];
+    
+    // Find the specified document library or default to first one
+    const targetDrive = drives.find((d: any) => 
+      d.name === libraryName || 
+      d.name?.toLowerCase() === libraryName.toLowerCase()
+    ) || drives[0];
+
+    return targetDrive?.id || null;
+  } catch (error) {
+    console.error('[SharePoint] Error getting drive ID:', error);
+    return null;
+  }
+}
+
+export async function listSharePointSites(): Promise<Array<{ id: string; name: string; webUrl: string }>> {
+  const tokens = await getMicrosoftTokens();
+  if (!tokens) return [];
+
+  try {
+    const response = await fetch(
+      `${GRAPH_API_URL}/sites?search=*`,
+      {
+        headers: { Authorization: `Bearer ${tokens.accessToken}` },
+      }
+    );
+
+    if (!response.ok) {
+      console.error('[SharePoint] Failed to list sites:', await response.text());
+      return [];
+    }
+
+    const data = await response.json();
+    return (data.value || []).map((site: any) => ({
+      id: site.id,
+      name: site.displayName || site.name,
+      webUrl: site.webUrl,
+    }));
+  } catch (error) {
+    console.error('[SharePoint] Error listing sites:', error);
+    return [];
+  }
+}
+
+export async function listSharePointDrives(siteId?: string): Promise<Array<{ id: string; name: string; webUrl: string }>> {
+  const tokens = await getMicrosoftTokens();
+  if (!tokens) return [];
+
+  const targetSiteId = siteId || await getSharePointSiteId();
+  if (!targetSiteId) return [];
+
+  try {
+    const response = await fetch(
+      `${GRAPH_API_URL}/sites/${targetSiteId}/drives`,
+      {
+        headers: { Authorization: `Bearer ${tokens.accessToken}` },
+      }
+    );
+
+    if (!response.ok) {
+      console.error('[SharePoint] Failed to list drives:', await response.text());
+      return [];
+    }
+
+    const data = await response.json();
+    return (data.value || []).map((drive: any) => ({
+      id: drive.id,
+      name: drive.name,
+      webUrl: drive.webUrl,
+    }));
+  } catch (error) {
+    console.error('[SharePoint] Error listing drives:', error);
+    return [];
+  }
+}
+
+export async function createSharePointFolder(folderPath: string): Promise<{ id: string; webUrl: string } | null> {
+  const tokens = await getMicrosoftTokens();
+  if (!tokens) {
+    throw new Error('Microsoft not connected');
+  }
+
+  const driveId = await getSharePointDriveId();
+  if (!driveId) {
+    throw new Error('SharePoint not configured or site not found');
+  }
+
+  const siteId = await getSharePointSiteId();
+  if (!siteId) {
+    throw new Error('SharePoint site not found');
+  }
+
+  // Split path into parts and create each folder
+  const parts = folderPath.split('/').filter(Boolean);
+  let currentPath = '';
+  let lastFolder: any = null;
+
+  for (const part of parts) {
+    const endpoint = currentPath
+      ? `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${currentPath}:/children`
+      : `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root/children`;
+
+    // Check if folder exists
+    const checkEndpoint = currentPath
+      ? `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${currentPath}/${part}`
+      : `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${part}`;
+
+    const checkResponse = await fetch(checkEndpoint, {
+      headers: { Authorization: `Bearer ${tokens.accessToken}` },
+    });
+
+    if (checkResponse.ok) {
+      lastFolder = await checkResponse.json();
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      continue;
+    }
+
+    // Create folder
+    const createResponse = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tokens.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: part,
+        folder: {},
+        '@microsoft.graph.conflictBehavior': 'fail',
+      }),
+    });
+
+    if (!createResponse.ok) {
+      const error = await createResponse.text();
+      // If conflict (folder exists), try to get it
+      if (createResponse.status === 409) {
+        const getResponse = await fetch(checkEndpoint, {
+          headers: { Authorization: `Bearer ${tokens.accessToken}` },
+        });
+        if (getResponse.ok) {
+          lastFolder = await getResponse.json();
+          currentPath = currentPath ? `${currentPath}/${part}` : part;
+          continue;
+        }
+      }
+      throw new Error(`Failed to create SharePoint folder ${part}: ${error}`);
+    }
+
+    lastFolder = await createResponse.json();
+    currentPath = currentPath ? `${currentPath}/${part}` : part;
+    console.log(`[SharePoint] Created folder: ${currentPath}`);
+  }
+
+  return lastFolder ? { id: lastFolder.id, webUrl: lastFolder.webUrl } : null;
+}
+
+export async function uploadFileToSharePoint(
+  folderPath: string,
+  fileName: string,
+  fileBuffer: Buffer,
+  mimeType: string = 'application/octet-stream'
+): Promise<{ id: string; webUrl: string; name: string } | null> {
+  const tokens = await getMicrosoftTokens();
+  if (!tokens) {
+    throw new Error('Microsoft not connected');
+  }
+
+  const driveId = await getSharePointDriveId();
+  if (!driveId) {
+    throw new Error('SharePoint not configured or site not found');
+  }
+
+  const siteId = await getSharePointSiteId();
+  if (!siteId) {
+    throw new Error('SharePoint site not found');
+  }
+
+  const filePath = `${folderPath}/${fileName}`.replace(/\/+/g, '/');
+
+  // For small files (< 4MB), use simple upload
+  if (fileBuffer.length < 4 * 1024 * 1024) {
+    const response = await fetch(
+      `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${filePath}:/content`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${tokens.accessToken}`,
+          'Content-Type': mimeType,
+        },
+        body: fileBuffer,
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Failed to upload file to SharePoint: ${error}`);
+    }
+
+    const result = await response.json();
+    console.log(`[SharePoint] Uploaded ${fileName} to ${folderPath}`);
+    return { id: result.id, webUrl: result.webUrl, name: result.name };
+  }
+
+  // For larger files, use upload session (chunked upload)
+  const sessionResponse = await fetch(
+    `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${filePath}:/createUploadSession`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tokens.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        item: {
+          '@microsoft.graph.conflictBehavior': 'replace',
+        },
+      }),
+    }
+  );
+
+  if (!sessionResponse.ok) {
+    const error = await sessionResponse.text();
+    throw new Error(`Failed to create SharePoint upload session: ${error}`);
+  }
+
+  const session = await sessionResponse.json();
+  const uploadUrl = session.uploadUrl;
+
+  // Upload in chunks
+  const chunkSize = 320 * 1024 * 10; // 3.2 MB chunks
+  let offset = 0;
+  let result: any = null;
+
+  while (offset < fileBuffer.length) {
+    const end = Math.min(offset + chunkSize, fileBuffer.length);
+    const chunk = fileBuffer.slice(offset, end);
+
+    const chunkResponse = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Length': String(chunk.length),
+        'Content-Range': `bytes ${offset}-${end - 1}/${fileBuffer.length}`,
+      },
+      body: chunk,
+    });
+
+    if (!chunkResponse.ok && chunkResponse.status !== 202) {
+      const error = await chunkResponse.text();
+      throw new Error(`SharePoint chunk upload failed: ${error}`);
+    }
+
+    if (chunkResponse.status === 200 || chunkResponse.status === 201) {
+      result = await chunkResponse.json();
+    }
+
+    offset = end;
+  }
+
+  console.log(`[SharePoint] Uploaded large file ${fileName} to ${folderPath}`);
+  return result ? { id: result.id, webUrl: result.webUrl, name: result.name } : null;
+}
+
+export async function listSharePointFolder(folderPath: string): Promise<any[]> {
+  const tokens = await getMicrosoftTokens();
+  if (!tokens) {
+    throw new Error('Microsoft not connected');
+  }
+
+  const driveId = await getSharePointDriveId();
+  if (!driveId) {
+    throw new Error('SharePoint not configured');
+  }
+
+  const siteId = await getSharePointSiteId();
+  if (!siteId) {
+    throw new Error('SharePoint site not found');
+  }
+
+  const endpoint = folderPath
+    ? `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${folderPath}:/children`
+    : `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root/children`;
+
+  const response = await fetch(endpoint, {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` },
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to list SharePoint folder: ${error}`);
+  }
+
+  const data = await response.json();
+  return data.value || [];
+}
+
+export async function isSharePointConnected(): Promise<boolean> {
+  const microsoftConnected = await isMicrosoftConnected();
+  if (!microsoftConnected.connected) return false;
+  
+  const configured = await isSharePointConfigured();
+  if (!configured) return false;
+  
+  // Verify we can access the site
+  const siteId = await getSharePointSiteId();
+  return !!siteId;
 }

@@ -58,7 +58,7 @@ interface ArchiveProgress {
   errors: string[];
   startedAt: string;
   completedAt?: string;
-  oneDriveUrl?: string;
+  sharePointUrl?: string;
 }
 
 interface DocumentSummary {
@@ -77,17 +77,18 @@ export default function ProjectArchivePage() {
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [activeArchiveId, setActiveArchiveId] = useState<string | null>(null);
 
-  const { data: oneDriveStatus, isLoading: statusLoading } = useQuery<{
+  const { data: sharePointStatus, isLoading: statusLoading } = useQuery<{
     connected: boolean;
+    microsoftConnected: boolean;
     email?: string;
-    userName?: string;
+    config?: { siteUrl?: string; siteName?: string; documentLibrary?: string };
   }>({
-    queryKey: ["/api/archive/onedrive/status"],
+    queryKey: ["/api/archive/sharepoint/status"],
   });
 
   const { data: projects, isLoading: projectsLoading } = useQuery<Project[]>({
     queryKey: ["/api/archive/projects"],
-    enabled: !!oneDriveStatus?.connected,
+    enabled: !!sharePointStatus?.connected,
   });
 
   return (
@@ -98,7 +99,7 @@ export default function ProjectArchivePage() {
             Project Archive
           </h1>
           <p className="text-muted-foreground text-sm mt-1">
-            Extract and archive completed project documents to OneDrive
+            Extract and archive completed project documents to SharePoint
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -106,27 +107,30 @@ export default function ProjectArchivePage() {
             <Skeleton className="h-8 w-32" />
           ) : (
             <Badge
-              variant={oneDriveStatus?.connected ? "default" : "destructive"}
+              variant={sharePointStatus?.connected ? "default" : "destructive"}
               className="gap-1"
             >
-              {oneDriveStatus?.connected ? (
+              {sharePointStatus?.connected ? (
                 <CheckCircle className="w-3 h-3" />
               ) : (
                 <AlertCircle className="w-3 h-3" />
               )}
-              {oneDriveStatus?.connected ? "OneDrive Connected" : "OneDrive Not Connected"}
+              {sharePointStatus?.connected ? "SharePoint Connected" : "SharePoint Not Connected"}
             </Badge>
           )}
         </div>
       </div>
 
-      {!oneDriveStatus?.connected ? (
+      {!sharePointStatus?.connected ? (
         <Card>
           <CardContent className="py-12 text-center">
             <Cloud className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-            <h3 className="text-lg font-semibold mb-2">OneDrive Connection Required</h3>
+            <h3 className="text-lg font-semibold mb-2">SharePoint Configuration Required</h3>
             <p className="text-muted-foreground mb-4">
-              Connect your Microsoft 365 account in Settings to enable project archiving to OneDrive.
+              {!sharePointStatus?.microsoftConnected 
+                ? "Connect your Microsoft 365 account in Settings first, then configure SharePoint."
+                : "Configure SharePoint site in Settings to enable project archiving."
+              }
             </p>
             <Button asChild>
               <a href="/#/settings">Go to Settings</a>
@@ -270,7 +274,7 @@ function ArchiveDialog({
             Archive Project
           </DialogTitle>
           <DialogDescription>
-            Extract documents from Procore and upload to OneDrive.
+            Extract documents from Procore and upload to SharePoint.
           </DialogDescription>
         </DialogHeader>
 
@@ -347,7 +351,7 @@ function ArchiveDialog({
 
           <div className="space-y-2">
             <Label htmlFor="basePath" className="text-xs font-medium">
-              OneDrive Base Folder:
+              SharePoint Base Folder:
             </Label>
             <Input
               id="basePath"
@@ -463,12 +467,12 @@ function ArchiveProgressCard({
           </div>
         )}
 
-        {isComplete && progress.oneDriveUrl && (
+        {isComplete && progress.sharePointUrl && (
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" asChild>
-              <a href={progress.oneDriveUrl} target="_blank" rel="noopener noreferrer">
+              <a href={progress.sharePointUrl} target="_blank" rel="noopener noreferrer">
                 <ExternalLink className="w-3 h-3 mr-1" />
-                Open in OneDrive
+                Open in SharePoint
               </a>
             </Button>
             <Button variant="ghost" size="sm" onClick={onComplete}>

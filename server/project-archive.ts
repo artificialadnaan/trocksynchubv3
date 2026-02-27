@@ -1,6 +1,11 @@
 import { storage } from './storage';
 import { extractProjectDocuments, downloadProcoreFile, getProjectDocumentSummary, getProjectsList } from './procore-documents';
-import { createOneDriveFolder, uploadFileToOneDrive, isOneDriveConnected } from './microsoft';
+import { 
+  createSharePointFolder, 
+  uploadFileToSharePoint, 
+  isSharePointConnected,
+  getSharePointConfig 
+} from './microsoft';
 
 interface ArchiveProgress {
   projectId: string;
@@ -13,14 +18,14 @@ interface ArchiveProgress {
   errors: string[];
   startedAt: string;
   completedAt?: string;
-  oneDriveUrl?: string;
+  sharePointUrl?: string;
 }
 
 interface ArchiveResult {
   success: boolean;
   projectId: string;
   projectName: string;
-  oneDriveUrl?: string;
+  sharePointUrl?: string;
   filesArchived: number;
   errors: string[];
   duration: number;
@@ -92,11 +97,11 @@ async function runArchive(archiveId: string, projectId: string, options: {
 
   try {
     progress.status = 'in_progress';
-    progress.currentStep = 'Checking OneDrive connection...';
+    progress.currentStep = 'Checking SharePoint connection...';
 
-    // Check OneDrive connection
-    if (!await isOneDriveConnected()) {
-      throw new Error('OneDrive not connected. Please connect Microsoft 365 in Settings first.');
+    // Check SharePoint connection
+    if (!await isSharePointConnected()) {
+      throw new Error('SharePoint not configured. Please configure SharePoint in Settings first.');
     }
 
     progress.currentStep = 'Extracting project documents from Procore...';
@@ -121,18 +126,18 @@ async function runArchive(archiveId: string, projectId: string, options: {
     progress.totalFiles = totalFiles;
     progress.progress = 10;
 
-    // Create base folder structure in OneDrive
+    // Create base folder structure in SharePoint
     const projectFolderName = sanitizeFolderName(`${docs.projectName} (${projectId})`);
     const basePath = `${options.baseFolderPath}/${projectFolderName}`;
 
     progress.currentStep = `Creating folder structure: ${basePath}`;
-    const baseFolder = await createOneDriveFolder(basePath);
+    const baseFolder = await createSharePointFolder(basePath);
 
     if (!baseFolder) {
-      throw new Error('Failed to create OneDrive folder');
+      throw new Error('Failed to create SharePoint folder');
     }
 
-    progress.oneDriveUrl = baseFolder.webUrl;
+    progress.sharePointUrl = baseFolder.webUrl;
     progress.progress = 15;
 
     let filesUploaded = 0;
@@ -141,7 +146,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
     // Upload documents from folders
     if (options.includeDocuments && docs.folders.length > 0) {
       progress.currentStep = 'Uploading project documents...';
-      await createOneDriveFolder(`${basePath}/Documents`);
+      await createSharePointFolder(`${basePath}/Documents`);
 
       for (const folder of docs.folders) {
         const result = await uploadFolderRecursive(`${basePath}/Documents`, folder, progress);
@@ -154,7 +159,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
     // Upload drawings
     if (options.includeDrawings && docs.drawings.length > 0) {
       progress.currentStep = 'Uploading drawings...';
-      await createOneDriveFolder(`${basePath}/Drawings`);
+      await createSharePointFolder(`${basePath}/Drawings`);
 
       for (const drawing of docs.drawings) {
         if (drawing.downloadUrl) {
@@ -169,7 +174,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
     // Upload submittals
     if (options.includeSubmittals && docs.submittals.length > 0) {
       progress.currentStep = 'Uploading submittals...';
-      await createOneDriveFolder(`${basePath}/Submittals`);
+      await createSharePointFolder(`${basePath}/Submittals`);
 
       for (const submittal of docs.submittals) {
         if (submittal.downloadUrl) {
@@ -184,7 +189,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
     // Upload RFIs
     if (options.includeRFIs && docs.rfis.length > 0) {
       progress.currentStep = 'Uploading RFIs...';
-      await createOneDriveFolder(`${basePath}/RFIs`);
+      await createSharePointFolder(`${basePath}/RFIs`);
 
       for (const rfi of docs.rfis) {
         if (rfi.downloadUrl) {
@@ -199,7 +204,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
     // Upload bid packages
     if (options.includeBidPackages && docs.bidPackages.length > 0) {
       progress.currentStep = 'Uploading bid packages...';
-      await createOneDriveFolder(`${basePath}/Bid Packages`);
+      await createSharePointFolder(`${basePath}/Bid Packages`);
 
       for (const bp of docs.bidPackages) {
         if (bp.downloadUrl) {
@@ -214,7 +219,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
     // Upload photos
     if (options.includePhotos && docs.photos.length > 0) {
       progress.currentStep = 'Uploading photos...';
-      await createOneDriveFolder(`${basePath}/Photos`);
+      await createSharePointFolder(`${basePath}/Photos`);
 
       for (const photo of docs.photos) {
         if (photo.downloadUrl) {
@@ -229,12 +234,12 @@ async function runArchive(archiveId: string, projectId: string, options: {
     // Export budget as JSON
     if (options.includeBudget && docs.budget.summary) {
       progress.currentStep = 'Exporting budget data...';
-      await createOneDriveFolder(`${basePath}/Budget`);
+      await createSharePointFolder(`${basePath}/Budget`);
 
       try {
         const budgetJson = JSON.stringify(docs.budget, null, 2);
         const budgetBuffer = Buffer.from(budgetJson, 'utf-8');
-        await uploadFileToOneDrive(`${basePath}/Budget`, 'budget_export.json', budgetBuffer, 'application/json');
+        await uploadFileToSharePoint(`${basePath}/Budget`, 'budget_export.json', budgetBuffer, 'application/json');
         filesUploaded++;
       } catch (e: any) {
         errors.push(`Budget export: ${e.message}`);
@@ -262,7 +267,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
     };
 
     const summaryJson = JSON.stringify(summary, null, 2);
-    await uploadFileToOneDrive(basePath, '_archive_summary.json', Buffer.from(summaryJson, 'utf-8'), 'application/json');
+    await uploadFileToSharePoint(basePath, '_archive_summary.json', Buffer.from(summaryJson, 'utf-8'), 'application/json');
 
     // Complete
     progress.status = 'completed';
@@ -284,7 +289,7 @@ async function runArchive(archiveId: string, projectId: string, options: {
         filesUploaded,
         errors: errors.length,
         duration: Date.now() - startTime,
-        oneDriveUrl: baseFolder.webUrl,
+        sharePointUrl: baseFolder.webUrl,
       },
     });
 
@@ -305,7 +310,7 @@ async function uploadFolderRecursive(basePath: string, folder: any, progress: Ar
   const folderPath = `${basePath}/${sanitizeFolderName(folder.name)}`;
 
   try {
-    await createOneDriveFolder(folderPath);
+    await createSharePointFolder(folderPath);
 
     // Upload files in this folder
     for (const file of folder.files || []) {
@@ -339,7 +344,7 @@ async function uploadDocument(folderPath: string, doc: any, progress: ArchivePro
     }
 
     const fileName = sanitizeFileName(doc.name);
-    await uploadFileToOneDrive(folderPath, fileName, fileBuffer, doc.mimeType || 'application/octet-stream');
+    await uploadFileToSharePoint(folderPath, fileName, fileBuffer, doc.mimeType || 'application/octet-stream');
 
     progress.filesUploaded++;
     return { success: true };
