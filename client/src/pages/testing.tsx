@@ -31,6 +31,12 @@ interface EmailTemplate {
   enabled: boolean;
 }
 
+interface BidBoardConfig {
+  enabled: boolean;
+  pollingIntervalMinutes: number;
+  hasCredentials: boolean;
+}
+
 export default function TestingPage() {
   const queryClient = useQueryClient();
   const [testEmail, setTestEmail] = useState('adnaan.iqbal@gmail.com');
@@ -38,6 +44,11 @@ export default function TestingPage() {
   const [projectId, setProjectId] = useState('');
   const [screenshotResult, setScreenshotResult] = useState<string | null>(null);
   const [extractionResult, setExtractionResult] = useState<any>(null);
+  
+  // Procore credentials state
+  const [procoreEmail, setProcoreEmail] = useState('');
+  const [procorePassword, setProcorePassword] = useState('');
+  const [procoreSandbox, setProcoreSandbox] = useState(false);
 
   // Fetch testing mode status
   const { data: testingMode, isLoading: loadingMode } = useQuery<TestingMode>({
@@ -47,6 +58,49 @@ export default function TestingPage() {
   // Fetch Playwright status
   const { data: playwrightStatus, isLoading: loadingPlaywright } = useQuery<PlaywrightStatus>({
     queryKey: ['/api/testing/playwright/status'],
+  });
+
+  // Fetch BidBoard config (includes hasCredentials)
+  const { data: bidboardConfig, isLoading: loadingBidboardConfig } = useQuery<BidBoardConfig>({
+    queryKey: ['/api/bidboard/config'],
+  });
+
+  // Save Procore credentials
+  const saveCredentials = useMutation({
+    mutationFn: async ({ email, password, sandbox }: { email: string; password: string; sandbox: boolean }) => {
+      const res = await fetch('/api/bidboard/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email, password, sandbox }),
+      });
+      if (!res.ok) throw new Error('Failed to save credentials');
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/bidboard/config'] });
+      setProcorePassword(''); // Clear password after save
+    },
+  });
+
+  // Test Procore login
+  const testLogin = useMutation({
+    mutationFn: async ({ email, password, sandbox }: { email: string; password: string; sandbox: boolean }) => {
+      const res = await fetch('/api/bidboard/test-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email, password, sandbox }),
+      });
+      if (!res.ok) throw new Error('Failed to test login');
+      return res.json();
+    },
+    onSuccess: (data) => {
+      if (data.success) {
+        queryClient.invalidateQueries({ queryKey: ['/api/bidboard/config'] });
+        setProcorePassword('');
+      }
+    },
   });
 
   // Fetch email templates
@@ -322,6 +376,117 @@ export default function TestingPage() {
 
         {/* Playwright Testing Tab */}
         <TabsContent value="playwright" className="space-y-4">
+          {/* Procore Browser Credentials */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <Settings className="w-5 h-5 text-primary" />
+                Procore Browser Login
+              </CardTitle>
+              <CardDescription>
+                Configure Procore credentials for Playwright automation (BidBoard scraping, document extraction)
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {loadingBidboardConfig ? (
+                <Skeleton className="h-32 w-full" />
+              ) : (
+                <>
+                  <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/30">
+                    {bidboardConfig?.hasCredentials ? (
+                      <>
+                        <CheckCircle2 className="w-5 h-5 text-green-500" />
+                        <span className="text-green-600 dark:text-green-400">Procore credentials configured</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="w-5 h-5 text-amber-500" />
+                        <span className="text-amber-600 dark:text-amber-400">No Procore credentials saved</span>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="grid gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="procore-email">Procore Email</Label>
+                      <Input
+                        id="procore-email"
+                        type="email"
+                        value={procoreEmail}
+                        onChange={(e) => setProcoreEmail(e.target.value)}
+                        placeholder="your-email@company.com"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="procore-password">Procore Password</Label>
+                      <Input
+                        id="procore-password"
+                        type="password"
+                        value={procorePassword}
+                        onChange={(e) => setProcorePassword(e.target.value)}
+                        placeholder="••••••••"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="procore-sandbox"
+                        checked={procoreSandbox}
+                        onCheckedChange={setProcoreSandbox}
+                      />
+                      <Label htmlFor="procore-sandbox">Use Sandbox Environment</Label>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      onClick={() => testLogin.mutate({ email: procoreEmail, password: procorePassword, sandbox: procoreSandbox })}
+                      disabled={testLogin.isPending || !procoreEmail || !procorePassword}
+                    >
+                      {testLogin.isPending ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Testing...
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-4 h-4 mr-2" />
+                          Test Login & Save
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => saveCredentials.mutate({ email: procoreEmail, password: procorePassword, sandbox: procoreSandbox })}
+                      disabled={saveCredentials.isPending || !procoreEmail || !procorePassword}
+                    >
+                      {saveCredentials.isPending ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        'Save Without Testing'
+                      )}
+                    </Button>
+                  </div>
+
+                  {testLogin.isSuccess && (
+                    <div className={`p-3 rounded-lg flex items-center gap-2 ${testLogin.data.success ? 'bg-green-500/10 border border-green-500/30' : 'bg-destructive/10 border border-destructive/30'}`}>
+                      {testLogin.data.success ? (
+                        <>
+                          <CheckCircle2 className="w-5 h-5 text-green-500" />
+                          <span className="text-green-600 dark:text-green-400">Login successful! Credentials saved.</span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertCircle className="w-5 h-5 text-destructive" />
+                          <span className="text-destructive">{testLogin.data.error || 'Login failed'}</span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Playwright Status */}
           <Card>
             <CardHeader>
