@@ -250,10 +250,11 @@ export async function logout(): Promise<void> {
 }
 
 export async function testLogin(email: string, password: string, sandbox: boolean = false): Promise<LoginResult> {
-  const page = await getPage();
-  
-  // Clear any existing session
+  // Clear any existing session first (before getting page)
   await clearSession();
+  
+  // Now get a fresh page from a new context
+  const page = await getPage();
   
   const result = await performLogin(page, { email, password, sandbox });
   
@@ -263,4 +264,72 @@ export async function testLogin(email: string, password: string, sandbox: boolea
   }
   
   return result;
+}
+
+/**
+ * Login to Procore using an external Page object (for isolated browser instances)
+ * Uses stored credentials from the database
+ */
+export async function loginToProcore(page: Page): Promise<boolean> {
+  const credentials = await getProcoreCredentials();
+  
+  if (!credentials) {
+    log("No Procore credentials configured", "playwright");
+    return false;
+  }
+  
+  const loginUrl = credentials.sandbox ? PROCORE_URLS.loginSandbox : PROCORE_URLS.login;
+  
+  try {
+    log(`Navigating to Procore login: ${loginUrl}`, "playwright");
+    await page.goto(loginUrl, { waitUntil: "networkidle", timeout: 30000 });
+    
+    // Wait a moment for page to stabilize
+    await page.waitForTimeout(1000);
+    
+    // Enter email
+    log("Entering email", "playwright");
+    await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 10000 });
+    await page.fill(PROCORE_SELECTORS.login.emailInput, credentials.email);
+    
+    await page.waitForTimeout(500);
+    
+    // Enter password
+    log("Entering password", "playwright");
+    await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 10000 });
+    await page.fill(PROCORE_SELECTORS.login.passwordInput, credentials.password);
+    
+    await page.waitForTimeout(500);
+    
+    // Click submit
+    log("Submitting login form", "playwright");
+    await page.click(PROCORE_SELECTORS.login.submitButton);
+    
+    // Wait for navigation
+    try {
+      await page.waitForURL(/app\.procore\.com|sandbox\.procore\.com|us02\.procore\.com/, { timeout: 30000 });
+      log("Successfully logged into Procore", "playwright");
+      return true;
+    } catch {
+      // Check for MFA or error
+      const mfaInput = await page.$(PROCORE_SELECTORS.login.mfaInput);
+      if (mfaInput) {
+        log("MFA required - cannot proceed", "playwright");
+        return false;
+      }
+      
+      const errorElement = await page.$(PROCORE_SELECTORS.login.errorMessage);
+      if (errorElement) {
+        const errorText = await errorElement.textContent();
+        log(`Login failed: ${errorText}`, "playwright");
+        return false;
+      }
+      
+      log("Login navigation timed out", "playwright");
+      return false;
+    }
+  } catch (error: any) {
+    log(`Login error: ${error.message}`, "playwright");
+    return false;
+  }
 }
