@@ -2329,17 +2329,64 @@ export async function registerRoutes(
 
   app.get("/api/stage-mapping/hubspot-stages", requireAuth, async (_req, res) => {
     try {
-      const pipelines = await storage.getHubspotPipelines();
-      const stages: { stageId: string; label: string; pipelineLabel: string }[] = [];
+      let pipelines = await storage.getHubspotPipelines();
+      
+      // If no pipelines in database, try to fetch from HubSpot directly
+      if (pipelines.length === 0) {
+        try {
+          const { syncHubSpotPipelines } = await import('./hubspot');
+          pipelines = await syncHubSpotPipelines();
+          console.log(`[stage-mapping] Synced ${pipelines.length} pipelines from HubSpot`);
+        } catch (syncError: any) {
+          console.log('[stage-mapping] Could not sync pipelines from HubSpot:', syncError.message);
+        }
+      }
+      
+      const stages: { stageId: string; label: string; pipelineLabel: string; pipelineId: string }[] = [];
       for (const p of pipelines) {
         const pStages = (p.stages as any[]) || [];
         for (const s of pStages) {
-          stages.push({ stageId: s.stageId, label: s.label, pipelineLabel: p.label });
+          stages.push({ 
+            stageId: s.stageId, 
+            label: s.label, 
+            pipelineLabel: p.label,
+            pipelineId: p.hubspotId 
+          });
         }
       }
       res.json(stages);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
+    }
+  });
+  
+  // Dedicated endpoint to refresh HubSpot pipelines
+  app.post("/api/stage-mapping/refresh-hubspot-pipelines", requireAuth, async (_req, res) => {
+    try {
+      const { syncHubSpotPipelines } = await import('./hubspot');
+      const pipelines = await syncHubSpotPipelines();
+      
+      const stages: { stageId: string; label: string; pipelineLabel: string; pipelineId: string }[] = [];
+      for (const p of pipelines) {
+        const pStages = (p.stages as any[]) || [];
+        for (const s of pStages) {
+          stages.push({ 
+            stageId: s.stageId, 
+            label: s.label, 
+            pipelineLabel: p.label,
+            pipelineId: p.hubspotId 
+          });
+        }
+      }
+      
+      res.json({ 
+        success: true, 
+        message: `Synced ${pipelines.length} pipelines with ${stages.length} stages`,
+        pipelines: pipelines.length,
+        stages 
+      });
+    } catch (e: any) {
+      res.status(500).json({ success: false, message: e.message });
     }
   });
 

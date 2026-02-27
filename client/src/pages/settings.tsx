@@ -1646,7 +1646,7 @@ function StageMappingCard() {
     queryKey: ["/api/stage-mapping/config"],
   });
 
-  const { data: hubspotStages } = useQuery<{ stageId: string; label: string; pipelineLabel: string }[]>({
+  const { data: hubspotStages, refetch: refetchHubspotStages } = useQuery<{ stageId: string; label: string; pipelineLabel: string }[]>({
     queryKey: ["/api/stage-mapping/hubspot-stages"],
   });
 
@@ -1673,6 +1673,24 @@ function StageMappingCard() {
     },
     onError: (e: Error) => {
       toast({ title: "Failed to save", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const refreshPipelinesMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/stage-mapping/refresh-hubspot-pipelines");
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || "Failed to refresh pipelines");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      refetchHubspotStages();
+      toast({ title: "Pipelines Refreshed", description: `Found ${data.stages?.length || 0} stages from HubSpot` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to refresh", description: e.message, variant: "destructive" });
     },
   });
 
@@ -1705,7 +1723,20 @@ function StageMappingCard() {
             <ArrowRightLeft className="w-4 h-4" />
             BidBoard → HubSpot Stage Mapping
           </CardTitle>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refreshPipelinesMutation.mutate()}
+              disabled={refreshPipelinesMutation.isPending}
+              title="Refresh HubSpot Pipelines"
+            >
+              {refreshPipelinesMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+            </Button>
             <div className="flex items-center gap-2">
               <Label htmlFor="stage-mapping-toggle" className="text-xs text-muted-foreground">
                 {enabled ? "Active" : "Disabled"}
@@ -1739,10 +1770,34 @@ function StageMappingCard() {
       <CardContent>
         {configLoading ? (
           <Skeleton className="h-40 w-full" />
+        ) : statuses.length === 0 && stages.length === 0 ? (
+          <div className="text-center py-6 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              No BidBoard data or HubSpot stages found.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refreshPipelinesMutation.mutate()}
+              disabled={refreshPipelinesMutation.isPending}
+            >
+              {refreshPipelinesMutation.isPending ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4 mr-2" />
+              )}
+              Refresh HubSpot Pipelines
+            </Button>
+          </div>
         ) : statuses.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-6">
-            No BidBoard data imported yet. Import a BidBoard CSV on the Procore Data page first.
-          </p>
+          <div className="text-center py-6 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              No BidBoard data imported yet. Import a BidBoard CSV on the Procore Data page first.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {stages.length} HubSpot stages available
+            </p>
+          </div>
         ) : (
           <div className="space-y-2">
             <div className="grid grid-cols-[1fr,auto,1fr] gap-3 items-center px-2 pb-1 border-b">
