@@ -1834,6 +1834,17 @@ export class DatabaseStorage implements IStorage {
       if (!exists) {
         await db.insert(emailTemplates).values(template);
         console.log(`[seed] Created email template: ${template.templateKey}`);
+      } else {
+        // Update existing template with new design (preserving user's enabled state)
+        await db.update(emailTemplates)
+          .set({
+            bodyHtml: template.bodyHtml,
+            subject: template.subject,
+            variables: template.variables,
+            description: template.description,
+          })
+          .where(eq(emailTemplates.templateKey, template.templateKey));
+        console.log(`[seed] Updated email template: ${template.templateKey}`);
       }
     }
   }
