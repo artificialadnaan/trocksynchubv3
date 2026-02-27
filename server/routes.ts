@@ -3547,6 +3547,35 @@ export async function registerRoutes(
     }
   });
 
+  // Export-based BidBoard sync (uses Procore's Excel export feature)
+  app.post("/api/bidboard/export-sync", requireAuth, async (req, res) => {
+    try {
+      const { runBidBoardExportSync } = await import('./playwright/bidboard');
+      const result = await runBidBoardExportSync();
+      
+      await storage.createAuditLog({
+        action: "bidboard_export_sync",
+        entityType: "bidboard",
+        source: "playwright",
+        status: result.errors.length > 0 ? "partial" : "success",
+        details: {
+          projectCount: result.projects.length,
+          changeCount: result.changes.length,
+          errors: result.errors,
+        },
+      });
+      
+      res.json({
+        success: result.errors.length === 0,
+        projects: result.projects.length,
+        changes: result.changes,
+        errors: result.errors,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Send project to Portfolio
   app.post("/api/bidboard/send-to-portfolio/:projectId", requireAuth, async (req, res) => {
     try {

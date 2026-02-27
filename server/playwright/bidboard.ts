@@ -161,26 +161,66 @@ export async function scrapeProjectList(page: Page): Promise<BidBoardProject[]> 
 
 export async function exportBidBoardCsv(page: Page): Promise<string | null> {
   try {
-    // Click export button
-    const exportButton = await page.$(PROCORE_SELECTORS.bidboard.exportButton);
-    if (!exportButton) {
-      log("Export button not found", "playwright");
-      return null;
+    log("Starting BidBoard CSV export...", "playwright");
+    
+    // Step 1: Click the more options menu (three dots)
+    log("Looking for more options menu...", "playwright");
+    const moreOptionsButton = await page.$(PROCORE_SELECTORS.bidboard.moreOptionsMenu);
+    
+    if (moreOptionsButton) {
+      log("Found more options menu, clicking...", "playwright");
+      await moreOptionsButton.click();
+      await randomDelay(1000, 1500);
+      
+      // Step 2: Click "Export Project List To Excel"
+      log("Looking for export option in menu...", "playwright");
+      const exportOption = await page.$(PROCORE_SELECTORS.bidboard.exportMenuOption);
+      
+      if (exportOption) {
+        log("Found export option, initiating download...", "playwright");
+        
+        // Set up download handler before clicking
+        const [download] = await Promise.all([
+          page.waitForEvent("download", { timeout: 60000 }),
+          exportOption.click(),
+        ]);
+        
+        // Save the file to a temp location
+        const downloadPath = await download.path();
+        const suggestedFilename = download.suggestedFilename();
+        log(`Excel downloaded: ${suggestedFilename} at ${downloadPath}`, "playwright");
+        
+        return downloadPath;
+      } else {
+        log("Export option not found in menu", "playwright");
+        await takeScreenshot(page, "export-menu-no-option");
+      }
+    } else {
+      log("More options menu not found, trying direct export button...", "playwright");
     }
     
-    // Set up download handler
-    const [download] = await Promise.all([
-      page.waitForEvent("download", { timeout: 30000 }),
-      exportButton.click(),
-    ]);
+    // Fallback: Try direct export button
+    const exportButton = await page.$(PROCORE_SELECTORS.bidboard.exportButton);
+    if (exportButton) {
+      log("Found direct export button, clicking...", "playwright");
+      
+      const [download] = await Promise.all([
+        page.waitForEvent("download", { timeout: 60000 }),
+        exportButton.click(),
+      ]);
+      
+      const downloadPath = await download.path();
+      log(`CSV downloaded to: ${downloadPath}`, "playwright");
+      
+      return downloadPath;
+    }
     
-    // Save the file
-    const downloadPath = await download.path();
-    log(`CSV downloaded to: ${downloadPath}`, "playwright");
-    
-    return downloadPath;
+    log("No export button found", "playwright");
+    await takeScreenshot(page, "export-button-not-found");
+    return null;
   } catch (error) {
     log(`Failed to export CSV: ${error}`, "playwright");
+    await takeScreenshot(page, "export-error");
     return null;
   }
 }
@@ -546,4 +586,126 @@ export async function runBidBoardScrape(): Promise<BidBoardSyncResult> {
   }
   
   return result;
+}
+
+// Export Excel from BidBoard and parse it
+export async function runBidBoardExportSync(): Promise<BidBoardSyncResult> {
+  const result: BidBoardSyncResult = {
+    projects: [],
+    changes: [],
+    errors: [],
+  };
+  
+  try {
+    log("Starting BidBoard export sync...", "playwright");
+    
+    // Ensure we're logged in
+    const { page, success, error } = await ensureLoggedIn();
+    
+    if (!success) {
+      result.errors.push(error || "Failed to log in");
+      return result;
+    }
+    
+    // Navigate to BidBoard
+    const navigated = await navigateToBidBoard(page);
+    if (!navigated) {
+      result.errors.push("Failed to navigate to BidBoard");
+      return result;
+    }
+    
+    // Export the Excel file
+    const excelPath = await exportBidBoardCsv(page);
+    
+    if (!excelPath) {
+      result.errors.push("Failed to export Excel file from BidBoard");
+      return result;
+    }
+    
+    // Parse the Excel file
+    result.projects = await parseExportedExcel(excelPath);
+    
+    if (result.projects.length === 0) {
+      result.errors.push("No projects found in exported Excel");
+      return result;
+    }
+    
+    log(`Parsed ${result.projects.length} projects from Excel export`, "playwright");
+    
+    // Detect changes
+    result.changes = await detectStageChanges(result.projects);
+    
+    // Save current state
+    await saveBidBoardState(result.projects);
+    
+    log(`BidBoard export sync complete: ${result.projects.length} projects, ${result.changes.length} changes`, "playwright");
+    
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    result.errors.push(errorMessage);
+    log(`BidBoard export sync error: ${errorMessage}`, "playwright");
+  }
+  
+  return result;
+}
+
+// Parse the exported Excel file from BidBoard
+async function parseExportedExcel(filePath: string): Promise<BidBoardProject[]> {
+  const projects: BidBoardProject[] = [];
+  
+  try {
+    const XLSX = await import('xlsx');
+    const fs = await import('fs');
+    
+    const buffer = fs.readFileSync(filePath);
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    
+    // Get the first sheet
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    
+    // Convert to JSON
+    const rows = XLSX.utils.sheet_to_json(sheet) as any[];
+    
+    log(`Excel has ${rows.length} rows`, "playwright");
+    
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      
+      // Map Excel columns to BidBoardProject
+      // Based on the actual export format:
+      // Name, Estimator, Office, Status, Sales Price Per Area, Project Cost, Profit Margin, Total Sales, Created Date, Due Date, Customer Name, Customer Contact, Project #
+      
+      const name = row['Name']?.toString()?.trim();
+      if (!name) continue;
+      
+      const project: BidBoardProject = {
+        id: `excel_${i}_${Date.now()}`, // Generate ID since Excel doesn't have one
+        name,
+        stage: row['Status']?.toString()?.trim() || '',
+        projectNumber: row['Project #']?.toString()?.trim() || undefined,
+        metadata: {
+          estimator: row['Estimator']?.toString()?.trim() || null,
+          office: row['Office']?.toString()?.trim() || null,
+          projectCost: parseFloat(row['Project Cost']) || 0,
+          profitMargin: parseFloat(row['Profit Margin']) || 0,
+          totalSales: parseFloat(row['Total Sales']) || 0,
+          salesPricePerArea: row['Sales Price Per Area']?.toString()?.trim() || null,
+          createdDate: row['Created Date'] || null,
+          dueDate: row['Due Date'] || null,
+          customerName: row['Customer Name']?.toString()?.trim() || null,
+          customerContact: row['Customer Contact']?.toString()?.trim() || null,
+        },
+      };
+      
+      projects.push(project);
+    }
+    
+    log(`Parsed ${projects.length} projects from Excel`, "playwright");
+    
+  } catch (error) {
+    log(`Error parsing Excel: ${error}`, "playwright");
+  }
+  
+  return projects;
 }

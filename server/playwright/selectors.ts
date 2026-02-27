@@ -20,16 +20,22 @@ export const PROCORE_SELECTORS = {
   
   // BidBoard specific
   bidboard: {
-    container: '[data-testid="bidboard"], .bidboard-container, #bidboard',
-    projectList: '[data-testid="bidboard-projects"], .bidboard-project-list, table.projects',
-    projectRow: '[data-testid="bidboard-project-row"], .bidboard-project-row, tr.project-row',
-    projectName: '[data-testid="project-name"], .project-name, td.name',
+    container: '[data-testid="bidboard"], .bidboard-container, #bidboard, [class*="bidboard"], [class*="estimating"]',
+    projectList: '[data-testid="bidboard-projects"], .bidboard-project-list, table.projects, table[class*="project"]',
+    projectRow: '[data-testid="bidboard-project-row"], .bidboard-project-row, tr.project-row, tbody tr',
+    projectName: '[data-testid="project-name"], .project-name, td.name, td:first-child a',
     projectStage: '[data-testid="project-stage"], .project-stage, td.stage',
     projectNumber: '[data-testid="project-number"], .project-number, td.number',
+    // Export menu - the three-dot menu in the top right
+    moreOptionsMenu: '[data-testid="more-options"], button[aria-label*="more"], button[aria-label*="menu"], [class*="kebab"], [class*="more-menu"], button:has-text("⋮")',
+    exportMenuOption: '[data-testid="export-option"], [role="menuitem"]:has-text("Export"), button:has-text("Export Project List"), a:has-text("Export Project List To Excel")',
     exportButton: '[data-testid="export-csv"], .export-button, button:has-text("Export")',
     filterDropdown: '[data-testid="filter-dropdown"], .filter-dropdown',
     searchInput: '[data-testid="search-input"], input[placeholder*="Search"]',
+    // Stage tabs at the top (Estimate in Progress, Service - Estimating, etc.)
+    stageTabs: '[class*="stage-tab"], [class*="status-tab"], [role="tablist"] button, [class*="tab-item"]',
     stageDropdown: '[data-testid="stage-dropdown"], .stage-dropdown, select.stage',
+    createNewProject: 'button:has-text("Create New Project"), [data-testid="create-project"]',
     sendToPortfolioButton: '[data-testid="send-to-portfolio"], button:has-text("Send to Portfolio")',
     projectOverviewTab: '[data-testid="overview-tab"], a:has-text("Overview")',
     estimateTab: '[data-testid="estimate-tab"], a:has-text("Estimate")',
