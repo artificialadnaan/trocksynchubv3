@@ -21,20 +21,9 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, ArrowRight, Trash2, MoveHorizontal } from "lucide-react";
+import { Plus, ArrowRight, Trash2, MoveHorizontal, RefreshCw, Loader2 } from "lucide-react";
 import { useState } from "react";
 import type { StageMapping } from "@shared/schema";
-
-const hubspotStages = [
-  { value: "qualifiedtobuy", label: "Qualified to Buy" },
-  { value: "presentationscheduled", label: "Presentation Scheduled" },
-  { value: "decisionmakerboughtin", label: "Decision Maker Bought-In" },
-  { value: "contractsent", label: "Contract Sent" },
-  { value: "closedwon", label: "Closed Won" },
-  { value: "closedlost", label: "Closed Lost" },
-  { value: "inproduction", label: "In Production" },
-  { value: "projectcomplete", label: "Project Complete" },
-];
 
 const procoreStages = [
   { value: "preconstruction", label: "Pre-Construction" },
@@ -47,6 +36,13 @@ const procoreStages = [
   { value: "complete", label: "Complete" },
 ];
 
+interface HubSpotStage {
+  stageId: string;
+  label: string;
+  pipelineLabel: string;
+  pipelineId: string;
+}
+
 export default function SyncConfigPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const { toast } = useToast();
@@ -58,6 +54,35 @@ export default function SyncConfigPage() {
   const { data: configs } = useQuery<any[]>({
     queryKey: ["/api/automation-config"],
   });
+
+  // Fetch HubSpot stages dynamically from API
+  const { data: hubspotStagesData, isLoading: stagesLoading, refetch: refetchStages } = useQuery<HubSpotStage[]>({
+    queryKey: ["/api/stage-mapping/hubspot-stages"],
+  });
+
+  const refreshPipelinesMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/stage-mapping/refresh-hubspot-pipelines");
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || "Failed to refresh pipelines");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      refetchStages();
+      toast({ title: "HubSpot Stages Refreshed", description: `Found ${data.stages?.length || 0} stages` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to refresh", description: e.message, variant: "destructive" });
+    },
+  });
+
+  // Convert API response to dropdown format
+  const hubspotStages = (hubspotStagesData || []).map(s => ({
+    value: s.stageId,
+    label: `${s.label} (${s.pipelineLabel})`,
+  }));
 
   const createMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -133,24 +158,46 @@ export default function SyncConfigPage() {
           <CardTitle className="text-base font-semibold flex items-center gap-2">
             <MoveHorizontal className="w-4 h-4" />
             Stage Mappings
+            {hubspotStages.length > 0 && (
+              <Badge variant="secondary" className="text-xs font-normal">
+                {hubspotStages.length} HubSpot stages
+              </Badge>
+            )}
           </CardTitle>
-          <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-            <DialogTrigger asChild>
-              <Button size="sm" data-testid="button-add-mapping">
-                <Plus className="w-4 h-4 mr-1" />
-                Add Mapping
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Add Stage Mapping</DialogTitle>
-              </DialogHeader>
-              <AddMappingForm
-                onSubmit={(data) => createMutation.mutate(data)}
-                isPending={createMutation.isPending}
-              />
-            </DialogContent>
-          </Dialog>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refreshPipelinesMutation.mutate()}
+              disabled={refreshPipelinesMutation.isPending}
+              title="Refresh HubSpot Stages"
+            >
+              {refreshPipelinesMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+            </Button>
+            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+              <DialogTrigger asChild>
+                <Button size="sm" data-testid="button-add-mapping">
+                  <Plus className="w-4 h-4 mr-1" />
+                  Add Mapping
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Add Stage Mapping</DialogTitle>
+                </DialogHeader>
+                <AddMappingForm
+                  hubspotStages={hubspotStages}
+                  onSubmit={(data) => createMutation.mutate(data)}
+                  isPending={createMutation.isPending}
+                  isLoadingStages={stagesLoading}
+                />
+              </DialogContent>
+            </Dialog>
+          </div>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -241,7 +288,14 @@ export default function SyncConfigPage() {
   );
 }
 
-function AddMappingForm({ onSubmit, isPending }: { onSubmit: (data: any) => void; isPending: boolean }) {
+interface AddMappingFormProps {
+  hubspotStages: { value: string; label: string }[];
+  onSubmit: (data: any) => void;
+  isPending: boolean;
+  isLoadingStages?: boolean;
+}
+
+function AddMappingForm({ hubspotStages, onSubmit, isPending, isLoadingStages }: AddMappingFormProps) {
   const [hubspotStage, setHubspotStage] = useState("");
   const [procoreStage, setProcoreStage] = useState("");
   const [direction, setDirection] = useState("bidirectional");
@@ -267,16 +321,24 @@ function AddMappingForm({ onSubmit, isPending }: { onSubmit: (data: any) => void
     <form onSubmit={handleSubmit} className="space-y-4 pt-2">
       <div>
         <label className="text-sm font-medium mb-1.5 block">HubSpot Deal Stage</label>
-        <Select value={hubspotStage} onValueChange={setHubspotStage}>
-          <SelectTrigger data-testid="select-hubspot-stage">
-            <SelectValue placeholder="Select HubSpot stage" />
-          </SelectTrigger>
-          <SelectContent>
-            {hubspotStages.map((s) => (
-              <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {isLoadingStages ? (
+          <Skeleton className="h-10 w-full" />
+        ) : hubspotStages.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-2">
+            No HubSpot stages found. Click the refresh button to fetch stages from HubSpot.
+          </p>
+        ) : (
+          <Select value={hubspotStage} onValueChange={setHubspotStage}>
+            <SelectTrigger data-testid="select-hubspot-stage">
+              <SelectValue placeholder="Select HubSpot stage" />
+            </SelectTrigger>
+            <SelectContent>
+              {hubspotStages.map((s) => (
+                <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
       <div>
         <label className="text-sm font-medium mb-1.5 block">Procore Bid Board Stage</label>
