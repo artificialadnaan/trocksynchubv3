@@ -1,10 +1,12 @@
 [phases.setup]
-nixPkgs = ["nodejs_22"]
+nixPkgs = ["nodejs_20"]
 
 [phases.install]
-cmds = ["npm cache clean --force", "npm ci --include=dev"]
+cacheDirectories = []
+cmds = ["npm install --include=dev"]
 
 [phases.build]
+cacheDirectories = []
 cmds = ["npm run build", "npm run db:push"]
 
 [start]
