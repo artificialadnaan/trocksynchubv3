@@ -366,6 +366,70 @@ export async function registerRoutes(
     }
   });
 
+  // ============= HubSpot OAuth =============
+  app.get("/api/oauth/hubspot/authorize", async (_req, res) => {
+    try {
+      const { getHubSpotAuthUrl, getHubSpotOAuthConfig } = await import("./hubspot");
+      const config = getHubSpotOAuthConfig();
+      
+      if (!config.clientId) {
+        return res.status(400).json({ 
+          message: "HubSpot Client ID not configured. Set HUBSPOT_CLIENT_ID environment variable." 
+        });
+      }
+      
+      const url = getHubSpotAuthUrl();
+      console.log('[hubspot-oauth] Generated auth URL, redirecting to HubSpot...');
+      res.json({ url });
+    } catch (e: any) {
+      console.error('[hubspot-oauth] Failed to generate auth URL:', e);
+      res.status(400).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/oauth/hubspot/callback", async (req, res) => {
+    try {
+      const { code, error, error_description } = req.query;
+      
+      if (error) {
+        console.error('[hubspot-oauth] OAuth error:', error, error_description);
+        return res.redirect(`/#/settings?hubspot=error&message=${encodeURIComponent(error_description as string || error as string)}`);
+      }
+      
+      if (!code) {
+        return res.redirect("/#/settings?hubspot=error&message=Missing%20authorization%20code");
+      }
+
+      console.log('[hubspot-oauth] Received authorization code, exchanging for tokens...');
+      
+      const { exchangeHubSpotCode } = await import("./hubspot");
+      const tokens = await exchangeHubSpotCode(code as string);
+      
+      // Save tokens to database
+      await storage.upsertOAuthToken({
+        provider: "hubspot",
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        tokenType: "Bearer",
+        expiresAt: new Date(Date.now() + tokens.expiresIn * 1000),
+      });
+
+      await storage.createAuditLog({
+        action: "oauth_connect",
+        entityType: "hubspot",
+        source: "oauth",
+        status: "success",
+        details: { message: "HubSpot OAuth connected successfully" },
+      });
+
+      console.log('[hubspot-oauth] OAuth connection successful');
+      res.redirect("/#/settings?hubspot=connected");
+    } catch (e: any) {
+      console.error("[hubspot-oauth] Callback error:", e);
+      res.redirect("/#/settings?hubspot=error&message=" + encodeURIComponent(e.message));
+    }
+  });
+
   // ============= Microsoft OAuth (OneDrive + Outlook) =============
   app.get("/api/oauth/microsoft/authorize", async (_req, res) => {
     try {

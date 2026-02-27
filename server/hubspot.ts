@@ -1,92 +1,236 @@
 import { Client } from '@hubspot/api-client';
 import { storage } from './storage';
 
-let connectionSettings: any;
+// HubSpot OAuth configuration
+const HUBSPOT_AUTH_URL = 'https://app.hubspot.com/oauth/authorize';
+const HUBSPOT_TOKEN_URL = 'https://api.hubapi.com/oauth/v1/token';
+
+export function getHubSpotOAuthConfig() {
+  return {
+    clientId: process.env.HUBSPOT_CLIENT_ID || '',
+    clientSecret: process.env.HUBSPOT_CLIENT_SECRET || '',
+    redirectUri: `${process.env.APP_URL || 'http://localhost:5000'}/api/oauth/hubspot/callback`,
+    scopes: [
+      'crm.objects.deals.read',
+      'crm.objects.deals.write',
+      'crm.objects.contacts.read',
+      'crm.objects.companies.read',
+      'crm.schemas.deals.read',
+      'crm.schemas.contacts.read',
+      'crm.schemas.companies.read',
+      'oauth',
+    ],
+  };
+}
+
+export function getHubSpotAuthUrl(): string {
+  const config = getHubSpotOAuthConfig();
+  const params = new URLSearchParams({
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
+    scope: config.scopes.join(' '),
+    response_type: 'code',
+  });
+  return `${HUBSPOT_AUTH_URL}?${params.toString()}`;
+}
+
+export async function exchangeHubSpotCode(code: string): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  const config = getHubSpotOAuthConfig();
+  
+  console.log('[hubspot-oauth] Exchanging authorization code for tokens...');
+  
+  const response = await fetch(HUBSPOT_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      redirect_uri: config.redirectUri,
+      code,
+    }),
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[hubspot-oauth] Token exchange failed:', response.status, errorText);
+    throw new Error(`HubSpot OAuth failed: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  console.log('[hubspot-oauth] Token exchange successful, expires_in:', data.expires_in);
+  
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresIn: data.expires_in,
+  };
+}
+
+export async function refreshHubSpotToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  const config = getHubSpotOAuthConfig();
+  
+  console.log('[hubspot-oauth] Refreshing access token...');
+  
+  const response = await fetch(HUBSPOT_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: refreshToken,
+    }),
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[hubspot-oauth] Token refresh failed:', response.status, errorText);
+    throw new Error(`HubSpot token refresh failed: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  console.log('[hubspot-oauth] Token refresh successful, new expires_in:', data.expires_in);
+  
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresIn: data.expires_in,
+  };
+}
 
 export async function getAccessToken(): Promise<string> {
-  // First, check for access token stored in database from OAuth flow
+  console.log('[hubspot] Getting access token...');
+  
+  // 1. Check for access token stored in database (from Settings page or OAuth flow)
   const storedToken = await storage.getOAuthToken("hubspot");
+  
   if (storedToken?.accessToken) {
-    // Check if token is expired
-    if (storedToken.expiresAt && new Date(storedToken.expiresAt).getTime() <= Date.now()) {
-      console.log('[hubspot] Database token expired, checking other sources...');
+    console.log('[hubspot] Found stored token in database');
+    
+    // Check if token is expired and needs refresh
+    if (storedToken.expiresAt) {
+      const expiresAt = new Date(storedToken.expiresAt).getTime();
+      const now = Date.now();
+      const fiveMinutes = 5 * 60 * 1000;
+      
+      if (expiresAt <= now) {
+        console.log('[hubspot] Token is expired');
+        
+        // Try to refresh if we have a refresh token
+        if (storedToken.refreshToken) {
+          try {
+            console.log('[hubspot] Attempting token refresh...');
+            const refreshed = await refreshHubSpotToken(storedToken.refreshToken);
+            
+            // Save the new tokens
+            await storage.upsertOAuthToken({
+              provider: "hubspot",
+              accessToken: refreshed.accessToken,
+              refreshToken: refreshed.refreshToken,
+              tokenType: "Bearer",
+              expiresAt: new Date(Date.now() + refreshed.expiresIn * 1000),
+            });
+            
+            console.log('[hubspot] Token refreshed and saved successfully');
+            return refreshed.accessToken;
+          } catch (refreshError: any) {
+            console.error('[hubspot] Token refresh failed:', refreshError.message);
+          }
+        }
+      } else if (expiresAt - now < fiveMinutes && storedToken.refreshToken) {
+        // Token expires soon, proactively refresh
+        console.log('[hubspot] Token expires soon, proactively refreshing...');
+        try {
+          const refreshed = await refreshHubSpotToken(storedToken.refreshToken);
+          await storage.upsertOAuthToken({
+            provider: "hubspot",
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken,
+            tokenType: "Bearer",
+            expiresAt: new Date(Date.now() + refreshed.expiresIn * 1000),
+          });
+          console.log('[hubspot] Proactive token refresh successful');
+          return refreshed.accessToken;
+        } catch (e: any) {
+          console.warn('[hubspot] Proactive refresh failed, using existing token:', e.message);
+        }
+      }
+      
+      // Token is still valid
+      if (expiresAt > now) {
+        console.log('[hubspot] Using stored token (valid for', Math.round((expiresAt - now) / 60000), 'more minutes)');
+        return storedToken.accessToken;
+      }
     } else {
+      // No expiry set, assume it's a Private App token (doesn't expire)
+      console.log('[hubspot] Using stored token (no expiry - likely Private App token)');
       return storedToken.accessToken;
     }
   }
 
-  // Check environment variable
+  // 2. Check environment variable (for Private App tokens)
   if (process.env.HUBSPOT_ACCESS_TOKEN) {
+    console.log('[hubspot] Using HUBSPOT_ACCESS_TOKEN from environment');
     return process.env.HUBSPOT_ACCESS_TOKEN;
   }
 
-  // Fallback to Replit connector (for Replit deployments)
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY
-    ? 'repl ' + process.env.REPL_IDENTITY
-    : process.env.WEB_REPL_RENEWAL
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL
-    : null;
-
-  if (xReplitToken && hostname) {
-    if (connectionSettings && connectionSettings.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-      return connectionSettings.settings.access_token;
-    }
-
-    connectionSettings = null;
-
-    const response = await fetch(
-      'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=hubspot',
-      {
-        headers: {
-          'Accept': 'application/json',
-          'X-Replit-Token': xReplitToken
-        }
-      }
-    );
-
-    const data = await response.json();
-    connectionSettings = data.items?.[0];
-
-    const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
-
-    if (!connectionSettings || !accessToken) {
-      throw new Error('HubSpot not connected via Replit connector.');
-    }
-
-    const expiresAt = connectionSettings.settings?.expires_at;
-    if (expiresAt) {
-      const expiresTime = new Date(expiresAt).getTime();
-      if (expiresTime <= Date.now()) {
-        connectionSettings = null;
-        throw new Error('HubSpot OAuth token is expired. Please reconnect HubSpot in the integrations panel.');
-      }
-    }
-
-    return accessToken;
-  }
-
-  throw new Error('HubSpot token not available. Set HUBSPOT_ACCESS_TOKEN env var or connect via OAuth.');
+  console.error('[hubspot] No valid access token found');
+  throw new Error('HubSpot not connected. Please configure HubSpot in Settings or set HUBSPOT_ACCESS_TOKEN environment variable.');
 }
 
 export async function getHubSpotClient(): Promise<Client> {
   const accessToken = await getAccessToken();
+  console.log('[hubspot] Creating HubSpot client with token (first 10 chars):', accessToken.substring(0, 10) + '...');
   return new Client({ accessToken });
 }
 
 export async function testHubSpotConnection(): Promise<{ success: boolean; message: string; data?: any }> {
+  console.log('[hubspot-test] Testing HubSpot connection...');
   try {
     const client = await getHubSpotClient();
-    const response = await client.crm.deals.basicApi.getPage(1);
-    return {
-      success: true,
-      message: `Connected! Found ${(response as any).total || response.results?.length || 0} deals in your HubSpot account.`,
-      data: { totalDeals: (response as any).total || response.results?.length || 0 }
-    };
+    
+    // Test basic API access
+    console.log('[hubspot-test] Fetching deals to verify connection...');
+    const dealsResponse = await client.crm.deals.basicApi.getPage(1);
+    const totalDeals = (dealsResponse as any).total || dealsResponse.results?.length || 0;
+    console.log('[hubspot-test] Deals API successful, found', totalDeals, 'deals');
+    
+    // Test pipeline access
+    console.log('[hubspot-test] Fetching pipelines to verify schema access...');
+    try {
+      const pipelinesResponse = await client.crm.pipelines.pipelinesApi.getAll('deals');
+      const pipelineCount = pipelinesResponse.results?.length || 0;
+      const stageCount = pipelinesResponse.results?.reduce((sum, p) => sum + (p.stages?.length || 0), 0) || 0;
+      console.log('[hubspot-test] Pipelines API successful, found', pipelineCount, 'pipelines with', stageCount, 'stages');
+      
+      return {
+        success: true,
+        message: `Connected! Found ${totalDeals} deals and ${pipelineCount} pipelines (${stageCount} stages).`,
+        data: { totalDeals, pipelines: pipelineCount, stages: stageCount }
+      };
+    } catch (pipelineError: any) {
+      console.warn('[hubspot-test] Pipeline access failed:', pipelineError.message);
+      return {
+        success: true,
+        message: `Connected! Found ${totalDeals} deals. Note: Pipeline access may require additional scopes (crm.schemas.deals.read).`,
+        data: { totalDeals, pipelineError: pipelineError.message }
+      };
+    }
   } catch (e: any) {
+    console.error('[hubspot-test] Connection test failed:', e.message);
+    
+    // Provide more helpful error messages
+    let message = e.message || 'Failed to connect to HubSpot';
+    if (e.message?.includes('401')) {
+      message = 'Authentication failed. Please check your HubSpot access token is valid.';
+    } else if (e.message?.includes('403')) {
+      message = 'Access denied. Your HubSpot token may be missing required scopes.';
+    }
+    
     return {
       success: false,
-      message: e.message || 'Failed to connect to HubSpot'
+      message
     };
   }
 }
@@ -475,30 +619,61 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
 }
 
 export async function syncHubSpotPipelines(): Promise<any[]> {
-  const client = await getHubSpotClient();
-  const response = await client.crm.pipelines.pipelinesApi.getAll('deals');
-  const pipelines = response.results || [];
-  const saved: any[] = [];
+  console.log('[hubspot-pipelines] Starting pipeline sync...');
+  
+  try {
+    const client = await getHubSpotClient();
+    
+    console.log('[hubspot-pipelines] Fetching pipelines from HubSpot API...');
+    const response = await client.crm.pipelines.pipelinesApi.getAll('deals');
+    const pipelines = response.results || [];
+    
+    console.log('[hubspot-pipelines] Found', pipelines.length, 'pipelines from HubSpot');
+    
+    if (pipelines.length === 0) {
+      console.warn('[hubspot-pipelines] No pipelines returned from HubSpot. This could indicate:');
+      console.warn('  - Missing scope: crm.schemas.deals.read');
+      console.warn('  - No deal pipelines configured in HubSpot');
+      return [];
+    }
+    
+    const saved: any[] = [];
 
-  for (const pipeline of pipelines) {
-    const stages = (pipeline.stages || []).map((s: any) => ({
-      stageId: s.id,
-      label: s.label,
-      displayOrder: s.displayOrder,
-      probability: s.metadata?.probability,
-      isClosed: s.metadata?.isClosed === 'true',
-    }));
+    for (const pipeline of pipelines) {
+      const stages = (pipeline.stages || []).map((s: any) => ({
+        stageId: s.id,
+        label: s.label,
+        displayOrder: s.displayOrder,
+        probability: s.metadata?.probability,
+        isClosed: s.metadata?.isClosed === 'true',
+      }));
 
-    const result = await storage.upsertHubspotPipeline({
-      hubspotId: pipeline.id,
-      label: pipeline.label,
-      displayOrder: pipeline.displayOrder,
-      stages,
-    });
-    saved.push(result);
+      console.log(`[hubspot-pipelines] Processing pipeline "${pipeline.label}" (${pipeline.id}) with ${stages.length} stages:`);
+      stages.forEach((s: any) => console.log(`  - ${s.label} (${s.stageId})`));
+
+      const result = await storage.upsertHubspotPipeline({
+        hubspotId: pipeline.id,
+        label: pipeline.label,
+        displayOrder: pipeline.displayOrder,
+        stages,
+      });
+      saved.push(result);
+    }
+
+    const totalStages = saved.reduce((sum, p) => sum + ((p.stages as any[])?.length || 0), 0);
+    console.log(`[hubspot-pipelines] Sync complete: ${saved.length} pipelines, ${totalStages} stages saved to database`);
+    
+    return saved;
+  } catch (e: any) {
+    console.error('[hubspot-pipelines] Pipeline sync failed:', e.message);
+    
+    if (e.message?.includes('403') || e.message?.includes('401')) {
+      console.error('[hubspot-pipelines] This appears to be an authentication/authorization error.');
+      console.error('[hubspot-pipelines] Make sure your HubSpot app has the "crm.schemas.deals.read" scope.');
+    }
+    
+    throw e;
   }
-
-  return saved;
 }
 
 export async function runFullHubSpotSync(): Promise<{
