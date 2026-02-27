@@ -310,12 +310,12 @@ export async function registerRoutes(
 
   app.get("/api/oauth/procore/authorize", async (_req, res) => {
     const config = await storage.getAutomationConfig("procore_config");
-    const clientId = (config?.value as any)?.clientId;
+    const clientId = (config?.value as any)?.clientId || process.env.PROCORE_CLIENT_ID;
     const env = (config?.value as any)?.environment || "production";
     const host = process.env.APP_URL || (process.env.REPLIT_DEV_DOMAIN ? 'https://' + process.env.REPLIT_DEV_DOMAIN : `http://localhost:${process.env.PORT || 5000}`);
     const redirectUri = `${host}/api/oauth/procore/callback`;
     const baseUrl = env === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
-    if (!clientId) return res.status(400).json({ message: "Procore Client ID not configured. Save your credentials first." });
+    if (!clientId) return res.status(400).json({ message: "Procore Client ID not configured. Set PROCORE_CLIENT_ID environment variable or save credentials in settings." });
     const url = `${baseUrl}/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}`;
     res.json({ url });
   });
@@ -325,8 +325,8 @@ export async function registerRoutes(
       const { code } = req.query;
       if (!code) return res.status(400).json({ message: "Missing authorization code" });
       const config = await storage.getAutomationConfig("procore_config");
-      const clientId = (config?.value as any)?.clientId;
-      const clientSecret = (config?.value as any)?.clientSecret;
+      const clientId = (config?.value as any)?.clientId || process.env.PROCORE_CLIENT_ID;
+      const clientSecret = (config?.value as any)?.clientSecret || process.env.PROCORE_CLIENT_SECRET;
       const env = (config?.value as any)?.environment || "production";
       const host = process.env.APP_URL || (process.env.REPLIT_DEV_DOMAIN ? 'https://' + process.env.REPLIT_DEV_DOMAIN : `http://localhost:${process.env.PORT || 5000}`);
       const redirectUri = `${host}/api/oauth/procore/callback`;
