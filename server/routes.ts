@@ -997,17 +997,22 @@ export async function registerRoutes(
   app.post("/api/integrations/hubspot/save", requireAuth, async (req, res) => {
     try {
       const { accessToken, portalId, webhookUrl } = req.body;
-      if (!accessToken) return res.status(400).json({ message: "Access token is required" });
+      
+      // Trim whitespace from inputs
+      const trimmedAccessToken = accessToken?.trim();
+      const trimmedPortalId = portalId?.trim();
+      
+      if (!trimmedAccessToken) return res.status(400).json({ message: "Access token is required" });
 
       await storage.upsertOAuthToken({
         provider: "hubspot",
-        accessToken,
+        accessToken: trimmedAccessToken,
         tokenType: "Bearer",
       });
 
       await storage.upsertAutomationConfig({
         key: "hubspot_config",
-        value: { portalId, webhookUrl, configuredAt: new Date().toISOString() },
+        value: { portalId: trimmedPortalId, webhookUrl: webhookUrl?.trim(), configuredAt: new Date().toISOString() },
         description: "HubSpot CRM configuration",
         isActive: true,
       });
@@ -1158,14 +1163,20 @@ export async function registerRoutes(
   app.post("/api/integrations/procore/save", requireAuth, async (req, res) => {
     try {
       const { clientId, clientSecret, companyId, environment } = req.body;
-      if (!clientId || !clientSecret) return res.status(400).json({ message: "Client ID and Client Secret are required" });
+      
+      // Trim whitespace from all inputs to prevent issues with copy-paste
+      const trimmedClientId = clientId?.trim();
+      const trimmedClientSecret = clientSecret?.trim();
+      const trimmedCompanyId = companyId?.trim();
+      
+      if (!trimmedClientId || !trimmedClientSecret) return res.status(400).json({ message: "Client ID and Client Secret are required" });
 
       await storage.upsertAutomationConfig({
         key: "procore_config",
         value: {
-          clientId,
-          clientSecret,
-          companyId,
+          clientId: trimmedClientId,
+          clientSecret: trimmedClientSecret,
+          companyId: trimmedCompanyId,
           environment: environment || "production",
           configuredAt: new Date().toISOString(),
         },
