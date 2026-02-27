@@ -1273,7 +1273,7 @@ export class DatabaseStorage implements IStorage {
           
           <!-- Orange Accent Bar -->
           <tr>
-            <td style="background: linear-gradient(90deg, #f97316 0%, #fb923c 100%); height: 4px;"></td>
+            <td style="background: linear-gradient(90deg, #d11921 0%, #e53935 100%); height: 4px;"></td>
           </tr>
           
           <!-- Main Content -->
@@ -1294,8 +1294,8 @@ export class DatabaseStorage implements IStorage {
                       3001 Long Prairie Rd. Ste. 200, Flower Mound, TX 75022
                     </p>
                     <p style="color: #64748b; font-size: 12px; margin: 0;">
-                      <a href="tel:2145484733" style="color: #f97316; text-decoration: none;">(214) 548-4733</a> &nbsp;|&nbsp;
-                      <a href="https://trockgc.com" style="color: #f97316; text-decoration: none;">trockgc.com</a>
+                      <a href="tel:2145484733" style="color: #d11921; text-decoration: none;">(214) 548-4733</a> &nbsp;|&nbsp;
+                      <a href="https://trockgc.com" style="color: #d11921; text-decoration: none;">trockgc.com</a>
                     </p>
                     <p style="color: #475569; font-size: 11px; margin: 20px 0 0 0;">
                       © ${new Date().getFullYear()} T-Rock Construction. All rights reserved.
@@ -1322,7 +1322,7 @@ export class DatabaseStorage implements IStorage {
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
               <div style="text-align: center; margin-bottom: 24px;">
-                <div style="display: inline-block; background: linear-gradient(135deg, #f97316 0%, #fb923c 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #e53935 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
                   <span style="font-size: 28px;">👷</span>
                 </div>
               </div>
@@ -1343,17 +1343,17 @@ export class DatabaseStorage implements IStorage {
               </p>
               
               <!-- Info Card -->
-              <div style="background: linear-gradient(135deg, #fef3c7 0%, #fef9c3 100%); border-left: 4px solid #f97316; border-radius: 8px; padding: 20px; margin: 0 0 32px 0;">
+              <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-left: 4px solid #d11921; border-radius: 8px; padding: 20px; margin: 0 0 32px 0;">
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
                   <tr>
                     <td style="padding: 8px 0;">
-                      <span style="color: #92400e; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project</span><br>
+                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project</span><br>
                       <span style="color: #1a1a2e; font-size: 18px; font-weight: 700;">{{projectName}}</span>
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding: 8px 0; border-top: 1px solid #fcd34d;">
-                      <span style="color: #92400e; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Your Role</span><br>
+                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
+                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Your Role</span><br>
                       <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{roleName}}</span>
                     </td>
                   </tr>
@@ -1362,7 +1362,7 @@ export class DatabaseStorage implements IStorage {
               
               <!-- CTA Button -->
               <div style="text-align: center; margin: 32px 0;">
-                <a href="{{projectUrl}}" style="display: inline-block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(249, 115, 22, 0.4);">
+                <a href="{{projectUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
                   View Project in Procore →
                 </a>
               </div>
@@ -1411,7 +1411,7 @@ export class DatabaseStorage implements IStorage {
                   <p style="color: #7f1d1d; font-size: 16px; font-weight: 700; margin: 8px 0 0 0;">{{previousStage}}</p>
                 </div>
                 <div style="display: table-cell; width: 10%; vertical-align: middle; text-align: center;">
-                  <span style="color: #f97316; font-size: 24px;">→</span>
+                  <span style="color: #d11921; font-size: 24px;">→</span>
                 </div>
                 <div style="display: table-cell; width: 45%; vertical-align: middle; text-align: center; padding: 20px; background-color: #dcfce7; border-radius: 8px;">
                   <span style="color: #166534; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">New Stage</span>

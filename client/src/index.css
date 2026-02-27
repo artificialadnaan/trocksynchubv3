@@ -2,7 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-/* LIGHT MODE */
+/* LIGHT MODE - T-Rock Construction Branded Theme */
+/* Brand Colors: Primary Red #d11921, Dark #0a0a0a, Footer Gray #2c2f32 */
 :root {
   --button-outline: rgba(0,0,0, .10);
   --badge-outline: rgba(0,0,0, .05);
@@ -12,53 +13,54 @@
   --elevate-1: rgba(0,0,0, .03);
   --elevate-2: rgba(0,0,0, .08);
 
-  --background: 70.91 21.57% 90%;
-  --foreground: 0 0% 8.24%;
-  --border: 35 10.53% 77.65%;
-  --card: 180 6.6667% 97.0588%;
-  --card-foreground: 210 25% 7.8431%;
-  --card-border: 214 20% 92%;
-  --sidebar: 180 6.6667% 97.0588%;
-  --sidebar-foreground: 210 25% 7.8431%;
-  --sidebar-border: 205.0000 25.0000% 90.5882%;
-  --sidebar-primary: 203.8863 88.2845% 53.1373%;
+  /* T-Rock Light Theme */
+  --background: 0 0% 96%;
+  --foreground: 0 0% 4%;
+  --border: 0 0% 88%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 4%;
+  --card-border: 0 0% 90%;
+  --sidebar: 210 7% 18%;
+  --sidebar-foreground: 0 0% 95%;
+  --sidebar-border: 210 5% 25%;
+  --sidebar-primary: 357 77% 46%;
   --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 211.5789 51.3514% 92.7451%;
-  --sidebar-accent-foreground: 203.8863 88.2845% 53.1373%;
-  --sidebar-ring: 202.8169 89.1213% 53.1373%;
+  --sidebar-accent: 210 5% 25%;
+  --sidebar-accent-foreground: 0 0% 95%;
+  --sidebar-ring: 357 77% 46%;
   --popover: 0 0% 100%;
-  --popover-foreground: 210 25% 7.8431%;
-  --popover-border: 214 20% 90%;
-  --primary: 165.65 26.44% 65.88%;
-  --primary-foreground: 0 0% 8.24%;
-  --secondary: 0 0% 8.24%;
-  --secondary-foreground: 70.91 21.57% 90%;
-  --muted: 72 12.82% 84.71%;
-  --muted-foreground: 72 2.39% 40.98%;
-  --accent: 292.13 48.03% 75.1%;
-  --accent-foreground: 0 0% 8.24%;
-  --destructive: 0.49 54.19% 55.49%;
+  --popover-foreground: 0 0% 4%;
+  --popover-border: 0 0% 90%;
+  --primary: 357 77% 46%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 4%;
+  --secondary-foreground: 0 0% 96%;
+  --muted: 0 0% 92%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 357 77% 95%;
+  --accent-foreground: 357 77% 46%;
+  --destructive: 0 84% 60%;
   --destructive-foreground: 0 0% 100%;
-  --input: 35.29 11.41% 70.78%;
-  --ring: 166.76 29.82% 44.71%;
-  --chart-1: 203.8863 88.2845% 53.1373%;
-  --chart-2: 159.7826 100% 36.0784%;
-  --chart-3: 42.0290 92.8251% 56.2745%;
-  --chart-4: 147.1429 78.5047% 41.9608%;
-  --chart-5: 341.4894 75.2000% 50.9804%;
+  --input: 0 0% 85%;
+  --ring: 357 77% 46%;
+  --chart-1: 357 77% 46%;
+  --chart-2: 210 7% 18%;
+  --chart-3: 48 96% 53%;
+  --chart-4: 142 71% 45%;
+  --chart-5: 262 83% 58%;
 
-  --font-sans: 'Inter', sans-serif;
-  --font-serif: 'Source Serif Pro', serif;
+  --font-sans: 'Open Sans', 'Inter', sans-serif;
+  --font-serif: 'Domine', 'Source Serif Pro', serif;
   --font-mono: 'IBM Plex Mono', monospace;
-  --radius: 0.875rem;
-  --shadow-2xs: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-xs: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-sm: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 1px 2px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 1px 2px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-md: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 2px 4px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-lg: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 4px 6px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-xl: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 8px 10px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-2xl: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00);
+  --radius: 0.5rem;
+  --shadow-2xs: 0px 1px 2px 0px rgba(0, 0, 0, 0.05);
+  --shadow-xs: 0px 1px 3px 0px rgba(0, 0, 0, 0.1);
+  --shadow-sm: 0px 1px 3px 0px rgba(0, 0, 0, 0.1), 0px 1px 2px -1px rgba(0, 0, 0, 0.1);
+  --shadow: 0px 2px 4px 0px rgba(0, 0, 0, 0.1), 0px 1px 2px -1px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0px 4px 6px -1px rgba(0, 0, 0, 0.1), 0px 2px 4px -2px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0px 10px 15px -3px rgba(0, 0, 0, 0.1), 0px 4px 6px -4px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0px 20px 25px -5px rgba(0, 0, 0, 0.1), 0px 8px 10px -6px rgba(0, 0, 0, 0.1);
+  --shadow-2xl: 0px 25px 50px -12px rgba(0, 0, 0, 0.25);
   --tracking-normal: 0em;
   --spacing: 0.25rem;
 
@@ -78,6 +80,7 @@
   --destructive-border: hsl(from hsl(var(--destructive)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
 }
 
+/* DARK MODE - T-Rock Construction Branded Theme */
 .dark {
   --button-outline: rgba(255,255,255, .10);
   --badge-outline: rgba(255,255,255, .05);
@@ -87,54 +90,55 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
 
-  --background: 0 0% 0%;
-  --foreground: 200 6.6667% 91.1765%;
-  --border: 210 5.2632% 14.9020%;
-  --card: 228 9.8039% 10%;
-  --card-foreground: 0 0% 85.0980%;
-  --card-border: 217 20% 16%;
-  --sidebar: 228 9.8039% 10%;
-  --sidebar-foreground: 0 0% 85.0980%;
-  --sidebar-border: 205.7143 15.7895% 26.0784%;
-  --sidebar-primary: 202.8169 89.1213% 53.1373%;
+  /* T-Rock Dark Theme - matches footer/dark sections of website */
+  --background: 210 7% 10%;
+  --foreground: 0 0% 95%;
+  --border: 210 5% 20%;
+  --card: 210 7% 14%;
+  --card-foreground: 0 0% 90%;
+  --card-border: 210 5% 22%;
+  --sidebar: 210 7% 8%;
+  --sidebar-foreground: 0 0% 90%;
+  --sidebar-border: 210 5% 18%;
+  --sidebar-primary: 357 77% 50%;
   --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 205.7143 70% 7.8431%;
-  --sidebar-accent-foreground: 203.7736 87.6033% 52.5490%;
-  --sidebar-ring: 202.8169 89.1213% 53.1373%;
-  --popover: 0 0% 0%;
-  --popover-foreground: 200 6.6667% 91.1765%;
-  --popover-border: 217 20% 18%;
-  --primary: 203.7736 87.6033% 52.5490%;
+  --sidebar-accent: 210 5% 18%;
+  --sidebar-accent-foreground: 357 77% 60%;
+  --sidebar-ring: 357 77% 50%;
+  --popover: 210 7% 12%;
+  --popover-foreground: 0 0% 95%;
+  --popover-border: 210 5% 22%;
+  --primary: 357 77% 50%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 195.0000 15.3846% 94.9020%;
-  --secondary-foreground: 210 25% 7.8431%;
-  --muted: 0 0% 9.4118%;
-  --muted-foreground: 210 3.3898% 46.2745%;
-  --accent: 205.7143 70% 7.8431%;
-  --accent-foreground: 203.7736 87.6033% 52.5490%;
-  --destructive: 356.3033 90.5579% 54.3137%;
+  --secondary: 0 0% 95%;
+  --secondary-foreground: 210 7% 10%;
+  --muted: 210 5% 18%;
+  --muted-foreground: 0 0% 55%;
+  --accent: 357 77% 15%;
+  --accent-foreground: 357 77% 60%;
+  --destructive: 0 84% 60%;
   --destructive-foreground: 0 0% 100%;
-  --input: 207.6923 27.6596% 18.4314%;
-  --ring: 202.8169 89.1213% 53.1373%;
-  --chart-1: 203.8863 88.2845% 53.1373%;
-  --chart-2: 159.7826 100% 36.0784%;
-  --chart-3: 42.0290 92.8251% 56.2745%;
-  --chart-4: 147.1429 78.5047% 41.9608%;
-  --chart-5: 341.4894 75.2000% 50.9804%;
+  --input: 210 5% 22%;
+  --ring: 357 77% 50%;
+  --chart-1: 357 77% 50%;
+  --chart-2: 0 0% 70%;
+  --chart-3: 48 96% 53%;
+  --chart-4: 142 71% 45%;
+  --chart-5: 262 83% 58%;
 
-  --shadow-2xs: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-xs: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-sm: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 1px 2px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 1px 2px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-md: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 2px 4px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-lg: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 4px 6px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-xl: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00), 0px 8px 10px -1px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --shadow-2xl: 0px 2px 0px 0px hsl(202.8169 89.1213% 53.1373% / 0.00);
-  --radius: 1.3rem;
+  --shadow-2xs: 0px 1px 2px 0px rgba(0, 0, 0, 0.3);
+  --shadow-xs: 0px 1px 3px 0px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0px 1px 3px 0px rgba(0, 0, 0, 0.4), 0px 1px 2px -1px rgba(0, 0, 0, 0.4);
+  --shadow: 0px 2px 4px 0px rgba(0, 0, 0, 0.4), 0px 1px 2px -1px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0px 4px 6px -1px rgba(0, 0, 0, 0.4), 0px 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0px 10px 15px -3px rgba(0, 0, 0, 0.4), 0px 4px 6px -4px rgba(0, 0, 0, 0.4);
+  --shadow-xl: 0px 20px 25px -5px rgba(0, 0, 0, 0.4), 0px 8px 10px -6px rgba(0, 0, 0, 0.4);
+  --shadow-2xl: 0px 25px 50px -12px rgba(0, 0, 0, 0.5);
+  --radius: 0.5rem;
   --spacing: 0.25rem;
-  --font-mono: Menlo, monospace;
-  --font-sans: Open Sans, sans-serif;
-  --font-serif: Georgia, serif;
+  --font-mono: 'IBM Plex Mono', Menlo, monospace;
+  --font-sans: 'Open Sans', sans-serif;
+  --font-serif: 'Domine', Georgia, serif;
   --tracking-normal: 0em;
 }
 
