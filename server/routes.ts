@@ -22,13 +22,19 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  app.set("trust proxy", 1);
+
   app.use(
     session({
       store: new PgSession({ pool, createTableIfMissing: true }),
       secret: process.env.SESSION_SECRET || "trock-sync-hub-secret",
       resave: false,
       saveUninitialized: false,
-      cookie: { maxAge: 24 * 60 * 60 * 1000, secure: false },
+      cookie: {
+        maxAge: 24 * 60 * 60 * 1000,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+      },
     })
   );
 
