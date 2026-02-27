@@ -4,3 +4,7 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+# Ignore generated/attached assets + secrets
+attached_assets/
+.env
+.env.*
