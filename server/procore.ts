@@ -182,6 +182,58 @@ function projectDataFromApi(project: any): any {
   };
 }
 
+// Export helper functions for external use (e.g., procore-documents.ts)
+export async function getCompanyId(): Promise<string> {
+  const config = await getProcoreConfig();
+  return config.companyId;
+}
+
+export async function getProcoreClient(): Promise<{
+  get: (endpoint: string, options?: { params?: Record<string, any>; responseType?: string }) => Promise<{ data: any; headers?: any }>;
+}> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  return {
+    async get(endpoint: string, options?: { params?: Record<string, any>; responseType?: string }) {
+      const url = new URL(`${baseUrl}${endpoint}`);
+      
+      // Add query params
+      if (options?.params) {
+        for (const [key, value] of Object.entries(options.params)) {
+          if (value !== undefined && value !== null) {
+            url.searchParams.set(key, String(value));
+          }
+        }
+      }
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+          'Procore-Company-Id': companyId,
+        },
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Procore API error ${response.status}: ${errText}`);
+      }
+
+      // Handle different response types
+      if (options?.responseType === 'arraybuffer') {
+        const buffer = await response.arrayBuffer();
+        return { data: Buffer.from(buffer), headers: Object.fromEntries(response.headers.entries()) };
+      }
+
+      const data = await response.json();
+      return { data, headers: Object.fromEntries(response.headers.entries()) };
+    },
+  };
+}
+
 export async function syncProcoreProjects(): Promise<{ synced: number; created: number; updated: number; changes: number; stageChanges: Array<{ procoreId: string; projectName: string; oldStage: string; newStage: string }> }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
