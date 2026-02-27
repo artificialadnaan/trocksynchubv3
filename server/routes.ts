@@ -26,7 +26,7 @@ export async function registerRoutes(
 
   app.use(
     session({
-      store: new PgSession({ pool, createTableIfMissing: true }),
+      store: new PgSession({ pool, createTableIfMissing: false }),
       secret: process.env.SESSION_SECRET || "trock-sync-hub-secret",
       resave: false,
       saveUninitialized: false,
