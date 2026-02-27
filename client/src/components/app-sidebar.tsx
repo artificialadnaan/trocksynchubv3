@@ -16,6 +16,7 @@ import {
   BarChart3,
   Menu,
   X,
+  FlaskConical,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -33,6 +34,7 @@ const navItems = [
   { path: "/project-archive", label: "Archive", icon: Archive },
   { path: "/reports", label: "Reports", icon: BarChart3 },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
+  { path: "/testing", label: "Testing", icon: FlaskConical },
   { path: "/settings", label: "Settings", icon: Settings },
 ];
 

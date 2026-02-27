@@ -3530,6 +3530,392 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== TESTING MODE ====================
+
+  // Get testing mode status
+  app.get("/api/testing/mode", requireAuth, async (req, res) => {
+    try {
+      const mode = await storage.getTestingMode();
+      res.json(mode);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Set testing mode
+  app.post("/api/testing/mode", requireAuth, async (req, res) => {
+    try {
+      const { enabled, testEmail } = req.body;
+      await storage.setTestingMode(enabled, testEmail || 'adnaan.iqbal@gmail.com');
+      
+      await storage.createAuditLog({
+        action: enabled ? 'testing_mode_enabled' : 'testing_mode_disabled',
+        entityType: 'settings',
+        source: 'admin',
+        status: 'success',
+        details: { testEmail: testEmail || 'adnaan.iqbal@gmail.com' },
+      });
+      
+      res.json({ success: true, enabled, testEmail: testEmail || 'adnaan.iqbal@gmail.com' });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Send test email (to verify email configuration)
+  app.post("/api/testing/send-test-email", requireAuth, async (req, res) => {
+    try {
+      const { templateKey, testRecipient } = req.body;
+      const { sendEmail, renderTemplate } = await import('./email-service');
+      
+      const template = await storage.getEmailTemplate(templateKey);
+      if (!template) {
+        return res.status(404).json({ error: `Template '${templateKey}' not found` });
+      }
+      
+      // Sample variables for testing
+      const sampleVariables: Record<string, string> = {
+        assigneeName: 'Test User',
+        projectName: 'Sample Project - Test',
+        roleName: 'Project Manager',
+        projectId: '12345678',
+        companyId: '598134325683880',
+        procoreUrl: 'https://us02.procore.com/webclients/host/companies/598134325683880/projects/12345678/tools/projecthome',
+        hubspotUrl: 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
+        companycamUrl: 'https://app.companycam.com/projects',
+        previousStage: 'Estimating',
+        newStage: 'Internal Review',
+        hubspotStage: 'Internal Review',
+        timestamp: new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }),
+        recipientName: 'Test User',
+        clientName: 'Test Client Inc.',
+        projectAddress: '123 Test Street, Dallas, TX 75001',
+        pmName: 'John PM',
+        superName: 'Mike Super',
+        date: new Date().toLocaleDateString('en-US', { dateStyle: 'long' }),
+        projectsScanned: '15',
+        stageChanges: '3',
+        portfolioTransitions: '1',
+        hubspotUpdates: '2',
+        bidboardUrl: 'https://us02.procore.com/webclients/host/companies/598134325683880/projects',
+        hubspotDealsUrl: 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3/views/all/list',
+        syncHubUrl: process.env.APP_URL || 'http://localhost:5000',
+        nextSyncTime: '1 hour',
+        changedProjects: '',
+        surveyUrl: `${process.env.APP_URL || 'http://localhost:5000'}/survey/test-token`,
+        googleReviewUrl: 'https://g.page/r/YOUR_GOOGLE_REVIEW_LINK/review',
+        ownerName: 'Deal Owner',
+        dealName: 'Sample Deal - Test',
+      };
+      
+      const subject = renderTemplate(template.subject, sampleVariables);
+      const htmlBody = renderTemplate(template.bodyHtml, sampleVariables);
+      
+      const result = await sendEmail({
+        to: testRecipient || 'adnaan.iqbal@gmail.com',
+        subject,
+        htmlBody,
+        fromName: 'T-Rock Sync Hub (Test)',
+      });
+      
+      await storage.createAuditLog({
+        action: 'test_email_sent',
+        entityType: 'email',
+        source: 'admin',
+        status: result.success ? 'success' : 'failed',
+        details: { templateKey, recipient: testRecipient, provider: result.provider },
+      });
+      
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==================== PLAYWRIGHT TESTING ====================
+
+  // Get Playwright test status
+  app.get("/api/testing/playwright/status", requireAuth, async (req, res) => {
+    try {
+      // Check if Playwright is available and browser can launch
+      const { chromium } = await import('playwright');
+      let browserAvailable = false;
+      let browserVersion = '';
+      
+      try {
+        const browser = await chromium.launch({ headless: true });
+        browserVersion = browser.version();
+        await browser.close();
+        browserAvailable = true;
+      } catch (browserError: any) {
+        browserAvailable = false;
+      }
+      
+      res.json({
+        playwrightInstalled: true,
+        browserAvailable,
+        browserVersion,
+      });
+    } catch (e: any) {
+      res.json({
+        playwrightInstalled: false,
+        browserAvailable: false,
+        error: e.message,
+      });
+    }
+  });
+
+  // Run Playwright BidBoard test - capture a screenshot of BidBoard to verify selectors
+  app.post("/api/testing/playwright/bidboard-screenshot", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.body;
+      const { chromium } = await import('playwright');
+      const { loginToProcore } = await import('./playwright/auth');
+      
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({
+        viewport: { width: 1920, height: 1080 },
+      });
+      const page = await context.newPage();
+      
+      // Login to Procore
+      const loggedIn = await loginToProcore(page);
+      if (!loggedIn) {
+        await browser.close();
+        return res.status(400).json({ error: 'Failed to login to Procore' });
+      }
+      
+      // Navigate to BidBoard
+      const bidboardUrl = projectId 
+        ? `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/estimating`
+        : 'https://us02.procore.com/webclients/host/companies/598134325683880/estimating_projects';
+      
+      await page.goto(bidboardUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000);
+      
+      // Take screenshot
+      const screenshotBuffer = await page.screenshot({ fullPage: true });
+      const base64 = screenshotBuffer.toString('base64');
+      
+      await browser.close();
+      
+      await storage.createAuditLog({
+        action: 'playwright_test_bidboard_screenshot',
+        entityType: 'playwright',
+        source: 'admin',
+        status: 'success',
+        details: { projectId, url: bidboardUrl },
+      });
+      
+      res.json({
+        success: true,
+        screenshot: `data:image/png;base64,${base64}`,
+        url: bidboardUrl,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Run Playwright test to extract BidBoard project data
+  app.post("/api/testing/playwright/bidboard-extract", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.body;
+      if (!projectId) {
+        return res.status(400).json({ error: 'projectId is required' });
+      }
+      
+      const { chromium } = await import('playwright');
+      const { loginToProcore } = await import('./playwright/auth');
+      
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({
+        viewport: { width: 1920, height: 1080 },
+      });
+      const page = await context.newPage();
+      
+      const loggedIn = await loginToProcore(page);
+      if (!loggedIn) {
+        await browser.close();
+        return res.status(400).json({ error: 'Failed to login to Procore' });
+      }
+      
+      // Navigate to BidBoard project
+      const projectUrl = `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/estimating`;
+      await page.goto(projectUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000);
+      
+      const extractedData: Record<string, any> = {
+        url: projectUrl,
+        timestamp: new Date().toISOString(),
+        pageTitle: await page.title(),
+        elements: {},
+      };
+      
+      // Try to extract various data points
+      try {
+        // Project name
+        const projectNameEl = await page.$('h1, [data-testid="project-name"], .project-name');
+        if (projectNameEl) {
+          extractedData.elements.projectName = await projectNameEl.textContent();
+        }
+        
+        // Stage/Status
+        const stageEl = await page.$('[data-testid="project-stage"], .project-stage, .status-badge');
+        if (stageEl) {
+          extractedData.elements.stage = await stageEl.textContent();
+        }
+        
+        // Documents list
+        const docLinks = await page.$$('a[href*="documents"], a[href*="files"], .document-link');
+        extractedData.elements.documentCount = docLinks.length;
+        extractedData.elements.documents = await Promise.all(
+          docLinks.slice(0, 10).map(async (link) => ({
+            text: await link.textContent(),
+            href: await link.getAttribute('href'),
+          }))
+        );
+        
+        // Tabs available
+        const tabs = await page.$$('[role="tab"], .tab-item, nav a');
+        extractedData.elements.tabs = await Promise.all(
+          tabs.slice(0, 10).map(async (tab) => await tab.textContent())
+        );
+        
+      } catch (extractError: any) {
+        extractedData.extractionError = extractError.message;
+      }
+      
+      // Take screenshot
+      const screenshotBuffer = await page.screenshot({ fullPage: false });
+      extractedData.screenshot = `data:image/png;base64,${screenshotBuffer.toString('base64')}`;
+      
+      await browser.close();
+      
+      await storage.createAuditLog({
+        action: 'playwright_test_bidboard_extract',
+        entityType: 'playwright',
+        source: 'admin',
+        status: 'success',
+        details: { projectId, elementsFound: Object.keys(extractedData.elements).length },
+      });
+      
+      res.json({ success: true, data: extractedData });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Run Playwright test on Portfolio page
+  app.post("/api/testing/playwright/portfolio-screenshot", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.body;
+      const { chromium } = await import('playwright');
+      const { loginToProcore } = await import('./playwright/auth');
+      
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({
+        viewport: { width: 1920, height: 1080 },
+      });
+      const page = await context.newPage();
+      
+      const loggedIn = await loginToProcore(page);
+      if (!loggedIn) {
+        await browser.close();
+        return res.status(400).json({ error: 'Failed to login to Procore' });
+      }
+      
+      // Navigate to Portfolio/Project Home
+      const portfolioUrl = projectId 
+        ? `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/projecthome`
+        : 'https://us02.procore.com/webclients/host/companies/598134325683880/projects';
+      
+      await page.goto(portfolioUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000);
+      
+      const screenshotBuffer = await page.screenshot({ fullPage: true });
+      const base64 = screenshotBuffer.toString('base64');
+      
+      await browser.close();
+      
+      res.json({
+        success: true,
+        screenshot: `data:image/png;base64,${base64}`,
+        url: portfolioUrl,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Test Documents extraction
+  app.post("/api/testing/playwright/documents-extract", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.body;
+      if (!projectId) {
+        return res.status(400).json({ error: 'projectId is required' });
+      }
+      
+      const { chromium } = await import('playwright');
+      const { loginToProcore } = await import('./playwright/auth');
+      
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({
+        viewport: { width: 1920, height: 1080 },
+      });
+      const page = await context.newPage();
+      
+      const loggedIn = await loginToProcore(page);
+      if (!loggedIn) {
+        await browser.close();
+        return res.status(400).json({ error: 'Failed to login to Procore' });
+      }
+      
+      // Navigate to Documents tool
+      const documentsUrl = `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/documents`;
+      await page.goto(documentsUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000);
+      
+      const extractedData: Record<string, any> = {
+        url: documentsUrl,
+        timestamp: new Date().toISOString(),
+        folders: [],
+        files: [],
+      };
+      
+      try {
+        // Get folder structure
+        const folders = await page.$$('[data-testid="folder"], .folder-item, tr[data-type="folder"], .folder-row');
+        extractedData.folders = await Promise.all(
+          folders.slice(0, 20).map(async (folder) => ({
+            name: await folder.textContent(),
+          }))
+        );
+        
+        // Get files
+        const files = await page.$$('[data-testid="file"], .file-item, tr[data-type="file"], .file-row, a[download]');
+        extractedData.files = await Promise.all(
+          files.slice(0, 20).map(async (file) => ({
+            name: await file.textContent(),
+            href: await file.getAttribute('href'),
+          }))
+        );
+        
+      } catch (extractError: any) {
+        extractedData.extractionError = extractError.message;
+      }
+      
+      const screenshotBuffer = await page.screenshot({ fullPage: false });
+      extractedData.screenshot = `data:image/png;base64,${screenshotBuffer.toString('base64')}`;
+      
+      await browser.close();
+      
+      res.json({ success: true, data: extractedData });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Initialize BidBoard polling on startup
   (async () => {
     try {

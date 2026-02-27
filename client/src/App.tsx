@@ -18,6 +18,7 @@ import ProjectSyncPage from "@/pages/project-sync";
 import ProjectArchivePage from "@/pages/project-archive";
 import SurveyPage from "@/pages/survey";
 import ReportsPage from "@/pages/reports";
+import TestingPage from "@/pages/testing";
 import NotFound from "@/pages/not-found";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getQueryFn } from "@/lib/queryClient";
@@ -40,6 +41,7 @@ function AuthenticatedLayout() {
           <Route path="/email-notifications" component={EmailNotificationsPage} />
           <Route path="/project-archive" component={ProjectArchivePage} />
           <Route path="/reports" component={ReportsPage} />
+          <Route path="/testing" component={TestingPage} />
           <Route path="/settings" component={SettingsPage} />
           <Route component={NotFound} />
         </Switch>

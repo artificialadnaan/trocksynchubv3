@@ -339,6 +339,28 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  // Testing Mode helpers
+  async getTestingMode(): Promise<{ enabled: boolean; testEmail: string }> {
+    const config = await this.getAutomationConfig('testing_mode');
+    if (!config) {
+      return { enabled: false, testEmail: 'adnaan.iqbal@gmail.com' };
+    }
+    const value = config.value as { enabled?: boolean; testEmail?: string };
+    return {
+      enabled: value.enabled ?? false,
+      testEmail: value.testEmail ?? 'adnaan.iqbal@gmail.com',
+    };
+  }
+
+  async setTestingMode(enabled: boolean, testEmail: string = 'adnaan.iqbal@gmail.com'): Promise<void> {
+    await this.upsertAutomationConfig({
+      key: 'testing_mode',
+      value: { enabled, testEmail },
+      description: 'Testing mode settings - redirects all emails to test email address',
+      isActive: true,
+    });
+  }
+
   async getContractCounter(projectId: string, counterType: string): Promise<ContractCounter | undefined> {
     const [counter] = await db.select().from(contractCounters)
       .where(and(eq(contractCounters.procoreProjectId, projectId), eq(contractCounters.counterType, counterType)));

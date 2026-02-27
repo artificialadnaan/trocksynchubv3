@@ -53,11 +53,53 @@ export async function sendEmail(params: {
   const config = await getEmailConfig();
   const provider = params.provider || config.activeProvider;
 
+  // Check for testing mode - redirect all emails to test address
+  const testingMode = await storage.getTestingMode();
+  let finalTo = params.to;
+  let finalSubject = params.subject;
+  let finalBody = params.htmlBody;
+
+  if (testingMode.enabled) {
+    const originalRecipient = params.to;
+    finalTo = testingMode.testEmail;
+    finalSubject = `[TEST] ${params.subject}`;
+    
+    // Add testing banner to email body
+    const testingBanner = `
+      <div style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #ffffff; padding: 16px 24px; margin-bottom: 24px; border-radius: 8px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr>
+            <td>
+              <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;">
+                ⚠️ Testing Mode Active
+              </p>
+              <p style="margin: 0; font-size: 13px; opacity: 0.95;">
+                <strong>Original Recipient:</strong> ${originalRecipient}
+              </p>
+              <p style="margin: 4px 0 0 0; font-size: 11px; opacity: 0.8;">
+                This email was redirected because testing mode is enabled in T-Rock Sync Hub.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </div>
+    `;
+    
+    // Insert banner after <body> tag or at the start
+    if (finalBody.includes('<body')) {
+      finalBody = finalBody.replace(/(<body[^>]*>)/i, `$1${testingBanner}`);
+    } else {
+      finalBody = testingBanner + finalBody;
+    }
+    
+    console.log(`[Email] Testing mode: Redirecting email from ${originalRecipient} to ${finalTo}`);
+  }
+
   if (provider === 'outlook') {
     if (!config.outlookConnected) {
       return { success: false, error: 'Outlook not connected', provider: 'outlook' };
     }
-    const result = await sendOutlookEmail(params);
+    const result = await sendOutlookEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody });
     return { ...result, provider: 'outlook' };
   }
 
@@ -65,7 +107,7 @@ export async function sendEmail(params: {
   if (!config.gmailConnected) {
     return { success: false, error: 'Gmail not connected', provider: 'gmail' };
   }
-  const result = await sendGmailEmail(params);
+  const result = await sendGmailEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody });
   return { ...result, provider: 'gmail' };
 }
 
