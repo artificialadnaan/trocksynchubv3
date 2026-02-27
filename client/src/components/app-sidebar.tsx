@@ -12,6 +12,7 @@ import {
   Mail,
   Link2,
   Archive,
+  BarChart3,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -25,6 +26,7 @@ const navItems = [
   { path: "/project-sync", label: "Project Sync", icon: Link2 },
   { path: "/email-notifications", label: "Email Notifications", icon: Mail },
   { path: "/project-archive", label: "Project Archive", icon: Archive },
+  { path: "/reports", label: "Reports", icon: BarChart3 },
   { path: "/audit-logs", label: "Audit Logs", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },
 ];

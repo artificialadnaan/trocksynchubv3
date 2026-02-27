@@ -5,6 +5,15 @@ import { randomDelay, takeScreenshot, withRetry } from "./browser";
 import { navigateToProject } from "./bidboard";
 import { log } from "../index";
 import { storage } from "../storage";
+import { getProjectTeamMembers, fetchProcoreProjectDetail } from "../procore";
+import { sendKickoffEmails } from "../email-notifications";
+
+export interface DirectoryAddResult {
+  success: boolean;
+  portfolioProjectId: string;
+  error?: string;
+  screenshotPath?: string;
+}
 
 export interface PortfolioTransitionResult {
   success: boolean;
@@ -520,17 +529,159 @@ export async function createPrimeContract(
   return result;
 }
 
+export async function addClientToProjectDirectory(
+  page: Page,
+  portfolioProjectId: string,
+  clientData: {
+    name: string;
+    email?: string;
+    phone?: string;
+    company?: string;
+  }
+): Promise<DirectoryAddResult> {
+  const result: DirectoryAddResult = {
+    success: false,
+    portfolioProjectId,
+  };
+
+  try {
+    const navigated = await navigateToPortfolioProject(page, portfolioProjectId);
+    if (!navigated) {
+      result.error = "Failed to navigate to Portfolio project";
+      return result;
+    }
+
+    await randomDelay(1000, 2000);
+
+    const directoryTab = await page.$(PROCORE_SELECTORS.directory.tab);
+    if (directoryTab) {
+      await directoryTab.click();
+      await randomDelay(2000, 3000);
+    } else {
+      result.error = "Directory tab not found";
+      result.screenshotPath = await takeScreenshot(page, `directory-no-tab-${portfolioProjectId}`);
+      return result;
+    }
+
+    const addButton = await page.$(PROCORE_SELECTORS.directory.addButton);
+    if (!addButton) {
+      result.error = "Add person button not found";
+      result.screenshotPath = await takeScreenshot(page, `directory-no-add-${portfolioProjectId}`);
+      return result;
+    }
+
+    await addButton.click();
+    await randomDelay(1000, 2000);
+
+    const nameParts = clientData.name.split(' ');
+    const firstName = nameParts[0] || '';
+    const lastName = nameParts.slice(1).join(' ') || '';
+
+    const firstNameInput = await page.$(PROCORE_SELECTORS.directory.firstNameInput);
+    const lastNameInput = await page.$(PROCORE_SELECTORS.directory.lastNameInput);
+    const nameInput = await page.$(PROCORE_SELECTORS.directory.nameInput);
+
+    if (firstNameInput && lastNameInput) {
+      await firstNameInput.fill(firstName);
+      await randomDelay(200, 400);
+      await lastNameInput.fill(lastName);
+    } else if (nameInput) {
+      await nameInput.fill(clientData.name);
+    }
+    await randomDelay(300, 500);
+
+    if (clientData.email) {
+      const emailInput = await page.$(PROCORE_SELECTORS.directory.emailInput);
+      if (emailInput) {
+        await emailInput.fill(clientData.email);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (clientData.phone) {
+      const phoneInput = await page.$(PROCORE_SELECTORS.directory.phoneInput);
+      if (phoneInput) {
+        await phoneInput.fill(clientData.phone);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (clientData.company) {
+      const companyInput = await page.$(PROCORE_SELECTORS.directory.companyInput);
+      if (companyInput) {
+        await companyInput.fill(clientData.company);
+        await randomDelay(200, 400);
+      }
+    }
+
+    const roleDropdown = await page.$(PROCORE_SELECTORS.directory.roleDropdown);
+    if (roleDropdown) {
+      await roleDropdown.selectOption({ label: 'Client' }).catch(async () => {
+        const options = await page.$$(PROCORE_SELECTORS.directory.roleDropdown + ' option');
+        for (const option of options) {
+          const text = await option.textContent();
+          if (text?.toLowerCase().includes('client') || text?.toLowerCase().includes('owner')) {
+            await roleDropdown.selectOption({ label: text });
+            break;
+          }
+        }
+      });
+      await randomDelay(200, 400);
+    }
+
+    const inviteCheckbox = await page.$(PROCORE_SELECTORS.directory.inviteCheckbox);
+    if (inviteCheckbox) {
+      const isChecked = await inviteCheckbox.isChecked();
+      if (isChecked) {
+        await inviteCheckbox.click();
+      }
+    }
+
+    const saveButton = await page.$(PROCORE_SELECTORS.directory.saveButton);
+    if (saveButton) {
+      await saveButton.click();
+      await randomDelay(2000, 3000);
+    }
+
+    await page.waitForLoadState("networkidle");
+
+    const toast = await page.$(PROCORE_SELECTORS.common.toast);
+    const toastText = toast ? await toast.textContent() : null;
+
+    if (toastText?.toLowerCase().includes('error') || toastText?.toLowerCase().includes('failed')) {
+      result.error = toastText || 'Unknown error adding client';
+      result.screenshotPath = await takeScreenshot(page, `directory-error-${portfolioProjectId}`);
+      await logPortfolioAction(portfolioProjectId, "add_client_to_directory", "failed", {}, result.error, result.screenshotPath);
+    } else {
+      result.success = true;
+      await logPortfolioAction(portfolioProjectId, "add_client_to_directory", "success", { clientName: clientData.name });
+      log(`Successfully added client ${clientData.name} to directory for project ${portfolioProjectId}`, "playwright");
+    }
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+    result.screenshotPath = await takeScreenshot(page, `directory-error-${portfolioProjectId}`);
+    await logPortfolioAction(portfolioProjectId, "add_client_to_directory", "failed", {}, result.error, result.screenshotPath);
+    log(`Error adding client to directory: ${result.error}`, "playwright");
+  }
+
+  return result;
+}
+
 export async function runFullPortfolioWorkflow(
   bidboardProjectId: string,
   options: {
     importToBudget?: boolean;
     createPrimeContract?: boolean;
-    clientData?: { companyName?: string; contactName?: string };
+    sendKickoffEmail?: boolean;
+    addClientToDirectory?: boolean;
+    clientData?: { companyName?: string; contactName?: string; email?: string; phone?: string };
   } = {}
 ): Promise<{
   portfolioTransition: PortfolioTransitionResult;
   budgetImport?: BudgetImportResult;
   primeContract?: PrimeContractResult;
+  kickoffEmails?: { sent: number; skipped: number; failed: number };
+  directoryAdd?: DirectoryAddResult;
 }> {
   const { page, success, error } = await ensureLoggedIn();
   
@@ -548,6 +699,8 @@ export async function runFullPortfolioWorkflow(
     portfolioTransition: PortfolioTransitionResult;
     budgetImport?: BudgetImportResult;
     primeContract?: PrimeContractResult;
+    kickoffEmails?: { sent: number; skipped: number; failed: number };
+    directoryAdd?: DirectoryAddResult;
   } = {
     portfolioTransition: await sendToPortfolio(page, bidboardProjectId),
   };
@@ -583,6 +736,66 @@ export async function runFullPortfolioWorkflow(
       estimateData,
       options.clientData
     );
+  }
+  
+  // Send kickoff emails
+  if (options.sendKickoffEmail) {
+    try {
+      const projectDetail = await fetchProcoreProjectDetail(portfolioProjectId);
+      const teamMembers = await getProjectTeamMembers(portfolioProjectId);
+      
+      const pmMembers = teamMembers.filter(m => 
+        m.role.toLowerCase().includes('project manager') || 
+        m.role.toLowerCase().includes('superintendent')
+      );
+      
+      if (pmMembers.length > 0) {
+        result.kickoffEmails = await sendKickoffEmails({
+          projectId: portfolioProjectId,
+          projectName: projectDetail?.name || projectDetail?.display_name || 'Unknown Project',
+          clientName: options.clientData?.companyName || projectDetail?.company?.name || 'Unknown Client',
+          projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
+          teamMembers: pmMembers,
+        });
+        
+        log(`Kickoff emails sent: ${result.kickoffEmails.sent} sent, ${result.kickoffEmails.skipped} skipped, ${result.kickoffEmails.failed} failed`, 'playwright');
+      } else {
+        log('No PM/Superintendent found for kickoff emails', 'playwright');
+        result.kickoffEmails = { sent: 0, skipped: 0, failed: 0 };
+      }
+    } catch (err: any) {
+      log(`Error sending kickoff emails: ${err.message}`, 'playwright');
+      result.kickoffEmails = { sent: 0, skipped: 0, failed: 1 };
+    }
+  }
+  
+  // Add client to project directory
+  if (options.addClientToDirectory && options.clientData?.companyName) {
+    try {
+      result.directoryAdd = await addClientToProjectDirectory(
+        page,
+        portfolioProjectId,
+        {
+          name: options.clientData.contactName || options.clientData.companyName,
+          email: options.clientData.email,
+          phone: options.clientData.phone,
+          company: options.clientData.companyName,
+        }
+      );
+      
+      if (result.directoryAdd.success) {
+        log(`Client added to directory for project ${portfolioProjectId}`, 'playwright');
+      } else {
+        log(`Failed to add client to directory: ${result.directoryAdd.error}`, 'playwright');
+      }
+    } catch (err: any) {
+      log(`Error adding client to directory: ${err.message}`, 'playwright');
+      result.directoryAdd = { 
+        success: false, 
+        portfolioProjectId, 
+        error: err.message 
+      };
+    }
   }
   
   return result;

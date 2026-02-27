@@ -1,4 +1,4 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -16,6 +16,8 @@ import BidDetailPage from "@/pages/bid-detail";
 import EmailNotificationsPage from "@/pages/email-notifications";
 import ProjectSyncPage from "@/pages/project-sync";
 import ProjectArchivePage from "@/pages/project-archive";
+import SurveyPage from "@/pages/survey";
+import ReportsPage from "@/pages/reports";
 import NotFound from "@/pages/not-found";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getQueryFn } from "@/lib/queryClient";
@@ -36,6 +38,7 @@ function AuthenticatedLayout() {
           <Route path="/project-sync" component={ProjectSyncPage} />
           <Route path="/email-notifications" component={EmailNotificationsPage} />
           <Route path="/project-archive" component={ProjectArchivePage} />
+          <Route path="/reports" component={ReportsPage} />
           <Route path="/settings" component={SettingsPage} />
           <Route component={NotFound} />
         </Switch>
@@ -45,6 +48,13 @@ function AuthenticatedLayout() {
 }
 
 function AppContent() {
+  const [location] = useLocation();
+  
+  // Public routes that don't require authentication
+  if (location.startsWith('/survey/')) {
+    return <SurveyPage />;
+  }
+
   const { data: user, isLoading } = useQuery<any>({
     queryKey: ["/api/auth/me"],
     queryFn: getQueryFn({ on401: "returnNull" }),

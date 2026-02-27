@@ -506,6 +506,81 @@ export async function fetchProcoreProjectDetail(projectId: string): Promise<any>
   return fetchProcoreJson(`/rest/v1.0/projects/${projectId}?company_id=${companyId}`, companyId);
 }
 
+export async function getProjectTeamMembers(projectId: string): Promise<Array<{
+  name: string;
+  email: string;
+  role: string;
+}>> {
+  const config = await getProcoreConfig();
+  const companyId = config.companyId;
+
+  try {
+    const assignments = await fetchProcoreJson(
+      `/rest/v1.0/project_roles?project_id=${projectId}&company_id=${companyId}`,
+      companyId
+    ) as any[];
+
+    if (!Array.isArray(assignments)) return [];
+
+    const teamMembers: Array<{ name: string; email: string; role: string }> = [];
+
+    for (const assignment of assignments) {
+      const roleName = assignment.role || 'Unknown Role';
+      const assigneeId = assignment.user_id ? String(assignment.user_id) : (assignment.contact_id ? String(assignment.contact_id) : null);
+      if (!assigneeId) continue;
+
+      const nameParts = (assignment.name || '').split(' (');
+      const assigneeName = nameParts[0] || '';
+      let assigneeEmail = assignment.email_address || assignment.email || '';
+
+      if (!assigneeEmail) {
+        const user = await storage.getProcoreUserByProcoreId(assigneeId);
+        assigneeEmail = user?.emailAddress || '';
+      }
+
+      teamMembers.push({
+        name: assigneeName,
+        email: assigneeEmail,
+        role: roleName,
+      });
+    }
+
+    return teamMembers;
+  } catch (err: any) {
+    console.error(`[procore] Error fetching team members for project ${projectId}:`, err.message);
+    return [];
+  }
+}
+
+export async function deactivateProject(projectId: string): Promise<boolean> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  const response = await fetch(
+    `${baseUrl}/rest/v1.0/projects/${projectId}?company_id=${companyId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Procore-Company-Id': companyId,
+      },
+      body: JSON.stringify({ project: { active: false } }),
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to deactivate project: ${response.status} ${errText}`);
+  }
+
+  console.log(`[procore] Project ${projectId} deactivated successfully`);
+  return true;
+}
+
 export async function updateProcoreProject(
   projectId: string,
   fields: Record<string, any>

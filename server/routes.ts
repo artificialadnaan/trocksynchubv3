@@ -16,7 +16,7 @@ import { sendEmail } from "./email-service";
 import { isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
 import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot } from "./procore-hubspot-sync";
-import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject } from "./bidboard-automation";
+import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject, onBidBoardProjectCreated, detectAndProcessNewProjects } from "./bidboard-automation";
 import { testLogin as testProcoreLogin, saveProcoreCredentials, logout as logoutProcore } from "./playwright/auth";
 import { runPortfolioTransition, runFullPortfolioWorkflow } from "./playwright/portfolio";
 import { syncHubSpotClientToBidBoard, runBidBoardScrape } from "./playwright/bidboard";
@@ -743,6 +743,37 @@ export async function registerRoutes(
           await storage.createAuditLog({
             action: 'webhook_stage_change_processed',
             entityType: 'project_stage',
+            entityId: String(event.resource_id || ""),
+            source: 'procore',
+            status: 'error',
+            errorMessage: err.message,
+            details: event,
+          });
+        }
+      }
+
+      const changeOrderResources = ['change_order', 'change_order_package', 'change_orders', 'change_order_packages'];
+      if (changeOrderResources.includes(resourceName) && ['create', 'update', 'delete'].includes(eventType)) {
+        try {
+          const projectId = String(event.project_id || "");
+          if (projectId) {
+            console.log(`[webhook] Change order ${eventType} detected for project ${projectId}, syncing to HubSpot...`);
+            const { handleChangeOrderWebhook } = await import('./change-order-sync');
+            const result = await handleChangeOrderWebhook({
+              resource_name: event.resource_name,
+              event_type: eventType,
+              resource_id: String(event.resource_id || ""),
+              project_id: projectId,
+            });
+            if (result.processed) {
+              console.log(`[webhook] Change order sync result:`, result.result);
+            }
+          }
+        } catch (err: any) {
+          console.error(`[webhook] Error processing change order webhook:`, err.message);
+          await storage.createAuditLog({
+            action: 'webhook_change_order_processed',
+            entityType: 'change_order',
             entityId: String(event.resource_id || ""),
             source: 'procore',
             status: 'error',
@@ -3136,16 +3167,43 @@ export async function registerRoutes(
     }
   });
 
+  // Setup new BidBoard project with HubSpot data (client data + attachments)
+  app.post("/api/bidboard/setup-new-project", requireAuth, async (req, res) => {
+    try {
+      const { projectId, hubspotDealId, syncClientData, syncAttachments } = req.body;
+      const result = await onBidBoardProjectCreated(projectId, hubspotDealId, {
+        syncClientData,
+        syncAttachments,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Detect and process new BidBoard projects
+  app.post("/api/bidboard/detect-new-projects", requireAuth, async (req, res) => {
+    try {
+      const result = await detectAndProcessNewProjects();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Send project to Portfolio
   app.post("/api/bidboard/send-to-portfolio/:projectId", requireAuth, async (req, res) => {
     try {
       const { projectId } = req.params;
-      const { importToBudget, createPrimeContract } = req.body;
+      const { importToBudget, createPrimeContract, sendKickoffEmail, addClientToDirectory, clientData } = req.body;
       
-      if (importToBudget || createPrimeContract) {
+      if (importToBudget || createPrimeContract || sendKickoffEmail || addClientToDirectory) {
         const result = await runFullPortfolioWorkflow(projectId, {
           importToBudget,
           createPrimeContract,
+          sendKickoffEmail,
+          addClientToDirectory,
+          clientData,
         });
         res.json(result);
       } else {
@@ -3194,6 +3252,279 @@ export async function registerRoutes(
     try {
       await closeBrowser();
       res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================
+  // Reporting Dashboard Endpoints
+  // ============================================
+
+  // Get full dashboard metrics
+  app.get("/api/reports/dashboard", requireAuth, async (req, res) => {
+    try {
+      const { getDashboardMetrics } = await import('./reporting');
+      const metrics = await getDashboardMetrics();
+      res.json(metrics);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get deal stage distribution
+  app.get("/api/reports/deals/stages", requireAuth, async (req, res) => {
+    try {
+      const { getDealStageDistribution } = await import('./reporting');
+      const distribution = await getDealStageDistribution();
+      res.json(distribution);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get project stage distribution
+  app.get("/api/reports/projects/stages", requireAuth, async (req, res) => {
+    try {
+      const { getProjectStageDistribution } = await import('./reporting');
+      const distribution = await getProjectStageDistribution();
+      res.json(distribution);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get pipeline report
+  app.get("/api/reports/pipeline", requireAuth, async (req, res) => {
+    try {
+      const { getPipelineReport } = await import('./reporting');
+      const report = await getPipelineReport();
+      res.json(report);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get sync health report
+  app.get("/api/reports/health", requireAuth, async (req, res) => {
+    try {
+      const { getSyncHealthReport } = await import('./reporting');
+      const health = await getSyncHealthReport();
+      res.json(health);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get recent activity
+  app.get("/api/reports/activity", requireAuth, async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 20;
+      const { getRecentActivity } = await import('./reporting');
+      const activity = await getRecentActivity(limit);
+      res.json(activity);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================
+  // Change Order Sync Endpoints
+  // ============================================
+
+  // Get change orders for a project
+  app.get("/api/change-orders/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { calculateTotalContractValue } = await import('./change-order-sync');
+      const contractValue = await calculateTotalContractValue(req.params.projectId);
+      res.json(contractValue);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Sync change orders to HubSpot for a specific project
+  app.post("/api/change-orders/sync/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { syncChangeOrdersToHubSpot } = await import('./change-order-sync');
+      const result = await syncChangeOrdersToHubSpot(req.params.projectId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Sync all project change orders to HubSpot
+  app.post("/api/change-orders/sync-all", requireAuth, async (req, res) => {
+    try {
+      const { syncAllProjectChangeOrders } = await import('./change-order-sync');
+      const result = await syncAllProjectChangeOrders();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================
+  // CompanyCam Automation Endpoints
+  // ============================================
+
+  // Find or create CompanyCam project
+  app.post("/api/companycam/find-or-create", requireAuth, async (req, res) => {
+    try {
+      const { name, streetAddress, city, state, postalCode, hubspotDealId, procoreProjectId, dedupeThreshold } = req.body;
+      const { findOrCreateCompanyCamProject } = await import('./companycam-automation');
+      const result = await findOrCreateCompanyCamProject(
+        { name, streetAddress, city, state, postalCode },
+        { hubspotDealId, procoreProjectId, dedupeThreshold }
+      );
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Link existing CompanyCam project
+  app.post("/api/companycam/link", requireAuth, async (req, res) => {
+    try {
+      const { companycamId, hubspotDealId, procoreProjectId } = req.body;
+      const { linkCompanyCamProject } = await import('./companycam-automation');
+      const result = await linkCompanyCamProject(companycamId, { hubspotDealId, procoreProjectId });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Search CompanyCam projects
+  app.get("/api/companycam/search", requireAuth, async (req, res) => {
+    try {
+      const { name, address } = req.query;
+      const { searchCompanyCamProjects } = await import('./companycam-automation');
+      const results = await searchCompanyCamProjects({
+        name: name as string,
+        address: address as string,
+      });
+      res.json(results);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Find duplicate CompanyCam projects
+  app.get("/api/companycam/duplicates", requireAuth, async (req, res) => {
+    try {
+      const { findDuplicateCompanyCamProjects } = await import('./companycam-automation');
+      const duplicates = await findDuplicateCompanyCamProjects();
+      res.json(duplicates);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================
+  // Closeout and Survey Endpoints
+  // ============================================
+
+  // Get closeout surveys list
+  app.get("/api/closeout/surveys", requireAuth, async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const surveys = await storage.getCloseoutSurveys({ limit, offset });
+      res.json(surveys);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Trigger closeout survey for a project
+  app.post("/api/closeout/survey/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const { googleReviewLink } = req.body;
+      const { triggerCloseoutSurvey } = await import('./closeout-automation');
+      const result = await triggerCloseoutSurvey(projectId, { googleReviewLink });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Public survey submission endpoint (no auth required)
+  app.get("/api/survey/:token", async (req, res) => {
+    try {
+      const { token } = req.params;
+      const survey = await storage.getCloseoutSurveyByToken(token);
+      if (!survey) {
+        return res.status(404).json({ error: 'Survey not found' });
+      }
+      res.json({
+        projectName: survey.procoreProjectName,
+        clientName: survey.clientName,
+        submitted: !!survey.submittedAt,
+        rating: survey.rating,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/survey/:token/submit", async (req, res) => {
+    try {
+      const { token } = req.params;
+      const { rating, feedback, googleReviewClicked } = req.body;
+      
+      if (!rating || rating < 1 || rating > 5) {
+        return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+      }
+      
+      const { submitSurveyResponse } = await import('./closeout-automation');
+      const result = await submitSurveyResponse(token, {
+        rating,
+        feedback,
+        googleReviewClicked,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Run full closeout workflow
+  app.post("/api/closeout/run/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const { sendSurvey, archiveToOneDrive, deactivateProject, updateHubSpotStage, googleReviewLink } = req.body;
+      const { runProjectCloseout } = await import('./closeout-automation');
+      const result = await runProjectCloseout(projectId, {
+        sendSurvey,
+        archiveToOneDrive,
+        deactivateProject,
+        updateHubSpotStage,
+        googleReviewLink,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Deactivate project after archive
+  app.post("/api/closeout/deactivate/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const { archiveId } = req.body;
+      
+      if (archiveId) {
+        const { deactivateProjectAfterArchive } = await import('./closeout-automation');
+        const result = await deactivateProjectAfterArchive(projectId, archiveId);
+        res.json(result);
+      } else {
+        const { deactivateProject } = await import('./procore');
+        await deactivateProject(projectId);
+        res.json({ success: true });
+      }
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

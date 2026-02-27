@@ -97,6 +97,25 @@ export const PROCORE_SELECTORS = {
     saveButton: '[data-testid="save-prime-contract"], button:has-text("Save")',
   },
   
+  // Project Directory
+  directory: {
+    tab: '[data-testid="directory-tab"], a:has-text("Directory"), nav a[href*="/directory"]',
+    addButton: '[data-testid="add-person"], button:has-text("Add"), button:has-text("Add Person"), button:has-text("Add User")',
+    searchInput: '[data-testid="directory-search"], input[placeholder*="Search"], input[placeholder*="search"]',
+    personRow: '[data-testid="person-row"], .directory-row, tr.person-row',
+    companyTab: '[data-testid="companies-tab"], a:has-text("Companies")',
+    usersTab: '[data-testid="users-tab"], a:has-text("Users"), a:has-text("People")',
+    nameInput: '[data-testid="person-name"], input[name="name"], input[name="full_name"]',
+    firstNameInput: '[data-testid="first-name"], input[name="first_name"]',
+    lastNameInput: '[data-testid="last-name"], input[name="last_name"]',
+    emailInput: '[data-testid="person-email"], input[name="email"], input[type="email"]',
+    phoneInput: '[data-testid="person-phone"], input[name="phone"], input[type="tel"]',
+    companyInput: '[data-testid="person-company"], input[name="company"], [data-testid="company-select"]',
+    roleDropdown: '[data-testid="role-dropdown"], select[name="role"], [data-testid="role-select"]',
+    saveButton: '[data-testid="save-person"], button:has-text("Save"), button[type="submit"]',
+    inviteCheckbox: '[data-testid="invite-checkbox"], input[name="send_invite"], label:has-text("Send invite")',
+  },
+  
   // Common UI elements
   common: {
     loadingSpinner: '[data-testid="loading"], .loading-spinner, .spinner',

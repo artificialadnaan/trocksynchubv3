@@ -1,0 +1,318 @@
+import { storage } from './storage';
+import { sendEmail, renderTemplate } from './email-service';
+import { deactivateProject, fetchProcoreProjectDetail } from './procore';
+import { startProjectArchive, getArchiveProgress } from './project-archive';
+import crypto from 'crypto';
+
+interface CloseoutSurveyOptions {
+  includeExecs?: boolean;
+  googleReviewLink?: string;
+}
+
+export async function generateSurveyToken(): Promise<string> {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+export async function triggerCloseoutSurvey(
+  projectId: string,
+  options: CloseoutSurveyOptions = {}
+): Promise<{ success: boolean; surveyId?: number; error?: string }> {
+  try {
+    const existingSurvey = await storage.getCloseoutSurveyByProjectId(projectId);
+    if (existingSurvey && !existingSurvey.submittedAt) {
+      return { 
+        success: false, 
+        error: 'A survey has already been sent for this project and is pending response' 
+      };
+    }
+
+    const projectDetail = await fetchProcoreProjectDetail(projectId);
+    if (!projectDetail) {
+      return { success: false, error: 'Project not found' };
+    }
+
+    const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+    let clientEmail = '';
+    let clientName = '';
+    
+    if (mapping?.hubspotDealId) {
+      const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+      if (deal?.associatedCompanyId) {
+        const company = await storage.getHubspotCompanyByHubspotId(deal.associatedCompanyId);
+        if (company) {
+          clientName = company.name || '';
+        }
+      }
+    }
+
+    if (!clientEmail) {
+      clientEmail = projectDetail.client_email || projectDetail.owner_email || '';
+      clientName = clientName || projectDetail.client_name || projectDetail.company?.name || 'Valued Client';
+    }
+
+    if (!clientEmail) {
+      return { success: false, error: 'No client email found for this project' };
+    }
+
+    const template = await storage.getEmailTemplate('closeout_survey');
+    if (!template || !template.enabled) {
+      return { success: false, error: 'Closeout survey email template is disabled' };
+    }
+
+    const surveyToken = await generateSurveyToken();
+    const appUrl = process.env.APP_URL || 'http://localhost:5000';
+    const surveyUrl = `${appUrl}/survey/${surveyToken}`;
+    const googleReviewUrl = options.googleReviewLink || 'https://g.page/r/YOUR_GOOGLE_REVIEW_LINK/review';
+
+    const variables: Record<string, string> = {
+      clientName,
+      projectName: projectDetail.name || projectDetail.display_name || 'Your Project',
+      surveyUrl,
+      googleReviewUrl,
+    };
+
+    const subject = renderTemplate(template.subject, variables);
+    const htmlBody = renderTemplate(template.bodyHtml, variables);
+
+    const survey = await storage.createCloseoutSurvey({
+      procoreProjectId: projectId,
+      procoreProjectName: projectDetail.name || projectDetail.display_name || null,
+      hubspotDealId: mapping?.hubspotDealId || null,
+      surveyToken,
+      clientEmail,
+      clientName,
+      sentAt: new Date(),
+    });
+
+    const result = await sendEmail({
+      to: clientEmail,
+      subject,
+      htmlBody,
+      fromName: 'T-Rock Construction',
+    });
+
+    if (!result.success) {
+      return { success: false, error: result.error };
+    }
+
+    await storage.createAuditLog({
+      action: 'closeout_survey_sent',
+      entityType: 'project',
+      entityId: projectId,
+      source: 'automation',
+      status: 'success',
+      details: { surveyId: survey.id, clientEmail, projectName: projectDetail.name },
+    });
+
+    console.log(`[closeout] Survey sent to ${clientEmail} for project ${projectDetail.name}`);
+    return { success: true, surveyId: survey.id };
+  } catch (error) {
+    const err = error instanceof Error ? error.message : String(error);
+    console.error(`[closeout] Error triggering survey: ${err}`);
+    return { success: false, error: err };
+  }
+}
+
+export async function submitSurveyResponse(
+  token: string,
+  response: {
+    rating: number;
+    feedback?: string;
+    googleReviewClicked?: boolean;
+  }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const survey = await storage.getCloseoutSurveyByToken(token);
+    if (!survey) {
+      return { success: false, error: 'Survey not found' };
+    }
+
+    if (survey.submittedAt) {
+      return { success: false, error: 'Survey has already been submitted' };
+    }
+
+    await storage.updateCloseoutSurvey(survey.id, {
+      rating: response.rating,
+      feedback: response.feedback || null,
+      googleReviewClicked: response.googleReviewClicked || false,
+      submittedAt: new Date(),
+    });
+
+    await storage.createAuditLog({
+      action: 'closeout_survey_submitted',
+      entityType: 'survey',
+      entityId: String(survey.id),
+      source: 'client',
+      status: 'success',
+      details: { 
+        projectId: survey.procoreProjectId, 
+        rating: response.rating,
+        hasGoogleReview: response.googleReviewClicked,
+      },
+    });
+
+    console.log(`[closeout] Survey submitted for project ${survey.procoreProjectId} - Rating: ${response.rating}`);
+    return { success: true };
+  } catch (error) {
+    const err = error instanceof Error ? error.message : String(error);
+    console.error(`[closeout] Error submitting survey: ${err}`);
+    return { success: false, error: err };
+  }
+}
+
+export async function runProjectCloseout(
+  projectId: string,
+  options: {
+    sendSurvey?: boolean;
+    archiveToOneDrive?: boolean;
+    deactivateProject?: boolean;
+    updateHubSpotStage?: boolean;
+    googleReviewLink?: string;
+  } = {}
+): Promise<{
+  success: boolean;
+  surveyResult?: { success: boolean; surveyId?: number; error?: string };
+  archiveResult?: { archiveId?: string; error?: string };
+  deactivationResult?: { success: boolean; error?: string };
+  hubspotUpdateResult?: { success: boolean; error?: string };
+}> {
+  const results: {
+    success: boolean;
+    surveyResult?: { success: boolean; surveyId?: number; error?: string };
+    archiveResult?: { archiveId?: string; error?: string };
+    deactivationResult?: { success: boolean; error?: string };
+    hubspotUpdateResult?: { success: boolean; error?: string };
+  } = { success: true };
+
+  try {
+    if (options.sendSurvey !== false) {
+      results.surveyResult = await triggerCloseoutSurvey(projectId, {
+        googleReviewLink: options.googleReviewLink,
+      });
+      if (!results.surveyResult.success) {
+        console.warn(`[closeout] Survey warning: ${results.surveyResult.error}`);
+      }
+    }
+
+    if (options.archiveToOneDrive !== false) {
+      try {
+        const archiveResult = await startProjectArchive(projectId, {
+          includeDocuments: true,
+          includeDrawings: true,
+          includeSubmittals: true,
+          includeRfis: true,
+          includePhotos: true,
+          includeBudget: true,
+        });
+        results.archiveResult = { archiveId: archiveResult.archiveId };
+      } catch (err: any) {
+        results.archiveResult = { error: err.message };
+        console.warn(`[closeout] Archive warning: ${err.message}`);
+      }
+    }
+
+    if (options.updateHubSpotStage !== false) {
+      try {
+        const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+        if (mapping?.hubspotDealId) {
+          const { updateHubSpotDealStage } = await import('./hubspot');
+          const closeoutStageId = await getHubSpotCloseoutStageId();
+          if (closeoutStageId) {
+            await updateHubSpotDealStage(mapping.hubspotDealId, closeoutStageId);
+            results.hubspotUpdateResult = { success: true };
+          } else {
+            results.hubspotUpdateResult = { success: false, error: 'Closeout stage not found in HubSpot' };
+          }
+        } else {
+          results.hubspotUpdateResult = { success: false, error: 'No HubSpot deal mapping found' };
+        }
+      } catch (err: any) {
+        results.hubspotUpdateResult = { success: false, error: err.message };
+        console.warn(`[closeout] HubSpot update warning: ${err.message}`);
+      }
+    }
+
+    if (options.deactivateProject !== false) {
+      if (options.archiveToOneDrive !== false && results.archiveResult?.archiveId) {
+        console.log('[closeout] Waiting for archive to complete before deactivation...');
+      } else {
+        try {
+          await deactivateProject(projectId);
+          results.deactivationResult = { success: true };
+        } catch (err: any) {
+          results.deactivationResult = { success: false, error: err.message };
+          results.success = false;
+        }
+      }
+    }
+
+    await storage.createAuditLog({
+      action: 'project_closeout',
+      entityType: 'project',
+      entityId: projectId,
+      source: 'automation',
+      status: results.success ? 'success' : 'partial',
+      details: results,
+    });
+
+    return results;
+  } catch (error) {
+    const err = error instanceof Error ? error.message : String(error);
+    console.error(`[closeout] Closeout workflow error: ${err}`);
+    results.success = false;
+    return results;
+  }
+}
+
+async function getHubSpotCloseoutStageId(): Promise<string | null> {
+  try {
+    const pipelines = await storage.getHubspotPipelines();
+    for (const pipeline of pipelines) {
+      const stages = (pipeline.stages as any[]) || [];
+      const closeoutStage = stages.find((s: any) => 
+        s.label?.toLowerCase().includes('closeout') || 
+        s.stageName?.toLowerCase().includes('closeout') ||
+        s.label?.toLowerCase().includes('closed')
+      );
+      if (closeoutStage) {
+        return closeoutStage.stageId;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deactivateProjectAfterArchive(
+  projectId: string,
+  archiveId: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const progress = await getArchiveProgress(archiveId);
+    
+    if (progress.status !== 'completed') {
+      return { 
+        success: false, 
+        error: `Archive not complete. Current status: ${progress.status}` 
+      };
+    }
+
+    await deactivateProject(projectId);
+    
+    await storage.createAuditLog({
+      action: 'project_deactivated_after_archive',
+      entityType: 'project',
+      entityId: projectId,
+      source: 'automation',
+      status: 'success',
+      details: { archiveId },
+    });
+
+    return { success: true };
+  } catch (error) {
+    const err = error instanceof Error ? error.message : String(error);
+    console.error(`[closeout] Deactivation error: ${err}`);
+    return { success: false, error: err };
+  }
+}

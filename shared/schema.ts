@@ -744,3 +744,22 @@ export const emailSendLog = pgTable("email_send_log", {
 export const insertEmailSendLogSchema = createInsertSchema(emailSendLog).omit({ id: true, createdAt: true });
 export type InsertEmailSendLog = z.infer<typeof insertEmailSendLogSchema>;
 export type EmailSendLog = typeof emailSendLog.$inferSelect;
+
+export const closeoutSurveys = pgTable("closeout_surveys", {
+  id: serial("id").primaryKey(),
+  procoreProjectId: text("procore_project_id").notNull(),
+  procoreProjectName: text("procore_project_name"),
+  hubspotDealId: text("hubspot_deal_id"),
+  surveyToken: text("survey_token").notNull().unique(),
+  clientEmail: text("client_email").notNull(),
+  clientName: text("client_name"),
+  rating: integer("rating"),
+  feedback: text("feedback"),
+  googleReviewClicked: boolean("google_review_clicked").default(false),
+  sentAt: timestamp("sent_at").defaultNow(),
+  submittedAt: timestamp("submitted_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const insertCloseoutSurveySchema = createInsertSchema(closeoutSurveys).omit({ id: true, createdAt: true });
+export type InsertCloseoutSurvey = z.infer<typeof insertCloseoutSurveySchema>;
+export type CloseoutSurvey = typeof closeoutSurveys.$inferSelect;

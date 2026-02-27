@@ -33,6 +33,7 @@ import {
   emailSendLog, type EmailSendLog, type InsertEmailSendLog,
   bidboardSyncState, type BidboardSyncState,
   bidboardAutomationLogs, type BidboardAutomationLog,
+  closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -168,6 +169,12 @@ export interface IStorage {
   upsertBidboardSyncState(data: { projectId: string; projectName?: string; currentStage?: string; metadata?: any }): Promise<BidboardSyncState>;
   getBidboardAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
   createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog>;
+
+  createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey>;
+  getCloseoutSurveyByToken(token: string): Promise<CloseoutSurvey | undefined>;
+  getCloseoutSurveyByProjectId(projectId: string): Promise<CloseoutSurvey | undefined>;
+  updateCloseoutSurvey(id: number, data: Partial<InsertCloseoutSurvey>): Promise<CloseoutSurvey | undefined>;
+  getCloseoutSurveys(filters: { limit?: number; offset?: number }): Promise<{ data: CloseoutSurvey[]; total: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1246,6 +1253,32 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  async createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey> {
+    const [result] = await db.insert(closeoutSurveys).values(data).returning();
+    return result;
+  }
+
+  async getCloseoutSurveyByToken(token: string): Promise<CloseoutSurvey | undefined> {
+    const [result] = await db.select().from(closeoutSurveys).where(eq(closeoutSurveys.surveyToken, token));
+    return result;
+  }
+
+  async getCloseoutSurveyByProjectId(projectId: string): Promise<CloseoutSurvey | undefined> {
+    const [result] = await db.select().from(closeoutSurveys).where(eq(closeoutSurveys.procoreProjectId, projectId)).orderBy(desc(closeoutSurveys.sentAt));
+    return result;
+  }
+
+  async updateCloseoutSurvey(id: number, data: Partial<InsertCloseoutSurvey>): Promise<CloseoutSurvey | undefined> {
+    const [result] = await db.update(closeoutSurveys).set(data).where(eq(closeoutSurveys.id, id)).returning();
+    return result;
+  }
+
+  async getCloseoutSurveys(filters: { limit?: number; offset?: number }): Promise<{ data: CloseoutSurvey[]; total: number }> {
+    const [countResult] = await db.select({ count: sql<number>`count(*)::int` }).from(closeoutSurveys);
+    const data = await db.select().from(closeoutSurveys).orderBy(desc(closeoutSurveys.sentAt)).limit(filters.limit || 50).offset(filters.offset || 0);
+    return { data, total: countResult?.count || 0 };
+  }
+
   async seedEmailTemplates(): Promise<void> {
     const existingTemplates = await this.getEmailTemplates();
     
@@ -1425,6 +1458,157 @@ export class DatabaseStorage implements IStorage {
         `),
         enabled: true,
         variables: ["projectName", "previousStage", "newStage"],
+      },
+      {
+        templateKey: "project_kickoff",
+        name: "Project Kickoff",
+        description: "Welcome email sent to PM and Super when project moves to Portfolio/Production",
+        subject: "🚀 Project Kickoff: {{projectName}} | T-Rock Construction",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #e53935 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">🚀</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                Project Kickoff
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                A new project is ready to begin
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Hello <strong style="color: #1a1a2e;">{{recipientName}}</strong>,
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                The following project has been approved and is ready for kickoff. Please review the project details and coordinate with your team.
+              </p>
+              
+              <!-- Project Details Card -->
+              <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-left: 4px solid #d11921; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 8px 0;">
+                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project Name</span><br>
+                      <span style="color: #1a1a2e; font-size: 18px; font-weight: 700;">{{projectName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
+                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Client</span><br>
+                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{clientName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
+                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project Address</span><br>
+                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{projectAddress}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
+                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Your Role</span><br>
+                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{roleName}}</span>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Team Info -->
+              <div style="background-color: #f8fafc; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #1a1a2e; font-size: 14px; font-weight: 600; margin: 0 0 12px 0;">Project Team:</p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 4px 0; color: #64748b; font-size: 14px;">
+                      <strong>Project Manager:</strong> {{pmName}}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 0; color: #64748b; font-size: 14px;">
+                      <strong>Superintendent:</strong> {{superName}}
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- CTA Button -->
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="{{projectUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  View Project in Procore →
+                </a>
+              </div>
+              
+              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 32px 0 0 0; text-align: center;">
+                Please reach out to your project team if you have any questions about project kickoff.
+              </p>
+        `),
+        enabled: true,
+        variables: ["recipientName", "projectName", "clientName", "projectAddress", "roleName", "pmName", "superName", "projectUrl"],
+      },
+      {
+        templateKey: "closeout_survey",
+        name: "Project Closeout Survey",
+        description: "Client satisfaction survey sent when project reaches closeout stage",
+        subject: "🎉 How did we do? {{projectName}} | T-Rock Construction",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #34d399 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">🎉</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                Project Complete!
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                We'd love to hear about your experience
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Dear <strong style="color: #1a1a2e;">{{clientName}}</strong>,
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Thank you for choosing T-Rock Construction for your project <strong>{{projectName}}</strong>. We're committed to delivering exceptional service and would greatly appreciate your feedback.
+              </p>
+              
+              <!-- Project Summary Card -->
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 32px 0; text-align: center;">
+                <span style="color: #94a3b8; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Completed Project</span>
+                <h2 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 8px 0 0 0;">{{projectName}}</h2>
+              </div>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Your feedback helps us improve and ensures we continue to exceed expectations. Please take a moment to share your experience:
+              </p>
+              
+              <!-- Survey CTA Button -->
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="{{surveyUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  Take Quick Survey →
+                </a>
+              </div>
+              
+              <!-- Google Review Section -->
+              <div style="background-color: #f8fafc; border-radius: 8px; padding: 20px; margin: 24px 0; text-align: center;">
+                <p style="color: #1a1a2e; font-size: 14px; font-weight: 600; margin: 0 0 12px 0;">
+                  ⭐ Love your experience? Leave us a Google Review!
+                </p>
+                <a href="{{googleReviewUrl}}" style="color: #d11921; font-size: 14px; text-decoration: underline;">
+                  Write a Review on Google
+                </a>
+              </div>
+              
+              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 32px 0 0 0; text-align: center;">
+                Thank you for your partnership. We look forward to working with you again!
+              </p>
+        `),
+        enabled: true,
+        variables: ["clientName", "projectName", "surveyUrl", "googleReviewUrl"],
       },
       {
         templateKey: "bidboard_sync_summary",

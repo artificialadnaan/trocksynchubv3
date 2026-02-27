@@ -183,3 +183,116 @@ export async function sendStageChangeEmail(params: {
 
   return { sent: result.success, ownerEmail: ownerInfo.ownerEmail, error: result.error };
 }
+
+export async function sendKickoffEmails(params: {
+  projectId: string;
+  projectName: string;
+  clientName: string;
+  projectAddress: string;
+  teamMembers: Array<{
+    name: string;
+    email: string;
+    role: string;
+  }>;
+  pmName?: string;
+  superName?: string;
+}): Promise<{ sent: number; skipped: number; failed: number }> {
+  const template = await storage.getEmailTemplate('project_kickoff');
+  if (!template || !template.enabled) {
+    console.log('[email] Project kickoff template is disabled, skipping notifications');
+    return { sent: 0, skipped: params.teamMembers.length, failed: 0 };
+  }
+
+  let sent = 0, skipped = 0, failed = 0;
+
+  const pm = params.teamMembers.find(m => m.role.toLowerCase().includes('project manager'));
+  const superMember = params.teamMembers.find(m => m.role.toLowerCase().includes('superintendent'));
+  const pmName = params.pmName || pm?.name || 'TBD';
+  const superName = params.superName || superMember?.name || 'TBD';
+
+  for (const member of params.teamMembers) {
+    if (!member.email) {
+      skipped++;
+      continue;
+    }
+
+    const dedupeKey = `kickoff:${params.projectId}:${member.role}:${member.email}`;
+
+    const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
+    if (alreadySent) {
+      console.log(`[email] Skipping duplicate kickoff: ${dedupeKey}`);
+      skipped++;
+      continue;
+    }
+
+    const variables: Record<string, string> = {
+      recipientName: member.name || member.email,
+      projectName: params.projectName || 'Unknown Project',
+      clientName: params.clientName || 'Unknown Client',
+      projectAddress: params.projectAddress || 'TBD',
+      roleName: member.role,
+      pmName,
+      superName,
+      projectUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.projectId}/tools/projecthome`,
+    };
+
+    const subject = renderTemplate(template.subject, variables);
+    const htmlBody = renderTemplate(template.bodyHtml, variables);
+
+    const result = await sendEmail({
+      to: member.email,
+      subject,
+      htmlBody,
+      fromName: 'T-Rock Sync Hub',
+    });
+
+    try {
+      await storage.createEmailSendLog({
+        templateKey: 'project_kickoff',
+        recipientEmail: member.email,
+        recipientName: member.name,
+        subject,
+        dedupeKey,
+        status: result.success ? 'sent' : 'failed',
+        errorMessage: result.error || null,
+        metadata: {
+          messageId: result.messageId,
+          projectId: params.projectId,
+          projectName: params.projectName,
+          role: member.role,
+          clientName: params.clientName,
+        },
+        sentAt: new Date(),
+      });
+    } catch (logErr: any) {
+      if (logErr.message?.includes('unique constraint')) {
+        console.log(`[email] Dedupe key already exists: ${dedupeKey}`);
+        skipped++;
+        continue;
+      }
+      throw logErr;
+    }
+
+    if (result.success) {
+      sent++;
+      console.log(`[email] Sent kickoff notification to ${member.email} for ${params.projectName} (${member.role})`);
+    } else {
+      failed++;
+      console.error(`[email] Failed to send kickoff to ${member.email}: ${result.error}`);
+    }
+  }
+
+  console.log(`[email] Kickoff notifications: ${sent} sent, ${skipped} skipped, ${failed} failed`);
+
+  if (sent > 0 || failed > 0) {
+    await storage.createAuditLog({
+      action: 'kickoff_emails_sent',
+      entityType: 'email',
+      source: 'automation',
+      status: failed > 0 ? 'partial' : 'success',
+      details: { templateKey: 'project_kickoff', projectId: params.projectId, sent, skipped, failed },
+    });
+  }
+
+  return { sent, skipped, failed };
+}

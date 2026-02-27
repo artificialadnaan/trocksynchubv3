@@ -1,0 +1,436 @@
+import { storage } from './storage';
+
+const BASE_URL = 'https://api.companycam.com/v2';
+
+async function getCompanycamToken(): Promise<string> {
+  const tokenRecord = await storage.getOAuthToken('companycam');
+  if (tokenRecord?.accessToken) return tokenRecord.accessToken;
+  if (process.env.COMPANYCAM_API_TOKEN) return process.env.COMPANYCAM_API_TOKEN;
+  throw new Error('No CompanyCam API token configured. Please save your token in Settings.');
+}
+
+async function companycamApiRequest(
+  path: string,
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE' = 'GET',
+  body?: any
+): Promise<any> {
+  const token = await getCompanycamToken();
+  const url = path.startsWith('http') ? path : `${BASE_URL}${path}`;
+  
+  const options: RequestInit = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    },
+  };
+  
+  if (body) {
+    options.body = JSON.stringify(body);
+  }
+  
+  const response = await fetch(url, options);
+  
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`CompanyCam API error ${response.status}: ${text}`);
+  }
+  
+  if (response.status === 204) return null;
+  return response.json();
+}
+
+function normalizeAddress(address: string | null | undefined): string {
+  if (!address) return '';
+  return address
+    .toLowerCase()
+    .replace(/[.,#-]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|place|pl|way)\b/g, '')
+    .trim();
+}
+
+function normalizeName(name: string | null | undefined): string {
+  if (!name) return '';
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+}
+
+export async function searchCompanyCamProjects(query: {
+  name?: string;
+  address?: string;
+}): Promise<Array<{
+  companycamId: string;
+  name: string;
+  streetAddress: string | null;
+  city: string | null;
+  state: string | null;
+  score: number;
+}>> {
+  const results: Array<{
+    companycamId: string;
+    name: string;
+    streetAddress: string | null;
+    city: string | null;
+    state: string | null;
+    score: number;
+  }> = [];
+
+  const { data: allProjects } = await storage.getCompanycamProjects({ limit: 1000 });
+  
+  const normalizedQueryName = normalizeName(query.name);
+  const normalizedQueryAddress = normalizeAddress(query.address);
+
+  for (const project of allProjects) {
+    let score = 0;
+    
+    if (query.name && normalizedQueryName) {
+      const normalizedProjectName = normalizeName(project.name);
+      if (normalizedProjectName === normalizedQueryName) {
+        score += 100;
+      } else if (normalizedProjectName.includes(normalizedQueryName) || normalizedQueryName.includes(normalizedProjectName)) {
+        score += 50;
+      }
+    }
+    
+    if (query.address && normalizedQueryAddress) {
+      const normalizedProjectAddress = normalizeAddress(project.streetAddress);
+      if (normalizedProjectAddress === normalizedQueryAddress) {
+        score += 100;
+      } else if (normalizedProjectAddress.includes(normalizedQueryAddress) || normalizedQueryAddress.includes(normalizedProjectAddress)) {
+        score += 50;
+      }
+      
+      if (query.address.toLowerCase().includes(project.city?.toLowerCase() || '___')) {
+        score += 20;
+      }
+    }
+    
+    if (score > 0) {
+      results.push({
+        companycamId: project.companycamId,
+        name: project.name || '',
+        streetAddress: project.streetAddress,
+        city: project.city,
+        state: project.state,
+        score,
+      });
+    }
+  }
+
+  return results.sort((a, b) => b.score - a.score);
+}
+
+export async function createCompanyCamProject(projectData: {
+  name: string;
+  streetAddress?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  latitude?: number;
+  longitude?: number;
+}): Promise<{
+  success: boolean;
+  companycamId?: string;
+  projectUrl?: string;
+  error?: string;
+}> {
+  try {
+    const body: any = {
+      name: projectData.name,
+    };
+    
+    if (projectData.streetAddress || projectData.city || projectData.state) {
+      body.address = {
+        street_address_1: projectData.streetAddress || '',
+        city: projectData.city || '',
+        state: projectData.state || '',
+        postal_code: projectData.postalCode || '',
+        country: projectData.country || 'US',
+      };
+    }
+    
+    if (projectData.latitude && projectData.longitude) {
+      body.coordinates = {
+        lat: projectData.latitude,
+        lon: projectData.longitude,
+      };
+    }
+    
+    const response = await companycamApiRequest('/projects', 'POST', body);
+    
+    console.log(`[CompanyCam] Created project: ${response.name} (${response.id})`);
+    
+    return {
+      success: true,
+      companycamId: String(response.id),
+      projectUrl: response.project_url,
+    };
+  } catch (error: any) {
+    console.error(`[CompanyCam] Error creating project: ${error.message}`);
+    return { success: false, error: error.message };
+  }
+}
+
+export async function findOrCreateCompanyCamProject(
+  projectData: {
+    name: string;
+    streetAddress?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    country?: string;
+    latitude?: number;
+    longitude?: number;
+  },
+  options: {
+    hubspotDealId?: string;
+    procoreProjectId?: string;
+    dedupeThreshold?: number;
+  } = {}
+): Promise<{
+  success: boolean;
+  companycamId?: string;
+  projectUrl?: string;
+  isNewProject: boolean;
+  matchedProject?: { companycamId: string; name: string; score: number };
+  error?: string;
+}> {
+  const threshold = options.dedupeThreshold || 80;
+  
+  try {
+    const matches = await searchCompanyCamProjects({
+      name: projectData.name,
+      address: projectData.streetAddress,
+    });
+    
+    if (matches.length > 0 && matches[0].score >= threshold) {
+      const matched = matches[0];
+      console.log(`[CompanyCam] Found existing project: ${matched.name} (score: ${matched.score})`);
+      
+      if (options.hubspotDealId || options.procoreProjectId) {
+        const existingMapping = await storage.getSyncMappingByHubspotDealId(options.hubspotDealId || '');
+        
+        if (existingMapping) {
+          await storage.updateSyncMapping(existingMapping.id, {
+            companyCamProjectId: matched.companycamId,
+          });
+        } else if (options.hubspotDealId) {
+          await storage.createSyncMapping({
+            hubspotDealId: options.hubspotDealId,
+            procoreProjectId: options.procoreProjectId || null,
+            companyCamProjectId: matched.companycamId,
+            hubspotDealName: projectData.name,
+          });
+        }
+      }
+      
+      return {
+        success: true,
+        companycamId: matched.companycamId,
+        isNewProject: false,
+        matchedProject: matched,
+      };
+    }
+    
+    const createResult = await createCompanyCamProject(projectData);
+    
+    if (createResult.success && createResult.companycamId) {
+      if (options.hubspotDealId || options.procoreProjectId) {
+        const existingMapping = await storage.getSyncMappingByHubspotDealId(options.hubspotDealId || '');
+        
+        if (existingMapping) {
+          await storage.updateSyncMapping(existingMapping.id, {
+            companyCamProjectId: createResult.companycamId,
+          });
+        } else if (options.hubspotDealId) {
+          await storage.createSyncMapping({
+            hubspotDealId: options.hubspotDealId,
+            procoreProjectId: options.procoreProjectId || null,
+            companyCamProjectId: createResult.companycamId,
+            hubspotDealName: projectData.name,
+          });
+        }
+      }
+      
+      await storage.createAuditLog({
+        action: 'companycam_project_created',
+        entityType: 'companycam_project',
+        entityId: createResult.companycamId,
+        source: 'automation',
+        status: 'success',
+        details: {
+          projectName: projectData.name,
+          hubspotDealId: options.hubspotDealId,
+          procoreProjectId: options.procoreProjectId,
+        },
+      });
+      
+      return {
+        success: true,
+        companycamId: createResult.companycamId,
+        projectUrl: createResult.projectUrl,
+        isNewProject: true,
+      };
+    }
+    
+    return { success: false, error: createResult.error, isNewProject: false };
+  } catch (error: any) {
+    console.error(`[CompanyCam] Error in findOrCreate: ${error.message}`);
+    return { success: false, error: error.message, isNewProject: false };
+  }
+}
+
+export async function linkCompanyCamProject(
+  companycamId: string,
+  options: {
+    hubspotDealId?: string;
+    procoreProjectId?: string;
+  }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (!options.hubspotDealId && !options.procoreProjectId) {
+      return { success: false, error: 'At least one of hubspotDealId or procoreProjectId is required' };
+    }
+    
+    const existingByHubspot = options.hubspotDealId 
+      ? await storage.getSyncMappingByHubspotDealId(options.hubspotDealId)
+      : null;
+    const existingByProcore = options.procoreProjectId
+      ? await storage.getSyncMappingByProcoreProjectId(options.procoreProjectId)
+      : null;
+    
+    if (existingByHubspot) {
+      await storage.updateSyncMapping(existingByHubspot.id, {
+        companyCamProjectId: companycamId,
+        procoreProjectId: options.procoreProjectId || existingByHubspot.procoreProjectId,
+      });
+    } else if (existingByProcore) {
+      await storage.updateSyncMapping(existingByProcore.id, {
+        companyCamProjectId: companycamId,
+        hubspotDealId: options.hubspotDealId || existingByProcore.hubspotDealId,
+      });
+    } else {
+      await storage.createSyncMapping({
+        hubspotDealId: options.hubspotDealId || null,
+        procoreProjectId: options.procoreProjectId || null,
+        companyCamProjectId: companycamId,
+      });
+    }
+    
+    console.log(`[CompanyCam] Linked project ${companycamId} to HubSpot: ${options.hubspotDealId}, Procore: ${options.procoreProjectId}`);
+    return { success: true };
+  } catch (error: any) {
+    console.error(`[CompanyCam] Error linking project: ${error.message}`);
+    return { success: false, error: error.message };
+  }
+}
+
+export async function autoLinkCompanyCamOnDealStage(
+  hubspotDealId: string,
+  dealName: string,
+  stage: string,
+  address?: string
+): Promise<{
+  success: boolean;
+  companycamId?: string;
+  isNewProject: boolean;
+  error?: string;
+}> {
+  const triggerStages = ['rfp', 'estimating', 'proposal_sent'];
+  
+  const normalizedStage = stage.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const shouldTrigger = triggerStages.some(s => normalizedStage.includes(s));
+  
+  if (!shouldTrigger) {
+    return { success: false, error: 'Stage does not trigger CompanyCam creation', isNewProject: false };
+  }
+  
+  const existingMapping = await storage.getSyncMappingByHubspotDealId(hubspotDealId);
+  if (existingMapping?.companyCamProjectId) {
+    return { 
+      success: true, 
+      companycamId: existingMapping.companyCamProjectId, 
+      isNewProject: false 
+    };
+  }
+  
+  const result = await findOrCreateCompanyCamProject(
+    { name: dealName, streetAddress: address },
+    { hubspotDealId }
+  );
+  
+  return result;
+}
+
+export async function findDuplicateCompanyCamProjects(): Promise<Array<{
+  group: Array<{
+    companycamId: string;
+    name: string;
+    streetAddress: string | null;
+    createdAt: Date | null;
+  }>;
+  similarity: number;
+}>> {
+  const duplicates: Array<{
+    group: Array<{
+      companycamId: string;
+      name: string;
+      streetAddress: string | null;
+      createdAt: Date | null;
+    }>;
+    similarity: number;
+  }> = [];
+
+  const { data: allProjects } = await storage.getCompanycamProjects({ limit: 10000 });
+  const processed = new Set<string>();
+
+  for (let i = 0; i < allProjects.length; i++) {
+    if (processed.has(allProjects[i].companycamId)) continue;
+    
+    const normalizedName = normalizeName(allProjects[i].name);
+    const normalizedAddress = normalizeAddress(allProjects[i].streetAddress);
+    const group: Array<{
+      companycamId: string;
+      name: string;
+      streetAddress: string | null;
+      createdAt: Date | null;
+    }> = [];
+
+    for (let j = i; j < allProjects.length; j++) {
+      if (processed.has(allProjects[j].companycamId)) continue;
+      
+      const otherName = normalizeName(allProjects[j].name);
+      const otherAddress = normalizeAddress(allProjects[j].streetAddress);
+      
+      let score = 0;
+      if (normalizedName === otherName) score += 80;
+      else if (normalizedName.includes(otherName) || otherName.includes(normalizedName)) score += 40;
+      
+      if (normalizedAddress && otherAddress) {
+        if (normalizedAddress === otherAddress) score += 80;
+        else if (normalizedAddress.includes(otherAddress) || otherAddress.includes(normalizedAddress)) score += 40;
+      }
+      
+      if (score >= 80) {
+        group.push({
+          companycamId: allProjects[j].companycamId,
+          name: allProjects[j].name || '',
+          streetAddress: allProjects[j].streetAddress,
+          createdAt: allProjects[j].companycamCreatedAt,
+        });
+        processed.add(allProjects[j].companycamId);
+      }
+    }
+
+    if (group.length > 1) {
+      duplicates.push({
+        group,
+        similarity: 80,
+      });
+    }
+  }
+
+  return duplicates;
+}

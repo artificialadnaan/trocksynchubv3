@@ -1,6 +1,7 @@
-import { runBidBoardScrape, BidBoardProject, BidBoardSyncResult, navigateToProject, getProjectDetails } from "./playwright/bidboard";
+import { runBidBoardScrape, BidBoardProject, BidBoardSyncResult, navigateToProject, getProjectDetails, syncHubSpotClientToBidBoard } from "./playwright/bidboard";
 import { ensureLoggedIn } from "./playwright/auth";
 import { closeBrowser } from "./playwright/browser";
+import { syncHubSpotAttachmentsToBidBoard } from "./playwright/documents";
 import { log } from "./index";
 import { storage } from "./storage";
 
@@ -361,5 +362,133 @@ export async function manualSyncProject(projectId: string): Promise<StageChangeR
     const errorMessage = error instanceof Error ? error.message : String(error);
     log(`Manual sync error: ${errorMessage}`, "bidboard");
     return null;
+  }
+}
+
+export async function onBidBoardProjectCreated(
+  projectId: string,
+  hubspotDealId: string,
+  options: {
+    syncClientData?: boolean;
+    syncAttachments?: boolean;
+  } = {}
+): Promise<{
+  success: boolean;
+  clientDataSynced: boolean;
+  attachmentsSynced: boolean;
+  documentsUploaded: number;
+  errors: string[];
+}> {
+  const result = {
+    success: false,
+    clientDataSynced: false,
+    attachmentsSynced: false,
+    documentsUploaded: 0,
+    errors: [] as string[],
+  };
+
+  try {
+    log(`Processing new BidBoard project ${projectId} linked to HubSpot deal ${hubspotDealId}`, "bidboard");
+
+    if (options.syncClientData !== false) {
+      try {
+        const clientResult = await syncHubSpotClientToBidBoard(projectId, hubspotDealId);
+        if (clientResult.success) {
+          result.clientDataSynced = true;
+          log(`Client data synced for project ${projectId}`, "bidboard");
+        } else {
+          result.errors.push(`Client data sync failed: ${clientResult.error}`);
+          log(`Client data sync failed for project ${projectId}: ${clientResult.error}`, "bidboard");
+        }
+      } catch (err: any) {
+        result.errors.push(`Client data sync error: ${err.message}`);
+        log(`Client data sync error for project ${projectId}: ${err.message}`, "bidboard");
+      }
+    }
+
+    if (options.syncAttachments !== false) {
+      try {
+        const attachmentResult = await syncHubSpotAttachmentsToBidBoard(projectId, hubspotDealId);
+        if (attachmentResult.success) {
+          result.attachmentsSynced = true;
+          result.documentsUploaded = attachmentResult.documentsUploaded;
+          log(`Synced ${attachmentResult.documentsUploaded} attachments for project ${projectId}`, "bidboard");
+        } else {
+          result.errors.push(...attachmentResult.errors);
+          log(`Attachment sync failed for project ${projectId}: ${attachmentResult.errors.join(', ')}`, "bidboard");
+        }
+      } catch (err: any) {
+        result.errors.push(`Attachment sync error: ${err.message}`);
+        log(`Attachment sync error for project ${projectId}: ${err.message}`, "bidboard");
+      }
+    }
+
+    result.success = result.errors.length === 0;
+
+    await logAutomationAction(
+      projectId,
+      null,
+      "new_project_setup",
+      result.success ? "success" : "failed",
+      {
+        hubspotDealId,
+        clientDataSynced: result.clientDataSynced,
+        attachmentsSynced: result.attachmentsSynced,
+        documentsUploaded: result.documentsUploaded,
+      },
+      result.errors.length > 0 ? result.errors.join("; ") : undefined
+    );
+
+    return result;
+  } catch (error: any) {
+    result.errors.push(error.message);
+    log(`Error processing new project ${projectId}: ${error.message}`, "bidboard");
+    return result;
+  }
+}
+
+export async function detectAndProcessNewProjects(): Promise<{
+  newProjects: string[];
+  processed: number;
+  errors: string[];
+}> {
+  const result = {
+    newProjects: [] as string[],
+    processed: 0,
+    errors: [] as string[],
+  };
+
+  try {
+    const scrapeResult = await runBidBoardScrape();
+
+    for (const change of scrapeResult.changes) {
+      if (change.changeType === "new") {
+        result.newProjects.push(change.projectId);
+
+        const hubspotDealId = await findHubSpotDealForProject({
+          id: change.projectId,
+          name: change.projectName,
+          stage: change.newStage,
+        });
+
+        if (hubspotDealId) {
+          const setupResult = await onBidBoardProjectCreated(change.projectId, hubspotDealId);
+          if (setupResult.success) {
+            result.processed++;
+          } else {
+            result.errors.push(...setupResult.errors);
+          }
+        } else {
+          log(`No HubSpot deal found for new project ${change.projectName}, skipping auto-setup`, "bidboard");
+        }
+      }
+    }
+
+    log(`Detected ${result.newProjects.length} new projects, processed ${result.processed}`, "bidboard");
+    return result;
+  } catch (error: any) {
+    result.errors.push(error.message);
+    log(`Error detecting new projects: ${error.message}`, "bidboard");
+    return result;
   }
 }

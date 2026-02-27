@@ -533,6 +533,17 @@ export async function updateHubSpotDealStage(hubspotDealId: string, stageId: str
   }
 }
 
+export async function updateHubSpotDeal(hubspotDealId: string, properties: Record<string, string>): Promise<{ success: boolean; message: string }> {
+  try {
+    const client = await getHubSpotClient();
+    await client.crm.deals.basicApi.update(hubspotDealId, { properties });
+    return { success: true, message: `Deal ${hubspotDealId} updated` };
+  } catch (e: any) {
+    console.error(`Failed to update HubSpot deal ${hubspotDealId}:`, e.message);
+    return { success: false, message: e.message };
+  }
+}
+
 export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId: string | null; ownerName: string | null; ownerEmail: string | null }> {
   try {
     const client = await getHubSpotClient();
@@ -587,6 +598,87 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
   } catch (e: any) {
     console.error(`[HubSpot] Failed to get deal owner for ${hubspotDealId}:`, e.message);
     return { ownerId: null, ownerName: null, ownerEmail: null };
+  }
+}
+
+export interface DealClientData {
+  clientName: string;
+  clientEmail: string;
+  clientPhone: string;
+  clientCompany: string;
+  clientAddress: string;
+  clientCity: string;
+  clientState: string;
+  clientZip: string;
+  contactName: string;
+}
+
+export async function getDealClientData(dealId: string): Promise<DealClientData> {
+  const result: DealClientData = {
+    clientName: '',
+    clientEmail: '',
+    clientPhone: '',
+    clientCompany: '',
+    clientAddress: '',
+    clientCity: '',
+    clientState: '',
+    clientZip: '',
+    contactName: '',
+  };
+
+  try {
+    const client = await getHubSpotClient();
+    const accessToken = await getAccessToken();
+
+    const deal = await client.crm.deals.basicApi.getById(dealId, [
+      'dealname', 'hubspot_owner_id'
+    ], undefined, ['companies', 'contacts']);
+
+    const companyId = deal.associations?.companies?.results?.[0]?.id;
+    const contactId = deal.associations?.contacts?.results?.[0]?.id;
+
+    if (companyId) {
+      const company = await client.crm.companies.basicApi.getById(companyId, [
+        'name', 'domain', 'phone', 'address', 'city', 'state', 'zip'
+      ]);
+      
+      result.clientCompany = company.properties?.name || '';
+      result.clientName = company.properties?.name || '';
+      result.clientPhone = company.properties?.phone || '';
+      result.clientAddress = company.properties?.address || '';
+      result.clientCity = company.properties?.city || '';
+      result.clientState = company.properties?.state || '';
+      result.clientZip = company.properties?.zip || '';
+    }
+
+    if (contactId) {
+      const contact = await client.crm.contacts.basicApi.getById(contactId, [
+        'firstname', 'lastname', 'email', 'phone'
+      ]);
+      
+      const firstName = contact.properties?.firstname || '';
+      const lastName = contact.properties?.lastname || '';
+      result.contactName = `${firstName} ${lastName}`.trim();
+      result.clientEmail = contact.properties?.email || '';
+      
+      if (!result.clientPhone && contact.properties?.phone) {
+        result.clientPhone = contact.properties.phone;
+      }
+    }
+
+    if (!result.clientCompany && !result.contactName) {
+      const localDeal = await storage.getHubspotDealByHubspotId(dealId);
+      if (localDeal?.associatedCompanyName) {
+        result.clientCompany = localDeal.associatedCompanyName;
+        result.clientName = localDeal.associatedCompanyName;
+      }
+    }
+
+    console.log(`[HubSpot] Got client data for deal ${dealId}: ${result.clientCompany || result.contactName || 'Unknown'}`);
+    return result;
+  } catch (e: any) {
+    console.error(`[HubSpot] Failed to get client data for deal ${dealId}:`, e.message);
+    return result;
   }
 }
 
