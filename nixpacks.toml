@@ -7,7 +7,7 @@ cmds = ["npm install --include=dev"]
 
 [phases.build]
 cacheDirectories = []
-cmds = ["npm run build", "npm run db:push"]
+cmds = ["npm run build"]
 
 [start]
-cmd = "npm run start"
+cmd = "npm run db:push && npm run start"
