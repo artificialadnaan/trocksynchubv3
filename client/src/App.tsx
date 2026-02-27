@@ -3,7 +3,7 @@ import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import AppSidebar from "@/components/app-sidebar";
+import AppSidebar, { MobileHeader } from "@/components/app-sidebar";
 import LoginPage from "@/pages/login";
 import DashboardPage from "@/pages/dashboard";
 import SyncConfigPage from "@/pages/sync-config";
@@ -24,9 +24,10 @@ import { getQueryFn } from "@/lib/queryClient";
 
 function AuthenticatedLayout() {
   return (
-    <div className="flex min-h-screen">
+    <div className="flex flex-col md:flex-row min-h-screen">
+      <MobileHeader />
       <AppSidebar />
-      <main className="flex-1 p-6 overflow-auto">
+      <main className="flex-1 p-4 md:p-6 overflow-auto">
         <Switch>
           <Route path="/" component={DashboardPage} />
           <Route path="/sync-config" component={SyncConfigPage} />

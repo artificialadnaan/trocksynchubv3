@@ -92,12 +92,12 @@ export default function ReportsPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-4 md:space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
-          <h2 className="text-2xl font-bold">Reports & Analytics</h2>
-          <p className="text-muted-foreground text-sm mt-1">
-            Comprehensive insights into your sync operations and pipeline
+          <h2 className="text-xl md:text-2xl font-bold">Reports & Analytics</h2>
+          <p className="text-muted-foreground text-xs md:text-sm mt-1">
+            Insights into sync operations and pipeline
           </p>
         </div>
         {health && (
@@ -116,10 +116,10 @@ export default function ReportsPage() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 md:gap-4">
         <MetricCard
           icon={Building2}
-          label="Total Deals"
+          label="Deals"
           value={metrics?.totalDeals || 0}
           loading={metricsLoading}
         />
@@ -137,37 +137,40 @@ export default function ReportsPage() {
         />
         <MetricCard
           icon={DollarSign}
-          label="Pipeline Value"
+          label="Pipeline"
           value={formatCurrency(metrics?.totalDealValue || 0)}
           loading={metricsLoading}
         />
         <MetricCard
           icon={Mail}
-          label="Emails Sent"
+          label="Emails"
           value={metrics?.emailsSent || 0}
           loading={metricsLoading}
         />
         <MetricCard
           icon={ClipboardCheck}
-          label="Surveys Done"
+          label="Surveys"
           value={metrics?.surveysCompleted || 0}
           loading={metricsLoading}
         />
       </div>
 
       <Tabs defaultValue="pipeline" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="pipeline" className="gap-2">
-            <PieChart className="h-4 w-4" />
-            Pipeline
+        <TabsList className="w-full justify-start overflow-x-auto">
+          <TabsTrigger value="pipeline" className="gap-1 md:gap-2 text-xs md:text-sm px-2 md:px-3">
+            <PieChart className="h-3 w-3 md:h-4 md:w-4" />
+            <span className="hidden sm:inline">Pipeline</span>
+            <span className="sm:hidden">Pipe</span>
           </TabsTrigger>
-          <TabsTrigger value="sync" className="gap-2">
-            <RefreshCw className="h-4 w-4" />
-            Sync Activity
+          <TabsTrigger value="sync" className="gap-1 md:gap-2 text-xs md:text-sm px-2 md:px-3">
+            <RefreshCw className="h-3 w-3 md:h-4 md:w-4" />
+            <span className="hidden sm:inline">Sync Activity</span>
+            <span className="sm:hidden">Sync</span>
           </TabsTrigger>
-          <TabsTrigger value="health" className="gap-2">
-            <Activity className="h-4 w-4" />
-            System Health
+          <TabsTrigger value="health" className="gap-1 md:gap-2 text-xs md:text-sm px-2 md:px-3">
+            <Activity className="h-3 w-3 md:h-4 md:w-4" />
+            <span className="hidden sm:inline">System Health</span>
+            <span className="sm:hidden">Health</span>
           </TabsTrigger>
         </TabsList>
 
@@ -635,17 +638,17 @@ function MetricCard({
 }) {
   return (
     <Card>
-      <CardContent className="pt-4 pb-3 px-4">
+      <CardContent className="pt-3 pb-2 px-3 md:pt-4 md:pb-3 md:px-4">
         {loading ? (
-          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-12 md:h-14 w-full" />
         ) : (
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-primary/10">
-              <Icon className="h-4 w-4 text-primary" />
+          <div className="flex items-center gap-2 md:gap-3">
+            <div className="p-1.5 md:p-2 rounded-lg bg-primary/10 flex-shrink-0">
+              <Icon className="h-3.5 w-3.5 md:h-4 md:w-4 text-primary" />
             </div>
-            <div>
-              <p className="text-lg font-bold">{value}</p>
-              <p className="text-xs text-muted-foreground">{label}</p>
+            <div className="min-w-0">
+              <p className="text-base md:text-lg font-bold truncate">{value}</p>
+              <p className="text-[10px] md:text-xs text-muted-foreground truncate">{label}</p>
             </div>
           </div>
         )}

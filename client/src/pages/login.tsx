@@ -33,25 +33,26 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center space-y-3">
-          <div className="mx-auto w-12 h-12 rounded-xl bg-primary flex items-center justify-center">
-            <Zap className="w-6 h-6 text-primary-foreground" />
+      <Card className="w-full max-w-md mx-auto">
+        <CardHeader className="text-center space-y-3 px-4 md:px-6">
+          <div className="mx-auto w-12 h-12 md:w-14 md:h-14 rounded-xl bg-primary flex items-center justify-center">
+            <Zap className="w-6 h-6 md:w-7 md:h-7 text-primary-foreground" />
           </div>
-          <CardTitle className="text-2xl font-bold" data-testid="text-login-title">
+          <CardTitle className="text-xl md:text-2xl font-bold" data-testid="text-login-title">
             Trock Sync Hub 2.0
           </CardTitle>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-xs md:text-sm text-muted-foreground">
             HubSpot + Procore + CompanyCam Middleware
           </p>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-4 md:px-6">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <Input
                 placeholder="Username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
+                className="h-11 md:h-10 text-base md:text-sm"
                 data-testid="input-username"
               />
             </div>
@@ -61,12 +62,13 @@ export default function LoginPage() {
                 placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                className="h-11 md:h-10 text-base md:text-sm"
                 data-testid="input-password"
               />
             </div>
             <Button
               type="submit"
-              className="w-full"
+              className="w-full h-11 md:h-10 text-base md:text-sm"
               disabled={loginMutation.isPending}
               data-testid="button-login"
             >
@@ -75,7 +77,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={() => setIsRegistering(!isRegistering)}
-              className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors"
+              className="w-full py-2 text-sm text-muted-foreground hover:text-foreground transition-colors active:scale-[0.98]"
               data-testid="button-toggle-register"
             >
               {isRegistering ? "Already have an account? Sign in" : "Need an account? Register"}

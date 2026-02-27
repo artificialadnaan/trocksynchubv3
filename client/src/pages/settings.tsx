@@ -96,10 +96,10 @@ export default function SettingsPage() {
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 md:space-y-6">
       <div>
-        <h2 className="text-2xl font-bold" data-testid="text-settings-title">Settings</h2>
-        <p className="text-muted-foreground text-sm mt-1">Manage connections, schedules, and system configuration</p>
+        <h2 className="text-xl md:text-2xl font-bold" data-testid="text-settings-title">Settings</h2>
+        <p className="text-muted-foreground text-xs md:text-sm mt-1">Manage connections, schedules, and configuration</p>
       </div>
 
       <Card>
@@ -283,32 +283,32 @@ function ConnectionCard({ name, description, connected, expiresAt, configuredAt,
   onConfigure: () => void; onDisconnect: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between py-3 px-4 rounded-lg border" data-testid={`connection-${name.toLowerCase().replace(/\s+/g, "-")}`}>
-      <div className="flex-1">
-        <div className="flex items-center gap-2">
+    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-3 md:px-4 rounded-lg border" data-testid={`connection-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+      <div className="flex-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
           <p className="text-sm font-medium">{name}</p>
-          <Badge variant={connected ? "default" : "secondary"} className={connected ? "bg-green-500/10 text-green-600 border-green-500/20" : ""}>
+          <Badge variant={connected ? "default" : "secondary"} className={`text-[10px] md:text-xs ${connected ? "bg-green-500/10 text-green-600 border-green-500/20" : ""}`}>
             {connected ? "Connected" : "Not Connected"}
           </Badge>
         </div>
-        <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+        <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5 truncate">{description}</p>
         {email && (
-          <p className="text-xs text-muted-foreground">Account: {email}</p>
+          <p className="text-[10px] md:text-xs text-muted-foreground truncate">Account: {email}</p>
         )}
         {expiresAt && (
-          <p className="text-xs text-muted-foreground">Token expires: {new Date(expiresAt).toLocaleString()}</p>
+          <p className="text-[10px] md:text-xs text-muted-foreground">Expires: {new Date(expiresAt).toLocaleDateString()}</p>
         )}
         {configuredAt && (
-          <p className="text-xs text-muted-foreground">Configured: {new Date(configuredAt).toLocaleString()}</p>
+          <p className="text-[10px] md:text-xs text-muted-foreground">Configured: {new Date(configuredAt).toLocaleDateString()}</p>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-shrink-0">
         {connected && (
-          <Button variant="ghost" size="sm" onClick={onDisconnect} data-testid={`button-disconnect-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+          <Button variant="ghost" size="sm" className="h-9 w-9 p-0 md:h-8 md:w-auto md:px-2" onClick={onDisconnect} data-testid={`button-disconnect-${name.toLowerCase().replace(/\s+/g, "-")}`}>
             <Unplug className="w-4 h-4 text-muted-foreground" />
           </Button>
         )}
-        <Button variant="outline" size="sm" onClick={onConfigure} data-testid={`button-configure-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+        <Button variant="outline" size="sm" className="h-9 md:h-8 text-xs md:text-sm" onClick={onConfigure} data-testid={`button-configure-${name.toLowerCase().replace(/\s+/g, "-")}`}>
           <Settings2 className="w-4 h-4 mr-1" />
           {connected ? "Configure" : "Set Up"}
         </Button>

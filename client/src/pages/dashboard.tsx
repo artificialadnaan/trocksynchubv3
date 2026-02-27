@@ -30,27 +30,27 @@ export default function DashboardPage() {
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 md:space-y-6">
       <div>
-        <h2 className="text-2xl font-bold" data-testid="text-dashboard-title">Dashboard</h2>
-        <p className="text-muted-foreground text-sm mt-1">System health and recent sync activity</p>
+        <h2 className="text-xl md:text-2xl font-bold" data-testid="text-dashboard-title">Dashboard</h2>
+        <p className="text-muted-foreground text-xs md:text-sm mt-1">System health and recent sync activity</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         {statCards.map((card) => (
           <Card key={card.label}>
-            <CardContent className="pt-5 pb-4 px-5">
+            <CardContent className="pt-3 pb-3 px-3 md:pt-5 md:pb-4 md:px-5">
               {statsLoading ? (
-                <Skeleton className="h-16 w-full" />
+                <Skeleton className="h-14 md:h-16 w-full" />
               ) : (
                 <div className="flex items-start justify-between">
-                  <div>
-                    <p className="text-sm text-muted-foreground">{card.label}</p>
-                    <p className="text-3xl font-bold mt-1" data-testid={`stat-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs md:text-sm text-muted-foreground truncate">{card.label}</p>
+                    <p className="text-2xl md:text-3xl font-bold mt-0.5 md:mt-1" data-testid={`stat-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
                       {card.value}
                     </p>
                   </div>
-                  <card.icon className={`w-5 h-5 ${card.color} mt-1`} />
+                  <card.icon className={`w-4 h-4 md:w-5 md:h-5 ${card.color} mt-1 flex-shrink-0`} />
                 </div>
               )}
             </CardContent>
@@ -132,19 +132,19 @@ export default function DashboardPage() {
                 stats.recentActivity.slice(0, 10).map((log: any) => (
                   <div
                     key={log.id}
-                    className="flex items-center justify-between py-2.5 px-3 rounded-lg hover:bg-muted/50 transition-colors"
+                    className="flex items-center justify-between py-2 md:py-2.5 px-2 md:px-3 rounded-lg hover:bg-muted/50 transition-colors gap-2"
                     data-testid={`activity-${log.id}`}
                   >
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">
                       <StatusDot status={log.status} />
-                      <div>
-                        <p className="text-sm font-medium">{log.action}</p>
-                        <p className="text-xs text-muted-foreground">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs md:text-sm font-medium truncate">{log.action}</p>
+                        <p className="text-[10px] md:text-xs text-muted-foreground truncate">
                           {log.entityType} {log.entityId ? `#${log.entityId}` : ""} via {log.source}
                         </p>
                       </div>
                     </div>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-[10px] md:text-xs text-muted-foreground flex-shrink-0">
                       {log.createdAt ? format(new Date(log.createdAt), "h:mm a") : ""}
                     </span>
                   </div>
