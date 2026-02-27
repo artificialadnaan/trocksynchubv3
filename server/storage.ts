@@ -1372,40 +1372,72 @@ export class DatabaseStorage implements IStorage {
               </p>
               
               <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
-                You have been assigned a new role on one of our active projects. Please review the details below:
+                You have been assigned a new role on one of our active projects. Please review the details below and get started right away.
               </p>
               
               <!-- Info Card -->
-              <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-left: 4px solid #d11921; border-radius: 8px; padding: 20px; margin: 0 0 32px 0;">
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
                   <tr>
-                    <td style="padding: 8px 0;">
-                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project</span><br>
-                      <span style="color: #1a1a2e; font-size: 18px; font-weight: 700;">{{projectName}}</span>
+                    <td style="padding: 12px 0;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Name</span><br>
+                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{projectName}}</span>
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
-                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Your Role</span><br>
-                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{roleName}}</span>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Your Role</span><br>
+                      <span style="color: #d11921; font-size: 18px; font-weight: 700;">{{roleName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project ID</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px; font-family: monospace;">{{projectId}}</span>
                     </td>
                   </tr>
                 </table>
               </div>
               
-              <!-- CTA Button -->
-              <div style="text-align: center; margin: 32px 0;">
-                <a href="{{projectUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
-                  View Project in Procore →
+              <!-- Primary CTA Button -->
+              <div style="text-align: center; margin: 24px 0;">
+                <a href="{{procoreUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 32px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  Open in Procore →
                 </a>
               </div>
               
-              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 32px 0 0 0; text-align: center;">
-                If you have questions about this assignment, please contact your project manager.
+              <!-- Quick Links Section -->
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 24px 0;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
+                  Quick Links
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 8px; width: 33.33%; text-align: center;">
+                      <a href="{{procoreUrl}}" style="display: inline-block; background-color: #f97316; color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 10px 16px; border-radius: 6px; width: 100%; box-sizing: border-box;">
+                        🔧 Procore
+                      </a>
+                    </td>
+                    <td style="padding: 8px; width: 33.33%; text-align: center;">
+                      <a href="{{hubspotUrl}}" style="display: inline-block; background-color: #ff5c35; color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 10px 16px; border-radius: 6px; width: 100%; box-sizing: border-box;">
+                        📊 HubSpot
+                      </a>
+                    </td>
+                    <td style="padding: 8px; width: 33.33%; text-align: center;">
+                      <a href="{{companycamUrl}}" style="display: inline-block; background-color: #00b4d8; color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 10px 16px; border-radius: 6px; width: 100%; box-sizing: border-box;">
+                        📷 CompanyCam
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <p style="color: #64748b; font-size: 13px; line-height: 1.6; margin: 24px 0 0 0; text-align: center;">
+                Questions about this assignment? Contact your Project Manager or reply to this email.
               </p>
         `),
         enabled: true,
-        variables: ["assigneeName", "projectName", "roleName", "projectUrl", "projectId", "companyId"],
+        variables: ["assigneeName", "projectName", "roleName", "projectId", "companyId", "procoreUrl", "hubspotUrl", "companycamUrl"],
       },
       {
         templateKey: "stage_change_notification",
@@ -1415,7 +1447,7 @@ export class DatabaseStorage implements IStorage {
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
               <div style="text-align: center; margin-bottom: 24px;">
-                <div style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #34d399 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
                   <span style="font-size: 28px;">📈</span>
                 </div>
               </div>
@@ -1424,40 +1456,83 @@ export class DatabaseStorage implements IStorage {
                 Project Stage Updated
               </h1>
               <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
-                A project has moved to a new stage
-              </p>
-              
-              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
-                The following project has progressed to a new stage in the pipeline:
+                A project has moved to a new stage in the pipeline
               </p>
               
               <!-- Project Name Card -->
               <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;">
-                <span style="color: #94a3b8; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project</span>
+                <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project</span>
                 <h2 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 8px 0 0 0;">{{projectName}}</h2>
+                <p style="color: #64748b; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;">ID: {{projectId}}</p>
               </div>
               
               <!-- Stage Change Visual -->
-              <div style="display: table; width: 100%; margin: 0 0 32px 0;">
-                <div style="display: table-cell; width: 45%; vertical-align: middle; text-align: center; padding: 20px; background-color: #fee2e2; border-radius: 8px;">
-                  <span style="color: #991b1b; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Previous Stage</span>
-                  <p style="color: #7f1d1d; font-size: 16px; font-weight: 700; margin: 8px 0 0 0;">{{previousStage}}</p>
-                </div>
-                <div style="display: table-cell; width: 10%; vertical-align: middle; text-align: center;">
-                  <span style="color: #d11921; font-size: 24px;">→</span>
-                </div>
-                <div style="display: table-cell; width: 45%; vertical-align: middle; text-align: center; padding: 20px; background-color: #dcfce7; border-radius: 8px;">
-                  <span style="color: #166534; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">New Stage</span>
-                  <p style="color: #14532d; font-size: 16px; font-weight: 700; margin: 8px 0 0 0;">{{newStage}}</p>
-                </div>
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 24px 0;">
+                <tr>
+                  <td style="width: 44%; vertical-align: top;">
+                    <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-radius: 12px; padding: 20px; text-align: center; border: 2px solid #fecaca;">
+                      <span style="color: #991b1b; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Previous Stage</span>
+                      <p style="color: #7f1d1d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{previousStage}}</p>
+                    </div>
+                  </td>
+                  <td style="width: 12%; vertical-align: middle; text-align: center;">
+                    <div style="background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); width: 36px; height: 36px; border-radius: 50%; margin: 0 auto; line-height: 36px;">
+                      <span style="color: #ffffff; font-size: 18px; font-weight: bold;">→</span>
+                    </div>
+                  </td>
+                  <td style="width: 44%; vertical-align: top;">
+                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 20px; text-align: center; border: 2px solid #86efac;">
+                      <span style="color: #166534; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">New Stage</span>
+                      <p style="color: #14532d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{newStage}}</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+              
+              <!-- HubSpot Stage Info -->
+              <div style="background-color: #fff7ed; border-left: 4px solid #f97316; border-radius: 0 8px 8px 0; padding: 16px 20px; margin: 0 0 24px 0;">
+                <p style="color: #9a3412; font-size: 12px; font-weight: 600; text-transform: uppercase; margin: 0 0 4px 0;">HubSpot Deal Stage</p>
+                <p style="color: #c2410c; font-size: 16px; font-weight: 700; margin: 0;">{{hubspotStage}}</p>
               </div>
               
-              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 0; text-align: center; padding: 20px; background-color: #f8fafc; border-radius: 8px;">
-                This notification was automatically generated by T-Rock Sync Hub when the project stage was updated.
-              </p>
+              <!-- Quick Links Section -->
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
+                  View Project In
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{procoreUrl}}" style="display: block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        🔧 Procore
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{hubspotUrl}}" style="display: block; background: linear-gradient(135deg, #ff5c35 0%, #e04e2d 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📊 HubSpot
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{companycamUrl}}" style="display: block; background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📷 CompanyCam
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Timestamp -->
+              <div style="text-align: center; padding: 16px; background-color: #f1f5f9; border-radius: 8px;">
+                <p style="color: #64748b; font-size: 12px; margin: 0;">
+                  Stage updated on <strong>{{timestamp}}</strong>
+                </p>
+                <p style="color: #94a3b8; font-size: 11px; margin: 8px 0 0 0;">
+                  Synced automatically by T-Rock Sync Hub
+                </p>
+              </div>
         `),
         enabled: true,
-        variables: ["projectName", "previousStage", "newStage"],
+        variables: ["projectName", "projectId", "previousStage", "newStage", "hubspotStage", "timestamp", "procoreUrl", "hubspotUrl", "companycamUrl"],
       },
       {
         templateKey: "project_kickoff",
@@ -1467,16 +1542,16 @@ export class DatabaseStorage implements IStorage {
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
               <div style="text-align: center; margin-bottom: 24px;">
-                <div style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #e53935 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
-                  <span style="font-size: 28px;">🚀</span>
+                <div style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); width: 72px; height: 72px; border-radius: 50%; line-height: 72px;">
+                  <span style="font-size: 32px;">🚀</span>
                 </div>
               </div>
               
-              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+              <h1 style="color: #1a1a2e; font-size: 26px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
                 Project Kickoff
               </h1>
               <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
-                A new project is ready to begin
+                Congratulations! A new project is ready to begin.
               </p>
               
               <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
@@ -1484,69 +1559,106 @@ export class DatabaseStorage implements IStorage {
               </p>
               
               <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
-                The following project has been approved and is ready for kickoff. Please review the project details and coordinate with your team.
+                The following project has been approved and moved to production. Please review the project details and coordinate with your team to get started.
               </p>
               
               <!-- Project Details Card -->
-              <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-left: 4px solid #d11921; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
                   <tr>
-                    <td style="padding: 8px 0;">
-                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project Name</span><br>
-                      <span style="color: #1a1a2e; font-size: 18px; font-weight: 700;">{{projectName}}</span>
+                    <td style="padding: 12px 0;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Name</span><br>
+                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{projectName}}</span>
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
-                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Client</span><br>
-                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{clientName}}</span>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Client</span><br>
+                      <span style="color: #e2e8f0; font-size: 16px; font-weight: 600;">{{clientName}}</span>
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
-                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Project Address</span><br>
-                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{projectAddress}}</span>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Address</span><br>
+                      <span style="color: #e2e8f0; font-size: 16px; font-weight: 600;">{{projectAddress}}</span>
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding: 8px 0; border-top: 1px solid #fca5a5;">
-                      <span style="color: #991b1b; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Your Role</span><br>
-                      <span style="color: #1a1a2e; font-size: 16px; font-weight: 600;">{{roleName}}</span>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Your Role</span><br>
+                      <span style="color: #d11921; font-size: 18px; font-weight: 700;">{{roleName}}</span>
                     </td>
                   </tr>
                 </table>
               </div>
               
-              <!-- Team Info -->
-              <div style="background-color: #f8fafc; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
-                <p style="color: #1a1a2e; font-size: 14px; font-weight: 600; margin: 0 0 12px 0;">Project Team:</p>
+              <!-- Team Info Card -->
+              <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-left: 4px solid #d11921; border-radius: 0 12px 12px 0; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #991b1b; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 12px 0;">👥 Project Team</p>
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
                   <tr>
-                    <td style="padding: 4px 0; color: #64748b; font-size: 14px;">
-                      <strong>Project Manager:</strong> {{pmName}}
+                    <td style="padding: 6px 0; color: #1a1a2e; font-size: 14px;">
+                      <strong style="color: #991b1b;">PM:</strong> {{pmName}}
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding: 4px 0; color: #64748b; font-size: 14px;">
-                      <strong>Superintendent:</strong> {{superName}}
+                    <td style="padding: 6px 0; color: #1a1a2e; font-size: 14px;">
+                      <strong style="color: #991b1b;">Super:</strong> {{superName}}
                     </td>
                   </tr>
                 </table>
               </div>
               
-              <!-- CTA Button -->
-              <div style="text-align: center; margin: 32px 0;">
-                <a href="{{projectUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
-                  View Project in Procore →
+              <!-- Primary CTA Button -->
+              <div style="text-align: center; margin: 24px 0;">
+                <a href="{{procoreUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  Open Project in Procore →
                 </a>
               </div>
               
-              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 32px 0 0 0; text-align: center;">
-                Please reach out to your project team if you have any questions about project kickoff.
+              <!-- Quick Links Section -->
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 24px 0;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
+                  Access Project In
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{procoreUrl}}" style="display: block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        🔧 Procore
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{hubspotUrl}}" style="display: block; background: linear-gradient(135deg, #ff5c35 0%, #e04e2d 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📊 HubSpot
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{companycamUrl}}" style="display: block; background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📷 CompanyCam
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Next Steps -->
+              <div style="background-color: #f0fdf4; border-radius: 12px; padding: 20px; margin: 0 0 24px 0; border: 1px solid #bbf7d0;">
+                <p style="color: #166534; font-size: 14px; font-weight: 700; margin: 0 0 12px 0;">📋 Next Steps</p>
+                <ol style="color: #374151; font-size: 14px; line-height: 1.8; margin: 0; padding-left: 20px;">
+                  <li>Review project documents in Procore</li>
+                  <li>Schedule kickoff meeting with team</li>
+                  <li>Verify budget and contract details</li>
+                  <li>Set up CompanyCam project for photos</li>
+                </ol>
+              </div>
+              
+              <p style="color: #64748b; font-size: 13px; line-height: 1.6; margin: 0; text-align: center;">
+                Questions about this project? Contact your team lead or reply to this email.
               </p>
         `),
         enabled: true,
-        variables: ["recipientName", "projectName", "clientName", "projectAddress", "roleName", "pmName", "superName", "projectUrl"],
+        variables: ["recipientName", "projectName", "clientName", "projectAddress", "roleName", "pmName", "superName", "procoreUrl", "hubspotUrl", "companycamUrl"],
       },
       {
         templateKey: "closeout_survey",
@@ -1618,7 +1730,7 @@ export class DatabaseStorage implements IStorage {
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
               <div style="text-align: center; margin-bottom: 24px;">
-                <div style="display: inline-block; background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
                   <span style="font-size: 28px;">📊</span>
                 </div>
               </div>
@@ -1627,42 +1739,93 @@ export class DatabaseStorage implements IStorage {
                 BidBoard Sync Summary
               </h1>
               <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
-                Automated sync report for {{date}}
+                Automated sync report for <strong>{{date}}</strong>
               </p>
               
               <!-- Stats Grid -->
-              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 32px 0;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 24px 0;">
                 <tr>
-                  <td style="padding: 8px; width: 33.33%;">
-                    <div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-radius: 12px; padding: 24px; text-align: center;">
-                      <span style="font-size: 32px; font-weight: 800; color: #1d4ed8;">{{projectsScanned}}</span>
-                      <p style="color: #1e40af; font-size: 12px; text-transform: uppercase; font-weight: 600; margin: 8px 0 0 0; letter-spacing: 0.5px;">Projects Scanned</p>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #bfdbfe;">
+                      <span style="font-size: 28px; font-weight: 800; color: #1d4ed8; display: block;">{{projectsScanned}}</span>
+                      <p style="color: #1e40af; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">Scanned</p>
                     </div>
                   </td>
-                  <td style="padding: 8px; width: 33.33%;">
-                    <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; padding: 24px; text-align: center;">
-                      <span style="font-size: 32px; font-weight: 800; color: #d97706;">{{stageChanges}}</span>
-                      <p style="color: #b45309; font-size: 12px; text-transform: uppercase; font-weight: 600; margin: 8px 0 0 0; letter-spacing: 0.5px;">Stage Changes</p>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #fcd34d;">
+                      <span style="font-size: 28px; font-weight: 800; color: #d97706; display: block;">{{stageChanges}}</span>
+                      <p style="color: #b45309; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">Stage Changes</p>
                     </div>
                   </td>
-                  <td style="padding: 8px; width: 33.33%;">
-                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 24px; text-align: center;">
-                      <span style="font-size: 32px; font-weight: 800; color: #15803d;">{{portfolioTransitions}}</span>
-                      <p style="color: #166534; font-size: 12px; text-transform: uppercase; font-weight: 600; margin: 8px 0 0 0; letter-spacing: 0.5px;">Portfolio Moves</p>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #86efac;">
+                      <span style="font-size: 28px; font-weight: 800; color: #15803d; display: block;">{{portfolioTransitions}}</span>
+                      <p style="color: #166534; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">To Portfolio</p>
+                    </div>
+                  </td>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #fce7f3 0%, #fbcfe8 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #f9a8d4;">
+                      <span style="font-size: 28px; font-weight: 800; color: #be185d; display: block;">{{hubspotUpdates}}</span>
+                      <p style="color: #9d174d; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">HS Updated</p>
                     </div>
                   </td>
                 </tr>
               </table>
               
-              <div style="background-color: #f8fafc; border-radius: 8px; padding: 20px; text-align: center;">
-                <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 0;">
-                  This automated report provides an overview of BidBoard synchronization activities.<br>
-                  <span style="color: #94a3b8; font-size: 12px;">Generated by T-Rock Sync Hub</span>
+              <!-- Stage Changes Detail -->
+              {{#if changedProjects}}
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px; margin: 0 0 16px 0;">
+                  📋 Projects with Stage Changes
+                </p>
+                {{changedProjects}}
+              </div>
+              {{/if}}
+              
+              <!-- Quick Links Section -->
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
+                  Quick Access
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{bidboardUrl}}" style="display: block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        🎯 Open BidBoard
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{hubspotDealsUrl}}" style="display: block; background: linear-gradient(135deg, #ff5c35 0%, #e04e2d 100%); color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📊 HubSpot Deals
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{syncHubUrl}}" style="display: block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        ⚡ Sync Hub
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Sync Status -->
+              <div style="text-align: center; padding: 16px; background-color: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0;">
+                <p style="color: #166534; font-size: 14px; font-weight: 600; margin: 0;">
+                  ✅ Sync Completed Successfully
+                </p>
+                <p style="color: #64748b; font-size: 12px; margin: 8px 0 0 0;">
+                  Next sync scheduled in {{nextSyncTime}}
                 </p>
               </div>
+              
+              <!-- Footer Note -->
+              <p style="color: #94a3b8; font-size: 11px; line-height: 1.5; margin: 24px 0 0 0; text-align: center;">
+                This automated report is generated by T-Rock Sync Hub.<br>
+                Configure sync settings and notifications in the <a href="{{syncHubUrl}}/settings" style="color: #d11921;">Sync Hub Settings</a>.
+              </p>
         `),
         enabled: false,
-        variables: ["date", "projectsScanned", "stageChanges", "portfolioTransitions"],
+        variables: ["date", "projectsScanned", "stageChanges", "portfolioTransitions", "hubspotUpdates", "changedProjects", "bidboardUrl", "hubspotDealsUrl", "syncHubUrl", "nextSyncTime"],
       },
     ];
 

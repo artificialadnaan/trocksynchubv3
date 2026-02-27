@@ -36,6 +36,8 @@ export async function sendRoleAssignmentEmails(
       continue;
     }
 
+    const mapping = await storage.getSyncMappingByProcoreProjectId(assignment.procoreProjectId);
+    
     const variables: Record<string, string> = {
       assigneeName: assignment.assigneeName || assignment.assigneeEmail,
       projectName: assignment.projectName || 'Unknown Project',
@@ -43,7 +45,9 @@ export async function sendRoleAssignmentEmails(
       assigneeEmail: assignment.assigneeEmail,
       projectId: assignment.procoreProjectId,
       companyId: '598134325683880',
-      projectUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${assignment.procoreProjectId}/tools/projecthome`,
+      procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${assignment.procoreProjectId}/tools/projecthome`,
+      hubspotUrl: mapping?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${mapping.hubspotDealId}` : 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
+      companycamUrl: mapping?.companycamProjectId ? `https://app.companycam.com/projects/${mapping.companycamProjectId}` : 'https://app.companycam.com/projects',
     };
 
     const subject = renderTemplate(template.subject, variables);
@@ -130,17 +134,24 @@ export async function sendStageChangeEmail(params: {
 
   const dedupeKey = `stage_change:${params.procoreProjectId}:${params.newStage}:${Date.now()}`;
 
+  const mapping = await storage.getSyncMappingByProcoreProjectId(params.procoreProjectId);
+
   const variables: Record<string, string> = {
     ownerName: ownerInfo.ownerName || ownerInfo.ownerEmail,
     dealName: params.dealName || 'Unknown Deal',
+    projectName: params.procoreProjectName || params.dealName || 'Unknown Project',
     procoreProjectName: params.procoreProjectName || 'Unknown Project',
-    oldStage: params.oldStage || 'Unknown',
+    projectId: params.procoreProjectId,
+    previousStage: params.oldStage || 'Unknown',
     newStage: params.newStage || 'Unknown',
+    hubspotStage: params.hubspotStageName || params.newStage || 'Unknown',
     hubspotStageName: params.hubspotStageName || 'Unknown',
     procoreProjectId: params.procoreProjectId,
     hubspotDealId: params.hubspotDealId,
-    hubspotDealUrl: `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${params.hubspotDealId}`,
-    procoreProjectUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.procoreProjectId}/tools/projecthome`,
+    timestamp: new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }),
+    procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.procoreProjectId}/tools/projecthome`,
+    hubspotUrl: `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${params.hubspotDealId}`,
+    companycamUrl: mapping?.companycamProjectId ? `https://app.companycam.com/projects/${mapping.companycamProjectId}` : 'https://app.companycam.com/projects',
   };
 
   const subject = renderTemplate(template.subject, variables);
@@ -196,6 +207,7 @@ export async function sendKickoffEmails(params: {
   }>;
   pmName?: string;
   superName?: string;
+  hubspotDealId?: string;
 }): Promise<{ sent: number; skipped: number; failed: number }> {
   const template = await storage.getEmailTemplate('project_kickoff');
   if (!template || !template.enabled) {
@@ -209,6 +221,8 @@ export async function sendKickoffEmails(params: {
   const superMember = params.teamMembers.find(m => m.role.toLowerCase().includes('superintendent'));
   const pmName = params.pmName || pm?.name || 'TBD';
   const superName = params.superName || superMember?.name || 'TBD';
+
+  const mapping = await storage.getSyncMappingByProcoreProjectId(params.projectId);
 
   for (const member of params.teamMembers) {
     if (!member.email) {
@@ -225,6 +239,8 @@ export async function sendKickoffEmails(params: {
       continue;
     }
 
+    const hubspotDealId = params.hubspotDealId || mapping?.hubspotDealId;
+
     const variables: Record<string, string> = {
       recipientName: member.name || member.email,
       projectName: params.projectName || 'Unknown Project',
@@ -233,7 +249,9 @@ export async function sendKickoffEmails(params: {
       roleName: member.role,
       pmName,
       superName,
-      projectUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.projectId}/tools/projecthome`,
+      procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.projectId}/tools/projecthome`,
+      hubspotUrl: hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${hubspotDealId}` : 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
+      companycamUrl: mapping?.companycamProjectId ? `https://app.companycam.com/projects/${mapping.companycamProjectId}` : 'https://app.companycam.com/projects',
     };
 
     const subject = renderTemplate(template.subject, variables);
@@ -295,4 +313,104 @@ export async function sendKickoffEmails(params: {
   }
 
   return { sent, skipped, failed };
+}
+
+export async function sendBidBoardSyncSummary(params: {
+  recipientEmails: string[];
+  date: string;
+  projectsScanned: number;
+  stageChanges: number;
+  portfolioTransitions: number;
+  hubspotUpdates: number;
+  changedProjects?: Array<{
+    name: string;
+    oldStage: string;
+    newStage: string;
+    procoreUrl: string;
+    hubspotUrl?: string;
+  }>;
+}): Promise<{ sent: number; failed: number }> {
+  const template = await storage.getEmailTemplate('bidboard_sync_summary');
+  if (!template || !template.enabled) {
+    console.log('[email] BidBoard sync summary template is disabled, skipping');
+    return { sent: 0, failed: 0 };
+  }
+
+  let sent = 0, failed = 0;
+
+  const appUrl = process.env.APP_URL || 'http://localhost:5000';
+
+  let changedProjectsHtml = '';
+  if (params.changedProjects && params.changedProjects.length > 0) {
+    changedProjectsHtml = params.changedProjects.map(p => `
+      <div style="background-color: rgba(255,255,255,0.1); border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+        <p style="color: #ffffff; font-size: 14px; font-weight: 600; margin: 0 0 4px 0;">${p.name}</p>
+        <p style="color: #94a3b8; font-size: 12px; margin: 0;">
+          ${p.oldStage} → <span style="color: #10b981;">${p.newStage}</span>
+        </p>
+        <p style="margin: 8px 0 0 0;">
+          <a href="${p.procoreUrl}" style="color: #f97316; font-size: 11px; text-decoration: none;">Procore</a>
+          ${p.hubspotUrl ? `<span style="color: #64748b;"> | </span><a href="${p.hubspotUrl}" style="color: #ff5c35; font-size: 11px; text-decoration: none;">HubSpot</a>` : ''}
+        </p>
+      </div>
+    `).join('');
+  }
+
+  for (const email of params.recipientEmails) {
+    if (!email) continue;
+
+    const variables: Record<string, string> = {
+      date: params.date,
+      projectsScanned: String(params.projectsScanned),
+      stageChanges: String(params.stageChanges),
+      portfolioTransitions: String(params.portfolioTransitions),
+      hubspotUpdates: String(params.hubspotUpdates),
+      changedProjects: changedProjectsHtml,
+      bidboardUrl: 'https://us02.procore.com/webclients/host/companies/598134325683880/projects',
+      hubspotDealsUrl: 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3/views/all/list',
+      syncHubUrl: appUrl,
+      nextSyncTime: '1 hour',
+    };
+
+    const subject = renderTemplate(template.subject, variables);
+    const htmlBody = renderTemplate(template.bodyHtml, variables);
+
+    const result = await sendEmail({
+      to: email,
+      subject,
+      htmlBody,
+      fromName: 'T-Rock Sync Hub',
+    });
+
+    if (result.success) {
+      sent++;
+      console.log(`[email] BidBoard sync summary sent to ${email}`);
+    } else {
+      failed++;
+      console.error(`[email] Failed to send BidBoard sync summary to ${email}: ${result.error}`);
+    }
+  }
+
+  if (sent > 0 || failed > 0) {
+    await storage.createAuditLog({
+      action: 'bidboard_sync_summary_sent',
+      entityType: 'email',
+      source: 'automation',
+      status: failed > 0 ? 'partial' : 'success',
+      details: { 
+        templateKey: 'bidboard_sync_summary', 
+        recipientCount: params.recipientEmails.length,
+        sent, 
+        failed,
+        stats: {
+          projectsScanned: params.projectsScanned,
+          stageChanges: params.stageChanges,
+          portfolioTransitions: params.portfolioTransitions,
+          hubspotUpdates: params.hubspotUpdates,
+        }
+      },
+    });
+  }
+
+  return { sent, failed };
 }
