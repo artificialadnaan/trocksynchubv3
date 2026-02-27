@@ -26,14 +26,14 @@ import { useState } from "react";
 import type { StageMapping } from "@shared/schema";
 
 const procoreStages = [
-  { value: "preconstruction", label: "Pre-Construction" },
-  { value: "bidding", label: "Bidding" },
-  { value: "awarded", label: "Awarded" },
-  { value: "active", label: "Active Project" },
-  { value: "sendtoportfolio", label: "Send to Portfolio" },
-  { value: "production", label: "Production" },
-  { value: "closeout", label: "Closeout" },
-  { value: "complete", label: "Complete" },
+  { value: "estimate_in_progress", label: "Estimate in Progress" },
+  { value: "service_estimating", label: "Service - Estimating" },
+  { value: "estimate_under_review", label: "Estimate Under Review" },
+  { value: "estimate_sent_to_client", label: "Estimate Sent to Client" },
+  { value: "service_sent_to_production", label: "Service - Sent to Production" },
+  { value: "sent_to_production", label: "Sent to Production" },
+  { value: "service_lost", label: "Service - Lost" },
+  { value: "production_lost", label: "Production Lost" },
 ];
 
 interface HubSpotStage {
