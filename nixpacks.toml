@@ -1,13 +1,25 @@
 [phases.setup]
-nixPkgs = ["nodejs_20"]
+nixPkgs = [
+  "nodejs_20",
+  "chromium",
+  "nss",
+  "freetype",
+  "harfbuzz",
+  "ca-certificates",
+  "ttf-freefont",
+  "dbus",
+  "glib"
+]
 
 [phases.install]
-cacheDirectories = []
 cmds = ["npm install --include=dev"]
 
 [phases.build]
-cacheDirectories = []
-cmds = ["npm run build"]
+cmds = [
+  "npx playwright install chromium --with-deps || true",
+  "npm run build"
+]
 
-[start]
-cmd = "npm run db:push && npm run start"
+[variables]
+PLAYWRIGHT_BROWSERS_PATH = "/app/.playwright"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "0"
