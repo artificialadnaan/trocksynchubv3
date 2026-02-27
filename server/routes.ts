@@ -15,6 +15,12 @@ import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifica
 import { sendEmail, isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
 import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot } from "./procore-hubspot-sync";
+import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject } from "./bidboard-automation";
+import { testLogin as testProcoreLogin, saveProcoreCredentials, logout as logoutProcore } from "./playwright/auth";
+import { runPortfolioTransition, runFullPortfolioWorkflow } from "./playwright/portfolio";
+import { syncHubSpotClientToBidBoard, runBidBoardScrape } from "./playwright/bidboard";
+import { syncHubSpotAttachmentsToBidBoard, syncBidBoardDocumentsToPortfolio } from "./playwright/documents";
+import { closeBrowser } from "./playwright/browser";
 
 const PgSession = connectPgSimple(session);
 
@@ -2652,6 +2658,269 @@ export async function registerRoutes(
       }
     } catch (e) {
       console.log('[RolePolling] No saved config, role polling disabled by default');
+    }
+  })();
+
+  // ============================================
+  // BidBoard Playwright Automation Routes
+  // ============================================
+
+  let bidboardPollingTimer: ReturnType<typeof setInterval> | null = null;
+  let lastBidboardPollAt: Date | null = null;
+  let lastBidboardPollResult: any = null;
+  let bidboardPollingRunning = false;
+
+  async function runBidboardPollingCycle() {
+    if (bidboardPollingRunning) {
+      console.log('[BidBoardPolling] Already running, skipping');
+      return;
+    }
+
+    bidboardPollingRunning = true;
+    console.log('[BidBoardPolling] Starting polling cycle');
+    const startTime = Date.now();
+
+    try {
+      const result = await runBidBoardPolling();
+      lastBidboardPollAt = new Date();
+      lastBidboardPollResult = result;
+
+      const duration = Date.now() - startTime;
+      console.log(`[BidBoardPolling] Complete in ${(duration / 1000).toFixed(1)}s — ${result.projectsScraped} projects, ${result.stageChanges.length} changes`);
+    } catch (e: any) {
+      console.error('[BidBoardPolling] Polling failed:', e.message);
+      lastBidboardPollAt = new Date();
+      lastBidboardPollResult = { error: e.message };
+    } finally {
+      bidboardPollingRunning = false;
+    }
+  }
+
+  function startBidboardPolling(intervalMinutes: number) {
+    stopBidboardPolling();
+    console.log(`[BidBoardPolling] Starting automatic polling every ${intervalMinutes} minutes`);
+    bidboardPollingTimer = setInterval(() => runBidboardPollingCycle(), intervalMinutes * 60 * 1000);
+  }
+
+  function stopBidboardPolling() {
+    if (bidboardPollingTimer) {
+      clearInterval(bidboardPollingTimer);
+      bidboardPollingTimer = null;
+      console.log('[BidBoardPolling] Stopped automatic polling');
+    }
+  }
+
+  // BidBoard automation status
+  app.get("/api/bidboard/status", requireAuth, async (_req, res) => {
+    try {
+      const status = await getAutomationStatus();
+      res.json({
+        ...status,
+        isPolling: bidboardPollingTimer !== null,
+        lastPollAt: lastBidboardPollAt?.toISOString() || null,
+        lastPollResult: lastBidboardPollResult,
+        currentlyPolling: bidboardPollingRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // BidBoard automation config
+  app.get("/api/bidboard/config", requireAuth, async (_req, res) => {
+    try {
+      const automationConfig = await storage.getAutomationConfig("bidboard_automation");
+      const credentialsConfig = await storage.getAutomationConfig("procore_browser_credentials");
+      
+      res.json({
+        enabled: (automationConfig?.value as any)?.enabled || false,
+        pollingIntervalMinutes: (automationConfig?.value as any)?.pollingIntervalMinutes || 60,
+        hasCredentials: !!credentialsConfig?.value,
+        sandbox: (credentialsConfig?.value as any)?.sandbox || false,
+        email: (credentialsConfig?.value as any)?.email || null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Save BidBoard automation config
+  app.post("/api/bidboard/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, pollingIntervalMinutes } = req.body;
+      const interval = pollingIntervalMinutes || 60;
+
+      await storage.upsertAutomationConfig({
+        key: "bidboard_automation",
+        value: { enabled, pollingIntervalMinutes: interval },
+        description: "BidBoard Playwright automation configuration",
+      });
+
+      await enableBidBoardAutomation(enabled);
+
+      if (enabled) {
+        startBidboardPolling(interval);
+      } else {
+        stopBidboardPolling();
+      }
+
+      res.json({ success: true, enabled, pollingIntervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Test Procore browser credentials
+  app.post("/api/bidboard/test-credentials", requireAuth, async (req, res) => {
+    try {
+      const { email, password, sandbox } = req.body;
+      const result = await testProcoreLogin(email, password, sandbox);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Save Procore browser credentials
+  app.post("/api/bidboard/credentials", requireAuth, async (req, res) => {
+    try {
+      const { email, password, sandbox } = req.body;
+      await saveProcoreCredentials(email, password, sandbox);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Trigger immediate BidBoard poll
+  app.post("/api/bidboard/poll", requireAuth, async (_req, res) => {
+    try {
+      if (bidboardPollingRunning) {
+        return res.json({ message: "BidBoard polling already in progress", running: true });
+      }
+      runBidboardPollingCycle();
+      res.json({ message: "BidBoard polling triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get scraped projects
+  app.get("/api/bidboard/projects", requireAuth, async (_req, res) => {
+    try {
+      const states = await storage.getBidboardSyncStates();
+      res.json(states);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get automation logs
+  app.get("/api/bidboard/logs", requireAuth, async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const logs = await storage.getBidboardAutomationLogs(limit);
+      res.json(logs);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Manual sync project stage to HubSpot
+  app.post("/api/bidboard/sync-project/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const result = await manualSyncProject(projectId);
+      res.json(result || { success: false, error: "Project not found" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Push HubSpot client data to BidBoard
+  app.post("/api/bidboard/push-client-data", requireAuth, async (req, res) => {
+    try {
+      const { projectId, hubspotDealId } = req.body;
+      const result = await syncHubSpotClientToBidBoard(projectId, hubspotDealId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Send project to Portfolio
+  app.post("/api/bidboard/send-to-portfolio/:projectId", requireAuth, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const { importToBudget, createPrimeContract } = req.body;
+      
+      if (importToBudget || createPrimeContract) {
+        const result = await runFullPortfolioWorkflow(projectId, {
+          importToBudget,
+          createPrimeContract,
+        });
+        res.json(result);
+      } else {
+        const result = await runPortfolioTransition(projectId);
+        res.json(result);
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Sync HubSpot attachments to BidBoard
+  app.post("/api/bidboard/sync-documents/hubspot-to-bidboard", requireAuth, async (req, res) => {
+    try {
+      const { projectId, hubspotDealId } = req.body;
+      const result = await syncHubSpotAttachmentsToBidBoard(projectId, hubspotDealId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Sync BidBoard documents to Portfolio
+  app.post("/api/bidboard/sync-documents/bidboard-to-portfolio", requireAuth, async (req, res) => {
+    try {
+      const { bidboardProjectId, portfolioProjectId } = req.body;
+      const result = await syncBidBoardDocumentsToPortfolio(bidboardProjectId, portfolioProjectId);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Logout Procore browser session
+  app.post("/api/bidboard/logout", requireAuth, async (_req, res) => {
+    try {
+      await logoutProcore();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Close browser (cleanup)
+  app.post("/api/bidboard/close-browser", requireAuth, async (_req, res) => {
+    try {
+      await closeBrowser();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Initialize BidBoard polling on startup
+  (async () => {
+    try {
+      const config = await storage.getAutomationConfig("bidboard_automation");
+      const val = (config?.value as any);
+      if (val?.enabled) {
+        startBidboardPolling(val.pollingIntervalMinutes || 60);
+      }
+    } catch (e) {
+      console.log('[BidBoardPolling] No saved config, BidBoard polling disabled by default');
     }
   })();
 

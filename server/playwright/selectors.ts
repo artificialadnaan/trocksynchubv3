@@ -1,0 +1,144 @@
+// Centralized selectors for Procore UI elements
+// These may need to be updated if Procore changes their UI
+
+export const PROCORE_SELECTORS = {
+  // Login page
+  login: {
+    emailInput: 'input[name="email"], input[type="email"], #user_email',
+    passwordInput: 'input[name="password"], input[type="password"], #user_password',
+    submitButton: 'button[type="submit"], input[type="submit"], [data-testid="login-button"]',
+    errorMessage: '.alert-danger, .error-message, [data-testid="login-error"]',
+    mfaInput: 'input[name="otp"], input[name="code"], [data-testid="mfa-input"]',
+  },
+  
+  // Main navigation
+  nav: {
+    projectSelector: '[data-testid="project-selector"], .project-selector',
+    toolsMenu: '[data-testid="tools-menu"], .tools-menu',
+    userMenu: '[data-testid="user-menu"], .user-avatar',
+  },
+  
+  // BidBoard specific
+  bidboard: {
+    container: '[data-testid="bidboard"], .bidboard-container, #bidboard',
+    projectList: '[data-testid="bidboard-projects"], .bidboard-project-list, table.projects',
+    projectRow: '[data-testid="bidboard-project-row"], .bidboard-project-row, tr.project-row',
+    projectName: '[data-testid="project-name"], .project-name, td.name',
+    projectStage: '[data-testid="project-stage"], .project-stage, td.stage',
+    projectNumber: '[data-testid="project-number"], .project-number, td.number',
+    exportButton: '[data-testid="export-csv"], .export-button, button:has-text("Export")',
+    filterDropdown: '[data-testid="filter-dropdown"], .filter-dropdown',
+    searchInput: '[data-testid="search-input"], input[placeholder*="Search"]',
+    stageDropdown: '[data-testid="stage-dropdown"], .stage-dropdown, select.stage',
+    sendToPortfolioButton: '[data-testid="send-to-portfolio"], button:has-text("Send to Portfolio")',
+    projectOverviewTab: '[data-testid="overview-tab"], a:has-text("Overview")',
+    estimateTab: '[data-testid="estimate-tab"], a:has-text("Estimate")',
+    documentsTab: '[data-testid="documents-tab"], a:has-text("Documents")',
+  },
+  
+  // Project Overview fields
+  overview: {
+    clientNameInput: '[data-testid="client-name"], input[name="client_name"], #client_name',
+    clientEmailInput: '[data-testid="client-email"], input[name="client_email"], #client_email',
+    clientPhoneInput: '[data-testid="client-phone"], input[name="client_phone"], #client_phone',
+    clientAddressInput: '[data-testid="client-address"], input[name="client_address"], #client_address',
+    contactNameInput: '[data-testid="contact-name"], input[name="contact_name"], #contact_name',
+    saveButton: '[data-testid="save-overview"], button:has-text("Save")',
+    editButton: '[data-testid="edit-overview"], button:has-text("Edit")',
+  },
+  
+  // Estimate section
+  estimate: {
+    exportButton: '[data-testid="export-estimate"], button:has-text("Export")',
+    exportPdfOption: '[data-testid="export-pdf"], [data-value="pdf"]',
+    exportCsvOption: '[data-testid="export-csv"], [data-value="csv"]',
+    totalAmount: '[data-testid="estimate-total"], .estimate-total',
+    lineItems: '[data-testid="estimate-line-items"], .line-items-table',
+    inclusionsSection: '[data-testid="inclusions"], .inclusions',
+    exclusionsSection: '[data-testid="exclusions"], .exclusions',
+    scopeOfWork: '[data-testid="scope-of-work"], .scope-of-work',
+  },
+  
+  // Documents section
+  documents: {
+    uploadButton: '[data-testid="upload-document"], button:has-text("Upload")',
+    fileInput: 'input[type="file"]',
+    documentList: '[data-testid="document-list"], .document-list',
+    documentRow: '[data-testid="document-row"], .document-row',
+    downloadButton: '[data-testid="download-document"], .download-button',
+  },
+  
+  // Portfolio section
+  portfolio: {
+    container: '[data-testid="portfolio"], .portfolio-container',
+    projectList: '[data-testid="portfolio-projects"], .portfolio-project-list',
+    projectRow: '[data-testid="portfolio-project-row"], .portfolio-project-row',
+    budgetTab: '[data-testid="budget-tab"], a:has-text("Budget")',
+    primeContractTab: '[data-testid="prime-contract-tab"], a:has-text("Prime Contract")',
+    documentsTab: '[data-testid="portfolio-documents-tab"], a:has-text("Documents")',
+  },
+  
+  // Budget tool
+  budget: {
+    importButton: '[data-testid="import-budget"], button:has-text("Import")',
+    fileInput: 'input[type="file"]',
+    confirmImport: '[data-testid="confirm-import"], button:has-text("Confirm")',
+    lineItems: '[data-testid="budget-line-items"], .budget-line-items',
+  },
+  
+  // Prime Contract
+  primeContract: {
+    createButton: '[data-testid="create-prime-contract"], button:has-text("Create")',
+    clientNameInput: '[data-testid="contract-client-name"], input[name="client_name"]',
+    contractAmountInput: '[data-testid="contract-amount"], input[name="contract_amount"]',
+    scopeInput: '[data-testid="contract-scope"], textarea[name="scope"]',
+    inclusionsInput: '[data-testid="contract-inclusions"], textarea[name="inclusions"]',
+    exclusionsInput: '[data-testid="contract-exclusions"], textarea[name="exclusions"]',
+    saveButton: '[data-testid="save-prime-contract"], button:has-text("Save")',
+  },
+  
+  // Common UI elements
+  common: {
+    loadingSpinner: '[data-testid="loading"], .loading-spinner, .spinner',
+    modal: '[data-testid="modal"], .modal, [role="dialog"]',
+    modalCloseButton: '[data-testid="modal-close"], .modal-close, button:has-text("Close")',
+    confirmButton: '[data-testid="confirm"], button:has-text("Confirm"), button:has-text("Yes")',
+    cancelButton: '[data-testid="cancel"], button:has-text("Cancel"), button:has-text("No")',
+    toast: '[data-testid="toast"], .toast, .notification',
+    pagination: '[data-testid="pagination"], .pagination',
+    nextPageButton: '[data-testid="next-page"], .next-page, button:has-text("Next")',
+  },
+};
+
+export const PROCORE_URLS = {
+  login: "https://login.procore.com/",
+  loginSandbox: "https://login-sandbox.procore.com/",
+  app: "https://app.procore.com/",
+  appSandbox: "https://sandbox.procore.com/",
+  
+  // URL patterns
+  patterns: {
+    bidboard: /\/bidding\/?$/,
+    bidboardProject: /\/bidding\/\d+/,
+    portfolio: /\/projects?\/?$/,
+    portfolioProject: /\/projects?\/\d+/,
+    budget: /\/budget\/?$/,
+    primeContract: /\/prime_contract\/?$/,
+    documents: /\/documents?\/?$/,
+  },
+};
+
+export function getBidBoardUrl(companyId: string, sandbox: boolean = false): string {
+  const baseUrl = sandbox ? PROCORE_URLS.appSandbox : PROCORE_URLS.app;
+  return `${baseUrl}${companyId}/company/bidding`;
+}
+
+export function getProjectUrl(companyId: string, projectId: string, sandbox: boolean = false): string {
+  const baseUrl = sandbox ? PROCORE_URLS.appSandbox : PROCORE_URLS.app;
+  return `${baseUrl}${companyId}/company/bidding/${projectId}`;
+}
+
+export function getPortfolioProjectUrl(projectId: string, sandbox: boolean = false): string {
+  const baseUrl = sandbox ? PROCORE_URLS.appSandbox : PROCORE_URLS.app;
+  return `${baseUrl}projects/${projectId}`;
+}

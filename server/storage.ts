@@ -31,6 +31,8 @@ import {
   procoreRoleAssignments, type ProcoreRoleAssignment, type InsertProcoreRoleAssignment,
   emailTemplates, type EmailTemplate, type InsertEmailTemplate,
   emailSendLog, type EmailSendLog, type InsertEmailSendLog,
+  bidboardSyncState, type BidboardSyncState,
+  bidboardAutomationLogs, type BidboardAutomationLog,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -160,6 +162,12 @@ export interface IStorage {
   checkEmailDedupeKey(dedupeKey: string): Promise<boolean>;
   getEmailSendLogs(filters: { templateKey?: string; limit?: number; offset?: number }): Promise<{ data: EmailSendLog[]; total: number }>;
   getEmailSendLogCounts(): Promise<{ total: number; sent: number; failed: number }>;
+
+  getBidboardSyncStates(): Promise<BidboardSyncState[]>;
+  getBidboardSyncState(projectId: string): Promise<BidboardSyncState | undefined>;
+  upsertBidboardSyncState(data: { projectId: string; projectName?: string; currentStage?: string; metadata?: any }): Promise<BidboardSyncState>;
+  getBidboardAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
+  createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1183,6 +1191,59 @@ export class DatabaseStorage implements IStorage {
       sent: sentRes?.count || 0,
       failed: failedRes?.count || 0,
     };
+  }
+
+  async getBidboardSyncStates(): Promise<BidboardSyncState[]> {
+    return db.select().from(bidboardSyncState).orderBy(desc(bidboardSyncState.lastCheckedAt));
+  }
+
+  async getBidboardSyncState(projectId: string): Promise<BidboardSyncState | undefined> {
+    const [result] = await db.select().from(bidboardSyncState).where(eq(bidboardSyncState.projectId, projectId));
+    return result;
+  }
+
+  async upsertBidboardSyncState(data: { projectId: string; projectName?: string; currentStage?: string; metadata?: any }): Promise<BidboardSyncState> {
+    const [result] = await db
+      .insert(bidboardSyncState)
+      .values({
+        projectId: data.projectId,
+        projectName: data.projectName,
+        currentStage: data.currentStage,
+        lastCheckedAt: new Date(),
+        lastChangedAt: new Date(),
+        metadata: data.metadata,
+      })
+      .onConflictDoUpdate({
+        target: [bidboardSyncState.projectId],
+        set: {
+          projectName: data.projectName,
+          currentStage: data.currentStage,
+          lastCheckedAt: new Date(),
+          metadata: data.metadata,
+        },
+      })
+      .returning();
+    return result;
+  }
+
+  async getBidboardAutomationLogs(limit: number = 50): Promise<BidboardAutomationLog[]> {
+    return db.select().from(bidboardAutomationLogs).orderBy(desc(bidboardAutomationLogs.createdAt)).limit(limit);
+  }
+
+  async createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog> {
+    const [result] = await db
+      .insert(bidboardAutomationLogs)
+      .values({
+        projectId: data.projectId || null,
+        projectName: data.projectName || null,
+        action: data.action,
+        status: data.status,
+        details: data.details,
+        errorMessage: data.errorMessage,
+        screenshotPath: data.screenshotPath,
+      })
+      .returning();
+    return result;
   }
 }
 

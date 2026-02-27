@@ -12,6 +12,36 @@ export const session = pgTable("session", {
   index("IDX_session_expire").on(table.expire),
 ]);
 
+// BidBoard sync state tracking
+export const bidboardSyncState = pgTable("bidboard_sync_state", {
+  id: serial("id").primaryKey(),
+  projectId: text("project_id").notNull().unique(),
+  projectName: text("project_name"),
+  currentStage: text("current_stage"),
+  lastCheckedAt: timestamp("last_checked_at"),
+  lastChangedAt: timestamp("last_changed_at"),
+  metadata: jsonb("metadata"),
+}, (table) => [
+  index("IDX_bidboard_sync_project").on(table.projectId),
+]);
+
+export type BidboardSyncState = typeof bidboardSyncState.$inferSelect;
+
+// BidBoard automation logs
+export const bidboardAutomationLogs = pgTable("bidboard_automation_logs", {
+  id: serial("id").primaryKey(),
+  projectId: text("project_id"),
+  projectName: text("project_name"),
+  action: text("action").notNull(),
+  status: text("status").notNull().default("pending"),
+  details: jsonb("details"),
+  errorMessage: text("error_message"),
+  screenshotPath: text("screenshot_path"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type BidboardAutomationLog = typeof bidboardAutomationLogs.$inferSelect;
+
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
