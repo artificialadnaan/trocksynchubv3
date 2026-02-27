@@ -1790,13 +1790,39 @@ function StageMappingCard() {
             </Button>
           </div>
         ) : statuses.length === 0 ? (
-          <div className="text-center py-6 space-y-3">
-            <p className="text-sm text-muted-foreground">
-              No BidBoard data imported yet. Import a BidBoard CSV on the Procore Data page first.
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {stages.length} HubSpot stages available
-            </p>
+          <div className="py-4 space-y-4">
+            <div className="text-center">
+              <p className="text-sm text-muted-foreground">
+                No BidBoard data imported yet. Import a BidBoard CSV on the Procore Data page first to configure stage mappings.
+              </p>
+            </div>
+            
+            {stages.length > 0 && (
+              <div className="border rounded-lg p-4 bg-muted/30">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-medium">Available HubSpot Stages ({stages.length})</h4>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => refreshPipelinesMutation.mutate()}
+                    disabled={refreshPipelinesMutation.isPending}
+                  >
+                    {refreshPipelinesMutation.isPending ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3 h-3" />
+                    )}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {stages.map(s => (
+                    <Badge key={s.stageId} variant="secondary" className="text-xs">
+                      {s.label}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-2">
