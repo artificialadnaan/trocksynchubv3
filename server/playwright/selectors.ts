@@ -2,13 +2,16 @@
 // These may need to be updated if Procore changes their UI
 
 export const PROCORE_SELECTORS = {
-  // Login page
+  // Login page - Procore uses a two-step login flow
   login: {
-    emailInput: 'input[name="email"], input[type="email"], #user_email',
-    passwordInput: 'input[name="password"], input[type="password"], #user_password',
-    submitButton: 'button[type="submit"], input[type="submit"], [data-testid="login-button"]',
-    errorMessage: '.alert-danger, .error-message, [data-testid="login-error"]',
-    mfaInput: 'input[name="otp"], input[name="code"], [data-testid="mfa-input"]',
+    emailInput: 'input[name="email"], input[type="email"], #user_email, input[id*="email"]',
+    // Continue button after entering email (step 1)
+    continueButton: 'button:has-text("Continue"), button:has-text("Next"), button[type="submit"]:has-text("Continue"), input[type="submit"]',
+    passwordInput: 'input[name="password"], input[type="password"], #user_password, input[id*="password"]',
+    // Sign in button after entering password (step 2)
+    submitButton: 'button[type="submit"], input[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), [data-testid="login-button"]',
+    errorMessage: '.alert-danger, .error-message, [data-testid="login-error"], [class*="error"], [role="alert"]',
+    mfaInput: 'input[name="otp"], input[name="code"], [data-testid="mfa-input"], input[inputmode="numeric"]',
   },
   
   // Main navigation

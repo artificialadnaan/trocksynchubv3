@@ -119,29 +119,63 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
   
   await randomDelay(1000, 2000);
   
-  // Enter email
-  log("Entering email", "playwright");
-  const emailInput = await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 10000 });
+  // STEP 1: Enter email
+  log("Step 1: Entering email", "playwright");
+  const emailInput = await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 15000 });
   await emailInput.fill(credentials.email);
   
   await randomDelay(500, 1000);
   
-  // Enter password
-  log("Entering password", "playwright");
+  // Check if password field is already visible (old login flow)
+  let passwordVisible = await page.$(PROCORE_SELECTORS.login.passwordInput);
+  
+  if (!passwordVisible) {
+    // Two-step login: Click Continue button to proceed to password step
+    log("Clicking Continue to proceed to password step", "playwright");
+    try {
+      // Try to find and click Continue/Next button
+      const continueButton = await page.waitForSelector(PROCORE_SELECTORS.login.continueButton, { timeout: 5000 });
+      await continueButton.click();
+      
+      // Wait for password field to appear
+      log("Waiting for password field...", "playwright");
+      await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+    } catch (e) {
+      // Maybe there's a submit button instead
+      log("Trying submit button for email step", "playwright");
+      const submitBtn = await page.$('button[type="submit"]');
+      if (submitBtn) {
+        await submitBtn.click();
+        await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+      } else {
+        const screenshotPath = await takeScreenshot(page, "login-no-continue-button");
+        return {
+          success: false,
+          error: "Could not find Continue button or password field",
+          screenshotPath,
+        };
+      }
+    }
+  }
+  
+  await randomDelay(500, 1000);
+  
+  // STEP 2: Enter password
+  log("Step 2: Entering password", "playwright");
   const passwordInput = await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 10000 });
   await passwordInput.fill(credentials.password);
   
   await randomDelay(500, 1000);
   
-  // Click submit
-  log("Submitting login form", "playwright");
+  // Click Sign In / Submit
+  log("Clicking Sign In", "playwright");
   const submitButton = await page.waitForSelector(PROCORE_SELECTORS.login.submitButton, { timeout: 10000 });
   await submitButton.click();
   
   // Wait for navigation or error
   try {
     await Promise.race([
-      page.waitForURL(/app\.procore\.com|sandbox\.procore\.com/, { timeout: 30000 }),
+      page.waitForURL(/app\.procore\.com|sandbox\.procore\.com|us02\.procore\.com/, { timeout: 30000 }),
       page.waitForSelector(PROCORE_SELECTORS.login.errorMessage, { timeout: 30000 }),
       page.waitForSelector(PROCORE_SELECTORS.login.mfaInput, { timeout: 30000 }),
     ]);
@@ -149,7 +183,7 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
     const screenshotPath = await takeScreenshot(page, "login-timeout");
     return {
       success: false,
-      error: "Login timed out",
+      error: "Login timed out after submitting credentials",
       screenshotPath,
     };
   }
@@ -269,6 +303,7 @@ export async function testLogin(email: string, password: string, sandbox: boolea
 /**
  * Login to Procore using an external Page object (for isolated browser instances)
  * Uses stored credentials from the database
+ * Handles Procore's two-step login flow (email -> Continue -> password -> Sign In)
  */
 export async function loginToProcore(page: Page): Promise<boolean> {
   const credentials = await getProcoreCredentials();
@@ -285,24 +320,53 @@ export async function loginToProcore(page: Page): Promise<boolean> {
     await page.goto(loginUrl, { waitUntil: "networkidle", timeout: 30000 });
     
     // Wait a moment for page to stabilize
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
     
-    // Enter email
-    log("Entering email", "playwright");
-    await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 10000 });
+    // STEP 1: Enter email
+    log("Step 1: Entering email", "playwright");
+    await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 15000 });
     await page.fill(PROCORE_SELECTORS.login.emailInput, credentials.email);
     
     await page.waitForTimeout(500);
     
-    // Enter password
-    log("Entering password", "playwright");
+    // Check if password field is already visible (old login flow)
+    let passwordVisible = await page.$(PROCORE_SELECTORS.login.passwordInput);
+    
+    if (!passwordVisible) {
+      // Two-step login: Click Continue button
+      log("Clicking Continue to proceed to password step", "playwright");
+      try {
+        const continueButton = await page.waitForSelector(PROCORE_SELECTORS.login.continueButton, { timeout: 5000 });
+        await continueButton.click();
+        
+        // Wait for password field
+        log("Waiting for password field...", "playwright");
+        await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+      } catch {
+        // Try generic submit button
+        log("Trying submit button for email step", "playwright");
+        const submitBtn = await page.$('button[type="submit"]');
+        if (submitBtn) {
+          await submitBtn.click();
+          await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+        } else {
+          log("Could not find Continue button or password field", "playwright");
+          return false;
+        }
+      }
+    }
+    
+    await page.waitForTimeout(500);
+    
+    // STEP 2: Enter password
+    log("Step 2: Entering password", "playwright");
     await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 10000 });
     await page.fill(PROCORE_SELECTORS.login.passwordInput, credentials.password);
     
     await page.waitForTimeout(500);
     
-    // Click submit
-    log("Submitting login form", "playwright");
+    // Click Sign In
+    log("Clicking Sign In", "playwright");
     await page.click(PROCORE_SELECTORS.login.submitButton);
     
     // Wait for navigation
