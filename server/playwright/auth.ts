@@ -98,11 +98,32 @@ async function isLoggedIn(page: Page): Promise<boolean> {
   try {
     const url = page.url();
     
-    // Check if we're on a logged-in page
-    if (url.includes("app.procore.com") || url.includes("sandbox.procore.com")) {
+    // Check if we're on a logged-in page (various Procore domains)
+    const isOnProcoreApp = url.includes("app.procore.com") || 
+                           url.includes("sandbox.procore.com") ||
+                           url.includes("us02.procore.com") ||
+                           url.includes(".procore.com/webclients") ||
+                           url.includes(".procore.com/") && !url.includes("login");
+    
+    if (isOnProcoreApp) {
+      // First check URL - if we're on a project or dashboard page, we're logged in
+      if (url.includes("/projects") || url.includes("/company") || url.includes("/webclients") || url.includes("/dashboard")) {
+        log(`Logged in - detected dashboard/project URL: ${url}`, "playwright");
+        return true;
+      }
+      
       // Look for user menu or other logged-in indicators
       const userMenu = await page.$(PROCORE_SELECTORS.nav.userMenu);
-      return userMenu !== null;
+      if (userMenu) return true;
+      
+      // Check for other common logged-in elements
+      const hasNav = await page.$('nav, [class*="navigation"], [class*="sidebar"], [class*="header"]');
+      const hasProjectSelector = await page.$('[class*="project"], [class*="company"]');
+      
+      if (hasNav || hasProjectSelector) {
+        log(`Logged in - detected navigation elements`, "playwright");
+        return true;
+      }
     }
     
     return false;
@@ -172,21 +193,42 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
   const submitButton = await page.waitForSelector(PROCORE_SELECTORS.login.submitButton, { timeout: 10000 });
   await submitButton.click();
   
-  // Wait for navigation or error
-  try {
-    await Promise.race([
-      page.waitForURL(/app\.procore\.com|sandbox\.procore\.com|us02\.procore\.com/, { timeout: 30000 }),
-      page.waitForSelector(PROCORE_SELECTORS.login.errorMessage, { timeout: 30000 }),
-      page.waitForSelector(PROCORE_SELECTORS.login.mfaInput, { timeout: 30000 }),
-    ]);
-  } catch (error) {
-    const screenshotPath = await takeScreenshot(page, "login-timeout");
-    return {
-      success: false,
-      error: "Login timed out after submitting credentials",
-      screenshotPath,
-    };
+  // Wait for navigation - Procore may do multiple redirects
+  log("Waiting for login to complete...", "playwright");
+  
+  // Give the page time to redirect
+  await page.waitForTimeout(3000);
+  
+  // Check URL to see if we've left the login page
+  const postLoginUrl = page.url();
+  log(`Post-login URL: ${postLoginUrl}`, "playwright");
+  
+  // If still on login page, wait for navigation or error
+  if (postLoginUrl.includes("login")) {
+    try {
+      await Promise.race([
+        page.waitForURL(/procore\.com(?!.*login)/, { timeout: 30000 }),
+        page.waitForSelector(PROCORE_SELECTORS.login.errorMessage, { timeout: 30000 }),
+        page.waitForSelector(PROCORE_SELECTORS.login.mfaInput, { timeout: 30000 }),
+      ]);
+    } catch (error) {
+      // Check if we actually navigated away from login
+      const currentUrl = page.url();
+      if (!currentUrl.includes("login")) {
+        log(`Navigation detected to: ${currentUrl}`, "playwright");
+      } else {
+        const screenshotPath = await takeScreenshot(page, "login-timeout");
+        return {
+          success: false,
+          error: "Login timed out after submitting credentials",
+          screenshotPath,
+        };
+      }
+    }
   }
+  
+  // Wait a bit more for page to stabilize after redirects
+  await page.waitForTimeout(2000);
   
   // Check for MFA
   const mfaInput = await page.$(PROCORE_SELECTORS.login.mfaInput);
@@ -199,16 +241,19 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
     };
   }
   
-  // Check for error message
-  const errorElement = await page.$(PROCORE_SELECTORS.login.errorMessage);
-  if (errorElement) {
-    const errorText = await errorElement.textContent();
-    const screenshotPath = await takeScreenshot(page, "login-error");
-    return {
-      success: false,
-      error: `Login failed: ${errorText}`,
-      screenshotPath,
-    };
+  // Check for error message (only if still on login page)
+  const currentUrl = page.url();
+  if (currentUrl.includes("login")) {
+    const errorElement = await page.$(PROCORE_SELECTORS.login.errorMessage);
+    if (errorElement) {
+      const errorText = await errorElement.textContent();
+      const screenshotPath = await takeScreenshot(page, "login-error");
+      return {
+        success: false,
+        error: `Login failed: ${errorText}`,
+        screenshotPath,
+      };
+    }
   }
   
   // Verify we're logged in
@@ -218,10 +263,17 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
     return { success: true };
   }
   
+  // If URL indicates we're on Procore (not login), consider it success
+  if (!currentUrl.includes("login") && currentUrl.includes("procore.com")) {
+    await saveSession();
+    log(`Login appears successful - on URL: ${currentUrl}`, "playwright");
+    return { success: true };
+  }
+  
   const screenshotPath = await takeScreenshot(page, "login-unknown-state");
   return {
     success: false,
-    error: "Unknown login state",
+    error: `Unknown login state. Current URL: ${currentUrl}`,
     screenshotPath,
   };
 }
