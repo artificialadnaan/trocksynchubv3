@@ -68,6 +68,7 @@ const tabs: { id: TabType; label: string; icon: any }[] = [
 
 export function ProcoreDataContent() {
   const [activeTab, setActiveTab] = useState<TabType>("projects");
+  const { toast } = useToast();
 
   const { data: counts, isLoading: countsLoading } = useQuery<{
     projects: number;
@@ -80,6 +81,27 @@ export function ProcoreDataContent() {
     bidboardEstimates: number;
   }>({
     queryKey: ["/api/integrations/procore/data-counts"],
+  });
+
+  // Full sync from Procore API
+  const syncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/procore/sync");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Procore Sync Complete",
+        description: `Synced ${data.projects || 0} projects, ${data.vendors || 0} vendors, ${data.users || 0} users`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/procore/data-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/projects"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/vendors"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/users"] });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Sync failed", description: e.message, variant: "destructive" });
+    },
   });
 
   const countMap: Record<TabType, number> = {
@@ -95,6 +117,28 @@ export function ProcoreDataContent() {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm text-muted-foreground">
+          Browse and manage Procore data synced to the local database
+        </p>
+        <Button 
+          onClick={() => syncMutation.mutate()} 
+          disabled={syncMutation.isPending}
+          data-testid="button-sync-from-procore"
+        >
+          {syncMutation.isPending ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Syncing...
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Sync from Procore
+            </>
+          )}
+        </Button>
+      </div>
       <div className="flex gap-2 border-b pb-0 flex-wrap">
         {tabs.map((tab) => (
           <button

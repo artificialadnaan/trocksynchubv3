@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,9 +30,12 @@ import {
   ExternalLink,
   Link2,
   Camera,
+  Loader2,
 } from "lucide-react";
 import { useState } from "react";
 import { format } from "date-fns";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import type {
   HubspotCompany,
   HubspotContact,
@@ -53,6 +56,7 @@ const tabs: { id: TabType; label: string; icon: any }[] = [
 
 export function HubspotDataContent() {
   const [activeTab, setActiveTab] = useState<TabType>("companies");
+  const { toast } = useToast();
 
   const { data: counts, isLoading: countsLoading } = useQuery<{
     companies: number;
@@ -62,6 +66,27 @@ export function HubspotDataContent() {
     changeHistory: number;
   }>({
     queryKey: ["/api/integrations/hubspot/data-counts"],
+  });
+
+  // Full sync from HubSpot API
+  const syncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/hubspot/sync");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "HubSpot Sync Complete",
+        description: `Synced ${data.companies || 0} companies, ${data.contacts || 0} contacts, ${data.deals || 0} deals`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/hubspot/data-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/hubspot/companies"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/hubspot/contacts"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/hubspot/deals"] });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Sync failed", description: e.message, variant: "destructive" });
+    },
   });
 
   const countMap: Record<TabType, number> = {
@@ -74,6 +99,28 @@ export function HubspotDataContent() {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm text-muted-foreground">
+          Browse and manage HubSpot data synced to the local database
+        </p>
+        <Button 
+          onClick={() => syncMutation.mutate()} 
+          disabled={syncMutation.isPending}
+          data-testid="button-sync-from-hubspot"
+        >
+          {syncMutation.isPending ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Syncing...
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Sync from HubSpot
+            </>
+          )}
+        </Button>
+      </div>
       <div className="flex gap-2 border-b pb-0 flex-wrap">
         {tabs.map((tab) => (
           <button
