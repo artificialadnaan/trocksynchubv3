@@ -250,7 +250,20 @@ function ProjectsTab() {
                             </a>
                           </div>
                         )}
-                        <div><span className="text-muted-foreground">Notepad:</span> <span className="ml-1">{project.notepad || "—"}</span></div>
+                        <div>
+                          <span className="text-muted-foreground">Notepad:</span>
+                          <span className="ml-1">
+                            {project.notepad 
+                              ? project.notepad
+                                  .replace(/<br\s*\/?>/gi, '\n')
+                                  .replace(/<[^>]*>/g, '')
+                                  .split('\n')
+                                  .map((line, i) => (
+                                    <span key={i}>{line}{i < project.notepad!.split('<br').length - 1 && <br />}</span>
+                                  ))
+                              : "—"}
+                          </span>
+                        </div>
                         {project.featureImageUrl && (
                           <div><span className="text-muted-foreground">Feature Image:</span> <span className="ml-1 text-xs font-mono truncate">{project.featureImageUrl}</span></div>
                         )}
