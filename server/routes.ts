@@ -4201,12 +4201,12 @@ export async function registerRoutes(
       }
       
       // Navigate to BidBoard (Estimating)
-      // Procore URL structure: /webclients/host/companies/{companyId}/tools/bidding for BidBoard list
+      // Procore URL structure: /webclients/host/companies/{companyId}/tools/bid-board for BidBoard list
       // or /webclients/host/companies/{companyId}/projects/{projectId}/tools/estimating for specific project
       const companyId = '598134325683880';
       const bidboardUrl = projectId
         ? `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/estimating`
-        : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bidding`;
+        : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board`;
 
       log(`Navigating to BidBoard: ${bidboardUrl}`, "playwright");
       await page.goto(bidboardUrl, { waitUntil: 'networkidle', timeout: 60000 });
