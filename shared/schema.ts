@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -706,7 +706,7 @@ export const procoreRoleAssignments = pgTable("procore_role_assignments", {
   projectName: text("project_name"),
   roleId: text("role_id"),
   roleName: text("role_name").notNull(),
-  assigneeId: text("assignee_id"),
+  assigneeId: text("assignee_id").notNull().default(''),
   assigneeName: text("assignee_name"),
   assigneeEmail: text("assignee_email"),
   assigneeCompany: text("assignee_company"),
@@ -714,7 +714,9 @@ export const procoreRoleAssignments = pgTable("procore_role_assignments", {
   lastSyncedAt: timestamp("last_synced_at").defaultNow(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  uniqueAssignment: unique().on(table.procoreProjectId, table.roleName, table.assigneeId),
+}));
 export const insertProcoreRoleAssignmentSchema = createInsertSchema(procoreRoleAssignments).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertProcoreRoleAssignment = z.infer<typeof insertProcoreRoleAssignmentSchema>;
 export type ProcoreRoleAssignment = typeof procoreRoleAssignments.$inferSelect;
