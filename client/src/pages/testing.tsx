@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, CheckCircle2, Mail, Play, Camera, FileText, Loader2, AlertTriangle, Settings } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 
 interface TestingMode {
   enabled: boolean;
@@ -39,6 +40,8 @@ interface BidBoardConfig {
 
 export default function TestingPage() {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const screenshotRef = useRef<HTMLDivElement>(null);
   const [testEmail, setTestEmail] = useState('adnaan.iqbal@gmail.com');
   const [selectedTemplate, setSelectedTemplate] = useState('');
   const [projectId, setProjectId] = useState('');
@@ -49,6 +52,13 @@ export default function TestingPage() {
   const [procoreEmail, setProcoreEmail] = useState('');
   const [procorePassword, setProcorePassword] = useState('');
   const [procoreSandbox, setProcoreSandbox] = useState(false);
+
+  // Scroll to screenshot when captured
+  useEffect(() => {
+    if (screenshotResult && screenshotRef.current) {
+      screenshotRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [screenshotResult]);
 
   // Fetch testing mode status
   const { data: testingMode, isLoading: loadingMode } = useQuery<TestingMode>({
@@ -148,11 +158,22 @@ export default function TestingPage() {
         credentials: 'include',
         body: JSON.stringify({ projectId }),
       });
-      if (!res.ok) throw new Error('Failed to capture screenshot');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to capture screenshot');
+      }
       return res.json();
     },
     onSuccess: (data) => {
-      if (data.screenshot) setScreenshotResult(data.screenshot);
+      if (data.screenshot) {
+        setScreenshotResult(data.screenshot);
+        toast({ title: "Screenshot Captured", description: "BidBoard screenshot captured successfully" });
+      } else if (data.error) {
+        toast({ title: "Screenshot Failed", description: data.error, variant: "destructive" });
+      }
+    },
+    onError: (error: any) => {
+      toast({ title: "Screenshot Failed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -164,11 +185,22 @@ export default function TestingPage() {
         credentials: 'include',
         body: JSON.stringify({ projectId }),
       });
-      if (!res.ok) throw new Error('Failed to capture screenshot');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to capture screenshot');
+      }
       return res.json();
     },
     onSuccess: (data) => {
-      if (data.screenshot) setScreenshotResult(data.screenshot);
+      if (data.screenshot) {
+        setScreenshotResult(data.screenshot);
+        toast({ title: "Screenshot Captured", description: "Portfolio screenshot captured successfully" });
+      } else if (data.error) {
+        toast({ title: "Screenshot Failed", description: data.error, variant: "destructive" });
+      }
+    },
+    onError: (error: any) => {
+      toast({ title: "Screenshot Failed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -648,12 +680,15 @@ export default function TestingPage() {
 
           {/* Screenshot Preview */}
           {screenshotResult && (
-            <Card>
+            <Card ref={screenshotRef}>
               <CardHeader>
-                <CardTitle className="text-base font-semibold">Screenshot Preview</CardTitle>
+                <CardTitle className="text-base font-semibold flex items-center gap-2">
+                  <CheckCircle2 className="w-5 h-5 text-green-500" />
+                  Screenshot Preview
+                </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="border rounded-lg overflow-hidden">
+                <div className="border rounded-lg overflow-hidden bg-muted">
                   <img 
                     src={screenshotResult} 
                     alt="Screenshot" 
