@@ -177,9 +177,13 @@ export async function registerRoutes(
         };
         if (m.procoreProjectId) {
           lookup[`procore:${m.procoreProjectId}`] = entry;
+          lookup[`bidboard:${m.procoreProjectId}`] = entry;
         }
         if (m.hubspotDealId) {
           lookup[`hubspot:${m.hubspotDealId}`] = entry;
+        }
+        if (m.companyCamProjectId) {
+          lookup[`companycam:${m.companyCamProjectId}`] = entry;
         }
       }
       res.json(lookup);
