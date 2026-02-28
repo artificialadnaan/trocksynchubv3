@@ -4200,11 +4200,15 @@ export async function registerRoutes(
         return res.status(400).json({ error: 'Failed to login to Procore' });
       }
       
-      // Navigate to BidBoard
-      const bidboardUrl = projectId 
-        ? `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/estimating`
-        : 'https://us02.procore.com/webclients/host/companies/598134325683880/estimating_projects';
-      
+      // Navigate to BidBoard (Estimating)
+      // Procore URL structure: /webclients/host/companies/{companyId}/tools/bidding for BidBoard list
+      // or /webclients/host/companies/{companyId}/projects/{projectId}/tools/estimating for specific project
+      const companyId = '598134325683880';
+      const bidboardUrl = projectId
+        ? `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/estimating`
+        : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bidding`;
+
+      log(`Navigating to BidBoard: ${bidboardUrl}`, "playwright");
       await page.goto(bidboardUrl, { waitUntil: 'networkidle', timeout: 60000 });
       await page.waitForTimeout(3000);
       
@@ -4341,10 +4345,14 @@ export async function registerRoutes(
       }
       
       // Navigate to Portfolio/Project Home
-      const portfolioUrl = projectId 
-        ? `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/projecthome`
-        : 'https://us02.procore.com/webclients/host/companies/598134325683880/projects';
-      
+      // Procore URL structure: /webclients/host/companies/{companyId}/tools/hubs/company-hub/views/portfolio for list
+      // or /webclients/host/companies/{companyId}/projects/{projectId}/tools/projecthome for specific project
+      const companyId = '598134325683880';
+      const portfolioUrl = projectId
+        ? `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/projecthome`
+        : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/hubs/company-hub/views/portfolio`;
+
+      log(`Navigating to Portfolio: ${portfolioUrl}`, "playwright");
       await page.goto(portfolioUrl, { waitUntil: 'networkidle', timeout: 60000 });
       await page.waitForTimeout(3000);
       
