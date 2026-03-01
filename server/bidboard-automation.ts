@@ -107,13 +107,20 @@ async function findHubSpotDealForProject(project: BidBoardProject): Promise<stri
 
 async function updateHubSpotDealStage(
   dealId: string,
-  hubspotStage: string
+  hubspotStageLabel: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Import HubSpot update function
+    // Import HubSpot update function and stage resolver
     const { updateHubSpotDealStage: hubspotUpdate } = await import("./hubspot");
+    const { resolveHubspotStageId } = await import("./procore-hubspot-sync");
     
-    await hubspotUpdate(dealId, hubspotStage);
+    // Resolve stage label to actual stage ID (HubSpot API requires IDs, not labels)
+    const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+    if (!resolvedStage) {
+      return { success: false, error: `Could not resolve HubSpot stage ID for label: ${hubspotStageLabel}` };
+    }
+    
+    await hubspotUpdate(dealId, resolvedStage.stageId);
     
     return { success: true };
   } catch (error) {
