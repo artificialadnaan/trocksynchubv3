@@ -401,7 +401,7 @@ function ArchiveProgressCard({
       const res = await apiRequest("GET", `/api/archive/progress/${archiveId}`);
       return res.json();
     },
-    refetchInterval: progress?.status === "completed" || progress?.status === "failed" ? false : pollInterval,
+    refetchInterval: pollInterval || false,
   });
 
   useEffect(() => {

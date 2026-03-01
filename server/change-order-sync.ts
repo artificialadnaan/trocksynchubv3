@@ -31,13 +31,15 @@ export async function getProjectChangeOrders(projectId: string): Promise<ChangeO
     const changeOrders: ChangeOrder[] = [];
 
     for (const pkg of packages) {
+      const status = (pkg.status || 'pending').toLowerCase();
+      const amount = parseFloat(pkg.grand_total || pkg.amount || 0);
       changeOrders.push({
         id: String(pkg.id),
         number: pkg.number || '',
         title: pkg.title || pkg.description || '',
         status: pkg.status || 'pending',
-        approvedAmount: pkg.status?.toLowerCase() === 'approved' ? parseFloat(pkg.grand_total || pkg.amount || 0) : 0,
-        pendingAmount: pkg.status?.toLowerCase() !== 'approved' ? parseFloat(pkg.grand_total || pkg.amount || 0) : 0,
+        approvedAmount: status === 'approved' ? amount : 0,
+        pendingAmount: status !== 'approved' ? amount : 0,
         createdAt: pkg.created_at || '',
         updatedAt: pkg.updated_at || '',
       });
