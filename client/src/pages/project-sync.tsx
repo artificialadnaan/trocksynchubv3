@@ -96,6 +96,14 @@ function ExternalServiceLink({ href, icon: Icon, label, colorClass }: {
   );
 }
 
+function ExternalIconLink({ href, colorClass }: { href: string; colorClass: string }) {
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" className={`${colorClass} hover:opacity-80`}>
+      <ExternalLink className="w-3 h-3" />
+    </a>
+  );
+}
+
 export default function ProjectSyncPage() {
   const [search, setSearch] = useState("");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -294,18 +302,20 @@ export default function ProjectSyncPage() {
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
               {matched.map((m: any) => (
-                <div key={m.id} className="p-3 border rounded-lg">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{m.procoreProjectName}</div>
-                      {m.procoreProjectNumber && (
-                        <Badge variant="secondary" className="font-mono text-xs mt-1">{m.procoreProjectNumber}</Badge>
-                      )}
-                      <div className="text-xs text-muted-foreground mt-1">
+                <div key={m.id} className="p-4 border rounded-lg">
+                  <div className="grid grid-cols-[1fr,auto] gap-4">
+                    <div className="space-y-2">
+                      <div className="font-medium text-base">{m.procoreProjectName}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {m.procoreProjectNumber && (
+                          <Badge variant="secondary" className="font-mono text-xs">{m.procoreProjectNumber}</Badge>
+                        )}
+                      </div>
+                      <div className="text-sm text-green-600 font-medium">
                         Linked to: {m.hubspotDealName || "—"}
                       </div>
                     </div>
-                    <div className="flex flex-col gap-1">
+                    <div className="flex flex-col gap-2 items-end">
                       <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                       {m.hubspotDealId && (
                         <ExternalServiceLink href={getHubspotUrl(m.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
@@ -320,18 +330,27 @@ export default function ProjectSyncPage() {
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
               {unmatchedList.map((p: any) => (
-                <div key={p.procoreId} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{p.name}</div>
-                      {p.projectNumber && (
-                        <Badge variant="secondary" className="font-mono text-xs mt-1">{p.projectNumber}</Badge>
-                      )}
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {p.city && `${p.city}, ${p.stateCode}`} {p.stage && `• ${p.stage}`}
+                <div key={p.procoreId} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="grid grid-cols-[1fr,auto] gap-4">
+                    <div className="space-y-2">
+                      <div className="font-medium text-base">{p.name}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {p.projectNumber && (
+                          <Badge variant="secondary" className="font-mono text-xs">{p.projectNumber}</Badge>
+                        )}
+                        {p.stage && (
+                          <Badge variant="outline" className="text-xs">{p.stage}</Badge>
+                        )}
                       </div>
+                      {p.city && (
+                        <div className="text-sm text-muted-foreground">
+                          {p.city}, {p.stateCode}
+                        </div>
+                      )}
                     </div>
-                    <ExternalServiceLink href={getProcoreUrl(p.procoreId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
+                    <div className="flex flex-col gap-2 items-end">
+                      <ExternalServiceLink href={getProcoreUrl(p.procoreId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
+                    </div>
                   </div>
                 </div>
               ))}
@@ -361,15 +380,15 @@ export default function ProjectSyncPage() {
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
               {matched.map((m: any) => (
-                <div key={m.id} className="p-3 border rounded-lg">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{m.hubspotDealName}</div>
-                      <div className="text-xs text-muted-foreground mt-1">
+                <div key={m.id} className="p-4 border rounded-lg">
+                  <div className="grid grid-cols-[1fr,auto] gap-4">
+                    <div className="space-y-2">
+                      <div className="font-medium text-base">{m.hubspotDealName}</div>
+                      <div className="text-sm text-green-600 font-medium">
                         Linked to: {m.procoreProjectName || "—"}
                       </div>
                     </div>
-                    <div className="flex flex-col gap-1">
+                    <div className="flex flex-col gap-2 items-end">
                       <ExternalServiceLink href={getHubspotUrl(m.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                       {m.procoreProjectId && (
                         <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
@@ -384,15 +403,25 @@ export default function ProjectSyncPage() {
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
               {unmatchedList.map((d: any) => (
-                <div key={d.hubspotId} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{d.dealName}</div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {d.amount && `$${parseFloat(d.amount).toLocaleString()}`} {d.stageName && `• ${d.stageName}`}
+                <div key={d.hubspotId} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="grid grid-cols-[1fr,auto] gap-4">
+                    <div className="space-y-2">
+                      <div className="font-medium text-base">{d.dealName}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {d.amount && (
+                          <Badge variant="secondary" className="text-xs">${parseFloat(d.amount).toLocaleString()}</Badge>
+                        )}
+                        {d.stageName && (
+                          <Badge variant="outline" className="text-xs">{d.stageName}</Badge>
+                        )}
+                        {d.pipeline && (
+                          <span className="text-sm text-muted-foreground">{d.pipeline}</span>
+                        )}
                       </div>
                     </div>
-                    <ExternalServiceLink href={getHubspotUrl(d.hubspotId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
+                    <div className="flex flex-col gap-2 items-end">
+                      <ExternalServiceLink href={getHubspotUrl(d.hubspotId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
+                    </div>
                   </div>
                 </div>
               ))}
@@ -406,26 +435,32 @@ export default function ProjectSyncPage() {
     if (type === "conflicts") {
       const conflictsList = conflictMappings;
       return (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {conflictsList.map((m: any) => {
             const meta = m.metadata || {};
             return (
-              <div key={m.id} className="p-3 border rounded-lg border-yellow-300 bg-yellow-50/50 dark:bg-yellow-950/20">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium truncate">{m.procoreProjectName || m.hubspotDealName}</div>
-                    {m.procoreProjectNumber && (
-                      <Badge variant="secondary" className="font-mono text-xs mt-1">{m.procoreProjectNumber}</Badge>
-                    )}
-                    <div className="mt-2 space-y-1">
+              <div key={m.id} className="p-4 border rounded-lg border-yellow-300 bg-yellow-50/50 dark:bg-yellow-950/20">
+                <div className="grid grid-cols-[1fr,auto] gap-4">
+                  <div className="space-y-3">
+                    <div>
+                      <div className="font-medium text-base">{m.procoreProjectName || m.hubspotDealName}</div>
+                      {m.procoreProjectNumber && (
+                        <Badge variant="secondary" className="font-mono text-xs mt-1">{m.procoreProjectNumber}</Badge>
+                      )}
+                    </div>
+                    <div className="space-y-2">
                       {meta.conflicts?.map((c: any, i: number) => (
-                        <div key={i} className="text-xs text-yellow-700 dark:text-yellow-400">
-                          <span className="font-medium">{c.field}:</span> Procore: {c.procoreValue || "—"} → HubSpot: {c.hubspotValue || "—"}
+                        <div key={i} className="p-2 bg-yellow-100/50 dark:bg-yellow-900/20 rounded border border-yellow-200 dark:border-yellow-800">
+                          <div className="font-medium text-sm text-yellow-800 dark:text-yellow-300 mb-1">{c.field}</div>
+                          <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div><span className="text-blue-600 font-medium">Procore:</span> {c.procoreValue || "—"}</div>
+                            <div><span className="text-orange-600 font-medium">HubSpot:</span> {c.hubspotValue || "—"}</div>
+                          </div>
                         </div>
                       ))}
                     </div>
                   </div>
-                  <div className="flex flex-col gap-1">
+                  <div className="flex flex-col gap-2 items-end">
                     {m.procoreProjectId && (
                       <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                     )}
@@ -460,18 +495,18 @@ export default function ProjectSyncPage() {
               {companycamMatched.map((p: any) => {
                 const lookup = syncLookup?.[`companycam:${p.companycamId}`];
                 return (
-                  <div key={p.id} className="p-3 border rounded-lg">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate">{p.name}</div>
-                        <div className="text-xs text-muted-foreground mt-1">
+                  <div key={p.id} className="p-4 border rounded-lg">
+                    <div className="grid grid-cols-[1fr,auto] gap-4">
+                      <div className="space-y-2">
+                        <div className="font-medium text-base">{p.name}</div>
+                        <div className="text-sm text-muted-foreground">
                           {p.streetAddress && `${p.streetAddress}, `}{p.city}, {p.state}
                         </div>
-                        <div className="text-xs text-green-600 mt-1">
+                        <div className="text-sm text-green-600 font-medium">
                           Linked to: {lookup?.procoreProjectName || lookup?.hubspotDealName || "Project"}
                         </div>
                       </div>
-                      <div className="flex flex-col gap-1">
+                      <div className="flex flex-col gap-2 items-end">
                         <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
                         {lookup?.procoreProjectId && (
                           <ExternalServiceLink href={getProcoreUrl(lookup.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
@@ -487,18 +522,20 @@ export default function ProjectSyncPage() {
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
               {companycamUnmatched.map((p: any) => (
-                <div key={p.id} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{p.name}</div>
-                      <div className="text-xs text-muted-foreground mt-1">
+                <div key={p.id} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="grid grid-cols-[1fr,auto] gap-4">
+                    <div className="space-y-2">
+                      <div className="font-medium text-base">{p.name}</div>
+                      <div className="text-sm text-muted-foreground">
                         {p.streetAddress && `${p.streetAddress}, `}{p.city}, {p.state}
                       </div>
-                      <div className="text-xs text-muted-foreground">
-                        Photos: {p.photoCount || 0}
+                      <div className="flex items-center gap-2">
+                        <Badge variant="secondary" className="text-xs">Photos: {p.photoCount || 0}</Badge>
                       </div>
                     </div>
-                    <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
+                    <div className="flex flex-col gap-2 items-end">
+                      <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
+                    </div>
                   </div>
                 </div>
               ))}
@@ -527,23 +564,30 @@ export default function ProjectSyncPage() {
               {bidboardMatched.map((b: any) => {
                 const lookup = b.procoreProjectId ? syncLookup?.[`procore:${b.procoreProjectId}`] : null;
                 return (
-                  <div key={b.id} className="p-3 border rounded-lg">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate">{b.name}</div>
-                        {b.projectNumber && (
-                          <Badge variant="secondary" className="font-mono text-xs mt-1">{b.projectNumber}</Badge>
-                        )}
-                        <div className="text-xs text-muted-foreground mt-1">
-                          {b.estimator && `Estimator: ${b.estimator}`} {b.status && `• ${b.status}`}
+                  <div key={b.id} className="p-4 border rounded-lg">
+                    <div className="grid grid-cols-[1fr,auto] gap-4">
+                      <div className="space-y-2">
+                        <div className="font-medium text-base">{b.name}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {b.projectNumber && (
+                            <Badge variant="secondary" className="font-mono text-xs">{b.projectNumber}</Badge>
+                          )}
+                          {b.status && (
+                            <Badge variant="outline" className="text-xs">{b.status}</Badge>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-muted-foreground">
+                          {b.estimator && <div><span className="font-medium">Estimator:</span> {b.estimator}</div>}
+                          {b.customerName && <div><span className="font-medium">Customer:</span> {b.customerName}</div>}
+                          {b.bidDueDate && <div><span className="font-medium">Bid Due:</span> {b.bidDueDate}</div>}
                         </div>
                         {lookup?.procoreProjectName && (
-                          <div className="text-xs text-green-600 mt-1">
+                          <div className="text-sm text-green-600 font-medium">
                             Linked to: {lookup.procoreProjectName}
                           </div>
                         )}
                       </div>
-                      <div className="flex flex-col gap-1">
+                      <div className="flex flex-col gap-2 items-end">
                         {b.procoreProjectId && (
                           <ExternalServiceLink href={getProcoreUrl(b.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                         )}
@@ -561,21 +605,21 @@ export default function ProjectSyncPage() {
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
               {bidboardUnmatched.map((b: any) => (
-                <div key={b.id} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{b.name}</div>
+                <div key={b.id} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="space-y-2">
+                    <div className="font-medium text-base">{b.name}</div>
+                    <div className="flex flex-wrap items-center gap-2">
                       {b.projectNumber && (
-                        <Badge variant="secondary" className="font-mono text-xs mt-1">{b.projectNumber}</Badge>
+                        <Badge variant="secondary" className="font-mono text-xs">{b.projectNumber}</Badge>
                       )}
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {b.estimator && `Estimator: ${b.estimator}`} {b.status && `• ${b.status}`}
-                      </div>
-                      {b.customerName && (
-                        <div className="text-xs text-muted-foreground">
-                          Customer: {b.customerName}
-                        </div>
+                      {b.status && (
+                        <Badge variant="outline" className="text-xs">{b.status}</Badge>
                       )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-muted-foreground">
+                      {b.estimator && <div><span className="font-medium">Estimator:</span> {b.estimator}</div>}
+                      {b.customerName && <div><span className="font-medium">Customer:</span> {b.customerName}</div>}
+                      {b.bidDueDate && <div><span className="font-medium">Bid Due:</span> {b.bidDueDate}</div>}
                     </div>
                   </div>
                 </div>
@@ -800,13 +844,13 @@ export default function ProjectSyncPage() {
         )}
       </div>
 
-      {/* Report Sheet */}
+      {/* Report Sheet - Full width on mobile, 900px on desktop */}
       <Sheet open={reportOpen !== null} onOpenChange={(open) => !open && setReportOpen(null)}>
-        <SheetContent className="w-[600px] sm:max-w-[600px]">
+        <SheetContent className="w-full sm:w-[900px] sm:max-w-[900px] overflow-hidden">
           <SheetHeader>
-            <SheetTitle>{getReportTitle(reportOpen)}</SheetTitle>
+            <SheetTitle className="text-xl">{getReportTitle(reportOpen)}</SheetTitle>
           </SheetHeader>
-          <ScrollArea className="h-[calc(100vh-120px)] mt-4 pr-4">
+          <ScrollArea className="h-[calc(100vh-100px)] mt-4 pr-4">
             {renderProjectList(reportOpen)}
           </ScrollArea>
         </SheetContent>
@@ -901,10 +945,7 @@ export default function ProjectSyncPage() {
                             <h4 className="font-medium text-xs uppercase text-muted-foreground mb-2 flex items-center gap-2">
                               Procore (Master)
                               {m.procoreProjectId && (
-                                <a href={getProcoreUrl(m.procoreProjectId)} target="_blank" rel="noopener noreferrer"
-                                  className="text-blue-600 hover:text-blue-800">
-                                  <ExternalLink className="w-3 h-3" />
-                                </a>
+                                <ExternalIconLink href={getProcoreUrl(m.procoreProjectId)} colorClass="text-blue-600" />
                               )}
                             </h4>
                             <div className="space-y-1">
@@ -918,10 +959,7 @@ export default function ProjectSyncPage() {
                             <h4 className="font-medium text-xs uppercase text-muted-foreground mb-2 flex items-center gap-2">
                               HubSpot
                               {m.hubspotDealId && (
-                                <a href={getHubspotUrl(m.hubspotDealId)} target="_blank" rel="noopener noreferrer"
-                                  className="text-orange-600 hover:text-orange-800">
-                                  <ExternalLink className="w-3 h-3" />
-                                </a>
+                                <ExternalIconLink href={getHubspotUrl(m.hubspotDealId)} colorClass="text-orange-600" />
                               )}
                             </h4>
                             <div className="space-y-1">
