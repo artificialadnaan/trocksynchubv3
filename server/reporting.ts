@@ -289,10 +289,18 @@ export async function getSyncHealthReport(): Promise<SyncHealthReport> {
   const webhooksToday = todayLogs.filter(log => log.action.includes('webhook'));
   const failedToday = webhooksToday.filter(log => log.status === 'error' || log.status === 'failed');
 
-  // Find last successful syncs from ALL logs (not just today) - we want to know the most recent sync ever
-  const hubspotSync = logs.find(l => l.action === 'sync_hubspot_deals' && l.status === 'success');
-  const procoreSync = logs.find(l => l.action === 'sync_procore_projects' && l.status === 'success');
-  const companyCamSync = logs.find(l => l.action.includes('companycam') && l.action.includes('sync') && l.status === 'success');
+  // Find last successful syncs from ALL logs (not just today) - we want the most recent sync ever
+  // Note: getAuditLogs returns logs ordered by createdAt DESC (most recent first),
+  // but we explicitly sort here to ensure correctness regardless of input order
+  const sortedLogs = [...logs].sort((a, b) => {
+    const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return dateB - dateA; // Descending (most recent first)
+  });
+  
+  const hubspotSync = sortedLogs.find(l => l.action === 'sync_hubspot_deals' && l.status === 'success');
+  const procoreSync = sortedLogs.find(l => l.action === 'sync_procore_projects' && l.status === 'success');
+  const companyCamSync = sortedLogs.find(l => l.action.includes('companycam') && l.action.includes('sync') && l.status === 'success');
 
   // Calculate failure rate from today's webhooks
   const failureRate = webhooksToday.length > 0 

@@ -855,7 +855,9 @@ export async function createBidBoardProject(
     if (projectData.state) {
       const stateInput = await page.$(PROCORE_SELECTORS.newProject.stateInput);
       if (stateInput) {
-        if (stateInput.tagName === 'SELECT') {
+        // ElementHandle doesn't have .tagName directly; evaluate in browser context
+        const tagName = await stateInput.evaluate(el => el.tagName.toUpperCase());
+        if (tagName === 'SELECT') {
           await stateInput.selectOption({ label: projectData.state });
         } else {
           await stateInput.fill(projectData.state);

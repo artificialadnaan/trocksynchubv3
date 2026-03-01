@@ -78,7 +78,8 @@ export async function calculateTotalContractValue(projectId: string): Promise<Co
 
   const approvedChangeOrders = changeOrders.reduce((sum, co) => sum + co.approvedAmount, 0);
   const pendingChangeOrders = changeOrders.reduce((sum, co) => sum + co.pendingAmount, 0);
-  const totalContractValue = primeContractAmount + approvedChangeOrders;
+  // Include both approved and pending change orders in total (pending represents expected work)
+  const totalContractValue = primeContractAmount + approvedChangeOrders + pendingChangeOrders;
 
   return {
     primeContractAmount,
