@@ -9,19 +9,26 @@ import { storage } from "./storage";
 // Note: HubSpot stage IDs should match your actual pipeline stage internal values
 // These label mappings are used as fallback if database stage_mappings aren't configured
 const BIDBOARD_TO_HUBSPOT_STAGE: Record<string, string> = {
-  // Procore Stage → HubSpot Stage (internal ID or label)
-  "Estimate in Progress": "estimating",
-  "Service – Estimating": "service_estimating",
-  "Service - Estimating": "service_estimating", // Alternative dash character
-  "Estimate under review": "internal_review",
-  "Estimate sent to Client": "proposal_sent",
-  "Service – sent to production": "service_won",
-  "Service - sent to production": "service_won", // Alternative dash character
-  "Sent to production": "closedwon",
-  "Service – lost": "service_lost",
-  "Service - lost": "service_lost", // Alternative dash character
-  "Production – lost": "closedlost",
-  "Production - lost": "closedlost", // Alternative dash character
+  // Procore Stage → HubSpot Stage Label
+  // Estimating stages
+  "Estimate in Progress": "Estimating",
+  "Service – Estimating": "Service – Estimating",
+  "Service - Estimating": "Service – Estimating", // Alternative dash character
+  
+  // Review stages
+  "Estimate under review": "Internal Review",
+  "Estimate sent to Client": "Proposal Sent",
+  
+  // Won stages (trigger portfolio transition)
+  "Service – sent to production": "Service – Won",
+  "Service - sent to production": "Service – Won", // Alternative dash character
+  "Sent to production": "Closed Won",
+  
+  // Lost stages
+  "Service – lost": "Service – Lost",
+  "Service - lost": "Service – Lost", // Alternative dash character
+  "Production – lost": "Closed Lost",
+  "Production - lost": "Closed Lost", // Alternative dash character
 };
 
 // Stages that trigger Portfolio transition (project moves to Procore Portfolio)

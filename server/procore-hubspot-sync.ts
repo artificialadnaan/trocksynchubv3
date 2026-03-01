@@ -40,22 +40,33 @@ function normalizeNameForMatch(name: string | null): string {
   return name.toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
+// Procore Portfolio/BidBoard Stage → HubSpot Deal Stage mapping
+// These should match your HubSpot pipeline stage labels or internal IDs
 const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
-  'Estimating': 'closedlost',
-  'Estimating - Sent to Client': 'appointmentscheduled',
-  'Estimating - Canceled': '3200448216',
-  'Service - Estimating': 'closedwon',
-  'Service - Close Out': 'presentationscheduled',
-  'Service - Close Out Final Invoice': 'presentationscheduled',
-  'Service - Won': 'presentationscheduled',
-  'Closed Won': '3200448214',
-  'Closed Lost': '3200448215',
-  'On Hold': 'contractsent',
+  // Estimating stages
+  'Estimate in Progress': 'Estimating',
+  'Service – Estimating': 'Service – Estimating',
+  'Service - Estimating': 'Service – Estimating',
+  
+  // Review stages
+  'Estimate under review': 'Internal Review',
+  'Estimate sent to Client': 'Proposal Sent',
+  
+  // Won stages
+  'Service – sent to production': 'Service – Won',
+  'Service - sent to production': 'Service – Won',
+  'Sent to production': 'Closed Won',
+  
+  // Lost stages
+  'Service – lost': 'Service – Lost',
+  'Service - lost': 'Service – Lost',
+  'Production – lost': 'Closed Lost',
+  'Production - lost': 'Closed Lost',
 };
 
 export function mapProcoreStageToHubspot(procoreStage: string | null): string {
-  if (!procoreStage) return 'decisionmakerboughtin';
-  return PROCORE_TO_HUBSPOT_STAGE[procoreStage] || 'decisionmakerboughtin';
+  if (!procoreStage) return 'Estimating'; // Default to Estimating for new projects
+  return PROCORE_TO_HUBSPOT_STAGE[procoreStage] || procoreStage; // Pass through if no mapping
 }
 
 export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubspotWrites?: boolean } = {}): Promise<SyncResult> {
