@@ -764,6 +764,7 @@ export const closeoutSurveys = pgTable("closeout_surveys", {
   clientName: text("client_name"),
   rating: integer("rating"),
   feedback: text("feedback"),
+  googleReviewLink: text("google_review_link"),
   googleReviewClicked: boolean("google_review_clicked").default(false),
   sentAt: timestamp("sent_at").defaultNow(),
   submittedAt: timestamp("submitted_at"),

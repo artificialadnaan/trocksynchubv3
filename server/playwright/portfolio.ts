@@ -124,9 +124,28 @@ export async function sendToPortfolio(
       const toastText = toast ? await toast.textContent() : null;
       
       if (toastText?.toLowerCase().includes("success") || toastText?.toLowerCase().includes("created")) {
-        result.success = true;
-        await logPortfolioAction(bidboardProjectId, "send_to_portfolio", "success", { message: toastText });
-        log(`Project ${bidboardProjectId} sent to Portfolio (confirmation: ${toastText})`, "playwright");
+        // Try to extract portfolio project ID from current URL
+        const currentUrl = page.url();
+        const urlMatch = currentUrl.match(/\/projects\/(\d+)/);
+        if (urlMatch) {
+          result.portfolioProjectId = urlMatch[1];
+        }
+        
+        if (result.portfolioProjectId) {
+          result.success = true;
+          await logPortfolioAction(bidboardProjectId, "send_to_portfolio", "success", { 
+            portfolioProjectId: result.portfolioProjectId,
+            message: toastText 
+          });
+          log(`Project ${bidboardProjectId} sent to Portfolio (ID: ${result.portfolioProjectId}, confirmation: ${toastText})`, "playwright");
+        } else {
+          // Success toast but no project ID - workflow cannot continue
+          result.success = false;
+          result.error = "Portfolio project created but ID could not be extracted from URL";
+          result.screenshotPath = await takeScreenshot(page, `portfolio-no-id-${bidboardProjectId}`);
+          await logPortfolioAction(bidboardProjectId, "send_to_portfolio", "partial", { message: toastText }, result.error, result.screenshotPath);
+          log(`Project ${bidboardProjectId} sent to Portfolio but ID extraction failed`, "playwright");
+        }
       } else {
         result.error = "Portfolio transition did not complete as expected";
         result.screenshotPath = await takeScreenshot(page, `portfolio-unknown-${bidboardProjectId}`);

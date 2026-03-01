@@ -182,23 +182,25 @@ export default function SurveyPage() {
               />
             </div>
 
-            <div className="bg-slate-50 rounded-lg p-3 md:p-4 text-center">
-              <p className="font-medium mb-2 text-sm md:text-base">⭐ Love your experience?</p>
-              <p className="text-xs md:text-sm text-muted-foreground mb-3">
-                Consider leaving us a Google review to help others discover T-Rock Construction!
-              </p>
-              <Button
-                variant="outline"
-                className="gap-2 h-10 md:h-9 text-sm"
-                onClick={() => {
-                  setGoogleReviewClicked(true);
-                  window.open('https://g.page/r/YOUR_GOOGLE_REVIEW_LINK/review', '_blank');
-                }}
-              >
-                <ExternalLink className="h-4 w-4" />
-                Write a Google Review
-              </Button>
-            </div>
+            {survey.googleReviewLink && (
+              <div className="bg-slate-50 rounded-lg p-3 md:p-4 text-center">
+                <p className="font-medium mb-2 text-sm md:text-base">⭐ Love your experience?</p>
+                <p className="text-xs md:text-sm text-muted-foreground mb-3">
+                  Consider leaving us a Google review to help others discover T-Rock Construction!
+                </p>
+                <Button
+                  variant="outline"
+                  className="gap-2 h-10 md:h-9 text-sm"
+                  onClick={() => {
+                    setGoogleReviewClicked(true);
+                    window.open(survey.googleReviewLink, '_blank');
+                  }}
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Write a Google Review
+                </Button>
+              </div>
+            )}
 
             <Button
               className="w-full bg-gradient-to-r from-red-600 to-red-500 hover:from-red-700 hover:to-red-600 h-12 md:h-11 text-base"

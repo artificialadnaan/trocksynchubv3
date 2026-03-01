@@ -4000,6 +4000,7 @@ export async function registerRoutes(
         clientName: survey.clientName,
         submitted: !!survey.submittedAt,
         rating: survey.rating,
+        googleReviewLink: survey.googleReviewLink,
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });

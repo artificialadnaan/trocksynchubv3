@@ -81,6 +81,7 @@ export async function triggerCloseoutSurvey(
       surveyToken,
       clientEmail,
       clientName,
+      googleReviewLink: options.googleReviewLink || null,
       sentAt: new Date(),
     });
 
