@@ -731,6 +731,21 @@ export async function registerRoutes(
             console.error(`[project-number] Webhook error for deal ${objectId}:`, pnErr.message);
           }
         }
+
+        // Handle deal stage changes - trigger BidBoard project creation
+        if (objectType === "deal" && eventType.includes("propertyChange")) {
+          const changedProperty = event.propertyName || "";
+          const newValue = event.propertyValue || "";
+          
+          if (changedProperty === "dealstage") {
+            try {
+              const { processDealStageChange } = await import("./hubspot-bidboard-trigger");
+              await processDealStageChange(objectId, newValue);
+            } catch (stageErr: any) {
+              console.error(`[hubspot-bidboard] Stage change error for deal ${objectId}:`, stageErr.message);
+            }
+          }
+        }
       }
       res.status(200).json({ received: true });
     } catch (e: any) {
@@ -3546,6 +3561,58 @@ export async function registerRoutes(
     try {
       const result = await detectAndProcessNewProjects();
       res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Create BidBoard project from HubSpot deal (manual trigger)
+  app.post("/api/bidboard/create-from-deal", requireAuth, async (req, res) => {
+    try {
+      const { dealId, stage } = req.body;
+      if (!dealId) {
+        return res.status(400).json({ error: "dealId is required" });
+      }
+      const { triggerBidBoardCreationForDeal } = await import("./hubspot-bidboard-trigger");
+      const result = await triggerBidBoardCreationForDeal(dealId, stage || "Estimate in Progress");
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get HubSpot → BidBoard auto-create configuration
+  app.get("/api/bidboard/auto-create-config", requireAuth, async (req, res) => {
+    try {
+      const enabledConfig = await storage.getAutomationConfig("hubspot_bidboard_auto_create");
+      const stagesConfig = await storage.getAutomationConfig("hubspot_bidboard_trigger_stages");
+      
+      res.json({
+        enabled: (enabledConfig?.value as any)?.enabled || false,
+        triggerStages: (stagesConfig?.value as any)?.stages || [
+          { hubspotStageId: "rfp", hubspotStageLabel: "RFP", bidboardStage: "Estimate in Progress" },
+          { hubspotStageId: "service_rfp", hubspotStageLabel: "Service RFP", bidboardStage: "Service – Estimating" },
+        ],
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Update HubSpot → BidBoard auto-create configuration
+  app.post("/api/bidboard/auto-create-config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, triggerStages } = req.body;
+      
+      if (typeof enabled === "boolean") {
+        await storage.upsertAutomationConfig("hubspot_bidboard_auto_create", { enabled });
+      }
+      
+      if (Array.isArray(triggerStages)) {
+        await storage.upsertAutomationConfig("hubspot_bidboard_trigger_stages", { stages: triggerStages });
+      }
+      
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

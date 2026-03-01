@@ -709,3 +709,312 @@ async function parseExportedExcel(filePath: string): Promise<BidBoardProject[]> 
   
   return projects;
 }
+
+// Interface for creating a new BidBoard project
+export interface NewBidBoardProjectData {
+  name: string;
+  projectNumber?: string;
+  stage: string; // "Estimate in Progress" or "Service – Estimating"
+  clientName?: string;
+  clientEmail?: string;
+  clientPhone?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  description?: string;
+  bidDueDate?: string;
+}
+
+export interface CreateBidBoardProjectResult {
+  success: boolean;
+  projectId?: string;
+  projectName?: string;
+  error?: string;
+  screenshotPath?: string;
+}
+
+export async function createBidBoardProject(
+  projectData: NewBidBoardProjectData
+): Promise<CreateBidBoardProjectResult> {
+  const result: CreateBidBoardProjectResult = {
+    success: false,
+    projectName: projectData.name,
+  };
+
+  const { page, success, error } = await ensureLoggedIn();
+  
+  if (!success || !page) {
+    result.error = error || "Failed to log in to Procore";
+    return result;
+  }
+
+  try {
+    // Navigate to BidBoard
+    const navigated = await navigateToBidBoard(page);
+    if (!navigated) {
+      result.error = "Failed to navigate to BidBoard";
+      result.screenshotPath = await takeScreenshot(page, "create-bidboard-nav-failed");
+      return result;
+    }
+
+    // Click "Create New Project" button
+    const createButton = await page.$(PROCORE_SELECTORS.bidboard.createNewProject);
+    if (!createButton) {
+      result.error = "Create New Project button not found";
+      result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-button");
+      return result;
+    }
+
+    await createButton.click();
+    await randomDelay(1500, 2500);
+
+    // Wait for the new project form/modal
+    try {
+      await page.waitForSelector(PROCORE_SELECTORS.newProject.nameInput, { timeout: 10000 });
+    } catch {
+      result.error = "New project form did not appear";
+      result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-form");
+      return result;
+    }
+
+    // Fill in project name (required)
+    const nameInput = await page.$(PROCORE_SELECTORS.newProject.nameInput);
+    if (nameInput) {
+      await nameInput.fill(projectData.name);
+      await randomDelay(200, 400);
+    }
+
+    // Fill in project number if provided
+    if (projectData.projectNumber) {
+      const numberInput = await page.$(PROCORE_SELECTORS.newProject.numberInput);
+      if (numberInput) {
+        await numberInput.fill(projectData.projectNumber);
+        await randomDelay(200, 400);
+      }
+    }
+
+    // Select stage
+    const stageSelect = await page.$(PROCORE_SELECTORS.newProject.stageSelect);
+    if (stageSelect) {
+      try {
+        await stageSelect.selectOption({ label: projectData.stage });
+      } catch {
+        // Try alternative: click and select from dropdown
+        await stageSelect.click();
+        await randomDelay(300, 500);
+        const stageOption = await page.$(`option:has-text("${projectData.stage}")`);
+        if (stageOption) {
+          await stageOption.click();
+        }
+      }
+      await randomDelay(200, 400);
+    }
+
+    // Fill optional fields if provided
+    if (projectData.clientName) {
+      const clientInput = await page.$(PROCORE_SELECTORS.newProject.clientNameInput);
+      if (clientInput) {
+        await clientInput.fill(projectData.clientName);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.clientEmail) {
+      const emailInput = await page.$(PROCORE_SELECTORS.newProject.clientEmailInput);
+      if (emailInput) {
+        await emailInput.fill(projectData.clientEmail);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.clientPhone) {
+      const phoneInput = await page.$(PROCORE_SELECTORS.newProject.clientPhoneInput);
+      if (phoneInput) {
+        await phoneInput.fill(projectData.clientPhone);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.address) {
+      const addressInput = await page.$(PROCORE_SELECTORS.newProject.addressInput);
+      if (addressInput) {
+        await addressInput.fill(projectData.address);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.city) {
+      const cityInput = await page.$(PROCORE_SELECTORS.newProject.cityInput);
+      if (cityInput) {
+        await cityInput.fill(projectData.city);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.state) {
+      const stateInput = await page.$(PROCORE_SELECTORS.newProject.stateInput);
+      if (stateInput) {
+        if (stateInput.tagName === 'SELECT') {
+          await stateInput.selectOption({ label: projectData.state });
+        } else {
+          await stateInput.fill(projectData.state);
+        }
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.zip) {
+      const zipInput = await page.$(PROCORE_SELECTORS.newProject.zipInput);
+      if (zipInput) {
+        await zipInput.fill(projectData.zip);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.description) {
+      const descInput = await page.$(PROCORE_SELECTORS.newProject.descriptionInput);
+      if (descInput) {
+        await descInput.fill(projectData.description);
+        await randomDelay(200, 400);
+      }
+    }
+
+    if (projectData.bidDueDate) {
+      const dueDateInput = await page.$(PROCORE_SELECTORS.newProject.bidDueDateInput);
+      if (dueDateInput) {
+        await dueDateInput.fill(projectData.bidDueDate);
+        await randomDelay(200, 400);
+      }
+    }
+
+    // Click Create/Save button
+    const submitButton = await page.$(PROCORE_SELECTORS.newProject.createButton);
+    if (!submitButton) {
+      result.error = "Create button not found in form";
+      result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-submit");
+      return result;
+    }
+
+    await submitButton.click();
+    await randomDelay(2000, 3000);
+
+    // Wait for navigation or success indicator
+    await page.waitForLoadState("networkidle");
+
+    // Check for success - either redirect to project page or success message
+    const currentUrl = page.url();
+    const projectIdMatch = currentUrl.match(/\/bidding\/(\d+)|\/projects\/(\d+)/);
+    
+    if (projectIdMatch) {
+      result.projectId = projectIdMatch[1] || projectIdMatch[2];
+      result.success = true;
+      log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId})`, "playwright");
+    } else {
+      // Check for success toast/message
+      const successMsg = await page.$(PROCORE_SELECTORS.newProject.successMessage);
+      if (successMsg) {
+        result.success = true;
+        log(`Successfully created BidBoard project: ${projectData.name}`, "playwright");
+      } else {
+        // Check for error message
+        const errorMsg = await page.$(PROCORE_SELECTORS.newProject.errorMessage);
+        if (errorMsg) {
+          const errorText = await errorMsg.textContent();
+          result.error = `Project creation failed: ${errorText}`;
+        } else {
+          result.error = "Could not confirm project creation";
+        }
+        result.screenshotPath = await takeScreenshot(page, "create-bidboard-uncertain");
+      }
+    }
+
+    // Log the automation action
+    await storage.createBidboardAutomationLog({
+      projectId: result.projectId || undefined,
+      projectName: projectData.name,
+      action: "create_project",
+      status: result.success ? "success" : "failed",
+      details: {
+        stage: projectData.stage,
+        clientName: projectData.clientName,
+        hubspotTrigger: true,
+      },
+      errorMessage: result.error,
+      screenshotPath: result.screenshotPath,
+    });
+
+  } catch (err: any) {
+    result.error = err.message || "Unknown error during project creation";
+    result.screenshotPath = await takeScreenshot(page, "create-bidboard-error");
+    log(`Error creating BidBoard project: ${result.error}`, "playwright");
+    
+    await storage.createBidboardAutomationLog({
+      projectName: projectData.name,
+      action: "create_project",
+      status: "failed",
+      details: { stage: projectData.stage },
+      errorMessage: result.error,
+      screenshotPath: result.screenshotPath,
+    });
+  }
+
+  return result;
+}
+
+// Create BidBoard project from HubSpot deal data
+export async function createBidBoardProjectFromDeal(
+  dealId: string,
+  initialStage: string = "Estimate in Progress"
+): Promise<CreateBidBoardProjectResult> {
+  // Fetch deal data from database
+  const deal = await storage.getHubspotDealByHubspotId(dealId);
+  
+  if (!deal) {
+    return {
+      success: false,
+      error: `HubSpot deal ${dealId} not found in database`,
+    };
+  }
+
+  // Extract properties from deal
+  const properties = (deal.properties || {}) as Record<string, any>;
+  
+  const projectData: NewBidBoardProjectData = {
+    name: deal.dealName || `Deal ${dealId}`,
+    stage: initialStage,
+    clientName: deal.associatedCompanyName || properties.company_name || undefined,
+    clientEmail: properties.client_email || properties.contact_email || undefined,
+    clientPhone: properties.client_phone || properties.contact_phone || undefined,
+    address: properties.address || properties.street_address || undefined,
+    city: properties.city || undefined,
+    state: properties.state || properties.state_region || undefined,
+    zip: properties.zip || properties.postal_code || undefined,
+    description: properties.description || properties.notes || undefined,
+  };
+
+  log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");
+  
+  const result = await createBidBoardProject(projectData);
+  
+  // If successful, create a sync mapping
+  if (result.success && result.projectId) {
+    try {
+      await storage.createSyncMapping({
+        hubspotDealId: dealId,
+        hubspotDealName: deal.dealName,
+        bidboardProjectId: result.projectId,
+        bidboardProjectName: projectData.name,
+        projectPhase: "bidboard",
+        lastSyncAt: new Date(),
+        lastSyncStatus: "created_from_hubspot",
+        lastSyncDirection: "hubspot_to_procore",
+      });
+      log(`Created sync mapping for deal ${dealId} → BidBoard ${result.projectId}`, "playwright");
+    } catch (err: any) {
+      log(`Warning: Could not create sync mapping: ${err.message}`, "playwright");
+    }
+  }
+  
+  return result;
+}

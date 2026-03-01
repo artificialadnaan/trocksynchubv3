@@ -38,11 +38,33 @@ export const PROCORE_SELECTORS = {
     // Stage tabs at the top (Estimate in Progress, Service - Estimating, etc.)
     stageTabs: '[class*="stage-tab"], [class*="status-tab"], [role="tablist"] button, [class*="tab-item"]',
     stageDropdown: '[data-testid="stage-dropdown"], .stage-dropdown, select.stage',
-    createNewProject: 'button:has-text("Create New Project"), [data-testid="create-project"]',
+    createNewProject: 'button:has-text("Create New Project"), button:has-text("New Project"), [data-testid="create-project"], [data-testid="new-project"]',
     sendToPortfolioButton: '[data-testid="send-to-portfolio"], button:has-text("Send to Portfolio")',
     projectOverviewTab: '[data-testid="overview-tab"], a:has-text("Overview")',
     estimateTab: '[data-testid="estimate-tab"], a:has-text("Estimate")',
     documentsTab: '[data-testid="documents-tab"], a:has-text("Documents")',
+  },
+  
+  // New Project Form (BidBoard project creation modal/page)
+  newProject: {
+    modal: '[data-testid="new-project-modal"], [role="dialog"], .modal, [class*="modal"]',
+    nameInput: 'input[name="name"], input[name="project_name"], input[placeholder*="Project Name"], input[placeholder*="Name"], #project_name',
+    numberInput: 'input[name="number"], input[name="project_number"], input[placeholder*="Number"], #project_number',
+    stageSelect: 'select[name="stage"], select[name="status"], [data-testid="stage-select"], select[class*="stage"]',
+    stageOption: (stage: string) => `option:has-text("${stage}"), [data-value="${stage}"]`,
+    clientNameInput: 'input[name="client_name"], input[name="owner_name"], input[placeholder*="Client"], input[placeholder*="Owner"]',
+    clientEmailInput: 'input[name="client_email"], input[name="owner_email"], input[placeholder*="Email"]',
+    clientPhoneInput: 'input[name="client_phone"], input[name="owner_phone"], input[placeholder*="Phone"]',
+    addressInput: 'input[name="address"], input[name="project_address"], textarea[name="address"], input[placeholder*="Address"]',
+    cityInput: 'input[name="city"], input[placeholder*="City"]',
+    stateInput: 'input[name="state"], select[name="state"], input[placeholder*="State"]',
+    zipInput: 'input[name="zip"], input[name="postal_code"], input[placeholder*="ZIP"], input[placeholder*="Postal"]',
+    descriptionInput: 'textarea[name="description"], textarea[name="notes"], textarea[placeholder*="Description"]',
+    bidDueDateInput: 'input[name="bid_due_date"], input[type="date"][name*="due"], input[placeholder*="Due Date"]',
+    createButton: 'button:has-text("Create"), button:has-text("Save"), button[type="submit"]:has-text("Create"), [data-testid="create-button"]',
+    cancelButton: 'button:has-text("Cancel"), [data-testid="cancel-button"]',
+    successMessage: '[class*="success"], [data-testid="success-message"], .toast-success',
+    errorMessage: '[class*="error"], [data-testid="error-message"], .toast-error',
   },
   
   // Project Overview fields
