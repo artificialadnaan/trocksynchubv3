@@ -4460,6 +4460,91 @@ export async function registerRoutes(
     }
   });
 
+  // Test BidBoard new project form (dry run - capture screenshot without creating)
+  app.post("/api/testing/playwright/bidboard-new-project-form", requireAuth, async (req, res) => {
+    try {
+      const { chromium } = await import('playwright');
+      const { loginToProcore } = await import('./playwright/auth');
+      const { PROCORE_SELECTORS, getBidBoardUrl } = await import('./playwright/selectors');
+      
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({
+        viewport: { width: 1920, height: 1080 },
+      });
+      const page = await context.newPage();
+      
+      const loggedIn = await loginToProcore(page);
+      if (!loggedIn) {
+        await browser.close();
+        return res.status(400).json({ error: 'Failed to login to Procore' });
+      }
+
+      // Get company ID from config
+      const config = await storage.getAutomationConfig("procore_config");
+      const companyId = (config?.value as any)?.companyId || '598134325683880';
+      const credentials = await storage.getAutomationConfig("procore_browser_credentials");
+      const sandbox = (credentials?.value as any)?.sandbox || false;
+      
+      const bidboardUrl = getBidBoardUrl(companyId, sandbox);
+      await page.goto(bidboardUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000);
+
+      const result: any = {
+        success: true,
+        steps: [],
+        elementsFound: {},
+        screenshots: {},
+      };
+
+      // Screenshot 1: BidBoard list
+      result.screenshots.bidboardList = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
+      result.steps.push('Captured BidBoard list');
+
+      // Find "Create New Project" button
+      const createButton = await page.$(PROCORE_SELECTORS.bidboard.createNewProject);
+      result.elementsFound.createNewProjectButton = !!createButton;
+      
+      if (createButton) {
+        await createButton.click();
+        await page.waitForTimeout(2000);
+        
+        // Screenshot 2: New project form
+        result.screenshots.newProjectForm = `data:image/png;base64,${(await page.screenshot()).toString('base64')}`;
+        result.steps.push('Clicked Create New Project, captured form');
+
+        // Check for form elements
+        result.elementsFound.nameInput = !!(await page.$(PROCORE_SELECTORS.newProject.nameInput));
+        result.elementsFound.stageSelect = !!(await page.$(PROCORE_SELECTORS.newProject.stageSelect));
+        result.elementsFound.clientNameInput = !!(await page.$(PROCORE_SELECTORS.newProject.clientNameInput));
+        result.elementsFound.createButton = !!(await page.$(PROCORE_SELECTORS.newProject.createButton));
+        result.elementsFound.cancelButton = !!(await page.$(PROCORE_SELECTORS.newProject.cancelButton));
+
+        // Click cancel to close form without creating
+        const cancelButton = await page.$(PROCORE_SELECTORS.newProject.cancelButton);
+        if (cancelButton) {
+          await cancelButton.click();
+          result.steps.push('Clicked Cancel to close form');
+        }
+      } else {
+        result.steps.push('Create New Project button not found');
+      }
+
+      await browser.close();
+
+      await storage.createAuditLog({
+        action: 'playwright_test_new_project_form',
+        entityType: 'playwright',
+        source: 'admin',
+        status: 'success',
+        details: { elementsFound: result.elementsFound },
+      });
+
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Test Documents extraction
   app.post("/api/testing/playwright/documents-extract", requireAuth, async (req, res) => {
     try {
