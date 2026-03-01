@@ -256,10 +256,11 @@ export async function exportEstimateToCsv(page: Page, bidboardProjectId: string)
       return null;
     }
     
+    // First click to open dropdown menu (if any)
     await exportButton.click();
     await randomDelay(500, 1000);
     
-    // Select CSV option if dropdown appears
+    // Check if CSV option appears in dropdown
     const csvOption = await page.$(PROCORE_SELECTORS.estimate.exportCsvOption);
     if (csvOption) {
       const [download] = await Promise.all([
@@ -271,12 +272,15 @@ export async function exportEstimateToCsv(page: Page, bidboardProjectId: string)
       log(`Estimate CSV downloaded to: ${downloadPath}`, "playwright");
       return downloadPath;
     } else {
-      // Direct download
+      // No dropdown - button triggers direct download
+      // Re-click with download listener since initial click may have only opened a menu
       const [download] = await Promise.all([
         page.waitForEvent("download", { timeout: 30000 }),
+        exportButton.click(),
       ]);
       
       const downloadPath = await download.path();
+      log(`Estimate CSV downloaded directly to: ${downloadPath}`, "playwright");
       return downloadPath;
     }
   } catch (error) {
