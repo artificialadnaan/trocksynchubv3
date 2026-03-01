@@ -552,10 +552,12 @@ function extractHubspotIdFromIntegrations(ccProject: any): string | null {
     if (Array.isArray(properties.integrations)) {
       const hubspotInt = properties.integrations.find((i: any) => 
         i.type?.toLowerCase() === 'hubspot' || 
-        i.provider?.toLowerCase() === 'hubspot'
+        i.provider?.toLowerCase() === 'hubspot' ||
+        i.name?.toLowerCase() === 'hubspot'
       );
       if (hubspotInt?.relation_id) return String(hubspotInt.relation_id);
       if (hubspotInt?.deal_id) return String(hubspotInt.deal_id);
+      if (hubspotInt?.external_id) return String(hubspotInt.external_id);
     }
     if (properties.integrations?.hubspot?.relation_id) return String(properties.integrations.hubspot.relation_id);
     if (properties.integrations?.hubspot?.deal_id) return String(properties.integrations.hubspot.deal_id);

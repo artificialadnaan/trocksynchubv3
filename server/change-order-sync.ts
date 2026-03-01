@@ -25,7 +25,9 @@ export async function getProjectChangeOrders(projectId: string): Promise<ChangeO
     const client = await getProcoreClient();
     const companyId = await getCompanyId();
 
-    const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`);
+    const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
+      params: { company_id: companyId },
+    });
     const packages = response.data || [];
 
     const changeOrders: ChangeOrder[] = [];
@@ -55,8 +57,11 @@ export async function getProjectChangeOrders(projectId: string): Promise<ChangeO
 export async function getPrimeContractAmount(projectId: string): Promise<number> {
   try {
     const client = await getProcoreClient();
+    const companyId = await getCompanyId();
     
-    const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`);
+    const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
+      params: { company_id: companyId },
+    });
     const contracts = response.data || [];
 
     if (contracts.length === 0) return 0;
