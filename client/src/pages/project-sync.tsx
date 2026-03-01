@@ -211,11 +211,19 @@ export default function ProjectSyncPage() {
       return res.json();
     },
     onSuccess: (data) => {
+      if (data.message) {
+        toast({
+          title: "CompanyCam Match Issue",
+          description: data.message,
+          variant: "destructive",
+        });
+        return;
+      }
       const integrationCount = data.matchedViaIntegration || 0;
       const fuzzyCount = data.matchedViaFuzzy || 0;
       toast({
         title: "CompanyCam Match Complete",
-        description: `Matched ${data.matched} projects (${integrationCount} via integration, ${fuzzyCount} via name). ${data.alreadyMatched} already matched, ${data.noMatch} no match found.`,
+        description: `Found ${data.totalCompanyCam || 0} CompanyCam, ${data.totalProcore || 0} Procore. Matched ${data.matched} (${integrationCount} via integration, ${fuzzyCount} via name). ${data.alreadyMatched} already matched, ${data.noMatch} no match.`,
       });
       invalidateSyncQueries("/api/sync-mappings/lookup");
       queryClient.invalidateQueries({ queryKey: ["/api/companycam/projects?limit=500"] });

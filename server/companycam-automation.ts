@@ -496,12 +496,15 @@ function extractHubspotIdFromIntegrations(ccProject: any): string | null {
 
 export async function bulkMatchCompanyCamToProcore(): Promise<{
   success: boolean;
+  totalCompanyCam: number;
+  totalProcore: number;
   matched: number;
   matchedViaIntegration: number;
   matchedViaFuzzy: number;
   alreadyMatched: number;
   noMatch: number;
   errors: number;
+  message?: string;
   details: Array<{
     companycamId: string;
     companycamName: string;
@@ -518,12 +521,15 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
   
   const results = {
     success: true,
+    totalCompanyCam: 0,
+    totalProcore: 0,
     matched: 0,
     matchedViaIntegration: 0,
     matchedViaFuzzy: 0,
     alreadyMatched: 0,
     noMatch: 0,
     errors: 0,
+    message: undefined as string | undefined,
     details: [] as Array<{
       companycamId: string;
       companycamName: string;
@@ -538,11 +544,36 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
   };
 
   try {
-    const { data: companycamProjects } = await storage.getCompanycamProjects({ limit: 2000 });
-    const { data: procoreProjects } = await storage.getProcoreProjects({ limit: 2000 });
-    const allMappings = await storage.getAllSyncMappings();
+    console.log('[CompanyCam] Fetching CompanyCam projects from database...');
+    const ccResult = await storage.getCompanycamProjects({ limit: 2000 });
+    const companycamProjects = ccResult?.data || [];
+    console.log(`[CompanyCam] CompanyCam query returned: ${companycamProjects.length} projects (total in DB: ${ccResult?.total || 0})`);
     
-    console.log(`[CompanyCam] Found ${companycamProjects.length} CompanyCam projects, ${procoreProjects.length} Procore projects`);
+    console.log('[CompanyCam] Fetching Procore projects from database...');
+    const procoreResult = await storage.getProcoreProjects({ limit: 2000 });
+    const procoreProjects = procoreResult?.data || [];
+    console.log(`[CompanyCam] Procore query returned: ${procoreProjects.length} projects (total in DB: ${procoreResult?.total || 0})`);
+    
+    console.log('[CompanyCam] Fetching sync mappings...');
+    const allMappings = await storage.getAllSyncMappings();
+    console.log(`[CompanyCam] Found ${allMappings?.length || 0} existing sync mappings`);
+    
+    results.totalCompanyCam = companycamProjects.length;
+    results.totalProcore = procoreProjects.length;
+    
+    if (companycamProjects.length === 0) {
+      console.log('[CompanyCam] WARNING: No CompanyCam projects found in database. Have you synced CompanyCam data first?');
+      results.message = 'No CompanyCam projects found in database. Run CompanyCam sync first.';
+      return results;
+    }
+    
+    if (procoreProjects.length === 0) {
+      console.log('[CompanyCam] WARNING: No Procore projects found in database. Have you synced Procore data first?');
+      results.message = 'No Procore projects found in database. Run Procore sync first.';
+      return results;
+    }
+    
+    console.log(`[CompanyCam] Starting matching: ${companycamProjects.length} CompanyCam → ${procoreProjects.length} Procore projects`);
     
     const companycamAlreadyLinked = new Set(
       allMappings.filter(m => m.companyCamProjectId).map(m => m.companyCamProjectId)
