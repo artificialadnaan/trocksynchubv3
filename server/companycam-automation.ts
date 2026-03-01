@@ -441,18 +441,27 @@ function extractProcoreIdFromIntegrations(ccProject: any): string | null {
   const integrations = ccProject.integrations;
   const properties = ccProject.properties;
   
-  // Check integrations field
-  if (integrations) {
+  // Check integrations field (array format from CompanyCam API)
+  if (Array.isArray(integrations)) {
+    const procoreInt = integrations.find((i: any) => 
+      i.type?.toLowerCase() === 'procore' || 
+      i.provider?.toLowerCase() === 'procore' || 
+      i.name?.toLowerCase() === 'procore'
+    );
+    if (procoreInt) {
+      // CompanyCam uses 'relation_id' for the linked Procore project ID
+      if (procoreInt.relation_id) return String(procoreInt.relation_id);
+      if (procoreInt.project_id) return String(procoreInt.project_id);
+      if (procoreInt.external_id) return String(procoreInt.external_id);
+      if (procoreInt.id) return String(procoreInt.id);
+    }
+  }
+  
+  // Check object format integrations
+  if (integrations && !Array.isArray(integrations)) {
+    if (integrations.procore?.relation_id) return String(integrations.procore.relation_id);
     if (integrations.procore?.project_id) return String(integrations.procore.project_id);
     if (integrations.procore?.id) return String(integrations.procore.id);
-    if (Array.isArray(integrations)) {
-      const procoreInt = integrations.find((i: any) => 
-        i.type === 'procore' || i.provider === 'procore' || i.name?.toLowerCase() === 'procore'
-      );
-      if (procoreInt?.project_id) return String(procoreInt.project_id);
-      if (procoreInt?.external_id) return String(procoreInt.external_id);
-      if (procoreInt?.id) return String(procoreInt.id);
-    }
   }
   
   // Check properties for various possible field names
@@ -461,24 +470,34 @@ function extractProcoreIdFromIntegrations(ccProject: any): string | null {
     if (properties.procore_project_id) return String(properties.procore_project_id);
     if (properties.procore_id) return String(properties.procore_id);
     
+    // Check integration_relation_id (seen in some CompanyCam responses)
+    if (properties.integration_relation_id) return String(properties.integration_relation_id);
+    
     // Check external_ids array (CompanyCam v2 API format)
     if (Array.isArray(properties.external_ids)) {
       const procoreExt = properties.external_ids.find((e: any) => 
-        e.source === 'procore' || e.type === 'procore' || e.provider === 'procore'
+        e.source?.toLowerCase() === 'procore' || 
+        e.type?.toLowerCase() === 'procore' || 
+        e.provider?.toLowerCase() === 'procore'
       );
+      if (procoreExt?.relation_id) return String(procoreExt.relation_id);
       if (procoreExt?.id) return String(procoreExt.id);
       if (procoreExt?.external_id) return String(procoreExt.external_id);
     }
     
     // Check nested integrations in properties
-    if (properties.integrations?.procore?.project_id) return String(properties.integrations.procore.project_id);
     if (Array.isArray(properties.integrations)) {
       const procoreInt = properties.integrations.find((i: any) => 
-        i.type === 'procore' || i.provider === 'procore' || i.name?.toLowerCase() === 'procore'
+        i.type?.toLowerCase() === 'procore' || 
+        i.provider?.toLowerCase() === 'procore' || 
+        i.name?.toLowerCase() === 'procore'
       );
+      if (procoreInt?.relation_id) return String(procoreInt.relation_id);
       if (procoreInt?.project_id) return String(procoreInt.project_id);
       if (procoreInt?.external_id) return String(procoreInt.external_id);
     }
+    if (properties.integrations?.procore?.relation_id) return String(properties.integrations.procore.relation_id);
+    if (properties.integrations?.procore?.project_id) return String(properties.integrations.procore.project_id);
   }
   
   return null;
@@ -488,18 +507,27 @@ function extractHubspotIdFromIntegrations(ccProject: any): string | null {
   const integrations = ccProject.integrations;
   const properties = ccProject.properties;
   
-  // Check integrations field
-  if (integrations) {
+  // Check integrations field (array format from CompanyCam API)
+  if (Array.isArray(integrations)) {
+    const hubspotInt = integrations.find((i: any) => 
+      i.type?.toLowerCase() === 'hubspot' || 
+      i.provider?.toLowerCase() === 'hubspot' || 
+      i.name?.toLowerCase() === 'hubspot'
+    );
+    if (hubspotInt) {
+      // CompanyCam uses 'relation_id' for linked IDs
+      if (hubspotInt.relation_id) return String(hubspotInt.relation_id);
+      if (hubspotInt.deal_id) return String(hubspotInt.deal_id);
+      if (hubspotInt.external_id) return String(hubspotInt.external_id);
+      if (hubspotInt.id) return String(hubspotInt.id);
+    }
+  }
+  
+  // Check object format integrations
+  if (integrations && !Array.isArray(integrations)) {
+    if (integrations.hubspot?.relation_id) return String(integrations.hubspot.relation_id);
     if (integrations.hubspot?.deal_id) return String(integrations.hubspot.deal_id);
     if (integrations.hubspot?.id) return String(integrations.hubspot.id);
-    if (Array.isArray(integrations)) {
-      const hubspotInt = integrations.find((i: any) => 
-        i.type === 'hubspot' || i.provider === 'hubspot' || i.name?.toLowerCase() === 'hubspot'
-      );
-      if (hubspotInt?.deal_id) return String(hubspotInt.deal_id);
-      if (hubspotInt?.external_id) return String(hubspotInt.external_id);
-      if (hubspotInt?.id) return String(hubspotInt.id);
-    }
   }
   
   // Check properties for various possible field names
@@ -511,13 +539,25 @@ function extractHubspotIdFromIntegrations(ccProject: any): string | null {
     // Check external_ids array (CompanyCam v2 API format)
     if (Array.isArray(properties.external_ids)) {
       const hubspotExt = properties.external_ids.find((e: any) => 
-        e.source === 'hubspot' || e.type === 'hubspot' || e.provider === 'hubspot'
+        e.source?.toLowerCase() === 'hubspot' || 
+        e.type?.toLowerCase() === 'hubspot' || 
+        e.provider?.toLowerCase() === 'hubspot'
       );
+      if (hubspotExt?.relation_id) return String(hubspotExt.relation_id);
       if (hubspotExt?.id) return String(hubspotExt.id);
       if (hubspotExt?.external_id) return String(hubspotExt.external_id);
     }
     
     // Check nested integrations in properties
+    if (Array.isArray(properties.integrations)) {
+      const hubspotInt = properties.integrations.find((i: any) => 
+        i.type?.toLowerCase() === 'hubspot' || 
+        i.provider?.toLowerCase() === 'hubspot'
+      );
+      if (hubspotInt?.relation_id) return String(hubspotInt.relation_id);
+      if (hubspotInt?.deal_id) return String(hubspotInt.deal_id);
+    }
+    if (properties.integrations?.hubspot?.relation_id) return String(properties.integrations.hubspot.relation_id);
     if (properties.integrations?.hubspot?.deal_id) return String(properties.integrations.hubspot.deal_id);
   }
   
