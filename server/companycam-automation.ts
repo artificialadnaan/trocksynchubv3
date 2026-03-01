@@ -435,9 +435,70 @@ export async function findDuplicateCompanyCamProjects(): Promise<Array<{
   return duplicates;
 }
 
+function extractProcoreIdFromIntegrations(ccProject: any): string | null {
+  const integrations = ccProject.integrations;
+  const properties = ccProject.properties;
+  
+  if (integrations) {
+    if (integrations.procore?.project_id) return String(integrations.procore.project_id);
+    if (integrations.procore?.id) return String(integrations.procore.id);
+    if (Array.isArray(integrations)) {
+      const procoreInt = integrations.find((i: any) => 
+        i.type === 'procore' || i.provider === 'procore' || i.name?.toLowerCase() === 'procore'
+      );
+      if (procoreInt?.project_id) return String(procoreInt.project_id);
+      if (procoreInt?.external_id) return String(procoreInt.external_id);
+      if (procoreInt?.id) return String(procoreInt.id);
+    }
+  }
+  
+  if (properties) {
+    if (properties.procore_project_id) return String(properties.procore_project_id);
+    if (properties.external_id) return String(properties.external_id);
+    if (properties.integrations?.procore?.project_id) return String(properties.integrations.procore.project_id);
+    
+    if (Array.isArray(properties.integrations)) {
+      const procoreInt = properties.integrations.find((i: any) => 
+        i.type === 'procore' || i.provider === 'procore' || i.name?.toLowerCase() === 'procore'
+      );
+      if (procoreInt?.project_id) return String(procoreInt.project_id);
+      if (procoreInt?.external_id) return String(procoreInt.external_id);
+    }
+  }
+  
+  return null;
+}
+
+function extractHubspotIdFromIntegrations(ccProject: any): string | null {
+  const integrations = ccProject.integrations;
+  const properties = ccProject.properties;
+  
+  if (integrations) {
+    if (integrations.hubspot?.deal_id) return String(integrations.hubspot.deal_id);
+    if (integrations.hubspot?.id) return String(integrations.hubspot.id);
+    if (Array.isArray(integrations)) {
+      const hubspotInt = integrations.find((i: any) => 
+        i.type === 'hubspot' || i.provider === 'hubspot' || i.name?.toLowerCase() === 'hubspot'
+      );
+      if (hubspotInt?.deal_id) return String(hubspotInt.deal_id);
+      if (hubspotInt?.external_id) return String(hubspotInt.external_id);
+      if (hubspotInt?.id) return String(hubspotInt.id);
+    }
+  }
+  
+  if (properties) {
+    if (properties.hubspot_deal_id) return String(properties.hubspot_deal_id);
+    if (properties.integrations?.hubspot?.deal_id) return String(properties.integrations.hubspot.deal_id);
+  }
+  
+  return null;
+}
+
 export async function bulkMatchCompanyCamToProcore(): Promise<{
   success: boolean;
   matched: number;
+  matchedViaIntegration: number;
+  matchedViaFuzzy: number;
   alreadyMatched: number;
   noMatch: number;
   errors: number;
@@ -446,16 +507,20 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
     companycamName: string;
     procoreProjectId?: string;
     procoreProjectName?: string;
+    hubspotDealId?: string;
+    matchType?: 'integration' | 'fuzzy';
     matchScore?: number;
     status: 'matched' | 'already_matched' | 'no_match' | 'error';
     error?: string;
   }>;
 }> {
-  console.log('[CompanyCam] Starting bulk auto-match to Procore projects...');
+  console.log('[CompanyCam] Starting bulk auto-match to Procore/HubSpot projects...');
   
   const results = {
     success: true,
     matched: 0,
+    matchedViaIntegration: 0,
+    matchedViaFuzzy: 0,
     alreadyMatched: 0,
     noMatch: 0,
     errors: 0,
@@ -464,6 +529,8 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
       companycamName: string;
       procoreProjectId?: string;
       procoreProjectName?: string;
+      hubspotDealId?: string;
+      matchType?: 'integration' | 'fuzzy';
       matchScore?: number;
       status: 'matched' | 'already_matched' | 'no_match' | 'error';
       error?: string;
@@ -484,6 +551,16 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
     const procoreMappingLookup = new Map(
       allMappings.filter(m => m.procoreProjectId).map(m => [m.procoreProjectId, m])
     );
+    
+    const hubspotMappingLookup = new Map(
+      allMappings.filter(m => m.hubspotDealId).map(m => [m.hubspotDealId, m])
+    );
+    
+    const procoreProjectLookup = new Map(
+      procoreProjects.map(p => [p.procoreId, p])
+    );
+
+    let sampleIntegrations: any[] = [];
 
     for (const ccProject of companycamProjects) {
       if (companycamAlreadyLinked.has(ccProject.companycamId)) {
@@ -494,6 +571,89 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
           status: 'already_matched',
         });
         continue;
+      }
+
+      if (sampleIntegrations.length < 5 && (ccProject.integrations || ccProject.properties)) {
+        sampleIntegrations.push({
+          name: ccProject.name,
+          integrations: ccProject.integrations,
+          propertiesKeys: ccProject.properties ? Object.keys(ccProject.properties) : [],
+        });
+      }
+
+      const directProcoreId = extractProcoreIdFromIntegrations(ccProject);
+      const directHubspotId = extractHubspotIdFromIntegrations(ccProject);
+      
+      if (directProcoreId) {
+        try {
+          const existingMapping = procoreMappingLookup.get(directProcoreId);
+          const procoreProject = procoreProjectLookup.get(directProcoreId);
+          
+          if (existingMapping) {
+            await storage.updateSyncMapping(existingMapping.id, {
+              companyCamProjectId: ccProject.companycamId,
+            });
+          } else {
+            await storage.createSyncMapping({
+              procoreProjectId: directProcoreId,
+              procoreProjectName: procoreProject?.name || null,
+              procoreProjectNumber: procoreProject?.projectNumber || null,
+              companyCamProjectId: ccProject.companycamId,
+              hubspotDealId: directHubspotId,
+            });
+          }
+          
+          results.matched++;
+          results.matchedViaIntegration++;
+          results.details.push({
+            companycamId: ccProject.companycamId,
+            companycamName: ccProject.name || '',
+            procoreProjectId: directProcoreId,
+            procoreProjectName: procoreProject?.name || '',
+            matchType: 'integration',
+            status: 'matched',
+          });
+          
+          console.log(`[CompanyCam] Matched via integration: "${ccProject.name}" → Procore ID: ${directProcoreId}`);
+          continue;
+        } catch (error: any) {
+          results.errors++;
+          results.details.push({
+            companycamId: ccProject.companycamId,
+            companycamName: ccProject.name || '',
+            status: 'error',
+            error: error.message,
+          });
+          continue;
+        }
+      }
+      
+      if (directHubspotId) {
+        try {
+          const existingMapping = hubspotMappingLookup.get(directHubspotId);
+          
+          if (existingMapping) {
+            await storage.updateSyncMapping(existingMapping.id, {
+              companyCamProjectId: ccProject.companycamId,
+            });
+            
+            results.matched++;
+            results.matchedViaIntegration++;
+            results.details.push({
+              companycamId: ccProject.companycamId,
+              companycamName: ccProject.name || '',
+              hubspotDealId: directHubspotId,
+              procoreProjectId: existingMapping.procoreProjectId || undefined,
+              matchType: 'integration',
+              status: 'matched',
+            });
+            
+            console.log(`[CompanyCam] Matched via HubSpot integration: "${ccProject.name}" → HubSpot ID: ${directHubspotId}`);
+            continue;
+          }
+        } catch (error: any) {
+          console.error(`[CompanyCam] Error matching via HubSpot: ${error.message}`);
+        }
       }
 
       const normalizedCCName = normalizeName(ccProject.name);
@@ -558,16 +718,18 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
           }
           
           results.matched++;
+          results.matchedViaFuzzy++;
           results.details.push({
             companycamId: ccProject.companycamId,
             companycamName: ccProject.name || '',
             procoreProjectId: bestMatch.project.procoreId,
             procoreProjectName: bestMatch.project.name || '',
+            matchType: 'fuzzy',
             matchScore: bestMatch.score,
             status: 'matched',
           });
           
-          console.log(`[CompanyCam] Matched: "${ccProject.name}" → "${bestMatch.project.name}" (score: ${bestMatch.score})`);
+          console.log(`[CompanyCam] Matched via fuzzy: "${ccProject.name}" → "${bestMatch.project.name}" (score: ${bestMatch.score})`);
         } catch (error: any) {
           results.errors++;
           results.details.push({
@@ -588,7 +750,11 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
       }
     }
     
-    console.log(`[CompanyCam] Bulk match complete: ${results.matched} matched, ${results.alreadyMatched} already matched, ${results.noMatch} no match, ${results.errors} errors`);
+    console.log(`[CompanyCam] Bulk match complete: ${results.matched} matched (${results.matchedViaIntegration} via integration, ${results.matchedViaFuzzy} via fuzzy), ${results.alreadyMatched} already matched, ${results.noMatch} no match, ${results.errors} errors`);
+    
+    if (sampleIntegrations.length > 0) {
+      console.log('[CompanyCam] Sample integration data from first few projects:', JSON.stringify(sampleIntegrations, null, 2));
+    }
     
   } catch (error: any) {
     console.error(`[CompanyCam] Bulk match error: ${error.message}`);
