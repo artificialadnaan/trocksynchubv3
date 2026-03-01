@@ -204,6 +204,24 @@ export default function ProjectSyncPage() {
     },
   });
 
+  const companycamMatchMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/companycam/bulk-match");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "CompanyCam Match Complete",
+        description: `Matched ${data.matched} projects. ${data.alreadyMatched} already matched, ${data.noMatch} no match found.`,
+      });
+      invalidateSyncQueries("/api/sync-mappings/lookup");
+      queryClient.invalidateQueries({ queryKey: ["/api/companycam/projects?limit=500"] });
+    },
+    onError: (e: any) => {
+      toast({ title: "Match Failed", description: e.message, variant: "destructive" });
+    },
+  });
+
   const toggleExpanded = (id: number) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
@@ -817,10 +835,28 @@ export default function ProjectSyncPage() {
               data-testid="card-companycam"
             >
               <CardContent className="pt-6">
-                <div className="flex items-center gap-2">
-                  <Camera className="w-5 h-5 text-purple-500" />
-                  <span className="text-2xl font-bold">{companycamMatched.length}</span>
-                  <span className="text-sm text-muted-foreground">/ {companycamProjects?.total || 0}</span>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Camera className="w-5 h-5 text-purple-500" />
+                    <span className="text-2xl font-bold">{companycamMatched.length}</span>
+                    <span className="text-sm text-muted-foreground">/ {companycamProjects?.total || 0}</span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      companycamMatchMutation.mutate();
+                    }}
+                    disabled={companycamMatchMutation.isPending}
+                  >
+                    {companycamMatchMutation.isPending ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3 h-3" />
+                    )}
+                  </Button>
                 </div>
                 <p className="text-sm text-muted-foreground mt-1">CompanyCam</p>
               </CardContent>

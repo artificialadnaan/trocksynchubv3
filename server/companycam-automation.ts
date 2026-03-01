@@ -434,3 +434,166 @@ export async function findDuplicateCompanyCamProjects(): Promise<Array<{
 
   return duplicates;
 }
+
+export async function bulkMatchCompanyCamToProcore(): Promise<{
+  success: boolean;
+  matched: number;
+  alreadyMatched: number;
+  noMatch: number;
+  errors: number;
+  details: Array<{
+    companycamId: string;
+    companycamName: string;
+    procoreProjectId?: string;
+    procoreProjectName?: string;
+    matchScore?: number;
+    status: 'matched' | 'already_matched' | 'no_match' | 'error';
+    error?: string;
+  }>;
+}> {
+  console.log('[CompanyCam] Starting bulk auto-match to Procore projects...');
+  
+  const results = {
+    success: true,
+    matched: 0,
+    alreadyMatched: 0,
+    noMatch: 0,
+    errors: 0,
+    details: [] as Array<{
+      companycamId: string;
+      companycamName: string;
+      procoreProjectId?: string;
+      procoreProjectName?: string;
+      matchScore?: number;
+      status: 'matched' | 'already_matched' | 'no_match' | 'error';
+      error?: string;
+    }>,
+  };
+
+  try {
+    const { data: companycamProjects } = await storage.getCompanycamProjects({ limit: 2000 });
+    const { data: procoreProjects } = await storage.getProcoreProjects({ limit: 2000 });
+    const allMappings = await storage.getAllSyncMappings();
+    
+    console.log(`[CompanyCam] Found ${companycamProjects.length} CompanyCam projects, ${procoreProjects.length} Procore projects`);
+    
+    const companycamAlreadyLinked = new Set(
+      allMappings.filter(m => m.companyCamProjectId).map(m => m.companyCamProjectId)
+    );
+    
+    const procoreMappingLookup = new Map(
+      allMappings.filter(m => m.procoreProjectId).map(m => [m.procoreProjectId, m])
+    );
+
+    for (const ccProject of companycamProjects) {
+      if (companycamAlreadyLinked.has(ccProject.companycamId)) {
+        results.alreadyMatched++;
+        results.details.push({
+          companycamId: ccProject.companycamId,
+          companycamName: ccProject.name || '',
+          status: 'already_matched',
+        });
+        continue;
+      }
+
+      const normalizedCCName = normalizeName(ccProject.name);
+      const normalizedCCAddress = normalizeAddress(ccProject.streetAddress);
+      const normalizedCCCity = (ccProject.city || '').toLowerCase().trim();
+      
+      let bestMatch: { project: typeof procoreProjects[0]; score: number } | null = null;
+      
+      for (const procoreProject of procoreProjects) {
+        let score = 0;
+        
+        const normalizedProcoreName = normalizeName(procoreProject.name);
+        const normalizedProcoreAddress = normalizeAddress(procoreProject.address);
+        const normalizedProcoreCity = (procoreProject.city || '').toLowerCase().trim();
+        
+        if (normalizedCCName && normalizedProcoreName) {
+          if (normalizedCCName === normalizedProcoreName) {
+            score += 100;
+          } else if (normalizedCCName.includes(normalizedProcoreName) || normalizedProcoreName.includes(normalizedCCName)) {
+            const shorter = normalizedCCName.length < normalizedProcoreName.length ? normalizedCCName : normalizedProcoreName;
+            const longer = normalizedCCName.length >= normalizedProcoreName.length ? normalizedCCName : normalizedProcoreName;
+            const overlap = shorter.length / longer.length;
+            if (overlap > 0.7) score += 70;
+            else if (overlap > 0.5) score += 50;
+            else score += 30;
+          }
+        }
+        
+        if (normalizedCCAddress && normalizedProcoreAddress) {
+          if (normalizedCCAddress === normalizedProcoreAddress) {
+            score += 80;
+          } else if (normalizedCCAddress.includes(normalizedProcoreAddress) || normalizedProcoreAddress.includes(normalizedCCAddress)) {
+            score += 40;
+          }
+        }
+        
+        if (normalizedCCCity && normalizedProcoreCity && normalizedCCCity === normalizedProcoreCity) {
+          score += 20;
+        }
+        
+        if (score > 0 && (!bestMatch || score > bestMatch.score)) {
+          bestMatch = { project: procoreProject, score };
+        }
+      }
+      
+      if (bestMatch && bestMatch.score >= 70) {
+        try {
+          const existingMapping = procoreMappingLookup.get(bestMatch.project.procoreId);
+          
+          if (existingMapping) {
+            await storage.updateSyncMapping(existingMapping.id, {
+              companyCamProjectId: ccProject.companycamId,
+            });
+          } else {
+            await storage.createSyncMapping({
+              procoreProjectId: bestMatch.project.procoreId,
+              procoreProjectName: bestMatch.project.name,
+              procoreProjectNumber: bestMatch.project.projectNumber,
+              companyCamProjectId: ccProject.companycamId,
+              hubspotDealId: null,
+            });
+          }
+          
+          results.matched++;
+          results.details.push({
+            companycamId: ccProject.companycamId,
+            companycamName: ccProject.name || '',
+            procoreProjectId: bestMatch.project.procoreId,
+            procoreProjectName: bestMatch.project.name || '',
+            matchScore: bestMatch.score,
+            status: 'matched',
+          });
+          
+          console.log(`[CompanyCam] Matched: "${ccProject.name}" → "${bestMatch.project.name}" (score: ${bestMatch.score})`);
+        } catch (error: any) {
+          results.errors++;
+          results.details.push({
+            companycamId: ccProject.companycamId,
+            companycamName: ccProject.name || '',
+            status: 'error',
+            error: error.message,
+          });
+        }
+      } else {
+        results.noMatch++;
+        results.details.push({
+          companycamId: ccProject.companycamId,
+          companycamName: ccProject.name || '',
+          matchScore: bestMatch?.score,
+          status: 'no_match',
+        });
+      }
+    }
+    
+    console.log(`[CompanyCam] Bulk match complete: ${results.matched} matched, ${results.alreadyMatched} already matched, ${results.noMatch} no match, ${results.errors} errors`);
+    
+  } catch (error: any) {
+    console.error(`[CompanyCam] Bulk match error: ${error.message}`);
+    results.success = false;
+  }
+  
+  return results;
+}

@@ -3937,6 +3937,17 @@ export async function registerRoutes(
     }
   });
 
+  // Bulk auto-match CompanyCam projects to Procore projects
+  app.post("/api/companycam/bulk-match", requireAuth, async (_req, res) => {
+    try {
+      const { bulkMatchCompanyCamToProcore } = await import('./companycam-automation');
+      const result = await bulkMatchCompanyCamToProcore();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
   // ============================================
   // Closeout and Survey Endpoints
   // ============================================
