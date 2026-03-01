@@ -62,7 +62,7 @@ async function downloadFile(url: string, destPath: string): Promise<boolean> {
       resolve(false);
     });
     
-    protocol.get(url, (response) => {
+    const request = protocol.get(url, (response) => {
       if (response.statusCode === 200) {
         response.pipe(file);
         file.on("finish", () => {
@@ -70,10 +70,13 @@ async function downloadFile(url: string, destPath: string): Promise<boolean> {
           resolve(true);
         });
       } else {
+        response.destroy();
         file.close();
         resolve(false);
       }
-    }).on("error", () => {
+    });
+    
+    request.on("error", () => {
       file.close();
       resolve(false);
     });

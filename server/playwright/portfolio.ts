@@ -648,16 +648,25 @@ export async function addClientToProjectDirectory(
 
     const roleDropdown = await page.$(PROCORE_SELECTORS.directory.roleDropdown);
     if (roleDropdown) {
-      await roleDropdown.selectOption({ label: 'Client' }).catch(async () => {
+      let roleSelected = false;
+      try {
+        await roleDropdown.selectOption({ label: 'Client' });
+        roleSelected = true;
+      } catch {
+        // Fallback: find a matching option
         const options = await page.$$(PROCORE_SELECTORS.directory.roleDropdown + ' option');
         for (const option of options) {
           const text = await option.textContent();
           if (text?.toLowerCase().includes('client') || text?.toLowerCase().includes('owner')) {
             await roleDropdown.selectOption({ label: text });
+            roleSelected = true;
             break;
           }
         }
-      });
+      }
+      if (!roleSelected) {
+        log('Warning: Could not select Client role from dropdown', 'playwright');
+      }
       await randomDelay(200, 400);
     }
 

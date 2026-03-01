@@ -706,7 +706,7 @@ export const procoreRoleAssignments = pgTable("procore_role_assignments", {
   projectName: text("project_name"),
   roleId: text("role_id"),
   roleName: text("role_name").notNull(),
-  assigneeId: text("assignee_id").notNull().default(''),
+  assigneeId: text("assignee_id"),
   assigneeName: text("assignee_name"),
   assigneeEmail: text("assignee_email"),
   assigneeCompany: text("assignee_company"),
