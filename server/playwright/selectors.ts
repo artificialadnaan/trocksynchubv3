@@ -1,3 +1,42 @@
+/**
+ * Playwright Selectors Module
+ * ============================
+ * 
+ * This module centralizes all CSS/XPath selectors for Procore UI elements.
+ * Having selectors in one place makes it easy to update when Procore changes their UI.
+ * 
+ * Selector Strategy:
+ * Each selector uses a cascade of options to maximize reliability:
+ * 1. data-testid attributes (most stable, but not always present)
+ * 2. Semantic selectors (role, aria-label)
+ * 3. Class-based selectors (may change with UI updates)
+ * 4. Text content selectors (fallback)
+ * 
+ * Selector Categories:
+ * 
+ * - login: Email/password fields, submit buttons, MFA input
+ * - nav: Main navigation elements
+ * - bidboard: BidBoard-specific elements (project list, stages)
+ * - newProject: New project creation form fields
+ * - portfolio: Portfolio/active project elements
+ * - directory: Project directory (contacts, vendors)
+ * - documents: Document management UI
+ * - estimate: Estimate editing and export
+ * 
+ * URL Helpers:
+ * - getBidBoardUrl(): Generate BidBoard URL for company
+ * - getPortfolioProjectUrl(): Generate Portfolio project URL
+ * 
+ * Maintenance Notes:
+ * When Procore updates their UI, check these selectors:
+ * 1. Look for data-testid attributes first
+ * 2. Use browser DevTools to inspect element structure
+ * 3. Add multiple fallback selectors for reliability
+ * 4. Test in both sandbox and production environments
+ * 
+ * @module playwright/selectors
+ */
+
 // Centralized selectors for Procore UI elements
 // These may need to be updated if Procore changes their UI
 

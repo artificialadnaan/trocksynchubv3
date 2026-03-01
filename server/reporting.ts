@@ -1,5 +1,55 @@
+/**
+ * Reporting Module
+ * =================
+ * 
+ * This module generates reports and metrics for the dashboard and admin views.
+ * It aggregates data from all synced systems to provide operational insights.
+ * 
+ * Report Types:
+ * 
+ * 1. Dashboard Metrics:
+ *    - Total deals, projects, and sync mappings
+ *    - Deal and project stage distributions
+ *    - Total and average deal values
+ *    - Sync activity summary
+ * 
+ * 2. Pipeline Reports:
+ *    - Projects by stage with timing metrics
+ *    - Revenue projections by stage
+ *    - Win/loss rates
+ * 
+ * 3. Sync Health Reports:
+ *    - Last sync times for each integration
+ *    - Webhook success/failure rates
+ *    - System health status
+ * 
+ * 4. Activity Reports:
+ *    - Recent sync activity
+ *    - Email send statistics
+ *    - Survey completion rates
+ * 
+ * Key Functions:
+ * - getDashboardMetrics(): Main dashboard data aggregation
+ * - getDealStageDistribution(): HubSpot deals by stage
+ * - getProjectStageDistribution(): Procore projects by stage
+ * - getSyncActivitySummary(): Recent sync statistics
+ * - getSyncHealthReport(): Integration health status
+ * - getPipelineReport(): Detailed pipeline analysis
+ * 
+ * Data Sources:
+ * - hubspot_deals: Deal counts and values
+ * - procore_projects: Project counts and stages
+ * - sync_mappings: Link statistics
+ * - audit_logs: Activity history
+ * - email_send_log: Email statistics
+ * - closeout_surveys: Survey completion data
+ * 
+ * @module reporting
+ */
+
 import { storage } from './storage';
 
+/** Distribution of deals by stage with value totals */
 export interface DealStageDistribution {
   stage: string;
   count: number;

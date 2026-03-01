@@ -1,3 +1,50 @@
+/**
+ * Storage Layer - Database Access and Business Logic
+ * ===================================================
+ * 
+ * This module provides the data access layer for the T-Rock Sync Hub application.
+ * It implements the Repository pattern, abstracting all database operations behind
+ * a clean interface (IStorage).
+ * 
+ * Key Responsibilities:
+ * - CRUD operations for all database entities
+ * - Data synchronization state management (sync mappings)
+ * - Webhook and audit logging
+ * - OAuth token management
+ * - Automation configuration storage
+ * - Email template management
+ * 
+ * Data Models:
+ * - Users: Application authentication
+ * - SyncMappings: Links between HubSpot deals, Procore projects, and CompanyCam projects
+ * - StageMappings: Procore → HubSpot stage translation rules
+ * - HubSpot*: Cached CRM data (companies, contacts, deals, pipelines)
+ * - Procore*: Cached project data (projects, vendors, users, bids)
+ * - CompanyCam*: Cached photo documentation data
+ * - WebhookLogs: Incoming webhook event tracking
+ * - AuditLogs: System activity and sync history
+ * - AutomationConfig: Feature flags and settings
+ * - EmailTemplates: Notification email templates
+ * 
+ * Usage:
+ * ```typescript
+ * import { storage } from './storage';
+ * 
+ * // Get a sync mapping by HubSpot deal ID
+ * const mapping = await storage.getSyncMappingByHubspotDealId('12345');
+ * 
+ * // Create an audit log entry
+ * await storage.createAuditLog({
+ *   action: 'sync_complete',
+ *   entityType: 'project',
+ *   entityId: 'proj-123',
+ *   status: 'success',
+ * });
+ * ```
+ * 
+ * @module storage
+ */
+
 import { eq, desc, and, gte, lte, sql, ilike, or } from "drizzle-orm";
 import { db } from "./db";
 import {
@@ -37,19 +84,48 @@ import {
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
+/**
+ * Storage Interface - Defines all database operations available in the application.
+ * 
+ * This interface ensures type safety and provides a clear contract for the storage layer.
+ * All methods are async and return Promises for database operations.
+ * 
+ * Method Categories:
+ * - User Management: Authentication and user CRUD
+ * - Sync Mappings: Core linking between HubSpot/Procore/CompanyCam entities
+ * - Stage Mappings: Workflow stage translation rules
+ * - Logging: Webhooks, audits, and email logs
+ * - External Data: Cached HubSpot, Procore, and CompanyCam data
+ * - Configuration: Automation settings and feature flags
+ */
 export interface IStorage {
+  // ==================== USER MANAGEMENT ====================
+  /** Get user by internal ID */
   getUser(id: string): Promise<User | undefined>;
+  /** Get user by username for authentication */
   getUserByUsername(username: string): Promise<User | undefined>;
+  /** Create a new user with hashed password */
   createUser(user: InsertUser): Promise<User>;
 
+  // ==================== SYNC MAPPINGS ====================
+  // Sync mappings are the core data structure linking entities across systems
+  /** Get all sync mappings (HubSpot ↔ Procore ↔ CompanyCam links) */
   getSyncMappings(): Promise<SyncMapping[]>;
+  /** Find mapping by HubSpot deal ID */
   getSyncMappingByHubspotDealId(dealId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by Procore project ID (includes BidBoard projects) */
   getSyncMappingByProcoreProjectId(projectId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by BidBoard-specific project ID */
   getSyncMappingByBidboardProjectId(bidboardProjectId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by Portfolio project ID (post-award projects) */
   getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined>;
+  /** Create a new sync mapping linking entities */
   createSyncMapping(mapping: InsertSyncMapping): Promise<SyncMapping>;
+  /** Update an existing sync mapping */
   updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined>;
+  /** Search mappings by deal name, project name, or project number */
   searchSyncMappings(query: string): Promise<SyncMapping[]>;
+  /** Transition a project from BidBoard (estimating) to Portfolio (active project) phase */
   transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined>;
 
   getStageMappings(): Promise<StageMapping[]>;

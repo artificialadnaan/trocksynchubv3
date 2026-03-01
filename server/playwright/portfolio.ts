@@ -1,3 +1,49 @@
+/**
+ * Playwright Portfolio Module
+ * ===========================
+ * 
+ * This module handles browser automation for Procore Portfolio (Active Projects).
+ * Portfolio is where T-Rock manages awarded/active construction projects.
+ * 
+ * Project Lifecycle Transition:
+ * When a project wins in BidBoard (stage "Sent to production"), it transitions
+ * to Portfolio. This module automates that transition and subsequent operations.
+ * 
+ * Key Operations:
+ * 
+ * 1. BidBoard → Portfolio Transition:
+ *    - Click "Send to Portfolio" button in BidBoard
+ *    - Verify project appears in Portfolio
+ *    - Update sync mapping with portfolio project ID
+ * 
+ * 2. Directory Management:
+ *    - Add contacts to project directory
+ *    - Sync client/vendor information
+ * 
+ * 3. Estimate Export:
+ *    - Export estimate as CSV/Excel
+ *    - Import estimate into project budget
+ * 
+ * 4. Full Portfolio Workflow:
+ *    - Combines all above steps into one automated workflow
+ *    - Sends kickoff emails to project team
+ * 
+ * Key Functions:
+ * - runPortfolioTransition(): Transition project from BidBoard to Portfolio
+ * - runFullPortfolioWorkflow(): Complete post-award workflow
+ * - addContactToDirectory(): Add person to project directory
+ * - exportEstimateToCsv(): Download estimate as CSV
+ * - importEstimateToBudget(): Import estimate into budget tool
+ * - sendToPortfolio(): Click send to portfolio button
+ * 
+ * URL Patterns:
+ * - Portfolio Project: /projects/{projectId}
+ * - Project Directory: /projects/{projectId}/directory
+ * - Project Budget: /projects/{projectId}/budget
+ * 
+ * @module playwright/portfolio
+ */
+
 import { Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
 import { PROCORE_SELECTORS, getPortfolioProjectUrl } from "./selectors";
@@ -8,6 +54,7 @@ import { storage } from "../storage";
 import { getProjectTeamMembers, fetchProcoreProjectDetail } from "../procore";
 import { sendKickoffEmails } from "../email-notifications";
 
+/** Result of adding contact to project directory */
 export interface DirectoryAddResult {
   success: boolean;
   portfolioProjectId: string;

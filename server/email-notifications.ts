@@ -1,7 +1,58 @@
+/**
+ * Email Notifications Module
+ * ==========================
+ * 
+ * This module handles automated email notifications triggered by various
+ * system events. It uses configurable templates and deduplication.
+ * 
+ * Notification Types:
+ * 
+ * 1. Role Assignment Notifications:
+ *    - Sent when team members are assigned to projects
+ *    - Includes links to Procore, HubSpot, and CompanyCam
+ * 
+ * 2. Project Kickoff Emails:
+ *    - Sent when a project transitions to active (Portfolio)
+ *    - Includes project team and relevant links
+ * 
+ * 3. Closeout Survey Emails:
+ *    - Sent when a project reaches completion
+ *    - Contains unique survey link for client feedback
+ * 
+ * 4. Weekly Summary Reports:
+ *    - Periodic digest of sync activity
+ *    - Sent to configured recipients
+ * 
+ * Features:
+ * - Templated emails with variable substitution
+ * - Deduplication to prevent duplicate sends
+ * - Configurable enable/disable per template
+ * - Email send logging for audit trails
+ * 
+ * Template Variables:
+ * Common variables available in templates:
+ * - {{assigneeName}}, {{projectName}}, {{roleName}}
+ * - {{procoreUrl}}, {{hubspotUrl}}, {{companycamUrl}}
+ * - {{ownerName}}, {{ownerEmail}}
+ * 
+ * Key Functions:
+ * - sendRoleAssignmentEmails(): Notify team of role assignments
+ * - sendKickoffEmails(): Notify team of project kickoff
+ * - sendCloseoutSurveyEmail(): Send client satisfaction survey
+ * - sendWeeklySummaryEmail(): Send periodic activity digest
+ * 
+ * @module email-notifications
+ */
+
 import { storage } from './storage';
 import { sendEmail, renderTemplate } from './email-service';
 import { getDealOwnerInfo } from './hubspot';
 
+/**
+ * Sends email notifications for new project role assignments.
+ * Each assignment triggers an email to the assignee with project details.
+ * Deduplication prevents the same assignment notification from being sent twice.
+ */
 export async function sendRoleAssignmentEmails(
   newAssignments: Array<{
     procoreProjectId: string;

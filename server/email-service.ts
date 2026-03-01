@@ -1,7 +1,45 @@
+/**
+ * Email Service Module
+ * ====================
+ * 
+ * This module provides a unified email sending interface that works with
+ * multiple email providers (Gmail, Outlook). It abstracts the provider
+ * selection and handles template rendering.
+ * 
+ * Supported Providers:
+ * - Gmail: Via Google OAuth API
+ * - Outlook: Via Microsoft Graph API
+ * 
+ * Features:
+ * - Provider switching (configurable active provider)
+ * - Template rendering with variable substitution
+ * - HTML email support
+ * - Connection status monitoring
+ * 
+ * Email Flow:
+ * 1. Get active provider from configuration
+ * 2. Check provider connection status
+ * 3. Render template with variables
+ * 4. Send via provider API
+ * 5. Log send result
+ * 
+ * Key Functions:
+ * - sendEmail(): Send email via active provider
+ * - getEmailConfig(): Get provider configuration and status
+ * - setEmailConfig(): Update provider selection
+ * - renderTemplate(): Replace {{variables}} in template
+ * 
+ * Configuration (automation_config table):
+ * - email_config.activeProvider: 'gmail' or 'outlook'
+ * 
+ * @module email-service
+ */
+
 import { storage } from './storage';
 import { sendEmail as sendGmailEmail, isGmailConnected, getGmailConnectionStatus } from './gmail';
 import { sendOutlookEmail, isOutlookConnected, isMicrosoftConnected } from './microsoft';
 
+/** Supported email providers */
 export type EmailProvider = 'gmail' | 'outlook';
 
 interface EmailConfig {

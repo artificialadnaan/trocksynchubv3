@@ -1,3 +1,48 @@
+/**
+ * BidBoard Automation Module
+ * ==========================
+ * 
+ * This module handles automated synchronization of Procore BidBoard (Estimating)
+ * projects with HubSpot deals. It uses Playwright browser automation to scrape
+ * data from the Procore web interface.
+ * 
+ * Why Playwright (Browser Automation)?
+ * Procore's BidBoard API is limited, so we use browser automation to:
+ * - Scrape project data (name, stage, client info)
+ * - Detect stage changes
+ * - Trigger portfolio transitions
+ * - Upload documents and client data
+ * 
+ * Key Features:
+ * - Periodic polling of BidBoard project data
+ * - Stage change detection and HubSpot sync
+ * - Automatic HubSpot deal creation when projects are created
+ * - Portfolio transition triggering when projects are "Sent to production"
+ * - Client data and document synchronization
+ * 
+ * Stage Mapping (BIDBOARD_TO_HUBSPOT_STAGE):
+ * BidBoard stages are mapped to HubSpot deal stages. When a stage changes
+ * in BidBoard, the corresponding HubSpot deal is updated.
+ * 
+ * Portfolio Trigger Stages (PORTFOLIO_TRIGGER_STAGES):
+ * When a project reaches these stages, it should transition from
+ * BidBoard (estimating) to Portfolio (active project):
+ * - "Sent to production"
+ * - "Service – sent to production"
+ * 
+ * Key Functions:
+ * - runBidBoardPolling(): Main polling loop for BidBoard sync
+ * - syncBidBoardStageToHubSpot(): Syncs stage change to HubSpot
+ * - onBidBoardProjectCreated(): Handles new project detection
+ * - detectAndProcessNewProjects(): Finds and processes new projects
+ * 
+ * Automation Config Keys:
+ * - bidboard_automation: Enable/disable BidBoard polling
+ * - procore_hubspot_stage_sync: Enable/disable stage sync to HubSpot
+ * 
+ * @module bidboard-automation
+ */
+
 import { runBidBoardScrape, BidBoardProject, BidBoardSyncResult, navigateToProject, getProjectDetails, syncHubSpotClientToBidBoard } from "./playwright/bidboard";
 import { ensureLoggedIn } from "./playwright/auth";
 import { closeBrowser } from "./playwright/browser";

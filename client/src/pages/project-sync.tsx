@@ -1,3 +1,47 @@
+/**
+ * Project Sync Page
+ * ==================
+ * 
+ * This is the main UI for viewing and managing project synchronization
+ * between HubSpot, Procore, and CompanyCam.
+ * 
+ * Features:
+ * 
+ * 1. Sync Overview Cards:
+ *    - Total Procore projects matched to HubSpot
+ *    - Total HubSpot deals matched to Procore
+ *    - CompanyCam projects matched
+ *    - BidBoard projects with links
+ *    Click any card to see detailed reports.
+ * 
+ * 2. Search & Filter:
+ *    - Search by project name, deal name, or project number
+ *    - Filter to show only unmatched entities
+ * 
+ * 3. Linked Projects Tab:
+ *    - Shows all established sync mappings
+ *    - External links to Procore, HubSpot, CompanyCam
+ *    - Displays sync status and last sync time
+ * 
+ * 4. Unmatched Entities Tab:
+ *    - Procore projects without HubSpot deals
+ *    - HubSpot deals without Procore projects
+ *    - Manual linking actions
+ * 
+ * 5. Sync Actions:
+ *    - Trigger Procore ↔ HubSpot sync
+ *    - Trigger CompanyCam matching
+ *    - View sync conflicts
+ * 
+ * Data Sources:
+ * - GET /api/sync/overview: Summary statistics
+ * - GET /api/sync/mappings: All sync mappings
+ * - POST /api/sync/trigger: Trigger sync operation
+ * - POST /api/companycam/bulk-match: CompanyCam matching
+ * 
+ * @page ProjectSync
+ */
+
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -51,6 +95,7 @@ import { format } from "date-fns";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
+// T-Rock's Procore and HubSpot account identifiers
 const PROCORE_COMPANY_ID = "598134325683880";
 const HUBSPOT_PORTAL_ID = "245227962";
 

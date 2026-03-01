@@ -1,3 +1,47 @@
+/**
+ * Project Archive Module
+ * ======================
+ * 
+ * This module handles archiving completed projects to SharePoint.
+ * When a project reaches closeout, all documents are extracted from
+ * Procore and uploaded to a SharePoint folder for permanent storage.
+ * 
+ * Archive Process:
+ * 1. Create SharePoint folder for project
+ * 2. Enumerate all Procore documents (drawings, submittals, RFIs, etc.)
+ * 3. Download each document from Procore
+ * 4. Upload to SharePoint with folder organization
+ * 5. Track progress and handle errors
+ * 
+ * Document Types Archived:
+ * - Project drawings (CAD, PDF)
+ * - Submittals and approvals
+ * - RFIs (Requests for Information)
+ * - Bid packages and proposals
+ * - Change order documentation
+ * - Project photos
+ * 
+ * SharePoint Organization:
+ * /Projects/{ProjectNumber} - {ProjectName}/
+ *   ├── Drawings/
+ *   ├── Submittals/
+ *   ├── RFIs/
+ *   ├── Bid Packages/
+ *   └── Photos/
+ * 
+ * Key Functions:
+ * - startProjectArchive(): Begin archive process (async)
+ * - getArchiveProgress(): Check progress by project ID
+ * - getAllArchiveProgress(): List all archive jobs
+ * - getProjectDocumentSummary(): Preview what will be archived
+ * 
+ * Progress Tracking:
+ * Archive jobs are tracked in memory with status updates.
+ * Progress includes: file counts, current step, errors.
+ * 
+ * @module project-archive
+ */
+
 import { storage } from './storage';
 import { extractProjectDocuments, downloadProcoreFile, getProjectDocumentSummary, getProjectsList } from './procore-documents';
 import { 
@@ -7,6 +51,7 @@ import {
   getSharePointConfig 
 } from './microsoft';
 
+/** Archive progress tracking object */
 interface ArchiveProgress {
   projectId: string;
   projectName: string;

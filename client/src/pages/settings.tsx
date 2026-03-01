@@ -1,3 +1,58 @@
+/**
+ * Settings Page
+ * ==============
+ * 
+ * Central configuration hub for all application settings.
+ * Manages API connections, automation toggles, and system preferences.
+ * 
+ * Settings Sections:
+ * 
+ * 1. API Connections:
+ *    - HubSpot OAuth connection
+ *    - Procore OAuth connection
+ *    - CompanyCam API token
+ *    - Test connection buttons
+ * 
+ * 2. Playwright/Browser Automation:
+ *    - Procore browser credentials (email/password)
+ *    - Sandbox vs production toggle
+ *    - Test login functionality
+ * 
+ * 3. Automation Toggles:
+ *    - BidBoard polling enable/disable
+ *    - Stage sync to HubSpot enable/disable
+ *    - Change order sync enable/disable
+ *    - HubSpot → BidBoard auto-create
+ * 
+ * 4. Email Notifications:
+ *    - Gmail/Outlook provider selection
+ *    - OAuth connection for email providers
+ *    - Test email functionality
+ * 
+ * 5. Stage Mappings:
+ *    - Configure Procore → HubSpot stage translations
+ *    - Enable/disable specific mappings
+ *    - Set portfolio trigger stages
+ * 
+ * 6. Polling Configuration:
+ *    - Poll intervals for each service
+ *    - Enable/disable polling jobs
+ *    - Manual trigger buttons
+ * 
+ * Data Sources:
+ * - GET /api/settings/connections: Service connection status
+ * - GET /api/automation/config: Automation settings
+ * - GET /api/stage-mappings: Stage translation rules
+ * - POST /api/settings/*: Update various settings
+ * 
+ * Security:
+ * - Passwords encrypted before storage
+ * - OAuth tokens managed via secure flow
+ * - Session authentication required
+ * 
+ * @page Settings
+ */
+
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -44,6 +99,7 @@ import {
 import React, { useState, useEffect } from "react";
 import type { PollJob } from "@shared/schema";
 
+/** Main settings page component with all configuration options */
 export default function SettingsPage() {
   const { toast } = useToast();
   const [hubspotDialogOpen, setHubspotDialogOpen] = useState(false);

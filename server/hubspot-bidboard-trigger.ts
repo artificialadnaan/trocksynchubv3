@@ -1,3 +1,42 @@
+/**
+ * HubSpot → BidBoard Trigger Module
+ * ==================================
+ * 
+ * This module handles automatic creation of Procore BidBoard projects
+ * when HubSpot deals move to specific stages (e.g., "RFP").
+ * 
+ * Workflow:
+ * 1. HubSpot webhook fires when deal stage changes
+ * 2. Check if new stage is a trigger stage (e.g., "RFP")
+ * 3. If yes, create BidBoard project via Playwright automation
+ * 4. Upload HubSpot attachments to new BidBoard project
+ * 5. Create sync mapping linking deal to project
+ * 
+ * Trigger Stage Mapping:
+ * HubSpot Stage    → BidBoard Stage
+ * ──────────────────────────────────────
+ * "RFP"            → "Estimate in Progress"
+ * "Service RFP"    → "Service – Estimating"
+ * 
+ * Features:
+ * - Configurable trigger stages (via database)
+ * - Enable/disable via automation config
+ * - Document sync from HubSpot to new project
+ * - Audit logging of all actions
+ * 
+ * Key Functions:
+ * - processDealStageChange(): Main webhook handler
+ * - isTriggerEnabled(): Check if automation is enabled
+ * - getTriggerStages(): Get configured trigger stages
+ * - triggerBidBoardCreationForDeal(): Create project for deal
+ * 
+ * Automation Config Keys:
+ * - hubspot_bidboard_auto_create: Enable/disable (disabled by default)
+ * - hubspot_bidboard_trigger_stages: Custom trigger stage configuration
+ * 
+ * @module hubspot-bidboard-trigger
+ */
+
 import { storage } from "./storage";
 import { createBidBoardProjectFromDeal } from "./playwright/bidboard";
 

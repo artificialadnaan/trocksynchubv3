@@ -1,9 +1,53 @@
+/**
+ * Procore ↔ HubSpot Sync Module
+ * ==============================
+ * 
+ * This module handles bidirectional synchronization between Procore projects
+ * and HubSpot deals. It maintains the core linking between the two systems.
+ * 
+ * Key Features:
+ * - Automatic matching by project number or exact name
+ * - Sync mappings persist links between entities
+ * - Stage mapping: Procore stages → HubSpot deal stages
+ * - Conflict detection when data differs between systems
+ * - Dry-run mode for testing without writes
+ * 
+ * Sync Flow:
+ * 1. Load all Procore projects and HubSpot deals from local cache
+ * 2. Match projects to deals by project number (preferred) or name
+ * 3. Create/update sync mappings for matched pairs
+ * 4. Optionally create new HubSpot deals for unmatched Procore projects
+ * 5. Track conflicts when field values differ
+ * 
+ * Stage Mapping (PROCORE_TO_HUBSPOT_STAGE):
+ * Procore Stage              → HubSpot Stage
+ * ─────────────────────────────────────────────
+ * "Estimate in Progress"     → "Estimating"
+ * "Estimate under review"    → "Internal Review"
+ * "Estimate sent to Client"  → "Proposal Sent"
+ * "Sent to production"       → "Closed Won"
+ * "Production – lost"        → "Closed Lost"
+ * 
+ * Important Functions:
+ * - syncProcoreToHubspot(): Main sync function (defaults to read-only)
+ * - mapProcoreStageToHubspot(): Converts Procore stage to HubSpot label
+ * - resolveHubspotStageId(): Converts label to actual HubSpot stage ID
+ * - getSyncOverview(): Returns sync statistics
+ * 
+ * Configuration:
+ * - skipHubspotWrites: If true (default), only reads/links data
+ * - dryRun: Full simulation mode, no database or API writes
+ * 
+ * @module procore-hubspot-sync
+ */
+
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken } from './hubspot';
 import { db } from './db';
 import { syncMappings, hubspotDeals, procoreProjects } from '@shared/schema';
 import { eq, and, ilike, or, isNull, sql, desc, ne } from 'drizzle-orm';
 
+/** Result of a sync operation */
 interface SyncResult {
   matched: number;
   newMappings: number;

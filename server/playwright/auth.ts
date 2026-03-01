@@ -1,3 +1,43 @@
+/**
+ * Playwright Authentication Module
+ * =================================
+ * 
+ * This module handles browser-based authentication to Procore.
+ * It manages credentials securely and maintains login sessions.
+ * 
+ * Why Browser Authentication?
+ * Some Procore features (BidBoard, Portfolio transitions) require
+ * browser automation because they don't have complete API coverage.
+ * This module handles logging in and maintaining authenticated sessions.
+ * 
+ * Security Features:
+ * - Passwords encrypted at rest using AES-256-GCM
+ * - Encryption key derived from SESSION_SECRET environment variable
+ * - Session cookies saved to avoid repeated logins
+ * - Sessions expire and re-authenticate as needed
+ * 
+ * Login Flow:
+ * 1. Check for existing valid session
+ * 2. If no session, decrypt stored credentials
+ * 3. Navigate to Procore login page
+ * 4. Enter email, wait for password field
+ * 5. Enter password, click sign in
+ * 6. Handle any 2FA or security prompts
+ * 7. Save session cookies for reuse
+ * 
+ * Key Functions:
+ * - loginToProcore(): Main login function
+ * - ensureLoggedIn(): Ensures valid session, re-logs if needed
+ * - saveProcoreCredentials(): Securely stores credentials
+ * - testLogin(): Validates credentials without saving
+ * - encryptPassword()/decryptPassword(): Credential encryption
+ * 
+ * Environment Variables Required:
+ * - SESSION_SECRET: Used to derive encryption key for credentials
+ * 
+ * @module playwright/auth
+ */
+
 import { Page } from "playwright";
 import { getPage, saveSession, clearSession, withRetry, randomDelay, takeScreenshot } from "./browser";
 import { PROCORE_SELECTORS, PROCORE_URLS } from "./selectors";

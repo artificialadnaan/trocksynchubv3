@@ -1,3 +1,44 @@
+/**
+ * Playwright BidBoard Module
+ * ==========================
+ * 
+ * This module handles browser automation for Procore BidBoard (Estimating).
+ * BidBoard is where T-Rock manages pre-award estimates and proposals.
+ * 
+ * Why Browser Automation?
+ * Procore's BidBoard API is limited. Browser automation allows us to:
+ * - Scrape project list with stages and client info
+ * - Create new projects from HubSpot deals
+ * - Navigate to specific projects for data extraction
+ * - Sync client information to projects
+ * 
+ * BidBoard Data Extraction:
+ * The module scrapes the BidBoard project list page to extract:
+ * - Project ID and number
+ * - Project name and stage
+ * - Client name and contact info
+ * - Bid due dates and estimate amounts
+ * 
+ * Project Creation:
+ * When a HubSpot deal moves to "RFP" stage, this module can
+ * automatically create a corresponding BidBoard project.
+ * 
+ * Key Functions:
+ * - runBidBoardScrape(): Scrapes all BidBoard projects
+ * - navigateToBidBoard(): Navigate to BidBoard list page
+ * - navigateToProject(): Navigate to specific project
+ * - getProjectDetails(): Extract detailed project info
+ * - createBidBoardProject(): Create new project via form
+ * - createBidBoardProjectFromDeal(): Create from HubSpot deal data
+ * - syncHubSpotClientToBidBoard(): Sync client info from HubSpot
+ * 
+ * URL Patterns:
+ * - BidBoard List: /webclients/host/companies/{companyId}/tools/bid-board
+ * - Project Detail: /webclients/host/companies/{companyId}/projects/{projectId}
+ * 
+ * @module playwright/bidboard
+ */
+
 import { Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
 import { PROCORE_SELECTORS, getBidBoardUrl } from "./selectors";
@@ -5,6 +46,7 @@ import { randomDelay, takeScreenshot, withRetry, waitForNavigation } from "./bro
 import { log } from "../index";
 import { storage } from "../storage";
 
+/** BidBoard project data extracted from web scrape */
 export interface BidBoardProject {
   id: string;
   projectNumber?: string;

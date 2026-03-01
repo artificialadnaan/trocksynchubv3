@@ -1,3 +1,38 @@
+/**
+ * Dashboard Page
+ * ===============
+ * 
+ * Main landing page showing system health, sync statistics, and recent activity.
+ * This is the first page users see after logging in.
+ * 
+ * Dashboard Sections:
+ * 
+ * 1. Stat Cards:
+ *    - Total syncs in last 24 hours
+ *    - Successful/failed sync counts
+ *    - Pending webhook count
+ * 
+ * 2. Connection Status:
+ *    - HubSpot connection health
+ *    - Procore connection health
+ *    - CompanyCam connection health
+ * 
+ * 3. Sync Activity Chart:
+ *    - Bar chart showing sync volume over time
+ *    - Success vs failure breakdown
+ * 
+ * 4. Recent Activity Feed:
+ *    - Latest sync operations
+ *    - Stage changes and updates
+ *    - Error notifications
+ * 
+ * Data Sources:
+ * - GET /api/dashboard/stats: Sync statistics
+ * - GET /api/dashboard/connections: Service connection status
+ * 
+ * @page Dashboard
+ */
+
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +48,7 @@ import {
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { format } from "date-fns";
 
+/** Main dashboard page component */
 export default function DashboardPage() {
   const { data: stats, isLoading: statsLoading } = useQuery<any>({
     queryKey: ["/api/dashboard/stats"],

@@ -1,7 +1,70 @@
+/**
+ * Database Schema Definition
+ * ==========================
+ * 
+ * This file defines all database tables using Drizzle ORM for PostgreSQL.
+ * It serves as the single source of truth for the application's data model.
+ * 
+ * Schema Organization:
+ * 
+ * 1. SESSION & AUTH
+ *    - session: Express session storage
+ *    - users: Application authentication
+ * 
+ * 2. SYNC CORE
+ *    - sync_mappings: Links between HubSpot/Procore/CompanyCam entities (CRITICAL)
+ *    - stage_mappings: Procore → HubSpot stage translation rules
+ * 
+ * 3. HUBSPOT DATA (Cached from HubSpot API)
+ *    - hubspot_deals: CRM deals
+ *    - hubspot_companies: Company records
+ *    - hubspot_contacts: Contact records
+ *    - hubspot_pipelines: Pipeline and stage definitions
+ *    - hubspot_change_history: Change tracking
+ * 
+ * 4. PROCORE DATA (Cached from Procore API)
+ *    - procore_projects: Project records
+ *    - procore_vendors: Vendor directory
+ *    - procore_users: User records
+ *    - procore_bid_packages/bids/forms: BidBoard data
+ *    - procore_role_assignments: Project team assignments
+ *    - procore_change_history: Change tracking
+ * 
+ * 5. COMPANYCAM DATA (Cached from CompanyCam API)
+ *    - companycam_projects: Photo documentation projects
+ *    - companycam_users: Team members
+ *    - companycam_photos: Photo records
+ *    - companycam_change_history: Change tracking
+ * 
+ * 6. AUTOMATION & LOGGING
+ *    - automation_config: Feature flags and settings
+ *    - webhook_logs: Incoming webhook tracking
+ *    - audit_logs: System activity history
+ *    - email_templates: Notification templates
+ *    - email_send_log: Email delivery tracking
+ *    - bidboard_automation_logs: Playwright automation logs
+ * 
+ * 7. CLOSEOUT & ARCHIVE
+ *    - closeout_surveys: Client satisfaction surveys
+ *    - archive_progress: Document archiving status
+ * 
+ * Key Table: sync_mappings
+ * This is the core table linking entities across systems:
+ * - hubspotDealId ↔ procoreProjectId ↔ companyCamProjectId
+ * - Tracks BidBoard vs Portfolio phase
+ * - Records sync history and status
+ * 
+ * @module shared/schema
+ */
+
 import { sql } from "drizzle-orm";
 import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+
+// ========================================
+// SESSION & AUTHENTICATION
+// ========================================
 
 // Session table for connect-pg-simple
 export const session = pgTable("session", {

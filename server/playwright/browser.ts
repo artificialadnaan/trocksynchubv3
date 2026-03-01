@@ -1,3 +1,47 @@
+/**
+ * Playwright Browser Management Module
+ * =====================================
+ * 
+ * This module manages browser lifecycle for Playwright automation.
+ * It handles browser/context creation, session persistence, and utilities.
+ * 
+ * Design Patterns:
+ * - Singleton browser instance (reused across operations)
+ * - Session persistence (avoids repeated logins)
+ * - Automatic retry with exponential backoff
+ * - Human-like delays to avoid detection
+ * 
+ * Browser Configuration:
+ * - Headless in production, visible in development
+ * - Anti-detection flags to avoid bot detection
+ * - Session storage for cookie persistence
+ * 
+ * Session Management:
+ * Sessions are saved to .playwright-storage/procore-session.json
+ * This includes cookies and localStorage, allowing reuse of
+ * authenticated sessions across restarts.
+ * 
+ * Key Functions:
+ * - getBrowser(): Get or create browser instance
+ * - getContext(): Get or create browser context with session
+ * - getPage(): Get a new page in the context
+ * - saveSession(): Persist session cookies to disk
+ * - clearSession(): Clear saved session
+ * - closeBrowser(): Cleanup browser resources
+ * 
+ * Utility Functions:
+ * - withRetry(): Retry operations with exponential backoff
+ * - randomDelay(): Add human-like delays
+ * - takeScreenshot(): Capture page state for debugging
+ * - waitForNavigation(): Wait for navigation with retry
+ * 
+ * Environment Variables:
+ * - PLAYWRIGHT_STORAGE_DIR: Session storage location
+ * - NODE_ENV: Determines headless mode
+ * 
+ * @module playwright/browser
+ */
+
 import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { log } from "../index";
 import path from "path";

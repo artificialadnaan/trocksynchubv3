@@ -1,3 +1,48 @@
+/**
+ * Playwright Documents Module
+ * ===========================
+ * 
+ * This module handles document operations in Procore via browser automation.
+ * It manages uploads, downloads, and exports for both BidBoard and Portfolio.
+ * 
+ * Document Operations:
+ * 
+ * 1. Upload Documents:
+ *    - Upload files to BidBoard projects
+ *    - Upload files to Portfolio projects
+ *    - Sync HubSpot attachments to Procore
+ * 
+ * 2. Download Documents:
+ *    - Download files from Procore projects
+ *    - Handle authentication headers for downloads
+ * 
+ * 3. Export Operations:
+ *    - Export project specifications as PDF
+ *    - Export project drawings as ZIP
+ *    - Export project reports
+ *    - Export estimates as PDF
+ * 
+ * HubSpot → Procore Document Sync:
+ * When a BidBoard project is created from HubSpot, this module can
+ * automatically upload all HubSpot deal attachments to the new project.
+ * 
+ * Key Functions:
+ * - uploadDocumentToBidBoard(): Upload file to BidBoard project
+ * - uploadDocumentToPortfolio(): Upload file to Portfolio project
+ * - syncHubSpotAttachmentsToBidBoard(): Sync all deal attachments
+ * - downloadFile(): Download file from URL to local path
+ * - downloadProcoreFile(): Download file from Procore API
+ * - exportProjectSpecifications(): Export specs as PDF
+ * - exportProjectDrawings(): Export drawings as ZIP
+ * - exportAndSaveEstimatePdf(): Export estimate as PDF
+ * 
+ * File Handling:
+ * - Temporary files stored in TEMP_DIR (default: .playwright-temp)
+ * - Automatic cleanup of temp files after processing
+ * 
+ * @module playwright/documents
+ */
+
 import { Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
 import { PROCORE_SELECTORS, PROCORE_URLS } from "./selectors";

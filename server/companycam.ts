@@ -1,3 +1,45 @@
+/**
+ * CompanyCam Integration Module
+ * =============================
+ * 
+ * This module handles all interactions with the CompanyCam Photo Documentation API.
+ * CompanyCam is used by T-Rock for jobsite photo documentation and progress tracking.
+ * 
+ * Key Features:
+ * - API token authentication (bearer token)
+ * - Full sync of projects, users, and photos
+ * - Integration detection (links to Procore/HubSpot via integrations field)
+ * - Change detection and history tracking
+ * 
+ * CompanyCam Data Model:
+ * - Projects: Jobsite locations with photos
+ * - Photos: Timestamped images with metadata
+ * - Users: Team members who can upload/view photos
+ * - Integrations: Native links to Procore/HubSpot projects
+ * 
+ * Integration Matching:
+ * CompanyCam projects may have native integrations that link them to
+ * Procore projects or HubSpot deals. The companycam-automation module
+ * extracts these IDs for automatic matching.
+ * 
+ * Integration Data Structure (from CompanyCam API):
+ * ```json
+ * {
+ *   "integrations": [
+ *     { "type": "procore", "relation_id": "12345" },
+ *     { "type": "hubspot", "relation_id": "67890" }
+ *   ]
+ * }
+ * ```
+ * 
+ * Key Functions:
+ * - runFullCompanycamSync(): Syncs all CompanyCam data to local database
+ * - getCompanycamToken(): Gets API token from database or env
+ * - companycamApiFetch(): Authenticated API request helper
+ * 
+ * @module companycam
+ */
+
 import { storage } from './storage';
 import type { InsertCompanycamProject, InsertCompanycamUser, InsertCompanycamPhoto, InsertCompanycamChangeHistory } from '@shared/schema';
 

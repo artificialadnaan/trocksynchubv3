@@ -1,3 +1,42 @@
+/**
+ * CompanyCam Automation Module
+ * ============================
+ * 
+ * This module handles automated matching and linking of CompanyCam projects
+ * to Procore projects and HubSpot deals. It leverages CompanyCam's native
+ * integrations when available and falls back to fuzzy matching.
+ * 
+ * Key Features:
+ * - Extract integration IDs from CompanyCam project data
+ * - Bulk matching of CompanyCam projects to Procore/HubSpot
+ * - Fuzzy matching by address and name when no direct link exists
+ * - Search CompanyCam projects by various criteria
+ * 
+ * Matching Strategy (in order of priority):
+ * 1. Direct Integration ID: CompanyCam stores Procore/HubSpot IDs
+ * 2. Project Number Match: Same project number in both systems
+ * 3. Exact Name Match: Identical project names
+ * 4. Fuzzy Address Match: Similar addresses with scoring
+ * 
+ * Integration Data Extraction:
+ * CompanyCam stores integration data in multiple formats:
+ * - integrations[] array with type/provider/name fields
+ * - properties.external_ids[] array
+ * - properties.integrations object
+ * - Direct properties like procore_project_id
+ * 
+ * The extractProcoreIdFromIntegrations() and extractHubspotIdFromIntegrations()
+ * functions handle all these formats.
+ * 
+ * Key Functions:
+ * - bulkMatchCompanyCamToProcore(): Batch matches all CompanyCam projects
+ * - searchCompanyCamProjects(): Search by name, address, city
+ * - extractProcoreIdFromIntegrations(): Get Procore ID from CC project
+ * - extractHubspotIdFromIntegrations(): Get HubSpot ID from CC project
+ * 
+ * @module companycam-automation
+ */
+
 import { storage } from './storage';
 
 const BASE_URL = 'https://api.companycam.com/v2';

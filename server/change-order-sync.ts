@@ -1,6 +1,50 @@
+/**
+ * Change Order Sync Module
+ * ========================
+ * 
+ * This module synchronizes change order data from Procore to HubSpot.
+ * It calculates total contract values including approved and pending changes.
+ * 
+ * What are Change Orders?
+ * Change orders represent modifications to the original contract scope and price.
+ * They can be:
+ * - Approved: Confirmed additional work/cost
+ * - Pending: Requested but not yet approved
+ * - Rejected: Denied changes
+ * 
+ * Contract Value Calculation:
+ * totalContractValue = primeContractAmount + approvedChangeOrders + pendingChangeOrders
+ * 
+ * This includes pending because pending changes represent work expected
+ * to be performed and should be visible in pipeline reporting.
+ * 
+ * Data Flow:
+ * 1. Fetch change order packages from Procore API
+ * 2. Calculate approved and pending amounts
+ * 3. Update HubSpot deal with total contract value
+ * 4. Store change order details for reference
+ * 
+ * Key Functions:
+ * - getProjectChangeOrders(): Fetch change orders from Procore
+ * - getPrimeContractAmount(): Get original contract value
+ * - calculateTotalContractValue(): Compute total with changes
+ * - syncChangeOrdersToHubSpot(): Push values to HubSpot deal
+ * 
+ * HubSpot Properties Updated:
+ * - amount: Total contract value
+ * - hs_change_order_approved: Approved changes total
+ * - hs_change_order_pending: Pending changes total
+ * 
+ * Automation Config:
+ * - change_order_hubspot_sync: Enable/disable sync (disabled by default)
+ * 
+ * @module change-order-sync
+ */
+
 import { storage } from './storage';
 import { getProcoreClient, getCompanyId } from './procore';
 
+/** Change order record from Procore */
 export interface ChangeOrder {
   id: string;
   number: string;

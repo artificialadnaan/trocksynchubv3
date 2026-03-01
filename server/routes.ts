@@ -1,3 +1,61 @@
+/**
+ * API Routes Module
+ * ==================
+ * 
+ * This module defines all HTTP API endpoints for the T-Rock Sync Hub.
+ * It handles REST endpoints, webhook receivers, and OAuth callbacks.
+ * 
+ * Route Categories:
+ * 
+ * 1. AUTHENTICATION (/api/auth/*)
+ *    - POST /api/auth/login: User login
+ *    - POST /api/auth/logout: User logout
+ *    - GET /api/auth/me: Current user info
+ * 
+ * 2. SYNC OPERATIONS (/api/sync/*)
+ *    - GET /api/sync/overview: Sync statistics
+ *    - GET /api/sync/mappings: All sync mappings
+ *    - POST /api/sync/trigger: Trigger sync operation
+ *    - POST /api/sync/link: Manual link creation
+ *    - POST /api/sync/unlink: Remove link
+ * 
+ * 3. HUBSPOT (/api/hubspot/*)
+ *    - GET /api/hubspot/deals: List deals
+ *    - POST /api/hubspot/sync: Full sync
+ *    - OAuth callback endpoints
+ * 
+ * 4. PROCORE (/api/procore/*)
+ *    - GET /api/procore/projects: List projects
+ *    - POST /api/procore/sync: Full sync
+ *    - OAuth callback endpoints
+ * 
+ * 5. COMPANYCAM (/api/companycam/*)
+ *    - GET /api/companycam/projects: List projects
+ *    - POST /api/companycam/bulk-match: Batch matching
+ *    - POST /api/companycam/sync: Full sync
+ * 
+ * 6. WEBHOOKS (/webhooks/*)
+ *    - POST /webhooks/hubspot: HubSpot events
+ *    - POST /webhooks/procore: Procore events
+ * 
+ * 7. PLAYWRIGHT AUTOMATION (/api/bidboard/*, /api/portfolio/*)
+ *    - POST /api/bidboard/scrape: Scrape BidBoard
+ *    - POST /api/portfolio/transition: Portfolio transition
+ *    - Playwright testing endpoints
+ * 
+ * 8. SETTINGS & CONFIG (/api/settings/*, /api/automation/*)
+ *    - GET/POST automation config
+ *    - Email template management
+ *    - Stage mapping management
+ * 
+ * Authentication:
+ * Most endpoints require authentication via session cookie.
+ * Use requireAuth middleware for protected routes.
+ * Webhook endpoints use signature verification instead.
+ * 
+ * @module routes
+ */
+
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";

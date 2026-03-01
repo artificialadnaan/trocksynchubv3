@@ -1,3 +1,36 @@
+/**
+ * T-Rock Sync Hub - Main Server Entry Point
+ * ==========================================
+ * 
+ * This is the main entry point for the T-Rock Sync Hub application server.
+ * The application synchronizes data between HubSpot CRM, Procore project management,
+ * and CompanyCam photo documentation systems.
+ * 
+ * Key Responsibilities:
+ * - Initialize Express server with middleware
+ * - Register API routes and webhook handlers
+ * - Serve static files in production or Vite dev server in development
+ * - Provide centralized logging utility
+ * - Seed default data (email templates) on startup
+ * 
+ * Architecture:
+ * - Express.js for HTTP handling
+ * - PostgreSQL for data persistence (via Drizzle ORM)
+ * - Playwright for browser automation (Procore BidBoard/Portfolio)
+ * - Real-time webhooks from HubSpot and Procore
+ * 
+ * Environment Variables:
+ * - PORT: Server port (default: 5000)
+ * - NODE_ENV: 'production' or 'development'
+ * - DATABASE_URL: PostgreSQL connection string
+ * - HUBSPOT_ACCESS_TOKEN: HubSpot API key
+ * - PROCORE_CLIENT_ID/SECRET: Procore OAuth credentials
+ * - COMPANYCAM_API_KEY: CompanyCam API key
+ * 
+ * @author T-Rock Construction
+ * @version 1.0.0
+ */
+
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
@@ -13,6 +46,18 @@ declare module "http" {
   }
 }
 
+/**
+ * Centralized logging utility for the application.
+ * Formats log messages with timestamp and source identifier.
+ * Used throughout the codebase for consistent logging format.
+ * 
+ * @param message - The message to log
+ * @param source - The source module (e.g., 'express', 'playwright', 'hubspot', 'procore')
+ * 
+ * @example
+ * log("Successfully synced 10 projects", "procore");
+ * // Output: "5:30:45 PM [procore] Successfully synced 10 projects"
+ */
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",

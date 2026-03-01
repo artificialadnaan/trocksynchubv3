@@ -1,5 +1,48 @@
+/**
+ * Procore Integration Module
+ * ==========================
+ * 
+ * This module handles all interactions with the Procore Construction Management API.
+ * It manages OAuth authentication, project data synchronization, and BidBoard operations.
+ * 
+ * Key Features:
+ * - OAuth 2.0 authentication with automatic token refresh
+ * - Full sync of projects, vendors, users, and bid packages
+ * - BidBoard (estimating) data synchronization
+ * - Role assignment tracking and notifications
+ * - Change detection for stage transitions
+ * 
+ * Procore Project Lifecycle:
+ * 1. BidBoard Phase: Projects in estimating (pre-award)
+ *    - Synced via syncProcoreBidBoard()
+ *    - Stage changes trigger HubSpot updates
+ * 
+ * 2. Portfolio Phase: Active projects (post-award)
+ *    - Transitioned via Playwright automation
+ *    - Documents, budgets, change orders tracked
+ * 
+ * API Endpoints Used:
+ * - /rest/v1.0/projects: Project CRUD
+ * - /rest/v1.0/companies/{id}/vendors: Vendor directory
+ * - /rest/v1.0/companies/{id}/users: User management
+ * - /rest/v1.1/projects/{id}/bid_packages: BidBoard data
+ * 
+ * Key Functions:
+ * - getProcoreClient(): Returns authenticated API client
+ * - runFullProcoreSync(): Syncs all Procore data to local database
+ * - syncProcoreBidBoard(): Syncs BidBoard/estimating projects
+ * - syncProcoreRoleAssignments(): Tracks project role changes
+ * - getCompanyId(): Gets configured Procore company ID
+ * 
+ * @module procore
+ */
+
 import { storage } from './storage';
 
+/**
+ * Gets Procore configuration from database.
+ * Falls back to default company ID if not configured.
+ */
 async function getProcoreConfig(): Promise<{ companyId: string; environment: string; clientId: string; clientSecret: string }> {
   const config = await storage.getAutomationConfig("procore_config");
   if (!config?.value) {

@@ -1,9 +1,61 @@
+/**
+ * Project Closeout Automation Module
+ * ===================================
+ * 
+ * This module handles end-of-project workflows including client surveys,
+ * document archiving, and project deactivation.
+ * 
+ * Closeout Workflow:
+ * 
+ * 1. Trigger Closeout Survey:
+ *    - Generate unique survey token
+ *    - Create survey record in database
+ *    - Send email to client with survey link
+ *    - Optionally include executives
+ * 
+ * 2. Process Survey Response:
+ *    - Client submits satisfaction rating
+ *    - Optional feedback and Google review
+ *    - Store response in database
+ *    - Notify team of completion
+ * 
+ * 3. Archive Project:
+ *    - Export all project documents
+ *    - Create archive package
+ *    - Store in configured location (SharePoint)
+ * 
+ * 4. Deactivate Project:
+ *    - Wait for archive to complete
+ *    - Mark project as inactive in Procore
+ *    - Update HubSpot deal stage to Closed
+ * 
+ * Survey Features:
+ * - Secure token-based access (no login required)
+ * - Star rating (1-5) for satisfaction
+ * - Free-form feedback field
+ * - Google review redirect link (configurable)
+ * 
+ * Key Functions:
+ * - triggerCloseoutSurvey(): Initiate closeout workflow
+ * - generateSurveyToken(): Create secure survey access token
+ * - createCloseoutSurvey(): Create survey record in DB
+ * - runProjectCloseout(): Full closeout workflow (archive + deactivate)
+ * - processSurveySubmission(): Handle client survey response
+ * 
+ * Database Tables:
+ * - closeout_surveys: Survey records and responses
+ * - archive_progress: Archive job tracking
+ * 
+ * @module closeout-automation
+ */
+
 import { storage } from './storage';
 import { sendEmail, renderTemplate } from './email-service';
 import { deactivateProject, fetchProcoreProjectDetail } from './procore';
 import { startProjectArchive, getArchiveProgress } from './project-archive';
 import crypto from 'crypto';
 
+/** Options for triggering closeout survey */
 interface CloseoutSurveyOptions {
   includeExecs?: boolean;
   googleReviewLink?: string;

@@ -1,3 +1,38 @@
+/**
+ * HubSpot Integration Module
+ * ==========================
+ * 
+ * This module handles all interactions with the HubSpot CRM API.
+ * It manages OAuth authentication, data synchronization, and deal/contact operations.
+ * 
+ * Key Features:
+ * - OAuth 2.0 authentication flow (authorization code grant)
+ * - Automatic token refresh when tokens expire
+ * - Full sync of companies, contacts, deals, and pipelines
+ * - Deal stage updates (triggered by Procore stage changes)
+ * - Change detection and history tracking
+ * 
+ * Data Flow:
+ * 1. User authenticates via OAuth → tokens stored in database
+ * 2. runFullHubSpotSync() fetches all CRM data → cached locally
+ * 3. Procore stage changes → mapProcoreStageToHubspot() → update deal stage
+ * 4. Webhooks from HubSpot → trigger sync updates
+ * 
+ * HubSpot API Scopes Required:
+ * - crm.objects.deals.read/write
+ * - crm.objects.contacts.read
+ * - crm.objects.companies.read
+ * - crm.schemas.*.read
+ * 
+ * Key Functions:
+ * - getHubSpotClient(): Returns authenticated API client
+ * - runFullHubSpotSync(): Syncs all HubSpot data to local database
+ * - updateHubSpotDealStage(): Updates deal stage (requires stage ID, not label)
+ * - syncHubSpotPipelines(): Syncs pipeline and stage definitions
+ * 
+ * @module hubspot
+ */
+
 import { Client } from '@hubspot/api-client';
 import { storage } from './storage';
 

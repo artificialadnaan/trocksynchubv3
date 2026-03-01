@@ -1,9 +1,51 @@
+/**
+ * Gmail Integration Module
+ * ========================
+ * 
+ * This module handles Gmail API integration for sending email notifications.
+ * Uses Google OAuth 2.0 for authentication.
+ * 
+ * OAuth Flow:
+ * 1. User clicks "Connect Gmail" in settings
+ * 2. Redirect to Google OAuth consent screen
+ * 3. User authorizes application
+ * 4. Callback receives authorization code
+ * 5. Exchange code for access/refresh tokens
+ * 6. Store tokens in database
+ * 
+ * Features:
+ * - Send emails via Gmail API
+ * - Automatic token refresh when expired
+ * - Read user's email address for display
+ * - HTML email support
+ * 
+ * Gmail API Scopes:
+ * - gmail.send: Send emails
+ * - gmail.readonly: Read user info
+ * - openid, profile, email: User identification
+ * 
+ * Key Functions:
+ * - getGmailAuthUrl(): Generate OAuth authorization URL
+ * - exchangeGmailCode(): Exchange auth code for tokens
+ * - sendEmail(): Send email via Gmail API
+ * - isGmailConnected(): Check if Gmail is connected
+ * - getGmailConnectionStatus(): Get connection details
+ * 
+ * Environment Variables:
+ * - GOOGLE_CLIENT_ID: OAuth client ID
+ * - GOOGLE_CLIENT_SECRET: OAuth client secret
+ * - APP_URL: Application base URL for callback
+ * 
+ * @module gmail
+ */
+
 import { google } from 'googleapis';
 import { storage } from './storage';
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
+/** Gmail OAuth token storage */
 interface GmailTokens {
   accessToken: string;
   refreshToken: string;
