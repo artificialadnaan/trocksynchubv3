@@ -251,7 +251,7 @@ async function getAccessToken(): Promise<string> {
     }
   ).then(res => res.json()).then(data => data.items?.[0]);
 
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings.settings?.oauth?.credentials?.access_token;
+  const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
 
   if (!connectionSettings || !accessToken) {
     throw new Error('Gmail not connected. Configure Gmail OAuth in Settings or set GMAIL_ACCESS_TOKEN env var.');

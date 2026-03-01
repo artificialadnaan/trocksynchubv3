@@ -804,6 +804,34 @@ export async function registerRoutes(
             }
           }
         }
+
+        // Handle contact events - sync contact data in real-time via webhook
+        if (objectType === "contact") {
+          try {
+            const { syncSingleHubSpotContact, deleteHubSpotContact } = await import("./hubspot");
+            if (eventType.includes("deletion") || eventType.includes("delete")) {
+              await deleteHubSpotContact(objectId);
+            } else {
+              // creation, propertyChange, or any other contact event - fetch and sync
+              await syncSingleHubSpotContact(objectId);
+            }
+          } catch (contactErr: any) {
+            console.error(`[hubspot] Contact sync error for ${objectId}:`, contactErr.message);
+          }
+        }
+
+        // Handle company events - sync company data in real-time via webhook
+        if (objectType === "company") {
+          try {
+            const { syncSingleHubSpotCompany } = await import("./hubspot");
+            if (!eventType.includes("deletion") && !eventType.includes("delete")) {
+              await syncSingleHubSpotCompany(objectId);
+            }
+            // Note: Company deletion would require implementing deleteHubspotCompany handler
+          } catch (companyErr: any) {
+            console.error(`[hubspot] Company sync error for ${objectId}:`, companyErr.message);
+          }
+        }
       }
       res.status(200).json({ received: true });
     } catch (e: any) {
@@ -1088,6 +1116,34 @@ export async function registerRoutes(
         }
       }
 
+      // Handle user events - sync user data in real-time via webhook
+      if (resourceName === "users" || resourceName === "user") {
+        try {
+          const userId = String(event.resource_id || "");
+          if (userId) {
+            const { syncSingleProcoreUser } = await import("./procore");
+            if (eventType === "delete") {
+              await storage.deleteProcoreUser(userId);
+              console.log(`[webhook] Procore user ${userId} deleted via webhook`);
+            } else {
+              const result = await syncSingleProcoreUser(userId);
+              console.log(`[webhook] Procore user ${userId} ${result.action} via webhook`);
+            }
+          }
+        } catch (err: any) {
+          console.error(`[webhook] Error processing user webhook:`, err.message);
+          await storage.createAuditLog({
+            action: "webhook_user_sync",
+            entityType: "user",
+            entityId: String(event.resource_id || ""),
+            source: "procore",
+            status: "error",
+            errorMessage: err.message,
+            details: event,
+          });
+        }
+      }
+
       await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
     } catch (e: any) {
       res.status(200).json({ received: true });
@@ -1118,15 +1174,62 @@ export async function registerRoutes(
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       });
 
+      const resourceType = event.resource_type || event.event_type?.split('.')[0] || "unknown";
+      const eventType = event.event_type || "unknown";
+      const resourceId = String(event.data?.id || "");
+
       await storage.createAuditLog({
         action: "webhook_received",
-        entityType: "project",
-        entityId: String(event.data?.id || ""),
+        entityType: resourceType,
+        entityId: resourceId,
         source: "companycam",
         status: "received",
         details: event,
         idempotencyKey,
       });
+
+      // Handle user events - sync user data in real-time via webhook
+      if (resourceType === "user" || eventType.startsWith("user.")) {
+        try {
+          if (resourceId) {
+            const { syncSingleCompanycamUser } = await import("./companycam");
+            // CompanyCam doesn't typically send delete events, but handle if they do
+            if (eventType.includes("deleted") || eventType.includes("delete")) {
+              await storage.deleteCompanycamUser(resourceId);
+              console.log(`[webhook] CompanyCam user ${resourceId} deleted via webhook`);
+            } else {
+              const result = await syncSingleCompanycamUser(resourceId);
+              console.log(`[webhook] CompanyCam user ${resourceId} ${result.action} via webhook`);
+            }
+          }
+        } catch (err: any) {
+          console.error(`[webhook] Error processing CompanyCam user webhook:`, err.message);
+          await storage.createAuditLog({
+            action: "webhook_user_sync",
+            entityType: "user",
+            entityId: resourceId,
+            source: "companycam",
+            status: "error",
+            errorMessage: err.message,
+            details: event,
+          });
+        }
+      }
+
+      // Handle project events - sync project data in real-time via webhook
+      if (resourceType === "project" || eventType.startsWith("project.")) {
+        try {
+          if (resourceId) {
+            const { syncSingleCompanycamProject } = await import("./companycam");
+            if (!eventType.includes("deleted") && !eventType.includes("delete")) {
+              const result = await syncSingleCompanycamProject(resourceId);
+              console.log(`[webhook] CompanyCam project ${resourceId} ${result.action} via webhook`);
+            }
+          }
+        } catch (err: any) {
+          console.error(`[webhook] Error processing CompanyCam project webhook:`, err.message);
+        }
+      }
 
       await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
       res.status(200).json({ received: true });

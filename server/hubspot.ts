@@ -347,6 +347,80 @@ export async function syncHubSpotCompanies(): Promise<{ synced: number; created:
   return { synced: allCompanies.length, created, updated, changes };
 }
 
+/**
+ * Fetch and sync a single HubSpot company by ID.
+ * Called by webhook handlers for real-time company updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleHubSpotCompany(companyId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+  try {
+    const client = await getHubSpotClient();
+    const properties = ['name', 'domain', 'phone', 'address', 'city', 'state', 'zip', 'industry', 'hubspot_owner_id', 'hs_lastmodifieddate'];
+    
+    let company;
+    try {
+      company = await client.crm.companies.basicApi.getById(companyId, properties);
+    } catch (fetchErr: any) {
+      if (fetchErr.code === 404 || fetchErr.statusCode === 404) {
+        await storage.deleteHubspotCompany(companyId);
+        console.log(`[hubspot] Company ${companyId} deleted (not found in HubSpot)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const props = company.properties || {};
+    const existing = await storage.getHubspotCompanyByHubspotId(companyId);
+    const action = existing ? 'updated' : 'created';
+    
+    const data = {
+      hubspotId: companyId,
+      name: props.name || null,
+      domain: props.domain || null,
+      phone: props.phone || null,
+      address: props.address || null,
+      city: props.city || null,
+      state: props.state || null,
+      zip: props.zip || null,
+      industry: props.industry || null,
+      ownerId: props.hubspot_owner_id || null,
+      properties: props,
+      hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
+    };
+    
+    if (existing) {
+      const changedFields = detectChanges(existing, data, ['name', 'domain', 'phone', 'address', 'city', 'state', 'zip', 'industry', 'ownerId']);
+      for (const change of changedFields) {
+        await storage.createChangeHistory({
+          entityType: 'company',
+          entityHubspotId: companyId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: props,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createChangeHistory({
+        entityType: 'company',
+        entityHubspotId: companyId,
+        changeType: 'created',
+        fullSnapshot: props,
+        syncedAt: new Date(),
+      });
+    }
+    
+    await storage.upsertHubspotCompany(data);
+    console.log(`[hubspot] Company ${companyId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to sync company ${companyId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
 async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   const ownerMap = new Map<string, string>();
   const accessToken = await getAccessToken();
@@ -550,6 +624,109 @@ export async function syncHubSpotContacts(): Promise<{ synced: number; created: 
   }
 
   return { synced: allContacts.length, created, updated, changes };
+}
+
+/**
+ * Fetch and sync a single HubSpot contact by ID.
+ * Called by webhook handlers for real-time contact updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleHubSpotContact(contactId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+  try {
+    const client = await getHubSpotClient();
+    const properties = ['firstname', 'lastname', 'email', 'phone', 'company', 'jobtitle', 'lifecyclestage', 'hubspot_owner_id', 'associatedcompanyid', 'hs_lastmodifieddate'];
+    
+    let contact;
+    try {
+      contact = await client.crm.contacts.basicApi.getById(contactId, properties);
+    } catch (fetchErr: any) {
+      if (fetchErr.code === 404 || fetchErr.statusCode === 404) {
+        // Contact was deleted - mark as deleted in our system
+        await storage.deleteHubspotContact(contactId);
+        console.log(`[hubspot] Contact ${contactId} deleted (not found in HubSpot)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const props = contact.properties || {};
+    const existing = await storage.getHubspotContactByHubspotId(contactId);
+    const ownerMap = await fetchHubSpotOwners();
+    
+    let associatedCompanyId = props.associatedcompanyid || null;
+    let associatedCompanyName: string | null = null;
+    if (associatedCompanyId) {
+      const company = await storage.getHubspotCompanyByHubspotId(associatedCompanyId);
+      associatedCompanyName = company?.name || null;
+    }
+    
+    const ownerName = props.hubspot_owner_id ? (ownerMap.get(props.hubspot_owner_id) || null) : null;
+    
+    const data = {
+      hubspotId: contactId,
+      firstName: props.firstname || null,
+      lastName: props.lastname || null,
+      email: props.email || null,
+      phone: props.phone || null,
+      company: props.company || null,
+      jobTitle: props.jobtitle || null,
+      lifecycleStage: props.lifecyclestage || null,
+      ownerId: props.hubspot_owner_id || null,
+      ownerName,
+      associatedCompanyId,
+      associatedCompanyName,
+      properties: props,
+      hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
+    };
+    
+    const action = existing ? 'updated' : 'created';
+    
+    if (existing) {
+      const changedFields = detectChanges(existing, data, ['firstName', 'lastName', 'email', 'phone', 'company', 'jobTitle', 'lifecycleStage', 'ownerId', 'ownerName', 'associatedCompanyId', 'associatedCompanyName']);
+      for (const change of changedFields) {
+        await storage.createChangeHistory({
+          entityType: 'contact',
+          entityHubspotId: contactId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: props,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createChangeHistory({
+        entityType: 'contact',
+        entityHubspotId: contactId,
+        changeType: 'created',
+        fullSnapshot: props,
+        syncedAt: new Date(),
+      });
+    }
+    
+    await storage.upsertHubspotContact(data);
+    console.log(`[hubspot] Contact ${contactId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to sync contact ${contactId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
+/**
+ * Delete a HubSpot contact from local database.
+ * Called when webhook indicates contact deletion.
+ */
+export async function deleteHubSpotContact(contactId: string): Promise<boolean> {
+  try {
+    await storage.deleteHubspotContact(contactId);
+    console.log(`[hubspot] Contact ${contactId} deleted from local database`);
+    return true;
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to delete contact ${contactId}:`, err.message);
+    return false;
+  }
 }
 
 export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number; newDealIds: string[] }> {

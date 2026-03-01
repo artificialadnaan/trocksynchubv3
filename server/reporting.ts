@@ -181,7 +181,7 @@ export async function getEmailsSentCount(): Promise<number> {
 
 export async function getSurveysCompletedCount(): Promise<number> {
   try {
-    const surveys = await storage.getCloseoutSurveys();
+    const { data: surveys } = await storage.getCloseoutSurveys({});
     return surveys.filter(s => s.submittedAt !== null).length;
   } catch {
     return 0;

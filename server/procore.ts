@@ -508,6 +508,94 @@ export async function syncProcoreUsers(): Promise<{ synced: number; created: num
   return { synced: allUsers.length, created, updated, changes };
 }
 
+/**
+ * Fetch and sync a single Procore user by ID.
+ * Called by webhook handlers for real-time user updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleProcoreUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+  try {
+    const config = await getProcoreConfig();
+    const companyId = config.companyId;
+    const client = await getProcoreClient();
+    
+    let user;
+    try {
+      const response = await client.get(`/rest/v1.0/companies/${companyId}/users/${userId}`);
+      user = response.data;
+    } catch (fetchErr: any) {
+      if (fetchErr.response?.status === 404) {
+        await storage.deleteProcoreUser(userId);
+        console.log(`[procore] User ${userId} deleted (not found in Procore)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const procoreId = String(user.id);
+    const existing = await storage.getProcoreUserByProcoreId(procoreId);
+    
+    const data = {
+      procoreId,
+      name: user.name || null,
+      firstName: user.first_name || null,
+      lastName: user.last_name || null,
+      emailAddress: user.email_address || null,
+      jobTitle: user.job_title || null,
+      businessPhone: user.business_phone || null,
+      mobilePhone: user.mobile_phone || null,
+      address: user.address || null,
+      city: user.city || null,
+      stateCode: user.state_code || null,
+      zip: user.zip || null,
+      countryCode: user.country_code || null,
+      isActive: user.is_active ?? null,
+      isEmployee: user.is_employee ?? null,
+      lastLoginAt: user.last_login_at || null,
+      employeeId: user.employee_id ? String(user.employee_id) : null,
+      vendorId: user.vendor?.id ? String(user.vendor.id) : null,
+      vendorName: user.vendor?.name || null,
+      companyId: companyId,
+      properties: user,
+      procoreUpdatedAt: user.updated_at ? new Date(user.updated_at) : null,
+    };
+    
+    const action = existing ? 'updated' : 'created';
+    const trackFields = ['name', 'firstName', 'lastName', 'emailAddress', 'jobTitle', 'businessPhone', 'mobilePhone', 'address', 'city', 'stateCode', 'zip', 'isActive', 'isEmployee', 'vendorName'];
+    
+    if (existing) {
+      const changedFields = detectChanges(existing, data, trackFields);
+      for (const change of changedFields) {
+        await storage.createProcoreChangeHistory({
+          entityType: 'user',
+          entityProcoreId: procoreId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: user,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createProcoreChangeHistory({
+        entityType: 'user',
+        entityProcoreId: procoreId,
+        changeType: 'created',
+        fullSnapshot: user,
+        syncedAt: new Date(),
+      });
+    }
+    
+    await storage.upsertProcoreUser(data);
+    console.log(`[procore] User ${procoreId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[procore] Failed to sync user ${userId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
 async function fetchProcoreJson(endpoint: string, companyId: string): Promise<any> {
   const accessToken = await getAccessToken();
   const config = await getProcoreConfig();

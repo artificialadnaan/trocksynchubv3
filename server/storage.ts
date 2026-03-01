@@ -183,6 +183,11 @@ export interface IStorage {
   getHubspotPipelines(): Promise<HubspotPipeline[]>;
   getHubspotChangeHistoryList(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: HubspotChangeHistory[]; total: number }>;
 
+  // Delete methods for webhook-driven deletions
+  deleteHubspotContact(hubspotId: string): Promise<void>;
+  deleteHubspotCompany(hubspotId: string): Promise<void>;
+  deleteHubspotDeal(hubspotId: string): Promise<void>;
+
   upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
   getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
   getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }>;
@@ -194,6 +199,7 @@ export interface IStorage {
   upsertProcoreUser(data: InsertProcoreUser): Promise<ProcoreUser>;
   getProcoreUserByProcoreId(procoreId: string): Promise<ProcoreUser | undefined>;
   getProcoreUsers(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreUser[]; total: number }>;
+  deleteProcoreUser(procoreId: string): Promise<void>;
 
   createProcoreChangeHistory(data: InsertProcoreChangeHistory): Promise<ProcoreChangeHistory>;
   getProcoreChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreChangeHistory[]; total: number }>;
@@ -221,6 +227,7 @@ export interface IStorage {
   upsertCompanycamUser(data: InsertCompanycamUser): Promise<CompanycamUser>;
   getCompanycamUserByCompanycamId(companycamId: string): Promise<CompanycamUser | undefined>;
   getCompanycamUsers(filters: { search?: string; role?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamUser[]; total: number }>;
+  deleteCompanycamUser(companycamId: string): Promise<void>;
   upsertCompanycamPhoto(data: InsertCompanycamPhoto): Promise<CompanycamPhoto>;
   getCompanycamPhotoByCompanycamId(companycamId: string): Promise<CompanycamPhoto | undefined>;
   getCompanycamPhotos(filters: { search?: string; projectId?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamPhoto[]; total: number }>;
@@ -591,6 +598,18 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  async deleteHubspotContact(hubspotId: string): Promise<void> {
+    await db.delete(hubspotContacts).where(eq(hubspotContacts.hubspotId, hubspotId));
+  }
+
+  async deleteHubspotCompany(hubspotId: string): Promise<void> {
+    await db.delete(hubspotCompanies).where(eq(hubspotCompanies.hubspotId, hubspotId));
+  }
+
+  async deleteHubspotDeal(hubspotId: string): Promise<void> {
+    await db.delete(hubspotDeals).where(eq(hubspotDeals.hubspotId, hubspotId));
+  }
+
   async getHubspotCompanyByHubspotId(hubspotId: string): Promise<HubspotCompany | undefined> {
     const [result] = await db.select().from(hubspotCompanies).where(eq(hubspotCompanies.hubspotId, hubspotId));
     return result;
@@ -863,6 +882,10 @@ export class DatabaseStorage implements IStorage {
         : db.select({ count: sql<number>`count(*)::int` }).from(procoreUsers),
     ]);
     return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async deleteProcoreUser(procoreId: string): Promise<void> {
+    await db.delete(procoreUsers).where(eq(procoreUsers.procoreId, procoreId));
   }
 
   async createProcoreChangeHistory(data: InsertProcoreChangeHistory): Promise<ProcoreChangeHistory> {
@@ -1165,6 +1188,10 @@ export class DatabaseStorage implements IStorage {
         : db.select({ count: sql<number>`count(*)::int` }).from(companycamUsers),
     ]);
     return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async deleteCompanycamUser(companycamId: string): Promise<void> {
+    await db.delete(companycamUsers).where(eq(companycamUsers.companycamId, companycamId));
   }
 
   async upsertCompanycamPhoto(data: InsertCompanycamPhoto): Promise<CompanycamPhoto> {

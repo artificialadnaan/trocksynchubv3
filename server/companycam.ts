@@ -238,6 +238,46 @@ export async function syncCompanycamProjects(): Promise<{ synced: number; create
   return { synced, created, updated, changes };
 }
 
+/**
+ * Fetch and sync a single CompanyCam project by ID.
+ * Called by webhook handlers for real-time project updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleCompanycamProject(projectId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+  try {
+    const token = await getCompanycamToken();
+    
+    let project;
+    try {
+      project = await companycamApiFetch(`/projects/${projectId}`, token);
+    } catch (fetchErr: any) {
+      if (fetchErr.message?.includes('404')) {
+        console.log(`[companycam] Project ${projectId} not found (may have been deleted)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const data = mapProjectData(project);
+    const existing = await storage.getCompanycamProjectByCompanycamId(data.companycamId);
+    const action = existing ? 'updated' : 'created';
+    
+    const changeEntries = detectChanges(existing as any, data as any, 'project', data.companycamId, PROJECT_FIELDS);
+    
+    await storage.upsertCompanycamProject(data);
+    
+    for (const entry of changeEntries) {
+      await storage.createCompanycamChangeHistory(entry);
+    }
+    
+    console.log(`[companycam] Project ${data.companycamId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[companycam] Failed to sync project ${projectId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
 export async function syncCompanycamUsers(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
   const token = await getCompanycamToken();
   let page = 1;
@@ -274,6 +314,47 @@ export async function syncCompanycamUsers(): Promise<{ synced: number; created: 
   }
 
   return { synced, created, updated, changes };
+}
+
+/**
+ * Fetch and sync a single CompanyCam user by ID.
+ * Called by webhook handlers for real-time user updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleCompanycamUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+  try {
+    const token = await getCompanycamToken();
+    
+    let user;
+    try {
+      user = await companycamApiFetch(`/users/${userId}`, token);
+    } catch (fetchErr: any) {
+      if (fetchErr.message?.includes('404')) {
+        await storage.deleteCompanycamUser(userId);
+        console.log(`[companycam] User ${userId} deleted (not found in CompanyCam)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const data = mapUserData(user);
+    const existing = await storage.getCompanycamUserByCompanycamId(data.companycamId);
+    const action = existing ? 'updated' : 'created';
+    
+    const changeEntries = detectChanges(existing as any, data as any, 'user', data.companycamId, USER_FIELDS);
+    
+    await storage.upsertCompanycamUser(data);
+    
+    for (const entry of changeEntries) {
+      await storage.createCompanycamChangeHistory(entry);
+    }
+    
+    console.log(`[companycam] User ${data.companycamId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[companycam] Failed to sync user ${userId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
 }
 
 export async function syncCompanycamPhotos(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
