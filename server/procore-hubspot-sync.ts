@@ -64,7 +64,12 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
   const details: SyncDetail[] = [];
   let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0;
   
-  if (skipHubspotWrites) {
+  // dryRun implies skipHubspotWrites - it's a full simulation with no writes anywhere
+  const effectiveSkipHubspotWrites = dryRun || skipHubspotWrites;
+  
+  if (dryRun) {
+    console.log('[procore-hubspot-sync] Running in DRY-RUN mode. No data will be written to HubSpot or database.');
+  } else if (effectiveSkipHubspotWrites) {
     console.log('[procore-hubspot-sync] Running in READ-ONLY mode. No data will be written to HubSpot.');
   } else {
     console.log('[procore-hubspot-sync] Running sync with HubSpot writes ENABLED.');
@@ -239,12 +244,18 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
       },
     };
 
-    if (existingMapping) {
-      await storage.updateSyncMapping(existingMapping.id, mappingData);
-      updatedMappings++;
+    if (!dryRun) {
+      if (existingMapping) {
+        await storage.updateSyncMapping(existingMapping.id, mappingData);
+        updatedMappings++;
+      } else {
+        await storage.createSyncMapping(mappingData);
+        newMappings++;
+      }
     } else {
-      await storage.createSyncMapping(mappingData);
-      newMappings++;
+      // In dry-run, count what would happen
+      if (existingMapping) updatedMappings++;
+      else newMappings++;
     }
 
     details.push({
@@ -260,7 +271,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
   }
 
   if (pendingHubspotUpdates.length > 0) {
-    if (skipHubspotWrites) {
+    if (effectiveSkipHubspotWrites) {
       console.log(`[procore-hubspot-sync] SKIPPED: Would have updated ${pendingHubspotUpdates.length} HubSpot deals (read-only mode)`);
     } else {
       try {
@@ -293,7 +304,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
   }
 
   if (pendingHubspotCreates.length > 0) {
-    if (skipHubspotWrites) {
+    if (effectiveSkipHubspotWrites) {
       console.log(`[procore-hubspot-sync] SKIPPED: Would have created ${pendingHubspotCreates.length} HubSpot deals for unmatched Procore projects (read-only mode)`);
       // Still track these as unmatched
       for (const item of pendingHubspotCreates) {
