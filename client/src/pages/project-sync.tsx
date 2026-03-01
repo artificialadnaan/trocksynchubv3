@@ -96,14 +96,6 @@ function ExternalServiceLink({ href, icon: Icon, label, colorClass }: {
   );
 }
 
-function ExternalIconLink({ href, colorClass }: { href: string; colorClass: string }) {
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" className={`${colorClass} hover:opacity-80`}>
-      <ExternalLink className="w-3 h-3" />
-    </a>
-  );
-}
-
 export default function ProjectSyncPage() {
   const [search, setSearch] = useState("");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -114,7 +106,6 @@ export default function ProjectSyncPage() {
   const [selectedHubspot, setSelectedHubspot] = useState<string | null>(null);
   const [reportOpen, setReportOpen] = useState<ReportType>(null);
   const [reportTab, setReportTab] = useState<"matched" | "unmatched">("matched");
-  const [reportSearch, setReportSearch] = useState("");
   const { toast } = useToast();
 
   const { data: overview, isLoading: overviewLoading } = useQuery<SyncOverview>({
@@ -205,35 +196,6 @@ export default function ProjectSyncPage() {
     },
   });
 
-  const companycamMatchMutation = useMutation({
-    mutationFn: async () => {
-      // Auto-sync CompanyCam projects before matching to ensure we have latest data
-      const res = await apiRequest("POST", "/api/companycam/bulk-match?autoSync=true");
-      return res.json();
-    },
-    onSuccess: (data) => {
-      if (data.message) {
-        toast({
-          title: "CompanyCam Match Issue",
-          description: data.message,
-          variant: "destructive",
-        });
-        return;
-      }
-      const integrationCount = data.matchedViaIntegration || 0;
-      const fuzzyCount = data.matchedViaFuzzy || 0;
-      toast({
-        title: "CompanyCam Match Complete",
-        description: `Found ${data.totalCompanyCam || 0} CompanyCam, ${data.totalProcore || 0} Procore. Matched ${data.matched} (${integrationCount} via integration, ${fuzzyCount} via name). ${data.alreadyMatched} already matched, ${data.noMatch} no match.`,
-      });
-      invalidateSyncQueries("/api/sync-mappings/lookup");
-      queryClient.invalidateQueries({ queryKey: ["/api/companycam/projects?limit=500"] });
-    },
-    onError: (e: any) => {
-      toast({ title: "Match Failed", description: e.message, variant: "destructive" });
-    },
-  });
-
   const toggleExpanded = (id: number) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
@@ -313,56 +275,37 @@ export default function ProjectSyncPage() {
   );
 
   const renderProjectList = (type: ReportType) => {
-    const searchLower = reportSearch.toLowerCase();
-    
     if (type === "procore") {
-      const allMatched = mappings?.data?.filter(m => m.procoreProjectId) || [];
-      const allUnmatched = unmatched?.unmatchedProcore || [];
-      const filteredMatched = reportSearch
-        ? allMatched.filter((m: any) =>
-            m.procoreProjectName?.toLowerCase().includes(searchLower) ||
-            m.procoreProjectNumber?.toLowerCase().includes(searchLower) ||
-            m.hubspotDealName?.toLowerCase().includes(searchLower)
-          )
-        : allMatched;
-      const filteredUnmatched = reportSearch
-        ? allUnmatched.filter((p: any) =>
-            p.name?.toLowerCase().includes(searchLower) ||
-            p.projectNumber?.toLowerCase().includes(searchLower) ||
-            p.city?.toLowerCase().includes(searchLower) ||
-            p.stage?.toLowerCase().includes(searchLower)
-          )
-        : allUnmatched;
+      const matched = mappings?.data?.filter(m => m.procoreProjectId) || [];
+      const unmatchedList = unmatched?.unmatchedProcore || [];
       
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Matched ({filteredMatched.length}{reportSearch && filteredMatched.length !== allMatched.length ? ` of ${allMatched.length}` : ''})
+              Matched ({matched.length})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Unmatched ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== allUnmatched.length ? ` of ${allUnmatched.length}` : ''})
+              Unmatched ({unmatchedList.length})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {filteredMatched.map((m: any) => (
-                <div key={m.id} className="p-4 border rounded-lg">
-                  <div className="grid grid-cols-[1fr,auto] gap-4">
-                    <div className="space-y-2">
-                      <div className="font-medium text-base">{m.procoreProjectName}</div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {m.procoreProjectNumber && (
-                          <Badge variant="secondary" className="font-mono text-xs">{m.procoreProjectNumber}</Badge>
-                        )}
-                      </div>
-                      <div className="text-sm text-green-600 font-medium">
+              {matched.map((m: any) => (
+                <div key={m.id} className="p-3 border rounded-lg">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{m.procoreProjectName}</div>
+                      {m.procoreProjectNumber && (
+                        <Badge variant="secondary" className="font-mono text-xs mt-1">{m.procoreProjectNumber}</Badge>
+                      )}
+                      <div className="text-xs text-muted-foreground mt-1">
                         Linked to: {m.hubspotDealName || "—"}
                       </div>
                     </div>
-                    <div className="flex flex-col gap-2 items-end">
+                    <div className="flex flex-col gap-1">
                       <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                       {m.hubspotDealId && (
                         <ExternalServiceLink href={getHubspotUrl(m.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
@@ -371,37 +314,28 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'No matched projects'}</p>}
+              {matched.length === 0 && <p className="text-center text-muted-foreground py-8">No matched projects</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {filteredUnmatched.map((p: any) => (
-                <div key={p.procoreId} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="grid grid-cols-[1fr,auto] gap-4">
-                    <div className="space-y-2">
-                      <div className="font-medium text-base">{p.name}</div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {p.projectNumber && (
-                          <Badge variant="secondary" className="font-mono text-xs">{p.projectNumber}</Badge>
-                        )}
-                        {p.stage && (
-                          <Badge variant="outline" className="text-xs">{p.stage}</Badge>
-                        )}
-                      </div>
-                      {p.city && (
-                        <div className="text-sm text-muted-foreground">
-                          {p.city}, {p.stateCode}
-                        </div>
+              {unmatchedList.map((p: any) => (
+                <div key={p.procoreId} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{p.name}</div>
+                      {p.projectNumber && (
+                        <Badge variant="secondary" className="font-mono text-xs mt-1">{p.projectNumber}</Badge>
                       )}
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {p.city && `${p.city}, ${p.stateCode}`} {p.stage && `• ${p.stage}`}
+                      </div>
                     </div>
-                    <div className="flex flex-col gap-2 items-end">
-                      <ExternalServiceLink href={getProcoreUrl(p.procoreId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
-                    </div>
+                    <ExternalServiceLink href={getProcoreUrl(p.procoreId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                   </div>
                 </div>
               ))}
-              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'All projects are matched!'}</p>}
+              {unmatchedList.length === 0 && <p className="text-center text-muted-foreground py-8">All projects are matched!</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -409,46 +343,33 @@ export default function ProjectSyncPage() {
     }
     
     if (type === "hubspot") {
-      const allMatched = mappings?.data?.filter(m => m.hubspotDealId) || [];
-      const allUnmatched = unmatched?.unmatchedHubspot || [];
-      const filteredMatched = reportSearch
-        ? allMatched.filter((m: any) =>
-            m.hubspotDealName?.toLowerCase().includes(searchLower) ||
-            m.procoreProjectName?.toLowerCase().includes(searchLower)
-          )
-        : allMatched;
-      const filteredUnmatched = reportSearch
-        ? allUnmatched.filter((d: any) =>
-            d.dealName?.toLowerCase().includes(searchLower) ||
-            d.stageName?.toLowerCase().includes(searchLower) ||
-            d.pipeline?.toLowerCase().includes(searchLower)
-          )
-        : allUnmatched;
+      const matched = mappings?.data?.filter(m => m.hubspotDealId) || [];
+      const unmatchedList = unmatched?.unmatchedHubspot || [];
       
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Matched ({filteredMatched.length}{reportSearch && filteredMatched.length !== allMatched.length ? ` of ${allMatched.length}` : ''})
+              Matched ({matched.length})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Unmatched ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== allUnmatched.length ? ` of ${allUnmatched.length}` : ''})
+              Unmatched ({unmatchedList.length})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {filteredMatched.map((m: any) => (
-                <div key={m.id} className="p-4 border rounded-lg">
-                  <div className="grid grid-cols-[1fr,auto] gap-4">
-                    <div className="space-y-2">
-                      <div className="font-medium text-base">{m.hubspotDealName}</div>
-                      <div className="text-sm text-green-600 font-medium">
+              {matched.map((m: any) => (
+                <div key={m.id} className="p-3 border rounded-lg">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{m.hubspotDealName}</div>
+                      <div className="text-xs text-muted-foreground mt-1">
                         Linked to: {m.procoreProjectName || "—"}
                       </div>
                     </div>
-                    <div className="flex flex-col gap-2 items-end">
+                    <div className="flex flex-col gap-1">
                       <ExternalServiceLink href={getHubspotUrl(m.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                       {m.procoreProjectId && (
                         <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
@@ -457,35 +378,25 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching deals found' : 'No matched deals'}</p>}
+              {matched.length === 0 && <p className="text-center text-muted-foreground py-8">No matched deals</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {filteredUnmatched.map((d: any) => (
-                <div key={d.hubspotId} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="grid grid-cols-[1fr,auto] gap-4">
-                    <div className="space-y-2">
-                      <div className="font-medium text-base">{d.dealName}</div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {d.amount && (
-                          <Badge variant="secondary" className="text-xs">${parseFloat(d.amount).toLocaleString()}</Badge>
-                        )}
-                        {d.stageName && (
-                          <Badge variant="outline" className="text-xs">{d.stageName}</Badge>
-                        )}
-                        {d.pipeline && (
-                          <span className="text-sm text-muted-foreground">{d.pipeline}</span>
-                        )}
+              {unmatchedList.map((d: any) => (
+                <div key={d.hubspotId} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{d.dealName}</div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {d.amount && `$${parseFloat(d.amount).toLocaleString()}`} {d.stageName && `• ${d.stageName}`}
                       </div>
                     </div>
-                    <div className="flex flex-col gap-2 items-end">
-                      <ExternalServiceLink href={getHubspotUrl(d.hubspotId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
-                    </div>
+                    <ExternalServiceLink href={getHubspotUrl(d.hubspotId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                   </div>
                 </div>
               ))}
-              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching deals found' : 'All deals are matched!'}</p>}
+              {unmatchedList.length === 0 && <p className="text-center text-muted-foreground py-8">All deals are matched!</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -493,43 +404,28 @@ export default function ProjectSyncPage() {
     }
     
     if (type === "conflicts") {
-      const filteredConflicts = reportSearch
-        ? conflictMappings.filter((m: any) =>
-            m.procoreProjectName?.toLowerCase().includes(searchLower) ||
-            m.hubspotDealName?.toLowerCase().includes(searchLower) ||
-            m.procoreProjectNumber?.toLowerCase().includes(searchLower)
-          )
-        : conflictMappings;
+      const conflictsList = conflictMappings;
       return (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Showing {filteredConflicts.length}{reportSearch && filteredConflicts.length !== conflictMappings.length ? ` of ${conflictMappings.length}` : ''} conflicts
-          </p>
-          {filteredConflicts.map((m: any) => {
+        <div className="space-y-2">
+          {conflictsList.map((m: any) => {
             const meta = m.metadata || {};
             return (
-              <div key={m.id} className="p-4 border rounded-lg border-yellow-300 bg-yellow-50/50 dark:bg-yellow-950/20">
-                <div className="grid grid-cols-[1fr,auto] gap-4">
-                  <div className="space-y-3">
-                    <div>
-                      <div className="font-medium text-base">{m.procoreProjectName || m.hubspotDealName}</div>
-                      {m.procoreProjectNumber && (
-                        <Badge variant="secondary" className="font-mono text-xs mt-1">{m.procoreProjectNumber}</Badge>
-                      )}
-                    </div>
-                    <div className="space-y-2">
+              <div key={m.id} className="p-3 border rounded-lg border-yellow-300 bg-yellow-50/50 dark:bg-yellow-950/20">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{m.procoreProjectName || m.hubspotDealName}</div>
+                    {m.procoreProjectNumber && (
+                      <Badge variant="secondary" className="font-mono text-xs mt-1">{m.procoreProjectNumber}</Badge>
+                    )}
+                    <div className="mt-2 space-y-1">
                       {meta.conflicts?.map((c: any, i: number) => (
-                        <div key={i} className="p-2 bg-yellow-100/50 dark:bg-yellow-900/20 rounded border border-yellow-200 dark:border-yellow-800">
-                          <div className="font-medium text-sm text-yellow-800 dark:text-yellow-300 mb-1">{c.field}</div>
-                          <div className="grid grid-cols-2 gap-4 text-sm">
-                            <div><span className="text-blue-600 font-medium">Procore:</span> {c.procoreValue || "—"}</div>
-                            <div><span className="text-orange-600 font-medium">HubSpot:</span> {c.hubspotValue || "—"}</div>
-                          </div>
+                        <div key={i} className="text-xs text-yellow-700 dark:text-yellow-400">
+                          <span className="font-medium">{c.field}:</span> Procore: {c.procoreValue || "—"} → HubSpot: {c.hubspotValue || "—"}
                         </div>
                       ))}
                     </div>
                   </div>
-                  <div className="flex flex-col gap-2 items-end">
+                  <div className="flex flex-col gap-1">
                     {m.procoreProjectId && (
                       <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                     )}
@@ -541,56 +437,41 @@ export default function ProjectSyncPage() {
               </div>
             );
           })}
-          {filteredConflicts.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching conflicts found' : 'No conflicts found'}</p>}
+          {conflictsList.length === 0 && <p className="text-center text-muted-foreground py-8">No conflicts found</p>}
         </div>
       );
     }
     
     if (type === "companycam") {
-      const filteredMatched = reportSearch
-        ? companycamMatched.filter((p: any) =>
-            p.name?.toLowerCase().includes(searchLower) ||
-            p.streetAddress?.toLowerCase().includes(searchLower) ||
-            p.city?.toLowerCase().includes(searchLower)
-          )
-        : companycamMatched;
-      const filteredUnmatched = reportSearch
-        ? companycamUnmatched.filter((p: any) =>
-            p.name?.toLowerCase().includes(searchLower) ||
-            p.streetAddress?.toLowerCase().includes(searchLower) ||
-            p.city?.toLowerCase().includes(searchLower)
-          )
-        : companycamUnmatched;
-        
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Linked ({filteredMatched.length}{reportSearch && filteredMatched.length !== companycamMatched.length ? ` of ${companycamMatched.length}` : ''})
+              Linked ({companycamMatched.length})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Not Linked ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== companycamUnmatched.length ? ` of ${companycamUnmatched.length}` : ''})
+              Not Linked ({companycamUnmatched.length})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {filteredMatched.map((p: any) => {
+              {companycamMatched.map((p: any) => {
                 const lookup = syncLookup?.[`companycam:${p.companycamId}`];
                 return (
-                  <div key={p.id} className="p-4 border rounded-lg">
-                    <div className="grid grid-cols-[1fr,auto] gap-4">
-                      <div className="space-y-2">
-                        <div className="font-medium text-base">{p.name}</div>
-                        <div className="text-sm text-muted-foreground">
+                  <div key={p.id} className="p-3 border rounded-lg">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium truncate">{p.name}</div>
+                        <div className="text-xs text-muted-foreground mt-1">
                           {p.streetAddress && `${p.streetAddress}, `}{p.city}, {p.state}
                         </div>
-                        <div className="text-sm text-green-600 font-medium">
+                        <div className="text-xs text-green-600 mt-1">
                           Linked to: {lookup?.procoreProjectName || lookup?.hubspotDealName || "Project"}
                         </div>
                       </div>
-                      <div className="flex flex-col gap-2 items-end">
+                      <div className="flex flex-col gap-1">
                         <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
                         {lookup?.procoreProjectId && (
                           <ExternalServiceLink href={getProcoreUrl(lookup.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
@@ -600,30 +481,28 @@ export default function ProjectSyncPage() {
                   </div>
                 );
               })}
-              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'No linked projects'}</p>}
+              {companycamMatched.length === 0 && <p className="text-center text-muted-foreground py-8">No linked projects</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {filteredUnmatched.map((p: any) => (
-                <div key={p.id} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="grid grid-cols-[1fr,auto] gap-4">
-                    <div className="space-y-2">
-                      <div className="font-medium text-base">{p.name}</div>
-                      <div className="text-sm text-muted-foreground">
+              {companycamUnmatched.map((p: any) => (
+                <div key={p.id} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{p.name}</div>
+                      <div className="text-xs text-muted-foreground mt-1">
                         {p.streetAddress && `${p.streetAddress}, `}{p.city}, {p.state}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="secondary" className="text-xs">Photos: {p.photoCount || 0}</Badge>
+                      <div className="text-xs text-muted-foreground">
+                        Photos: {p.photoCount || 0}
                       </div>
                     </div>
-                    <div className="flex flex-col gap-2 items-end">
-                      <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
-                    </div>
+                    <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
                   </div>
                 </div>
               ))}
-              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'All projects are linked!'}</p>}
+              {companycamUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">All projects are linked!</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -631,66 +510,40 @@ export default function ProjectSyncPage() {
     }
     
     if (type === "bidboard") {
-      const filteredMatched = reportSearch 
-        ? bidboardMatched.filter((b: any) => 
-            b.name?.toLowerCase().includes(searchLower) ||
-            b.projectNumber?.toLowerCase().includes(searchLower) ||
-            b.estimator?.toLowerCase().includes(searchLower) ||
-            b.customerName?.toLowerCase().includes(searchLower) ||
-            b.status?.toLowerCase().includes(searchLower)
-          )
-        : bidboardMatched;
-      const filteredUnmatched = reportSearch
-        ? bidboardUnmatched.filter((b: any) =>
-            b.name?.toLowerCase().includes(searchLower) ||
-            b.projectNumber?.toLowerCase().includes(searchLower) ||
-            b.estimator?.toLowerCase().includes(searchLower) ||
-            b.customerName?.toLowerCase().includes(searchLower) ||
-            b.status?.toLowerCase().includes(searchLower)
-          )
-        : bidboardUnmatched;
-        
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Matched ({filteredMatched.length}{reportSearch && filteredMatched.length !== bidboardMatched.length ? ` of ${bidboardMatched.length}` : ''})
+              Matched ({bidboardMatched.length})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Unmatched ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== bidboardUnmatched.length ? ` of ${bidboardUnmatched.length}` : ''})
+              Unmatched ({bidboardUnmatched.length})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {filteredMatched.map((b: any) => {
+              {bidboardMatched.map((b: any) => {
                 const lookup = b.procoreProjectId ? syncLookup?.[`procore:${b.procoreProjectId}`] : null;
                 return (
-                  <div key={b.id} className="p-4 border rounded-lg">
-                    <div className="grid grid-cols-[1fr,auto] gap-4">
-                      <div className="space-y-2">
-                        <div className="font-medium text-base">{b.name}</div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {b.projectNumber && (
-                            <Badge variant="secondary" className="font-mono text-xs">{b.projectNumber}</Badge>
-                          )}
-                          {b.status && (
-                            <Badge variant="outline" className="text-xs">{b.status}</Badge>
-                          )}
-                        </div>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                          {b.estimator && <div><span className="font-medium">Estimator:</span> {b.estimator}</div>}
-                          {b.customerName && <div><span className="font-medium">Customer:</span> {b.customerName}</div>}
-                          {b.bidDueDate && <div><span className="font-medium">Bid Due:</span> {b.bidDueDate}</div>}
+                  <div key={b.id} className="p-3 border rounded-lg">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium truncate">{b.name}</div>
+                        {b.projectNumber && (
+                          <Badge variant="secondary" className="font-mono text-xs mt-1">{b.projectNumber}</Badge>
+                        )}
+                        <div className="text-xs text-muted-foreground mt-1">
+                          {b.estimator && `Estimator: ${b.estimator}`} {b.status && `• ${b.status}`}
                         </div>
                         {lookup?.procoreProjectName && (
-                          <div className="text-sm text-green-600 font-medium">
+                          <div className="text-xs text-green-600 mt-1">
                             Linked to: {lookup.procoreProjectName}
                           </div>
                         )}
                       </div>
-                      <div className="flex flex-col gap-2 items-end">
+                      <div className="flex flex-col gap-1">
                         {b.procoreProjectId && (
                           <ExternalServiceLink href={getProcoreUrl(b.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                         )}
@@ -702,32 +555,32 @@ export default function ProjectSyncPage() {
                   </div>
                 );
               })}
-              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching estimates found' : 'No matched estimates'}</p>}
+              {bidboardMatched.length === 0 && <p className="text-center text-muted-foreground py-8">No matched estimates</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {filteredUnmatched.map((b: any) => (
-                <div key={b.id} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
-                  <div className="space-y-2">
-                    <div className="font-medium text-base">{b.name}</div>
-                    <div className="flex flex-wrap items-center gap-2">
+              {bidboardUnmatched.map((b: any) => (
+                <div key={b.id} className="p-3 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{b.name}</div>
                       {b.projectNumber && (
-                        <Badge variant="secondary" className="font-mono text-xs">{b.projectNumber}</Badge>
+                        <Badge variant="secondary" className="font-mono text-xs mt-1">{b.projectNumber}</Badge>
                       )}
-                      {b.status && (
-                        <Badge variant="outline" className="text-xs">{b.status}</Badge>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {b.estimator && `Estimator: ${b.estimator}`} {b.status && `• ${b.status}`}
+                      </div>
+                      {b.customerName && (
+                        <div className="text-xs text-muted-foreground">
+                          Customer: {b.customerName}
+                        </div>
                       )}
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                      {b.estimator && <div><span className="font-medium">Estimator:</span> {b.estimator}</div>}
-                      {b.customerName && <div><span className="font-medium">Customer:</span> {b.customerName}</div>}
-                      {b.bidDueDate && <div><span className="font-medium">Bid Due:</span> {b.bidDueDate}</div>}
                     </div>
                   </div>
                 </div>
               ))}
-              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching estimates found' : 'All estimates are matched!'}</p>}
+              {bidboardUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">All estimates are matched!</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -920,28 +773,10 @@ export default function ProjectSyncPage() {
               data-testid="card-companycam"
             >
               <CardContent className="pt-6">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Camera className="w-5 h-5 text-purple-500" />
-                    <span className="text-2xl font-bold">{companycamMatched.length}</span>
-                    <span className="text-sm text-muted-foreground">/ {companycamProjects?.total || 0}</span>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      companycamMatchMutation.mutate();
-                    }}
-                    disabled={companycamMatchMutation.isPending}
-                  >
-                    {companycamMatchMutation.isPending ? (
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-3 h-3" />
-                    )}
-                  </Button>
+                <div className="flex items-center gap-2">
+                  <Camera className="w-5 h-5 text-purple-500" />
+                  <span className="text-2xl font-bold">{companycamMatched.length}</span>
+                  <span className="text-sm text-muted-foreground">/ {companycamProjects?.total || 0}</span>
                 </div>
                 <p className="text-sm text-muted-foreground mt-1">CompanyCam</p>
               </CardContent>
@@ -965,22 +800,13 @@ export default function ProjectSyncPage() {
         )}
       </div>
 
-      {/* Report Sheet - Full width on mobile, 900px on desktop */}
-      <Sheet open={reportOpen !== null} onOpenChange={(open) => { if (!open) { setReportOpen(null); setReportSearch(""); } }}>
-        <SheetContent className="w-full sm:w-[900px] sm:max-w-[900px] overflow-hidden">
+      {/* Report Sheet */}
+      <Sheet open={reportOpen !== null} onOpenChange={(open) => !open && setReportOpen(null)}>
+        <SheetContent className="w-[600px] sm:max-w-[600px]">
           <SheetHeader>
-            <SheetTitle className="text-xl">{getReportTitle(reportOpen)}</SheetTitle>
+            <SheetTitle>{getReportTitle(reportOpen)}</SheetTitle>
           </SheetHeader>
-          <div className="relative mt-4 mb-3">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder="Search projects..."
-              value={reportSearch}
-              onChange={(e) => setReportSearch(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-          <ScrollArea className="h-[calc(100vh-180px)] pr-4">
+          <ScrollArea className="h-[calc(100vh-120px)] mt-4 pr-4">
             {renderProjectList(reportOpen)}
           </ScrollArea>
         </SheetContent>
@@ -1075,7 +901,10 @@ export default function ProjectSyncPage() {
                             <h4 className="font-medium text-xs uppercase text-muted-foreground mb-2 flex items-center gap-2">
                               Procore (Master)
                               {m.procoreProjectId && (
-                                <ExternalIconLink href={getProcoreUrl(m.procoreProjectId)} colorClass="text-blue-600" />
+                                <a href={getProcoreUrl(m.procoreProjectId)} target="_blank" rel="noopener noreferrer"
+                                  className="text-blue-600 hover:text-blue-800">
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
                               )}
                             </h4>
                             <div className="space-y-1">
@@ -1089,7 +918,10 @@ export default function ProjectSyncPage() {
                             <h4 className="font-medium text-xs uppercase text-muted-foreground mb-2 flex items-center gap-2">
                               HubSpot
                               {m.hubspotDealId && (
-                                <ExternalIconLink href={getHubspotUrl(m.hubspotDealId)} colorClass="text-orange-600" />
+                                <a href={getHubspotUrl(m.hubspotDealId)} target="_blank" rel="noopener noreferrer"
+                                  className="text-orange-600 hover:text-orange-800">
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
                               )}
                             </h4>
                             <div className="space-y-1">

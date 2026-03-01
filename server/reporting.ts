@@ -44,7 +44,7 @@ export interface ActivityItem {
 }
 
 export async function getDealStageDistribution(): Promise<DealStageDistribution[]> {
-  const deals = await storage.getHubspotDeals();
+  const { data: deals } = await storage.getHubspotDeals({});
   const stageMap = new Map<string, { count: number; totalValue: number }>();
 
   for (const deal of deals) {
@@ -67,7 +67,7 @@ export async function getDealStageDistribution(): Promise<DealStageDistribution[
 }
 
 export async function getProjectStageDistribution(): Promise<ProjectStageDistribution[]> {
-  const projects = await storage.getProcoreProjects();
+  const { data: projects } = await storage.getProcoreProjects({});
   const stageMap = new Map<string, number>();
 
   for (const project of projects) {
@@ -82,7 +82,7 @@ export async function getProjectStageDistribution(): Promise<ProjectStageDistrib
 }
 
 export async function getSyncActivitySummary(): Promise<SyncActivitySummary> {
-  const logs = await storage.getAuditLogs({ limit: 1000 });
+  const { logs } = await storage.getAuditLogs({ limit: 1000 });
   
   const syncLogs = logs.filter(log => 
     log.action.includes('sync') || 
@@ -118,7 +118,7 @@ export async function getSyncActivitySummary(): Promise<SyncActivitySummary> {
 }
 
 export async function getEmailsSentCount(): Promise<number> {
-  const logs = await storage.getAuditLogs({ limit: 5000 });
+  const { logs } = await storage.getAuditLogs({ limit: 5000 });
   return logs.filter(log => 
     log.action.includes('email') && log.status === 'success'
   ).length;
@@ -134,7 +134,7 @@ export async function getSurveysCompletedCount(): Promise<number> {
 }
 
 export async function getRecentActivity(limit: number = 20): Promise<ActivityItem[]> {
-  const logs = await storage.getAuditLogs({ limit });
+  const { logs } = await storage.getAuditLogs({ limit });
   
   return logs.map(log => ({
     id: String(log.id),
@@ -176,8 +176,8 @@ function formatActivityDescription(log: any): string {
 
 export async function getDashboardMetrics(): Promise<DashboardMetrics> {
   const [
-    deals,
-    projects,
+    dealsResult,
+    projectsResult,
     mappings,
     dealsByStage,
     projectsByStage,
@@ -186,8 +186,8 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
     surveysCompleted,
     recentActivity,
   ] = await Promise.all([
-    storage.getHubspotDeals(),
-    storage.getProcoreProjects(),
+    storage.getHubspotDeals({}),
+    storage.getProcoreProjects({}),
     storage.getSyncMappings(),
     getDealStageDistribution(),
     getProjectStageDistribution(),
@@ -197,6 +197,9 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
     getRecentActivity(20),
   ]);
 
+  const deals = dealsResult.data;
+  const projects = projectsResult.data;
+
   const totalDealValue = deals.reduce((sum, d) => sum + parseFloat(d.amount || '0'), 0);
   const activeProjects = projects.filter(p => 
     p.active === true || 
@@ -205,8 +208,8 @@ export async function getDashboardMetrics(): Promise<DashboardMetrics> {
   ).length;
 
   return {
-    totalDeals: deals.length,
-    totalProjects: projects.length,
+    totalDeals: dealsResult.total,
+    totalProjects: projectsResult.total,
     totalMappings: mappings.length,
     activeProjects,
     dealsByStage,
@@ -234,7 +237,7 @@ export interface PipelineReport {
 
 export async function getPipelineReport(): Promise<PipelineReport[]> {
   const pipelines = await storage.getHubspotPipelines();
-  const deals = await storage.getHubspotDeals();
+  const { data: deals } = await storage.getHubspotDeals({});
   const reports: PipelineReport[] = [];
 
   for (const pipeline of pipelines) {
@@ -275,7 +278,7 @@ export interface SyncHealthReport {
 }
 
 export async function getSyncHealthReport(): Promise<SyncHealthReport> {
-  const logs = await storage.getAuditLogs({ limit: 500 });
+  const { logs } = await storage.getAuditLogs({ limit: 500 });
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
