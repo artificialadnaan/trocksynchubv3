@@ -57,6 +57,11 @@ async function downloadFile(url: string, destPath: string): Promise<boolean> {
     const protocol = url.startsWith("https") ? https : http;
     const file = require("fs").createWriteStream(destPath);
     
+    file.on("error", () => {
+      file.close();
+      resolve(false);
+    });
+    
     protocol.get(url, (response) => {
       if (response.statusCode === 200) {
         response.pipe(file);

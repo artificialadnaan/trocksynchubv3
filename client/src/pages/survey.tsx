@@ -35,9 +35,9 @@ export default function SurveyPage() {
       if (!res.ok) throw new Error('Failed to submit survey');
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       toast({ title: 'Thank you!', description: 'Your feedback has been submitted.' });
-      refetch();
+      await refetch();
     },
     onError: (err: any) => {
       toast({ title: 'Error', description: err.message, variant: 'destructive' });

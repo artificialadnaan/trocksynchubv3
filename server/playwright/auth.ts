@@ -20,7 +20,10 @@ interface LoginResult {
 }
 
 function getEncryptionKey(): Buffer {
-  const secret = process.env.SESSION_SECRET || "default-secret-key-for-encryption";
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) {
+    throw new Error("SESSION_SECRET environment variable is required for credential encryption");
+  }
   return crypto.scryptSync(secret, "salt", 32);
 }
 
