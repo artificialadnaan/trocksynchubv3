@@ -755,9 +755,11 @@ export async function exportAndSaveEstimatePdf(
       downloadPath = path.join(TEMP_DIR, `estimate-${bidboardProjectId}.pdf`);
       await download.saveAs(downloadPath);
     } else {
-      // Direct download
+      // No PDF option found - the export button itself may trigger direct download
+      // Re-click export button to trigger the download
       const [download] = await Promise.all([
         page.waitForEvent("download", { timeout: 30000 }),
+        exportButton.click(),
       ]);
       
       downloadPath = path.join(TEMP_DIR, `estimate-${bidboardProjectId}.pdf`);
