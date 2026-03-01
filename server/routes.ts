@@ -3938,12 +3938,22 @@ export async function registerRoutes(
   });
 
   // Bulk auto-match CompanyCam projects to Procore projects
-  app.post("/api/companycam/bulk-match", requireAuth, async (_req, res) => {
+  app.post("/api/companycam/bulk-match", requireAuth, async (req, res) => {
     try {
+      const autoSync = req.query.autoSync === 'true';
+      
+      // Optionally sync CompanyCam data first
+      if (autoSync) {
+        console.log('[CompanyCam Bulk Match] Auto-syncing CompanyCam projects first...');
+        const syncResult = await runFullCompanycamSync();
+        console.log(`[CompanyCam Bulk Match] Sync complete: ${syncResult.projects?.synced || 0} projects synced`);
+      }
+      
       const { bulkMatchCompanyCamToProcore } = await import('./companycam-automation');
       const result = await bulkMatchCompanyCamToProcore();
       res.json(result);
     } catch (e: any) {
+      console.error('[CompanyCam Bulk Match] Error:', e);
       res.status(500).json({ success: false, error: e.message });
     }
   });

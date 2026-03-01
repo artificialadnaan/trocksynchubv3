@@ -207,7 +207,8 @@ export default function ProjectSyncPage() {
 
   const companycamMatchMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/companycam/bulk-match");
+      // Auto-sync CompanyCam projects before matching to ensure we have latest data
+      const res = await apiRequest("POST", "/api/companycam/bulk-match?autoSync=true");
       return res.json();
     },
     onSuccess: (data) => {
