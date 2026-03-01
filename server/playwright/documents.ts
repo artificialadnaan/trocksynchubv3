@@ -295,9 +295,19 @@ export async function uploadDocumentToPortfolio(
     // Wait for upload to complete
     await page.waitForLoadState("networkidle");
     
-    log(`Uploaded ${document.name} to Portfolio project ${projectId}`, "playwright");
-    await logDocumentAction(projectId, "upload_to_portfolio", "success", { documentName: document.name });
-    return true;
+    // Verify upload by checking if document appears in the list
+    const documentList = await page.$(PROCORE_SELECTORS.documents.documentList);
+    const documentText = documentList ? await documentList.textContent() : null;
+    
+    if (documentText && documentText.includes(document.name)) {
+      log(`Successfully uploaded ${document.name} to Portfolio project ${projectId}`, "playwright");
+      await logDocumentAction(projectId, "upload_to_portfolio", "success", { documentName: document.name });
+      return true;
+    }
+    
+    log(`Upload verification failed: ${document.name} not found in Portfolio document list`, "playwright");
+    await logDocumentAction(projectId, "upload_to_portfolio", "failed", { documentName: document.name }, "Document not found in list after upload");
+    return false;
   } catch (error) {
     log(`Error uploading document to Portfolio: ${error}`, "playwright");
     await logDocumentAction(projectId, "upload_to_portfolio", "failed", { documentName: document.name }, String(error));
