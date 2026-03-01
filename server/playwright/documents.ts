@@ -1,6 +1,6 @@
 import { Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
-import { PROCORE_SELECTORS } from "./selectors";
+import { PROCORE_SELECTORS, PROCORE_URLS } from "./selectors";
 import { randomDelay, takeScreenshot } from "./browser";
 import { navigateToProject } from "./bidboard";
 import { navigateToPortfolioProject } from "./portfolio";
@@ -438,7 +438,7 @@ export async function exportSpecificationsViaUI(
     await ensureTempDir();
 
     // Navigate to project specifications
-    const specsUrl = `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/specifications`;
+    const specsUrl = `${PROCORE_URLS.app}/projects/${projectId}/specifications`;
     await page.goto(specsUrl, { waitUntil: "networkidle" });
     await randomDelay(2000, 3000);
 
@@ -525,7 +525,7 @@ export async function exportDrawingSetPdfsViaUI(
     await ensureTempDir();
 
     // Navigate to project drawings
-    const drawingsUrl = `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/drawings`;
+    const drawingsUrl = `${PROCORE_URLS.app}/projects/${projectId}/drawings`;
     await page.goto(drawingsUrl, { waitUntil: "networkidle" });
     await randomDelay(2000, 3000);
 
@@ -579,10 +579,10 @@ export async function exportProjectReportViaUI(
     await ensureTempDir();
 
     const reportUrls: Record<string, string> = {
-      budget: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/budget`,
-      submittal_log: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/submittals`,
-      rfi_log: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/rfis`,
-      daily_log: `${PROCORE_SELECTORS.baseUrls.production}/projects/${projectId}/daily_log`,
+      budget: `${PROCORE_URLS.app}/projects/${projectId}/budget`,
+      submittal_log: `${PROCORE_URLS.app}/projects/${projectId}/submittals`,
+      rfi_log: `${PROCORE_URLS.app}/projects/${projectId}/rfis`,
+      daily_log: `${PROCORE_URLS.app}/projects/${projectId}/daily_log`,
     };
 
     await page.goto(reportUrls[reportType], { waitUntil: "networkidle" });
