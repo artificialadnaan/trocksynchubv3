@@ -59,13 +59,15 @@ export function mapProcoreStageToHubspot(procoreStage: string | null): string {
 }
 
 export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubspotWrites?: boolean } = {}): Promise<SyncResult> {
-  const { dryRun = false, skipHubspotWrites = true } = options; // Default to NOT writing to HubSpot
+  const { dryRun = false, skipHubspotWrites = false } = options;
   const start = Date.now();
   const details: SyncDetail[] = [];
   let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0;
   
   if (skipHubspotWrites) {
-    console.log('[procore-hubspot-sync] Running in READ-ONLY mode (skipHubspotWrites=true). No data will be written to HubSpot.');
+    console.log('[procore-hubspot-sync] Running in READ-ONLY mode. No data will be written to HubSpot.');
+  } else {
+    console.log('[procore-hubspot-sync] Running sync with HubSpot writes ENABLED.');
   }
 
   const allProcore = await db.select().from(procoreProjects);
