@@ -166,12 +166,26 @@ export async function syncCompanycamProjects(): Promise<{ synced: number; create
   let created = 0;
   let updated = 0;
   let changes = 0;
+  let sampleLogged = false;
+
+  console.log('[CompanyCam Sync] Starting project sync from CompanyCam API...');
 
   while (true) {
     const projects = await companycamApiFetch(`/projects?per_page=${perPage}&page=${page}`, token);
     if (!projects || !Array.isArray(projects) || projects.length === 0) break;
 
+    console.log(`[CompanyCam Sync] Fetched page ${page}: ${projects.length} projects`);
+
     for (const p of projects) {
+      // Log sample project data to understand the structure
+      if (!sampleLogged && page === 1 && synced < 3) {
+        console.log(`[CompanyCam Sync] Sample project "${p.name}":`);
+        console.log(`  - integrations field: ${JSON.stringify(p.integrations)}`);
+        console.log(`  - Has external_ids: ${!!p.external_ids}`);
+        if (p.external_ids) console.log(`  - external_ids: ${JSON.stringify(p.external_ids)}`);
+        if (synced === 2) sampleLogged = true;
+      }
+      
       const data = mapProjectData(p);
       const existing = await storage.getCompanycamProjectByCompanycamId(data.companycamId);
       const changeEntries = detectChanges(existing as any, data as any, 'project', data.companycamId, PROJECT_FIELDS);
