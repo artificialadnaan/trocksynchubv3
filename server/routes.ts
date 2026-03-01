@@ -4316,7 +4316,7 @@ export async function registerRoutes(
         ? `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/estimating`
         : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board`;
 
-      log(`Navigating to BidBoard: ${bidboardUrl}`, "playwright");
+      console.log(`[playwright] Navigating to BidBoard: ${bidboardUrl}`);
       await page.goto(bidboardUrl, { waitUntil: 'networkidle', timeout: 60000 });
       await page.waitForTimeout(3000);
       
@@ -4460,7 +4460,7 @@ export async function registerRoutes(
         ? `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/projecthome`
         : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/hubs/company-hub/views/portfolio`;
 
-      log(`Navigating to Portfolio: ${portfolioUrl}`, "playwright");
+      console.log(`[playwright] Navigating to Portfolio: ${portfolioUrl}`);
       await page.goto(portfolioUrl, { waitUntil: 'networkidle', timeout: 60000 });
       await page.waitForTimeout(3000);
       
