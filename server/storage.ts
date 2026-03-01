@@ -255,12 +255,12 @@ export class DatabaseStorage implements IStorage {
       return undefined;
     }
     
-    // Update the mapping with portfolio info
+    // Update the mapping with portfolio info, preserving the original BidBoard project ID
     const [result] = await db.update(syncMappings)
       .set({
+        bidboardProjectId: mapping.bidboardProjectId || bidboardProjectId,
         portfolioProjectId,
         portfolioProjectName: portfolioProjectName || mapping.procoreProjectName,
-        procoreProjectId: portfolioProjectId, // Update main project ID to portfolio
         projectPhase: 'portfolio',
         sentToPortfolioAt: new Date(),
         lastSyncAt: new Date(),
