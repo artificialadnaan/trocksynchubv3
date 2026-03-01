@@ -74,10 +74,10 @@ export async function processDealStageChange(
     return { triggered: false, reason: "bidboard_project_already_exists" };
   }
 
-  console.log(`[hubspot-bidboard] Deal ${dealId} moved to ${triggerConfig.hubspotStageLabel}, creating BidBoard project in "${triggerConfig.bidboardStage}"`);
+  console.log(`[hubspot-bidboard] Deal ${dealId} moved to ${triggerConfig.hubspotStageLabel}, creating BidBoard project in "${triggerConfig.bidboardStage}" with document sync`);
 
-  // Create BidBoard project
-  const result = await createBidBoardProjectFromDeal(dealId, triggerConfig.bidboardStage);
+  // Create BidBoard project and sync documents
+  const result = await createBidBoardProjectFromDeal(dealId, triggerConfig.bidboardStage, { syncDocuments: true });
 
   // Log the automation
   await storage.createAuditLog({
@@ -91,9 +91,15 @@ export async function processDealStageChange(
       hubspotStageLabel: triggerConfig.hubspotStageLabel,
       bidboardStage: triggerConfig.bidboardStage,
       bidboardProjectId: result.projectId,
+      documentsUploaded: result.documentsUploaded || 0,
+      documentErrors: result.documentErrors,
       error: result.error,
     },
   });
+
+  if (result.success) {
+    console.log(`[hubspot-bidboard] Successfully created BidBoard project ${result.projectId} with ${result.documentsUploaded || 0} documents`);
+  }
 
   return { triggered: true, result };
 }
@@ -101,8 +107,9 @@ export async function processDealStageChange(
 // Manual trigger for testing or one-off creation
 export async function triggerBidBoardCreationForDeal(
   dealId: string,
-  bidboardStage: string = "Estimate in Progress"
-): Promise<{ success: boolean; projectId?: string; error?: string }> {
+  bidboardStage: string = "Estimate in Progress",
+  options: { syncDocuments?: boolean } = { syncDocuments: true }
+): Promise<{ success: boolean; projectId?: string; documentsUploaded?: number; error?: string }> {
   // Check if deal already has a BidBoard project
   const existingMapping = await storage.getSyncMappingByHubspotDealId(dealId);
   if (existingMapping?.bidboardProjectId) {
@@ -112,11 +119,12 @@ export async function triggerBidBoardCreationForDeal(
     };
   }
 
-  const result = await createBidBoardProjectFromDeal(dealId, bidboardStage);
+  const result = await createBidBoardProjectFromDeal(dealId, bidboardStage, options);
   
   return {
     success: result.success,
     projectId: result.projectId,
+    documentsUploaded: result.documentsUploaded,
     error: result.error,
   };
 }

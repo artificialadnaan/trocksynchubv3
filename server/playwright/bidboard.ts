@@ -962,11 +962,18 @@ export async function createBidBoardProject(
   return result;
 }
 
-// Create BidBoard project from HubSpot deal data
+// Extended result type to include document sync info
+export interface CreateBidBoardProjectFromDealResult extends CreateBidBoardProjectResult {
+  documentsUploaded?: number;
+  documentErrors?: string[];
+}
+
+// Create BidBoard project from HubSpot deal data and sync documents
 export async function createBidBoardProjectFromDeal(
   dealId: string,
-  initialStage: string = "Estimate in Progress"
-): Promise<CreateBidBoardProjectResult> {
+  initialStage: string = "Estimate in Progress",
+  options: { syncDocuments?: boolean } = { syncDocuments: true }
+): Promise<CreateBidBoardProjectFromDealResult> {
   // Fetch deal data from database
   const deal = await storage.getHubspotDealByHubspotId(dealId);
   
@@ -995,10 +1002,11 @@ export async function createBidBoardProjectFromDeal(
 
   log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");
   
-  const result = await createBidBoardProject(projectData);
+  const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
   
-  // If successful, create a sync mapping
+  // If successful, create a sync mapping and sync documents
   if (result.success && result.projectId) {
+    // Create sync mapping
     try {
       await storage.createSyncMapping({
         hubspotDealId: dealId,
@@ -1013,6 +1021,52 @@ export async function createBidBoardProjectFromDeal(
       log(`Created sync mapping for deal ${dealId} → BidBoard ${result.projectId}`, "playwright");
     } catch (err: any) {
       log(`Warning: Could not create sync mapping: ${err.message}`, "playwright");
+    }
+
+    // Sync documents and photos from HubSpot to BidBoard
+    if (options.syncDocuments !== false) {
+      try {
+        log(`Syncing documents from HubSpot deal ${dealId} to BidBoard project ${result.projectId}`, "playwright");
+        const { syncHubSpotAttachmentsToBidBoard } = await import("./documents");
+        const docResult = await syncHubSpotAttachmentsToBidBoard(result.projectId, dealId);
+        
+        result.documentsUploaded = docResult.documentsUploaded;
+        result.documentErrors = docResult.errors;
+        
+        if (docResult.success) {
+          log(`Successfully synced ${docResult.documentsUploaded} documents to BidBoard project ${result.projectId}`, "playwright");
+        } else if (docResult.documentsUploaded > 0) {
+          log(`Partially synced ${docResult.documentsUploaded} documents to BidBoard (some errors)`, "playwright");
+        } else {
+          log(`No documents found or sync failed for BidBoard project ${result.projectId}`, "playwright");
+        }
+
+        // Log document sync action
+        await storage.createBidboardAutomationLog({
+          projectId: result.projectId,
+          projectName: projectData.name,
+          action: "sync_hubspot_documents",
+          status: docResult.success ? "success" : (docResult.documentsUploaded > 0 ? "partial" : "failed"),
+          details: {
+            hubspotDealId: dealId,
+            documentsFound: docResult.documentsDownloaded,
+            documentsUploaded: docResult.documentsUploaded,
+          },
+          errorMessage: docResult.errors.length > 0 ? docResult.errors.join(", ") : undefined,
+        });
+      } catch (docErr: any) {
+        log(`Error syncing documents: ${docErr.message}`, "playwright");
+        result.documentErrors = [docErr.message];
+        
+        await storage.createBidboardAutomationLog({
+          projectId: result.projectId,
+          projectName: projectData.name,
+          action: "sync_hubspot_documents",
+          status: "failed",
+          details: { hubspotDealId: dealId },
+          errorMessage: docErr.message,
+        });
+      }
     }
   }
   
