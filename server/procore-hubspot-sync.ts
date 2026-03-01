@@ -69,8 +69,34 @@ export function mapProcoreStageToHubspot(procoreStage: string | null): string {
   return PROCORE_TO_HUBSPOT_STAGE[procoreStage] || procoreStage; // Pass through if no mapping
 }
 
+// Resolve stage label to actual HubSpot stage ID
+// mapProcoreStageToHubspot returns labels, but HubSpot API requires stage IDs
+export async function resolveHubspotStageId(stageLabel: string): Promise<{ stageId: string; stageName: string } | null> {
+  const pipelines = await storage.getHubspotPipelines();
+  
+  for (const pipeline of pipelines) {
+    const stages = (pipeline.stages as any[]) || [];
+    for (const stage of stages) {
+      // Match by label (case-insensitive) or by stageId
+      const label = stage.label || stage.stageName || '';
+      if (label.toLowerCase() === stageLabel.toLowerCase() || stage.stageId === stageLabel) {
+        return {
+          stageId: stage.stageId,
+          stageName: label,
+        };
+      }
+    }
+  }
+  
+  // If no match found, return null (caller should handle gracefully)
+  console.warn(`[procore-hubspot-sync] No HubSpot stage found matching label: "${stageLabel}"`);
+  return null;
+}
+
 export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubspotWrites?: boolean } = {}): Promise<SyncResult> {
-  const { dryRun = false, skipHubspotWrites = false } = options;
+  // Default to read-only mode (skipHubspotWrites = true) - only read and link data
+  // Must explicitly pass skipHubspotWrites: false to enable HubSpot writes
+  const { dryRun = false, skipHubspotWrites = true } = options;
   const start = Date.now();
   const details: SyncDetail[] = [];
   let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0;
@@ -335,6 +361,15 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
         for (const item of pendingHubspotCreates) {
           const project = item.project;
           try {
+            // Resolve stage label to actual HubSpot stage ID before creating deal
+            const stageLabel = item.properties.dealstage;
+            const resolvedStage = await resolveHubspotStageId(stageLabel);
+            if (resolvedStage) {
+              item.properties.dealstage = resolvedStage.stageId;
+            } else {
+              console.warn(`[procore-hubspot-sync] Could not resolve stage "${stageLabel}" for project ${project.name}, using label as-is`);
+            }
+            
             const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
               method: 'POST',
               headers: {

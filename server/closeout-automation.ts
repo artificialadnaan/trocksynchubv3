@@ -213,23 +213,32 @@ export async function runProjectCloseout(
     }
 
     if (options.updateHubSpotStage !== false) {
-      try {
-        const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
-        if (mapping?.hubspotDealId) {
-          const { updateHubSpotDealStage } = await import('./hubspot');
-          const closeoutStageId = await getHubSpotCloseoutStageId();
-          if (closeoutStageId) {
-            await updateHubSpotDealStage(mapping.hubspotDealId, closeoutStageId);
-            results.hubspotUpdateResult = { success: true };
+      // Check if stage sync automation is enabled (disabled by default)
+      const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
+      const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
+      
+      if (!stageSyncEnabled) {
+        console.log('[closeout] Stage sync disabled - skipping HubSpot stage update');
+        results.hubspotUpdateResult = { success: false, error: 'Stage sync automation is disabled' };
+      } else {
+        try {
+          const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+          if (mapping?.hubspotDealId) {
+            const { updateHubSpotDealStage } = await import('./hubspot');
+            const closeoutStageId = await getHubSpotCloseoutStageId();
+            if (closeoutStageId) {
+              await updateHubSpotDealStage(mapping.hubspotDealId, closeoutStageId);
+              results.hubspotUpdateResult = { success: true };
+            } else {
+              results.hubspotUpdateResult = { success: false, error: 'Closeout stage not found in HubSpot' };
+            }
           } else {
-            results.hubspotUpdateResult = { success: false, error: 'Closeout stage not found in HubSpot' };
+            results.hubspotUpdateResult = { success: false, error: 'No HubSpot deal mapping found' };
           }
-        } else {
-          results.hubspotUpdateResult = { success: false, error: 'No HubSpot deal mapping found' };
+        } catch (err: any) {
+          results.hubspotUpdateResult = { success: false, error: err.message };
+          console.warn(`[closeout] HubSpot update warning: ${err.message}`);
         }
-      } catch (err: any) {
-        results.hubspotUpdateResult = { success: false, error: err.message };
-        console.warn(`[closeout] HubSpot update warning: ${err.message}`);
       }
     }
 

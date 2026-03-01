@@ -15,7 +15,7 @@ import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifica
 import { sendEmail } from "./email-service";
 import { isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
-import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot } from "./procore-hubspot-sync";
+import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot, resolveHubspotStageId } from "./procore-hubspot-sync";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject, onBidBoardProjectCreated, detectAndProcessNewProjects } from "./bidboard-automation";
 import { testLogin as testProcoreLogin, saveProcoreCredentials, logout as logoutProcore } from "./playwright/auth";
 import { runPortfolioTransition, runFullPortfolioWorkflow } from "./playwright/portfolio";
@@ -910,15 +910,30 @@ export async function registerRoutes(
 
                 const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
                 if (mapping?.hubspotDealId) {
-                  const hubspotStageId = mapProcoreStageToHubspot(newStage);
-
-                  const hubspotPipelines = await storage.getHubspotPipelines();
-                  let hubspotStageName = hubspotStageId;
-                  for (const pipeline of hubspotPipelines) {
-                    const stages = (pipeline.stages as any[]) || [];
-                    const found = stages.find((s: any) => s.stageId === hubspotStageId);
-                    if (found) { hubspotStageName = found.label || found.stageName || hubspotStageId; break; }
-                  }
+                  // Check if stage sync automation is enabled (disabled by default)
+                  const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
+                  const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
+                  
+                  if (!stageSyncEnabled) {
+                    console.log(`[webhook] Stage sync disabled - skipping HubSpot update for deal ${mapping.hubspotDealId}`);
+                  } else {
+                  // Map Procore stage to HubSpot stage label, then resolve to actual stage ID
+                  const hubspotStageLabel = mapProcoreStageToHubspot(newStage);
+                  const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+                  
+                  if (!resolvedStage) {
+                    console.log(`[webhook] Could not resolve HubSpot stage for label: ${hubspotStageLabel}`);
+                    await storage.createAuditLog({
+                      action: 'webhook_stage_change_processed',
+                      entityType: 'project_stage',
+                      entityId: projectId,
+                      source: 'procore',
+                      status: 'error',
+                      details: { projectId, projectName: project.name, oldStage, newStage, error: `No HubSpot stage found for label: ${hubspotStageLabel}` },
+                    });
+                  } else {
+                  const hubspotStageId = resolvedStage.stageId;
+                  const hubspotStageName = resolvedStage.stageName;
 
                   const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
                   console.log(`[webhook] HubSpot deal ${mapping.hubspotDealId} stage updated: ${updateResult.message}`);
@@ -954,6 +969,8 @@ export async function registerRoutes(
                       emailRecipient: emailResult.ownerEmail,
                     },
                   });
+                  } // End resolvedStage check
+                  } // End stageSyncEnabled check
                 } else {
                   console.log(`[webhook] No HubSpot mapping found for project ${projectId}, stage change logged but not synced`);
                   await storage.createAuditLog({
@@ -1721,36 +1738,38 @@ export async function registerRoutes(
       let emailResult = null;
 
       if (mapping?.hubspotDealId) {
-        const hubspotStageId = mapProcoreStageToHubspot(newStage);
-        const hubspotPipelines = await storage.getHubspotPipelines();
-        let hubspotStageName = hubspotStageId;
-        for (const pipeline of hubspotPipelines) {
-          const stages = (pipeline.stages as any[]) || [];
-          const found = stages.find((s: any) => s.stageId === hubspotStageId);
-          if (found) { hubspotStageName = found.label || found.stageName || hubspotStageId; break; }
+        // Map Procore stage to HubSpot stage label, then resolve to actual stage ID
+        const hubspotStageLabel = mapProcoreStageToHubspot(newStage);
+        const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+        
+        if (!resolvedStage) {
+          console.log(`[manual] Could not resolve HubSpot stage for label: ${hubspotStageLabel}`);
+        } else {
+          const hubspotStageId = resolvedStage.stageId;
+          const hubspotStageName = resolvedStage.stageName;
+
+          hubspotUpdate = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
+          const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+
+          emailResult = await sendStageChangeEmail({
+            hubspotDealId: mapping.hubspotDealId,
+            dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
+            procoreProjectId: projectId,
+            procoreProjectName: localProject.name || 'Unknown Project',
+            oldStage,
+            newStage,
+            hubspotStageName,
+          });
+
+          await storage.createAuditLog({
+            action: 'manual_stage_change_processed',
+            entityType: 'project_stage',
+            entityId: projectId,
+            source: 'manual',
+            status: 'success',
+            details: { projectId, projectName: localProject.name, oldStage, newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName, emailSent: emailResult?.sent },
+          });
         }
-
-        hubspotUpdate = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
-        const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
-
-        emailResult = await sendStageChangeEmail({
-          hubspotDealId: mapping.hubspotDealId,
-          dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
-          procoreProjectId: projectId,
-          procoreProjectName: localProject.name || 'Unknown Project',
-          oldStage,
-          newStage,
-          hubspotStageName,
-        });
-
-        await storage.createAuditLog({
-          action: 'manual_stage_change_processed',
-          entityType: 'project_stage',
-          entityId: projectId,
-          source: 'manual',
-          status: 'success',
-          details: { projectId, projectName: localProject.name, oldStage, newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName, emailSent: emailResult?.sent },
-        });
       }
 
       res.json({

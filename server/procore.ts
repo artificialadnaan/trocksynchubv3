@@ -956,23 +956,33 @@ export async function runFullProcoreSync(): Promise<{
 
   if (projects.stageChanges && projects.stageChanges.length > 0) {
     console.log(`[procore] Detected ${projects.stageChanges.length} stage change(s) during polling, processing...`);
+    
+    // Check if stage sync automation is enabled (disabled by default)
+    const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
+    const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
+    
+    if (!stageSyncEnabled) {
+      console.log(`[procore] Stage sync disabled - skipping HubSpot updates for ${projects.stageChanges.length} stage change(s)`);
+    } else {
     try {
       const { sendStageChangeEmail } = await import('./email-notifications');
-      const { mapProcoreStageToHubspot } = await import('./procore-hubspot-sync');
+      const { mapProcoreStageToHubspot, resolveHubspotStageId } = await import('./procore-hubspot-sync');
       const { updateHubSpotDealStage } = await import('./hubspot');
 
       for (const sc of projects.stageChanges) {
         const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
         if (mapping?.hubspotDealId) {
-          const hubspotStageId = mapProcoreStageToHubspot(sc.newStage);
-
-          const hubspotPipelines = await storage.getHubspotPipelines();
-          let hubspotStageName = hubspotStageId;
-          for (const pipeline of hubspotPipelines) {
-            const stages = (pipeline.stages as any[]) || [];
-            const found = stages.find((s: any) => s.stageId === hubspotStageId);
-            if (found) { hubspotStageName = found.label || found.stageName || hubspotStageId; break; }
+          // Map Procore stage to HubSpot stage label, then resolve to actual stage ID
+          const hubspotStageLabel = mapProcoreStageToHubspot(sc.newStage);
+          const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+          
+          if (!resolvedStage) {
+            console.log(`[procore] Could not resolve HubSpot stage for label: ${hubspotStageLabel}`);
+            continue;
           }
+          
+          const hubspotStageId = resolvedStage.stageId;
+          const hubspotStageName = resolvedStage.stageName;
 
           const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
           console.log(`[procore] Polling stage change: HubSpot deal ${mapping.hubspotDealId} updated to ${hubspotStageName}: ${updateResult.message}`);
@@ -1003,6 +1013,7 @@ export async function runFullProcoreSync(): Promise<{
     } catch (err: any) {
       console.error(`[procore] Stage change email processing failed:`, err.message);
     }
+    } // End stageSyncEnabled check
   }
 
   const purgedHistory = await storage.purgeProcoreChangeHistory(14);

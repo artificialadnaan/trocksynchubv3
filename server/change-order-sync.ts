@@ -111,6 +111,15 @@ export async function syncChangeOrdersToHubSpot(procoreProjectId: string): Promi
   contractValue?: ContractValue;
   error?: string;
 }> {
+  // Check if change order sync is enabled (disabled by default)
+  const changeOrderSyncConfig = await storage.getAutomationConfig("change_order_hubspot_sync");
+  const syncEnabled = (changeOrderSyncConfig?.value as any)?.enabled === true;
+  
+  if (!syncEnabled) {
+    console.log(`[ChangeOrder] Change order sync disabled - skipping HubSpot update for project ${procoreProjectId}`);
+    return { success: false, error: 'Change order sync is disabled' };
+  }
+  
   try {
     const mapping = await storage.getSyncMappingByProcoreProjectId(procoreProjectId);
     

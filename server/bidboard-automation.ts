@@ -133,6 +133,16 @@ export async function syncBidBoardStageToHubSpot(
     success: false,
   };
   
+  // Check if stage sync automation is enabled (disabled by default)
+  const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
+  const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
+  
+  if (!stageSyncEnabled) {
+    result.error = "Stage sync automation is disabled";
+    log(`Stage sync disabled - skipping HubSpot update for ${change.projectName}`, "bidboard");
+    return result;
+  }
+  
   // Find corresponding HubSpot deal
   const hubspotDealId = await findHubSpotDealForProject({
     id: change.projectId,
