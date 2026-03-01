@@ -289,18 +289,27 @@ export async function getSyncHealthReport(): Promise<SyncHealthReport> {
   const webhooksToday = todayLogs.filter(log => log.action.includes('webhook'));
   const failedToday = webhooksToday.filter(log => log.status === 'error' || log.status === 'failed');
 
+  // Find last successful syncs from ALL logs (not just today) - we want to know the most recent sync ever
   const hubspotSync = logs.find(l => l.action === 'sync_hubspot_deals' && l.status === 'success');
   const procoreSync = logs.find(l => l.action === 'sync_procore_projects' && l.status === 'success');
   const companyCamSync = logs.find(l => l.action.includes('companycam') && l.action.includes('sync') && l.status === 'success');
 
+  // Calculate failure rate from today's webhooks
   const failureRate = webhooksToday.length > 0 
     ? failedToday.length / webhooksToday.length 
     : 0;
 
+  // Determine system health based on today's failure rate AND recency of syncs
   let systemHealth: 'healthy' | 'degraded' | 'unhealthy' = 'healthy';
+  
+  // Check if any syncs are stale (more than 24 hours old)
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const hubspotStale = !hubspotSync?.createdAt || new Date(hubspotSync.createdAt) < oneDayAgo;
+  const procoreStale = !procoreSync?.createdAt || new Date(procoreSync.createdAt) < oneDayAgo;
+  
   if (failureRate > 0.5) {
     systemHealth = 'unhealthy';
-  } else if (failureRate > 0.2) {
+  } else if (failureRate > 0.2 || (hubspotStale && procoreStale)) {
     systemHealth = 'degraded';
   }
 
