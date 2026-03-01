@@ -46,7 +46,7 @@ import {
   Calculator,
   XCircle,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { format } from "date-fns";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -80,6 +80,22 @@ interface SyncLookupEntry {
 
 type ReportType = "procore" | "hubspot" | "conflicts" | "companycam" | "bidboard" | null;
 
+type LucideIcon = React.ComponentType<{ className?: string }>;
+
+function ExternalServiceLink({ href, icon: Icon, label, colorClass }: {
+  href: string;
+  icon: LucideIcon;
+  label: string;
+  colorClass: string;
+}) {
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer"
+      className={`inline-flex items-center gap-1 text-xs ${colorClass} hover:underline`}>
+      <Icon className="w-3 h-3" /> {label} <ExternalLink className="w-3 h-3" />
+    </a>
+  );
+}
+
 export default function ProjectSyncPage() {
   const [search, setSearch] = useState("");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -96,16 +112,17 @@ export default function ProjectSyncPage() {
     queryKey: ["/api/procore-hubspot/overview"],
   });
 
-  const params = new URLSearchParams();
-  if (search) params.set("search", search);
-  const paramsStr = params.toString();
+  const paramsStr = useMemo(() => {
+    const params = new URLSearchParams();
+    if (search) params.set("search", search);
+    return params.toString();
+  }, [search]);
 
   const { data: mappings, isLoading: mappingsLoading } = useQuery<MappingData>({
     queryKey: ["/api/procore-hubspot/mappings", paramsStr],
     queryFn: async () => {
       const url = paramsStr ? `/api/procore-hubspot/mappings?${paramsStr}` : "/api/procore-hubspot/mappings";
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to fetch mappings");
+      const res = await apiRequest("GET", url);
       return res.json();
     },
   });
@@ -129,6 +146,12 @@ export default function ProjectSyncPage() {
     queryKey: ["/api/bidboard/estimates?limit=500"],
   });
 
+  const invalidateSyncQueries = (...extraKeys: string[]) => {
+    queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/overview"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/mappings"] });
+    extraKeys.forEach(key => queryClient.invalidateQueries({ queryKey: [key] }));
+  };
+
   const syncMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/procore-hubspot/sync");
@@ -139,8 +162,7 @@ export default function ProjectSyncPage() {
         title: "Sync Complete",
         description: `Matched ${data.matched} projects. ${data.hubspotCreated || 0} created in HubSpot, ${data.hubspotUpdates} updated, ${data.conflicts} conflicts.`,
       });
-      queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/overview"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/mappings"] });
+      invalidateSyncQueries();
     },
     onError: (e: any) => {
       toast({ title: "Sync Failed", description: e.message, variant: "destructive" });
@@ -153,8 +175,7 @@ export default function ProjectSyncPage() {
     },
     onSuccess: () => {
       toast({ title: "Mapping removed" });
-      queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/overview"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/mappings"] });
+      invalidateSyncQueries();
     },
   });
 
@@ -168,9 +189,7 @@ export default function ProjectSyncPage() {
       setManualLinkOpen(false);
       setSelectedProcore(null);
       setSelectedHubspot(null);
-      queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/overview"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/mappings"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/procore-hubspot/unmatched"] });
+      invalidateSyncQueries("/api/procore-hubspot/unmatched");
     },
     onError: (e: any) => {
       toast({ title: "Failed", description: e.message, variant: "destructive" });
@@ -186,13 +205,19 @@ export default function ProjectSyncPage() {
     });
   };
 
-  const filteredUnmatchedProcore = unmatched?.unmatchedProcore?.filter(
-    (p) => !procoreSearch || p.name?.toLowerCase().includes(procoreSearch.toLowerCase()) || p.projectNumber?.toLowerCase().includes(procoreSearch.toLowerCase())
-  ).slice(0, 50) || [];
+  const filteredUnmatchedProcore = useMemo(() =>
+    unmatched?.unmatchedProcore?.filter(
+      (p) => !procoreSearch || p.name?.toLowerCase().includes(procoreSearch.toLowerCase()) || p.projectNumber?.toLowerCase().includes(procoreSearch.toLowerCase())
+    ).slice(0, 50) || [],
+    [unmatched?.unmatchedProcore, procoreSearch]
+  );
 
-  const filteredUnmatchedHubspot = unmatched?.unmatchedHubspot?.filter(
-    (d) => !hubspotSearch || d.dealName?.toLowerCase().includes(hubspotSearch.toLowerCase())
-  ).slice(0, 50) || [];
+  const filteredUnmatchedHubspot = useMemo(() =>
+    unmatched?.unmatchedHubspot?.filter(
+      (d) => !hubspotSearch || d.dealName?.toLowerCase().includes(hubspotSearch.toLowerCase())
+    ).slice(0, 50) || [],
+    [unmatched?.unmatchedHubspot, hubspotSearch]
+  );
 
   const getProcoreUrl = (projectId: string) => 
     `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${projectId}/tools/projecthome`;
@@ -203,25 +228,32 @@ export default function ProjectSyncPage() {
   const getCompanyCamUrl = (projectId: string) =>
     `https://app.companycam.com/projects/${projectId}`;
 
-  // Calculate CompanyCam matched/unmatched
-  const companycamMatched = companycamProjects?.data?.filter(p => {
-    const lookup = syncLookup?.[`companycam:${p.companycamId}`];
-    return lookup?.procoreProjectId || lookup?.hubspotDealId;
-  }) || [];
-  
-  const companycamUnmatched = companycamProjects?.data?.filter(p => {
-    const lookup = syncLookup?.[`companycam:${p.companycamId}`];
-    return !lookup?.procoreProjectId && !lookup?.hubspotDealId;
-  }) || [];
+  const [companycamMatched, companycamUnmatched] = useMemo(() => {
+    const matched: any[] = [];
+    const unmatched_: any[] = [];
+    for (const p of companycamProjects?.data || []) {
+      const lookup = syncLookup?.[`companycam:${p.companycamId}`];
+      if (lookup?.procoreProjectId || lookup?.hubspotDealId) {
+        matched.push(p);
+      } else {
+        unmatched_.push(p);
+      }
+    }
+    return [matched, unmatched_];
+  }, [companycamProjects?.data, syncLookup]);
 
-  // Calculate BidBoard matched/unmatched (matched = linked to Procore project or HubSpot deal)
-  const bidboardMatched = bidboardEstimates?.data?.filter(b => {
-    return b.matchStatus === 'matched' || b.procoreProjectId;
-  }) || [];
-  
-  const bidboardUnmatched = bidboardEstimates?.data?.filter(b => {
-    return b.matchStatus !== 'matched' && !b.procoreProjectId;
-  }) || [];
+  const [bidboardMatched, bidboardUnmatched] = useMemo(() => {
+    const matched: any[] = [];
+    const unmatched_: any[] = [];
+    for (const b of bidboardEstimates?.data || []) {
+      if (b.matchStatus === 'matched' || b.procoreProjectId) {
+        matched.push(b);
+      } else {
+        unmatched_.push(b);
+      }
+    }
+    return [matched, unmatched_];
+  }, [bidboardEstimates?.data]);
 
   const getReportTitle = (type: ReportType) => {
     switch (type) {
@@ -234,12 +266,13 @@ export default function ProjectSyncPage() {
     }
   };
 
-  const getMappingsWithConflicts = () => {
-    return mappings?.data?.filter(m => {
+  const conflictMappings = useMemo(() =>
+    mappings?.data?.filter((m: any) => {
       const meta = m.metadata || {};
       return meta.conflicts && meta.conflicts.length > 0;
-    }) || [];
-  };
+    }) || [],
+    [mappings?.data]
+  );
 
   const renderProjectList = (type: ReportType) => {
     if (type === "procore") {
@@ -273,15 +306,9 @@ export default function ProjectSyncPage() {
                       </div>
                     </div>
                     <div className="flex flex-col gap-1">
-                      <a href={getProcoreUrl(m.procoreProjectId)} target="_blank" rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                        <Building2 className="w-3 h-3" /> Procore <ExternalLink className="w-3 h-3" />
-                      </a>
+                      <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                       {m.hubspotDealId && (
-                        <a href={getHubspotUrl(m.hubspotDealId)} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-orange-600 hover:underline">
-                          <Building2 className="w-3 h-3" /> HubSpot <ExternalLink className="w-3 h-3" />
-                        </a>
+                        <ExternalServiceLink href={getHubspotUrl(m.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                       )}
                     </div>
                   </div>
@@ -304,10 +331,7 @@ export default function ProjectSyncPage() {
                         {p.city && `${p.city}, ${p.stateCode}`} {p.stage && `• ${p.stage}`}
                       </div>
                     </div>
-                    <a href={getProcoreUrl(p.procoreId)} target="_blank" rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                      <Building2 className="w-3 h-3" /> Procore <ExternalLink className="w-3 h-3" />
-                    </a>
+                    <ExternalServiceLink href={getProcoreUrl(p.procoreId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                   </div>
                 </div>
               ))}
@@ -346,15 +370,9 @@ export default function ProjectSyncPage() {
                       </div>
                     </div>
                     <div className="flex flex-col gap-1">
-                      <a href={getHubspotUrl(m.hubspotDealId)} target="_blank" rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-xs text-orange-600 hover:underline">
-                        <Building2 className="w-3 h-3" /> HubSpot <ExternalLink className="w-3 h-3" />
-                      </a>
+                      <ExternalServiceLink href={getHubspotUrl(m.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                       {m.procoreProjectId && (
-                        <a href={getProcoreUrl(m.procoreProjectId)} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                          <Building2 className="w-3 h-3" /> Procore <ExternalLink className="w-3 h-3" />
-                        </a>
+                        <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                       )}
                     </div>
                   </div>
@@ -374,10 +392,7 @@ export default function ProjectSyncPage() {
                         {d.amount && `$${parseFloat(d.amount).toLocaleString()}`} {d.stageName && `• ${d.stageName}`}
                       </div>
                     </div>
-                    <a href={getHubspotUrl(d.hubspotId)} target="_blank" rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-orange-600 hover:underline">
-                      <Building2 className="w-3 h-3" /> HubSpot <ExternalLink className="w-3 h-3" />
-                    </a>
+                    <ExternalServiceLink href={getHubspotUrl(d.hubspotId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                   </div>
                 </div>
               ))}
@@ -389,7 +404,7 @@ export default function ProjectSyncPage() {
     }
     
     if (type === "conflicts") {
-      const conflictsList = getMappingsWithConflicts();
+      const conflictsList = conflictMappings;
       return (
         <div className="space-y-2">
           {conflictsList.map((m: any) => {
@@ -412,16 +427,10 @@ export default function ProjectSyncPage() {
                   </div>
                   <div className="flex flex-col gap-1">
                     {m.procoreProjectId && (
-                      <a href={getProcoreUrl(m.procoreProjectId)} target="_blank" rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                        <Building2 className="w-3 h-3" /> Procore <ExternalLink className="w-3 h-3" />
-                      </a>
+                      <ExternalServiceLink href={getProcoreUrl(m.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                     )}
                     {m.hubspotDealId && (
-                      <a href={getHubspotUrl(m.hubspotDealId)} target="_blank" rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-xs text-orange-600 hover:underline">
-                        <Building2 className="w-3 h-3" /> HubSpot <ExternalLink className="w-3 h-3" />
-                      </a>
+                      <ExternalServiceLink href={getHubspotUrl(m.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                     )}
                   </div>
                 </div>
@@ -463,15 +472,9 @@ export default function ProjectSyncPage() {
                         </div>
                       </div>
                       <div className="flex flex-col gap-1">
-                        <a href={getCompanyCamUrl(p.companycamId)} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-purple-600 hover:underline">
-                          <Camera className="w-3 h-3" /> CompanyCam <ExternalLink className="w-3 h-3" />
-                        </a>
+                        <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
                         {lookup?.procoreProjectId && (
-                          <a href={getProcoreUrl(lookup.procoreProjectId)} target="_blank" rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                            <Building2 className="w-3 h-3" /> Procore <ExternalLink className="w-3 h-3" />
-                          </a>
+                          <ExternalServiceLink href={getProcoreUrl(lookup.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                         )}
                       </div>
                     </div>
@@ -495,10 +498,7 @@ export default function ProjectSyncPage() {
                         Photos: {p.photoCount || 0}
                       </div>
                     </div>
-                    <a href={getCompanyCamUrl(p.companycamId)} target="_blank" rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-purple-600 hover:underline">
-                      <Camera className="w-3 h-3" /> CompanyCam <ExternalLink className="w-3 h-3" />
-                    </a>
+                    <ExternalServiceLink href={getCompanyCamUrl(p.companycamId)} icon={Camera} label="CompanyCam" colorClass="text-purple-600" />
                   </div>
                 </div>
               ))}
@@ -545,16 +545,10 @@ export default function ProjectSyncPage() {
                       </div>
                       <div className="flex flex-col gap-1">
                         {b.procoreProjectId && (
-                          <a href={getProcoreUrl(b.procoreProjectId)} target="_blank" rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline">
-                            <Building2 className="w-3 h-3" /> Procore <ExternalLink className="w-3 h-3" />
-                          </a>
+                          <ExternalServiceLink href={getProcoreUrl(b.procoreProjectId)} icon={Building2} label="Procore" colorClass="text-blue-600" />
                         )}
                         {lookup?.hubspotDealId && (
-                          <a href={getHubspotUrl(lookup.hubspotDealId)} target="_blank" rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-xs text-orange-600 hover:underline">
-                            <Building2 className="w-3 h-3" /> HubSpot <ExternalLink className="w-3 h-3" />
-                          </a>
+                          <ExternalServiceLink href={getHubspotUrl(lookup.hubspotDealId)} icon={Building2} label="HubSpot" colorClass="text-orange-600" />
                         )}
                       </div>
                     </div>

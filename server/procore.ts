@@ -810,7 +810,27 @@ export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids
   return { bidPackages: allPackages.length, bids: totalBids, bidForms: totalForms };
 }
 
+// Mutex to prevent concurrent role assignment syncs
+let roleAssignmentSyncInProgress = false;
+const roleAssignmentSyncQueue: string[] = [];
+
 export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
+  // Prevent concurrent syncs to avoid duplicate emails
+  if (roleAssignmentSyncInProgress) {
+    console.log('[procore] Role assignment sync already in progress, skipping to prevent duplicates');
+    return { synced: 0, newAssignments: [] };
+  }
+  
+  roleAssignmentSyncInProgress = true;
+  
+  try {
+    return await performRoleAssignmentSync(projectIds);
+  } finally {
+    roleAssignmentSyncInProgress = false;
+  }
+}
+
+async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 

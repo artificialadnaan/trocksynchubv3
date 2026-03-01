@@ -1241,7 +1241,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async checkEmailDedupeKey(dedupeKey: string): Promise<boolean> {
-    const [result] = await db.select({ count: sql<number>`count(*)::int` }).from(emailSendLog).where(eq(emailSendLog.dedupeKey, dedupeKey));
+    // Only skip if email was successfully sent (not failed attempts)
+    const [result] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(emailSendLog)
+      .where(and(
+        eq(emailSendLog.dedupeKey, dedupeKey),
+        eq(emailSendLog.status, 'sent')
+      ));
     return (result?.count || 0) > 0;
   }
 
