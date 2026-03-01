@@ -198,7 +198,9 @@ export async function getProcoreClient(): Promise<{
 
   return {
     async get(endpoint: string, options?: { params?: Record<string, any>; responseType?: string }) {
-      const url = new URL(`${baseUrl}${endpoint}`);
+      // Handle both full URLs and relative endpoints
+      const isFullUrl = endpoint.startsWith('http://') || endpoint.startsWith('https://');
+      const url = isFullUrl ? new URL(endpoint) : new URL(`${baseUrl}${endpoint}`);
       
       // Add query params
       if (options?.params) {
