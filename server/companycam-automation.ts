@@ -101,7 +101,9 @@ export async function searchCompanyCamProjects(query: {
         score += 50;
       }
       
-      if (query.address.toLowerCase().includes(project.city?.toLowerCase() || '___')) {
+      // City bonus: use normalized values to avoid false positives from substring matching
+      const normalizedProjectCity = (project.city || '').toLowerCase().trim();
+      if (normalizedProjectCity && normalizedQueryAddress.includes(normalizedProjectCity)) {
         score += 20;
       }
     }

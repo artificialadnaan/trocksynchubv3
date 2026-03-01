@@ -234,7 +234,54 @@ export async function runProjectCloseout(
 
     if (options.deactivateProject !== false) {
       if (options.archiveToSharePoint !== false && results.archiveResult?.archiveId) {
-        console.log('[closeout] Waiting for archive to complete before deactivation...');
+        // Archive is in progress - poll for completion before deactivating
+        console.log('[closeout] Archive in progress, polling for completion before deactivation...');
+        const archiveId = results.archiveResult.archiveId;
+        const maxWaitMs = 60000; // Wait up to 60 seconds
+        const pollIntervalMs = 5000;
+        const startTime = Date.now();
+        let archiveComplete = false;
+        
+        while (Date.now() - startTime < maxWaitMs) {
+          try {
+            const progress = getArchiveProgress(archiveId);
+            if (!progress) {
+              console.warn(`[closeout] Archive ${archiveId} not found in progress tracker`);
+              break;
+            }
+            if (progress.status === 'completed') {
+              archiveComplete = true;
+              console.log(`[closeout] Archive ${archiveId} completed successfully`);
+              break;
+            } else if (progress.status === 'failed') {
+              console.warn(`[closeout] Archive ${archiveId} failed: ${progress.errors.join(', ')}`);
+              break;
+            }
+            // Still in progress, wait and retry
+            console.log(`[closeout] Archive ${archiveId} progress: ${progress.progress}% - ${progress.currentStep}`);
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+          } catch (err: any) {
+            console.warn(`[closeout] Error checking archive status: ${err.message}`);
+            break;
+          }
+        }
+        
+        if (archiveComplete) {
+          try {
+            await deactivateProject(projectId);
+            results.deactivationResult = { success: true };
+          } catch (err: any) {
+            results.deactivationResult = { success: false, error: err.message };
+            results.success = false;
+          }
+        } else {
+          // Archive didn't complete in time - mark deactivation as pending
+          results.deactivationResult = { 
+            success: false, 
+            error: `Deactivation skipped: archive ${archiveId} did not complete within ${maxWaitMs / 1000}s. Manual deactivation required.` 
+          };
+          console.warn(`[closeout] Deactivation skipped for project ${projectId} - archive still in progress after timeout`);
+        }
       } else {
         try {
           await deactivateProject(projectId);
