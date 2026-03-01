@@ -383,18 +383,27 @@ export async function importEstimateToBudget(
     // Wait for import to complete
     await page.waitForLoadState("networkidle");
     
-    // Check for success
+    // Check for success or error toast
     const toast = await page.$(PROCORE_SELECTORS.common.toast);
-    const toastText = toast ? await toast.textContent() : null;
+    const toastText = toast ? (await toast.textContent())?.toLowerCase() : null;
     
-    if (toastText?.toLowerCase().includes("success") || toastText?.toLowerCase().includes("imported")) {
+    if (toastText?.includes("success") || toastText?.includes("imported")) {
       result.success = true;
       await logPortfolioAction(portfolioProjectId, "import_to_budget", "success", {});
       log(`Successfully imported estimate to Budget for project ${portfolioProjectId}`, "playwright");
+    } else if (toastText?.includes("error") || toastText?.includes("failed") || toastText?.includes("invalid")) {
+      result.success = false;
+      result.error = `Import failed: ${toastText}`;
+      result.screenshotPath = await takeScreenshot(page, `budget-import-failed-${portfolioProjectId}`);
+      await logPortfolioAction(portfolioProjectId, "import_to_budget", "failed", {}, result.error, result.screenshotPath);
+      log(`Budget import failed for project ${portfolioProjectId}: ${toastText}`, "playwright");
     } else {
-      // Assume success if no error
-      result.success = true;
-      await logPortfolioAction(portfolioProjectId, "import_to_budget", "success", { message: "No explicit confirmation" });
+      // No confirmation toast - do not assume success
+      result.success = false;
+      result.error = "Import completed without confirmation. Manual verification required.";
+      result.screenshotPath = await takeScreenshot(page, `budget-no-confirmation-${portfolioProjectId}`);
+      await logPortfolioAction(portfolioProjectId, "import_to_budget", "uncertain", { message: "No confirmation toast received" });
+      log(`Budget import uncertain for project ${portfolioProjectId}: no confirmation received`, "playwright");
     }
     
   } catch (error) {
