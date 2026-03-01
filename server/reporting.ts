@@ -83,11 +83,16 @@ export interface DashboardMetrics {
   recentActivity: ActivityItem[];
 }
 
+/**
+ * Activity item for recent activity feed.
+ * Note: timestamp is string (ISO format) because Date objects are serialized
+ * to ISO strings by res.json() before being sent to the client.
+ */
 export interface ActivityItem {
   id: string;
   type: string;
   description: string;
-  timestamp: Date;
+  timestamp: string;
   status: string;
   entityType?: string;
   entityId?: string;
@@ -190,7 +195,7 @@ export async function getRecentActivity(limit: number = 20): Promise<ActivityIte
     id: String(log.id),
     type: log.action,
     description: formatActivityDescription(log),
-    timestamp: log.createdAt || new Date(),
+    timestamp: (log.createdAt || new Date()).toISOString(),
     status: log.status || 'unknown',
     entityType: log.entityType,
     entityId: log.entityId,
