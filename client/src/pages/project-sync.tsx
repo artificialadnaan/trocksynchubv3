@@ -114,6 +114,7 @@ export default function ProjectSyncPage() {
   const [selectedHubspot, setSelectedHubspot] = useState<string | null>(null);
   const [reportOpen, setReportOpen] = useState<ReportType>(null);
   const [reportTab, setReportTab] = useState<"matched" | "unmatched">("matched");
+  const [reportSearch, setReportSearch] = useState("");
   const { toast } = useToast();
 
   const { data: overview, isLoading: overviewLoading } = useQuery<SyncOverview>({
@@ -301,25 +302,42 @@ export default function ProjectSyncPage() {
   );
 
   const renderProjectList = (type: ReportType) => {
+    const searchLower = reportSearch.toLowerCase();
+    
     if (type === "procore") {
-      const matched = mappings?.data?.filter(m => m.procoreProjectId) || [];
-      const unmatchedList = unmatched?.unmatchedProcore || [];
+      const allMatched = mappings?.data?.filter(m => m.procoreProjectId) || [];
+      const allUnmatched = unmatched?.unmatchedProcore || [];
+      const filteredMatched = reportSearch
+        ? allMatched.filter((m: any) =>
+            m.procoreProjectName?.toLowerCase().includes(searchLower) ||
+            m.procoreProjectNumber?.toLowerCase().includes(searchLower) ||
+            m.hubspotDealName?.toLowerCase().includes(searchLower)
+          )
+        : allMatched;
+      const filteredUnmatched = reportSearch
+        ? allUnmatched.filter((p: any) =>
+            p.name?.toLowerCase().includes(searchLower) ||
+            p.projectNumber?.toLowerCase().includes(searchLower) ||
+            p.city?.toLowerCase().includes(searchLower) ||
+            p.stage?.toLowerCase().includes(searchLower)
+          )
+        : allUnmatched;
       
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Matched ({matched.length})
+              Matched ({filteredMatched.length}{reportSearch && filteredMatched.length !== allMatched.length ? ` of ${allMatched.length}` : ''})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Unmatched ({unmatchedList.length})
+              Unmatched ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== allUnmatched.length ? ` of ${allUnmatched.length}` : ''})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {matched.map((m: any) => (
+              {filteredMatched.map((m: any) => (
                 <div key={m.id} className="p-4 border rounded-lg">
                   <div className="grid grid-cols-[1fr,auto] gap-4">
                     <div className="space-y-2">
@@ -342,12 +360,12 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {matched.length === 0 && <p className="text-center text-muted-foreground py-8">No matched projects</p>}
+              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'No matched projects'}</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {unmatchedList.map((p: any) => (
+              {filteredUnmatched.map((p: any) => (
                 <div key={p.procoreId} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
                   <div className="grid grid-cols-[1fr,auto] gap-4">
                     <div className="space-y-2">
@@ -372,7 +390,7 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {unmatchedList.length === 0 && <p className="text-center text-muted-foreground py-8">All projects are matched!</p>}
+              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'All projects are matched!'}</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -380,24 +398,37 @@ export default function ProjectSyncPage() {
     }
     
     if (type === "hubspot") {
-      const matched = mappings?.data?.filter(m => m.hubspotDealId) || [];
-      const unmatchedList = unmatched?.unmatchedHubspot || [];
+      const allMatched = mappings?.data?.filter(m => m.hubspotDealId) || [];
+      const allUnmatched = unmatched?.unmatchedHubspot || [];
+      const filteredMatched = reportSearch
+        ? allMatched.filter((m: any) =>
+            m.hubspotDealName?.toLowerCase().includes(searchLower) ||
+            m.procoreProjectName?.toLowerCase().includes(searchLower)
+          )
+        : allMatched;
+      const filteredUnmatched = reportSearch
+        ? allUnmatched.filter((d: any) =>
+            d.dealName?.toLowerCase().includes(searchLower) ||
+            d.stageName?.toLowerCase().includes(searchLower) ||
+            d.pipeline?.toLowerCase().includes(searchLower)
+          )
+        : allUnmatched;
       
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Matched ({matched.length})
+              Matched ({filteredMatched.length}{reportSearch && filteredMatched.length !== allMatched.length ? ` of ${allMatched.length}` : ''})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Unmatched ({unmatchedList.length})
+              Unmatched ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== allUnmatched.length ? ` of ${allUnmatched.length}` : ''})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {matched.map((m: any) => (
+              {filteredMatched.map((m: any) => (
                 <div key={m.id} className="p-4 border rounded-lg">
                   <div className="grid grid-cols-[1fr,auto] gap-4">
                     <div className="space-y-2">
@@ -415,12 +446,12 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {matched.length === 0 && <p className="text-center text-muted-foreground py-8">No matched deals</p>}
+              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching deals found' : 'No matched deals'}</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {unmatchedList.map((d: any) => (
+              {filteredUnmatched.map((d: any) => (
                 <div key={d.hubspotId} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
                   <div className="grid grid-cols-[1fr,auto] gap-4">
                     <div className="space-y-2">
@@ -443,7 +474,7 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {unmatchedList.length === 0 && <p className="text-center text-muted-foreground py-8">All deals are matched!</p>}
+              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching deals found' : 'All deals are matched!'}</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -451,10 +482,19 @@ export default function ProjectSyncPage() {
     }
     
     if (type === "conflicts") {
-      const conflictsList = conflictMappings;
+      const filteredConflicts = reportSearch
+        ? conflictMappings.filter((m: any) =>
+            m.procoreProjectName?.toLowerCase().includes(searchLower) ||
+            m.hubspotDealName?.toLowerCase().includes(searchLower) ||
+            m.procoreProjectNumber?.toLowerCase().includes(searchLower)
+          )
+        : conflictMappings;
       return (
         <div className="space-y-3">
-          {conflictsList.map((m: any) => {
+          <p className="text-sm text-muted-foreground">
+            Showing {filteredConflicts.length}{reportSearch && filteredConflicts.length !== conflictMappings.length ? ` of ${conflictMappings.length}` : ''} conflicts
+          </p>
+          {filteredConflicts.map((m: any) => {
             const meta = m.metadata || {};
             return (
               <div key={m.id} className="p-4 border rounded-lg border-yellow-300 bg-yellow-50/50 dark:bg-yellow-950/20">
@@ -490,27 +530,42 @@ export default function ProjectSyncPage() {
               </div>
             );
           })}
-          {conflictsList.length === 0 && <p className="text-center text-muted-foreground py-8">No conflicts found</p>}
+          {filteredConflicts.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching conflicts found' : 'No conflicts found'}</p>}
         </div>
       );
     }
     
     if (type === "companycam") {
+      const filteredMatched = reportSearch
+        ? companycamMatched.filter((p: any) =>
+            p.name?.toLowerCase().includes(searchLower) ||
+            p.streetAddress?.toLowerCase().includes(searchLower) ||
+            p.city?.toLowerCase().includes(searchLower)
+          )
+        : companycamMatched;
+      const filteredUnmatched = reportSearch
+        ? companycamUnmatched.filter((p: any) =>
+            p.name?.toLowerCase().includes(searchLower) ||
+            p.streetAddress?.toLowerCase().includes(searchLower) ||
+            p.city?.toLowerCase().includes(searchLower)
+          )
+        : companycamUnmatched;
+        
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Linked ({companycamMatched.length})
+              Linked ({filteredMatched.length}{reportSearch && filteredMatched.length !== companycamMatched.length ? ` of ${companycamMatched.length}` : ''})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Not Linked ({companycamUnmatched.length})
+              Not Linked ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== companycamUnmatched.length ? ` of ${companycamUnmatched.length}` : ''})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {companycamMatched.map((p: any) => {
+              {filteredMatched.map((p: any) => {
                 const lookup = syncLookup?.[`companycam:${p.companycamId}`];
                 return (
                   <div key={p.id} className="p-4 border rounded-lg">
@@ -534,12 +589,12 @@ export default function ProjectSyncPage() {
                   </div>
                 );
               })}
-              {companycamMatched.length === 0 && <p className="text-center text-muted-foreground py-8">No linked projects</p>}
+              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'No linked projects'}</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {companycamUnmatched.map((p: any) => (
+              {filteredUnmatched.map((p: any) => (
                 <div key={p.id} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
                   <div className="grid grid-cols-[1fr,auto] gap-4">
                     <div className="space-y-2">
@@ -557,7 +612,7 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {companycamUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">All projects are linked!</p>}
+              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching projects found' : 'All projects are linked!'}</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -565,21 +620,40 @@ export default function ProjectSyncPage() {
     }
     
     if (type === "bidboard") {
+      const filteredMatched = reportSearch 
+        ? bidboardMatched.filter((b: any) => 
+            b.name?.toLowerCase().includes(searchLower) ||
+            b.projectNumber?.toLowerCase().includes(searchLower) ||
+            b.estimator?.toLowerCase().includes(searchLower) ||
+            b.customerName?.toLowerCase().includes(searchLower) ||
+            b.status?.toLowerCase().includes(searchLower)
+          )
+        : bidboardMatched;
+      const filteredUnmatched = reportSearch
+        ? bidboardUnmatched.filter((b: any) =>
+            b.name?.toLowerCase().includes(searchLower) ||
+            b.projectNumber?.toLowerCase().includes(searchLower) ||
+            b.estimator?.toLowerCase().includes(searchLower) ||
+            b.customerName?.toLowerCase().includes(searchLower) ||
+            b.status?.toLowerCase().includes(searchLower)
+          )
+        : bidboardUnmatched;
+        
       return (
         <Tabs value={reportTab} onValueChange={(v) => setReportTab(v as any)}>
           <TabsList className="w-full">
             <TabsTrigger value="matched" className="flex-1">
               <CheckCircle2 className="w-4 h-4 mr-2 text-green-500" />
-              Matched ({bidboardMatched.length})
+              Matched ({filteredMatched.length}{reportSearch && filteredMatched.length !== bidboardMatched.length ? ` of ${bidboardMatched.length}` : ''})
             </TabsTrigger>
             <TabsTrigger value="unmatched" className="flex-1">
               <XCircle className="w-4 h-4 mr-2 text-red-500" />
-              Unmatched ({bidboardUnmatched.length})
+              Unmatched ({filteredUnmatched.length}{reportSearch && filteredUnmatched.length !== bidboardUnmatched.length ? ` of ${bidboardUnmatched.length}` : ''})
             </TabsTrigger>
           </TabsList>
           <TabsContent value="matched" className="mt-4">
             <div className="space-y-2">
-              {bidboardMatched.map((b: any) => {
+              {filteredMatched.map((b: any) => {
                 const lookup = b.procoreProjectId ? syncLookup?.[`procore:${b.procoreProjectId}`] : null;
                 return (
                   <div key={b.id} className="p-4 border rounded-lg">
@@ -617,12 +691,12 @@ export default function ProjectSyncPage() {
                   </div>
                 );
               })}
-              {bidboardMatched.length === 0 && <p className="text-center text-muted-foreground py-8">No matched estimates</p>}
+              {filteredMatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching estimates found' : 'No matched estimates'}</p>}
             </div>
           </TabsContent>
           <TabsContent value="unmatched" className="mt-4">
             <div className="space-y-2">
-              {bidboardUnmatched.map((b: any) => (
+              {filteredUnmatched.map((b: any) => (
                 <div key={b.id} className="p-4 border rounded-lg border-red-200 bg-red-50/50 dark:bg-red-950/20">
                   <div className="space-y-2">
                     <div className="font-medium text-base">{b.name}</div>
@@ -642,7 +716,7 @@ export default function ProjectSyncPage() {
                   </div>
                 </div>
               ))}
-              {bidboardUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">All estimates are matched!</p>}
+              {filteredUnmatched.length === 0 && <p className="text-center text-muted-foreground py-8">{reportSearch ? 'No matching estimates found' : 'All estimates are matched!'}</p>}
             </div>
           </TabsContent>
         </Tabs>
@@ -881,12 +955,21 @@ export default function ProjectSyncPage() {
       </div>
 
       {/* Report Sheet - Full width on mobile, 900px on desktop */}
-      <Sheet open={reportOpen !== null} onOpenChange={(open) => !open && setReportOpen(null)}>
+      <Sheet open={reportOpen !== null} onOpenChange={(open) => { if (!open) { setReportOpen(null); setReportSearch(""); } }}>
         <SheetContent className="w-full sm:w-[900px] sm:max-w-[900px] overflow-hidden">
           <SheetHeader>
             <SheetTitle className="text-xl">{getReportTitle(reportOpen)}</SheetTitle>
           </SheetHeader>
-          <ScrollArea className="h-[calc(100vh-100px)] mt-4 pr-4">
+          <div className="relative mt-4 mb-3">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <Input
+              placeholder="Search projects..."
+              value={reportSearch}
+              onChange={(e) => setReportSearch(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+          <ScrollArea className="h-[calc(100vh-180px)] pr-4">
             {renderProjectList(reportOpen)}
           </ScrollArea>
         </SheetContent>
