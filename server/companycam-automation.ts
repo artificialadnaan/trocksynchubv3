@@ -583,7 +583,7 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
     console.log(`[CompanyCam] Procore query returned: ${procoreProjects.length} projects (total in DB: ${procoreResult?.total || 0})`);
     
     console.log('[CompanyCam] Fetching sync mappings...');
-    const allMappings = await storage.getAllSyncMappings();
+    const allMappings = await storage.getSyncMappings();
     console.log(`[CompanyCam] Found ${allMappings?.length || 0} existing sync mappings`);
     
     results.totalCompanyCam = companycamProjects.length;
