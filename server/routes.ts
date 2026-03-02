@@ -5040,6 +5040,7 @@ export async function registerRoutes(
         return res.json({ 
           active: false,
           isRecording: false,
+          isHeadless: false,
           message: "No active workshop session"
         });
       }
@@ -5047,6 +5048,7 @@ export async function registerRoutes(
       res.json({
         active: true,
         isRecording: workshopSession.isRecording,
+        isHeadless: workshopSession.isHeadless,
         actionsRecorded: workshopSession.recordedActions.length,
         startTime: workshopSession.startTime.toISOString(),
         uptime: Math.floor((Date.now() - workshopSession.startTime.getTime()) / 1000),
