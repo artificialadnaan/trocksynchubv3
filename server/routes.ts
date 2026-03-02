@@ -5020,6 +5020,385 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== PLAYWRIGHT WORKSHOP ====================
+  // Interactive Playwright testing area where users can see and control browser automation
+
+  // Store active workshop session
+  let workshopSession: {
+    browser: any;
+    context: any;
+    page: any;
+    isRecording: boolean;
+    recordedActions: string[];
+    startTime: Date;
+  } | null = null;
+
+  // Get workshop session status
+  app.get("/api/testing/playwright/workshop/status", requireAuth, async (req, res) => {
+    try {
+      if (!workshopSession) {
+        return res.json({ 
+          active: false,
+          isRecording: false,
+          message: "No active workshop session"
+        });
+      }
+      
+      res.json({
+        active: true,
+        isRecording: workshopSession.isRecording,
+        actionsRecorded: workshopSession.recordedActions.length,
+        startTime: workshopSession.startTime.toISOString(),
+        uptime: Math.floor((Date.now() - workshopSession.startTime.getTime()) / 1000),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Start workshop session with headed browser
+  app.post("/api/testing/playwright/workshop/start", requireAuth, async (req, res) => {
+    try {
+      const { url, loginFirst } = req.body;
+      
+      // Close existing session if any
+      if (workshopSession) {
+        try {
+          await workshopSession.browser?.close();
+        } catch {}
+        workshopSession = null;
+      }
+      
+      const { chromium } = await import('playwright');
+      
+      // Launch headed browser so user can see it
+      const browser = await chromium.launch({ 
+        headless: false,
+        slowMo: 100,
+        args: [
+          '--start-maximized',
+          '--disable-blink-features=AutomationControlled',
+        ],
+      });
+      
+      const context = await browser.newContext({
+        viewport: null, // Use full window size
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      });
+      
+      const page = await context.newPage();
+      
+      workshopSession = {
+        browser,
+        context,
+        page,
+        isRecording: false,
+        recordedActions: [],
+        startTime: new Date(),
+      };
+      
+      // If login requested, login to Procore first
+      if (loginFirst) {
+        const { loginToProcore } = await import('./playwright/auth');
+        const loggedIn = await loginToProcore(page);
+        if (!loggedIn) {
+          await browser.close();
+          workshopSession = null;
+          return res.status(400).json({ error: 'Failed to login to Procore' });
+        }
+      }
+      
+      // Navigate to URL if provided
+      if (url) {
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+      }
+      
+      // Take initial screenshot
+      const screenshot = await page.screenshot({ fullPage: false });
+      
+      res.json({ 
+        success: true,
+        message: 'Workshop session started. Browser window should be visible.',
+        screenshot: `data:image/png;base64,${screenshot.toString('base64')}`,
+        currentUrl: page.url(),
+      });
+    } catch (e: any) {
+      console.error('[workshop/start] Error:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Stop workshop session
+  app.post("/api/testing/playwright/workshop/stop", requireAuth, async (req, res) => {
+    try {
+      if (!workshopSession) {
+        return res.json({ success: true, message: 'No active session to stop' });
+      }
+      
+      const recordedActions = [...workshopSession.recordedActions];
+      
+      try {
+        await workshopSession.browser?.close();
+      } catch {}
+      
+      workshopSession = null;
+      
+      res.json({ 
+        success: true,
+        message: 'Workshop session stopped',
+        recordedActions,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get current screenshot from workshop session
+  app.get("/api/testing/playwright/workshop/screenshot", requireAuth, async (req, res) => {
+    try {
+      if (!workshopSession || !workshopSession.page) {
+        return res.status(400).json({ error: 'No active workshop session' });
+      }
+      
+      const screenshot = await workshopSession.page.screenshot({ fullPage: false });
+      
+      res.json({
+        screenshot: `data:image/png;base64,${screenshot.toString('base64')}`,
+        currentUrl: workshopSession.page.url(),
+        timestamp: new Date().toISOString(),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Navigate to URL in workshop session
+  app.post("/api/testing/playwright/workshop/navigate", requireAuth, async (req, res) => {
+    try {
+      const { url } = req.body;
+      
+      if (!workshopSession || !workshopSession.page) {
+        return res.status(400).json({ error: 'No active workshop session' });
+      }
+      
+      if (!url) {
+        return res.status(400).json({ error: 'URL is required' });
+      }
+      
+      await workshopSession.page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
+      
+      const screenshot = await workshopSession.page.screenshot({ fullPage: false });
+      
+      // Record the action
+      workshopSession.recordedActions.push(`await page.goto('${url}', { waitUntil: 'networkidle' });`);
+      
+      res.json({
+        success: true,
+        currentUrl: workshopSession.page.url(),
+        screenshot: `data:image/png;base64,${screenshot.toString('base64')}`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Click element in workshop session
+  app.post("/api/testing/playwright/workshop/click", requireAuth, async (req, res) => {
+    try {
+      const { selector } = req.body;
+      
+      if (!workshopSession || !workshopSession.page) {
+        return res.status(400).json({ error: 'No active workshop session' });
+      }
+      
+      if (!selector) {
+        return res.status(400).json({ error: 'Selector is required' });
+      }
+      
+      await workshopSession.page.click(selector, { timeout: 10000 });
+      await workshopSession.page.waitForTimeout(1000);
+      
+      const screenshot = await workshopSession.page.screenshot({ fullPage: false });
+      
+      // Record the action
+      workshopSession.recordedActions.push(`await page.click('${selector}');`);
+      
+      res.json({
+        success: true,
+        currentUrl: workshopSession.page.url(),
+        screenshot: `data:image/png;base64,${screenshot.toString('base64')}`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Type text in workshop session
+  app.post("/api/testing/playwright/workshop/type", requireAuth, async (req, res) => {
+    try {
+      const { selector, text } = req.body;
+      
+      if (!workshopSession || !workshopSession.page) {
+        return res.status(400).json({ error: 'No active workshop session' });
+      }
+      
+      if (!selector || text === undefined) {
+        return res.status(400).json({ error: 'Selector and text are required' });
+      }
+      
+      await workshopSession.page.fill(selector, text, { timeout: 10000 });
+      
+      const screenshot = await workshopSession.page.screenshot({ fullPage: false });
+      
+      // Record the action
+      workshopSession.recordedActions.push(`await page.fill('${selector}', '${text}');`);
+      
+      res.json({
+        success: true,
+        currentUrl: workshopSession.page.url(),
+        screenshot: `data:image/png;base64,${screenshot.toString('base64')}`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Run custom script in workshop session
+  app.post("/api/testing/playwright/workshop/run-script", requireAuth, async (req, res) => {
+    try {
+      const { script } = req.body;
+      
+      if (!workshopSession || !workshopSession.page) {
+        return res.status(400).json({ error: 'No active workshop session' });
+      }
+      
+      if (!script) {
+        return res.status(400).json({ error: 'Script is required' });
+      }
+      
+      const page = workshopSession.page;
+      
+      // Create a sandboxed function to execute the script
+      // Only allow basic Playwright page operations
+      const allowedMethods = ['goto', 'click', 'fill', 'type', 'press', 'waitForSelector', 'waitForTimeout', 'screenshot', 'evaluate', '$', '$$', 'textContent', 'getAttribute'];
+      
+      // Execute the script
+      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+      const fn = new AsyncFunction('page', script);
+      
+      const result = await fn(page);
+      
+      // Take screenshot after execution
+      const screenshot = await page.screenshot({ fullPage: false });
+      
+      // Record the script
+      workshopSession.recordedActions.push(`// Custom script:\n${script}`);
+      
+      res.json({
+        success: true,
+        result: result ?? null,
+        currentUrl: page.url(),
+        screenshot: `data:image/png;base64,${screenshot.toString('base64')}`,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get recorded actions as Playwright script
+  app.get("/api/testing/playwright/workshop/recorded-script", requireAuth, async (req, res) => {
+    try {
+      if (!workshopSession) {
+        return res.json({ 
+          script: '// No active session\n// Start a workshop session to record actions',
+          actions: [],
+        });
+      }
+      
+      const actions = workshopSession.recordedActions;
+      const script = `import { chromium } from 'playwright';
+
+async function main() {
+  const browser = await chromium.launch({ headless: false });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  
+  try {
+    ${actions.join('\n    ')}
+  } finally {
+    await browser.close();
+  }
+}
+
+main().catch(console.error);
+`;
+      
+      res.json({
+        script,
+        actions,
+        actionsCount: actions.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Inspect element - get selectors for element at coordinates
+  app.post("/api/testing/playwright/workshop/inspect", requireAuth, async (req, res) => {
+    try {
+      const { x, y } = req.body;
+      
+      if (!workshopSession || !workshopSession.page) {
+        return res.status(400).json({ error: 'No active workshop session' });
+      }
+      
+      // Get element info at coordinates
+      const elementInfo = await workshopSession.page.evaluate(({ x, y }: { x: number, y: number }) => {
+        const element = document.elementFromPoint(x, y);
+        if (!element) return null;
+        
+        const getSelector = (el: Element): string => {
+          if (el.id) return `#${el.id}`;
+          if (el.className && typeof el.className === 'string') {
+            const classes = el.className.split(' ').filter(c => c.trim()).slice(0, 3);
+            if (classes.length) return `.${classes.join('.')}`;
+          }
+          return el.tagName.toLowerCase();
+        };
+        
+        const getFullSelector = (el: Element): string => {
+          const parts: string[] = [];
+          let current: Element | null = el;
+          while (current && current !== document.body) {
+            parts.unshift(getSelector(current));
+            current = current.parentElement;
+          }
+          return parts.join(' > ');
+        };
+        
+        return {
+          tagName: element.tagName.toLowerCase(),
+          id: element.id || null,
+          className: element.className || null,
+          textContent: element.textContent?.slice(0, 100) || null,
+          selector: getSelector(element),
+          fullSelector: getFullSelector(element),
+          attributes: Array.from(element.attributes).reduce((acc, attr) => {
+            acc[attr.name] = attr.value;
+            return acc;
+          }, {} as Record<string, string>),
+        };
+      }, { x, y });
+      
+      res.json({
+        success: true,
+        element: elementInfo,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Initialize BidBoard polling on startup
   (async () => {
     try {
