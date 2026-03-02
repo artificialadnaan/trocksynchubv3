@@ -434,6 +434,19 @@ export const insertHubspotOwnerSchema = createInsertSchema(hubspotOwners).omit({
 export type InsertHubspotOwner = z.infer<typeof insertHubspotOwnerSchema>;
 export type HubspotOwner = typeof hubspotOwners.$inferSelect;
 
+/** User-provided mappings for HubSpot owner ID → email/name when HubSpot API does not return owner details */
+export const hubspotOwnerMappings = pgTable("hubspot_owner_mappings", {
+  id: serial("id").primaryKey(),
+  hubspotOwnerId: text("hubspot_owner_id").notNull().unique(),
+  email: text("email").notNull(),
+  name: text("name"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertHubspotOwnerMappingSchema = createInsertSchema(hubspotOwnerMappings).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertHubspotOwnerMapping = z.infer<typeof insertHubspotOwnerMappingSchema>;
+export type HubspotOwnerMapping = typeof hubspotOwnerMappings.$inferSelect;
+
 export const hubspotChangeHistory = pgTable("hubspot_change_history", {
   id: serial("id").primaryKey(),
   entityType: text("entity_type").notNull(),

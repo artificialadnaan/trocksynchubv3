@@ -822,6 +822,21 @@ export async function registerRoutes(
             } catch (emailErr: any) {
               console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
             }
+            // When deal moves to closed/closeout stage, trigger closeout survey to deal owner
+            try {
+              const { isHubSpotClosedStage } = await import("./closeout-automation");
+              const { triggerCloseoutSurvey } = await import("./closeout-automation");
+              if (await isHubSpotClosedStage(newValue)) {
+                const mapping = await storage.getSyncMappingByHubspotDealId(objectId);
+                const projectId = mapping?.portfolioProjectId || mapping?.procoreProjectId;
+                if (projectId) {
+                  const surveyResult = await triggerCloseoutSurvey(projectId, {});
+                  console.log(`[hubspot-webhook] Closeout survey triggered for deal ${objectId} → project ${projectId}:`, surveyResult.success ? "sent" : surveyResult.error);
+                }
+              }
+            } catch (surveyErr: any) {
+              console.error(`[hubspot-webhook] Closeout survey trigger error for deal ${objectId}:`, surveyErr.message);
+            }
           }
         }
 
@@ -907,9 +922,13 @@ export async function registerRoutes(
             console.log(`[webhook] ${resourceName} ${eventType} for project ${projectId}, syncing role assignments...`);
             const result = await syncProcoreRoleAssignments([projectId]);
             if (result.newAssignments.length > 0) {
-              const { sendRoleAssignmentEmails } = await import('./email-notifications');
+              const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('./email-notifications');
               const emailResult = await sendRoleAssignmentEmails(result.newAssignments);
               console.log(`[webhook] Role assignment email result: ${emailResult.sent} sent, ${emailResult.skipped} skipped, ${emailResult.failed} failed`);
+              const kickoffResult = await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
+              if (kickoffResult.triggered > 0 || kickoffResult.failed > 0) {
+                console.log(`[webhook] Kickoff for new PM on Portfolio: ${kickoffResult.triggered} sent, ${kickoffResult.failed} failed`);
+              }
             }
             await storage.createAuditLog({
               action: "webhook_role_assignment_processed",
@@ -2986,8 +3005,9 @@ export async function registerRoutes(
       let emailResult = { sent: 0, skipped: 0, failed: 0 };
       if (result.newAssignments.length > 0) {
         try {
-          const { sendRoleAssignmentEmails } = await import('./email-notifications');
+          const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('./email-notifications');
           emailResult = await sendRoleAssignmentEmails(result.newAssignments);
+          await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
         } catch (emailErr: any) {
           console.error(`[procore] Email notifications failed:`, emailErr.message);
         }
@@ -3447,8 +3467,9 @@ export async function registerRoutes(
       let emailResult = { sent: 0, skipped: 0, failed: 0 };
       if (result.newAssignments.length > 0) {
         try {
-          const { sendRoleAssignmentEmails } = await import('./email-notifications');
+          const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('./email-notifications');
           emailResult = await sendRoleAssignmentEmails(result.newAssignments);
+          await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
         } catch (emailErr: any) {
           console.error('[RolePolling] Email notifications failed:', emailErr.message);
         }
@@ -4351,6 +4372,42 @@ export async function registerRoutes(
         await deactivateProject(projectId);
         res.json({ success: true });
       }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================
+  // HubSpot Owner Mappings (ID → email/name fallback)
+  // ============================================
+
+  app.get("/api/hubspot/owner-mappings", requireAuth, async (req, res) => {
+    try {
+      const mappings = await storage.getHubspotOwnerMappings();
+      res.json(mappings);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/hubspot/owner-mappings", requireAuth, async (req, res) => {
+    try {
+      const { hubspotOwnerId, email, name } = req.body;
+      if (!hubspotOwnerId || !email) {
+        return res.status(400).json({ error: "hubspotOwnerId and email are required" });
+      }
+      const mapping = await storage.upsertHubspotOwnerMapping({ hubspotOwnerId: String(hubspotOwnerId), email, name: name || null });
+      res.json(mapping);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/hubspot/owner-mappings/:hubspotOwnerId", requireAuth, async (req, res) => {
+    try {
+      const { hubspotOwnerId } = req.params;
+      await storage.deleteHubspotOwnerMapping(hubspotOwnerId);
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

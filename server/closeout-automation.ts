@@ -87,12 +87,19 @@ export async function triggerCloseoutSurvey(
     let recipientEmail = '';
     let recipientName = '';
     
-    // Primary: Get deal owner email from HubSpot owners table
+    // Primary: Get deal owner email from HubSpot owners table or user-provided mapping
     if (mapping?.hubspotDealId) {
       const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
       if (deal?.ownerId) {
-        const owner = await storage.getHubspotOwnerByHubspotId(deal.ownerId);
-        if (owner?.email) {
+        let owner = await storage.getHubspotOwnerByHubspotId(deal.ownerId);
+        if (!owner?.email) {
+          const mappingEntry = await storage.getHubspotOwnerMappingByHubspotId(deal.ownerId);
+          if (mappingEntry?.email) {
+            recipientEmail = mappingEntry.email;
+            recipientName = mappingEntry.name || 'Team Member';
+            console.log(`[closeout] Using owner mapping for ${deal.ownerId}: ${recipientName} (${recipientEmail})`);
+          }
+        } else {
           recipientEmail = owner.email;
           recipientName = [owner.firstName, owner.lastName].filter(Boolean).join(' ') || 'Team Member';
           console.log(`[closeout] Using HubSpot deal owner: ${recipientName} (${recipientEmail})`);
@@ -402,6 +409,25 @@ async function getHubSpotCloseoutStageId(): Promise<string | null> {
     return null;
   } catch {
     return null;
+  }
+}
+
+/** Check if a HubSpot stage ID corresponds to a closed/closeout stage */
+export async function isHubSpotClosedStage(stageId: string): Promise<boolean> {
+  try {
+    const pipelines = await storage.getHubspotPipelines();
+    for (const pipeline of pipelines) {
+      const stages = (pipeline.stages as any[]) || [];
+      const stage = stages.find((s: any) => String(s.stageId || s.id) === String(stageId));
+      if (stage) {
+        const label = (stage.label || stage.stageName || '').toLowerCase();
+        const isClosed = stage.metadata?.isClosed === 'true';
+        return isClosed || label.includes('closeout') || label.includes('closed');
+      }
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 

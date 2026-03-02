@@ -1078,8 +1078,9 @@ export async function runFullProcoreSync(): Promise<{
 
   if (roleAssignmentResult.newAssignments.length > 0) {
     try {
-      const { sendRoleAssignmentEmails } = await import('./email-notifications');
+      const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('./email-notifications');
       await sendRoleAssignmentEmails(roleAssignmentResult.newAssignments);
+      await triggerKickoffForNewPmOnPortfolio(roleAssignmentResult.newAssignments);
     } catch (err: any) {
       console.error(`[procore] Email notifications failed:`, err.message);
     }

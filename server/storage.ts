@@ -63,6 +63,7 @@ import {
   hubspotDeals, type HubspotDeal, type InsertHubspotDeal,
   hubspotPipelines, type HubspotPipeline, type InsertHubspotPipeline,
   hubspotOwners, type HubspotOwner, type InsertHubspotOwner,
+  hubspotOwnerMappings, type HubspotOwnerMapping, type InsertHubspotOwnerMapping,
   hubspotChangeHistory, type HubspotChangeHistory, type InsertHubspotChangeHistory,
   procoreProjects, type ProcoreProject, type InsertProcoreProject,
   procoreVendors, type ProcoreVendor, type InsertProcoreVendor,
@@ -195,6 +196,12 @@ export interface IStorage {
   getHubspotOwners(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotOwner[]; total: number }>;
   deleteHubspotOwner(hubspotId: string): Promise<void>;
 
+  /** User-provided owner ID → email/name mappings (fallback when HubSpot API returns ID only) */
+  getHubspotOwnerMappingByHubspotId(hubspotOwnerId: string): Promise<HubspotOwnerMapping | undefined>;
+  upsertHubspotOwnerMapping(data: InsertHubspotOwnerMapping): Promise<HubspotOwnerMapping>;
+  getHubspotOwnerMappings(): Promise<HubspotOwnerMapping[]>;
+  deleteHubspotOwnerMapping(hubspotOwnerId: string): Promise<void>;
+
   upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
   getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
   getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }>;
@@ -298,7 +305,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getSyncMappingByProcoreProjectId(projectId: string): Promise<SyncMapping | undefined> {
-    const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.procoreProjectId, projectId));
+    const [mapping] = await db.select().from(syncMappings).where(
+      or(
+        eq(syncMappings.procoreProjectId, projectId),
+        eq(syncMappings.portfolioProjectId, projectId),
+        eq(syncMappings.bidboardProjectId, projectId)
+      )
+    );
     return mapping;
   }
 
@@ -664,6 +677,29 @@ export class DatabaseStorage implements IStorage {
 
   async deleteHubspotOwner(hubspotId: string): Promise<void> {
     await db.delete(hubspotOwners).where(eq(hubspotOwners.hubspotId, hubspotId));
+  }
+
+  async getHubspotOwnerMappingByHubspotId(hubspotOwnerId: string): Promise<HubspotOwnerMapping | undefined> {
+    const [result] = await db.select().from(hubspotOwnerMappings).where(eq(hubspotOwnerMappings.hubspotOwnerId, hubspotOwnerId));
+    return result;
+  }
+
+  async upsertHubspotOwnerMapping(data: InsertHubspotOwnerMapping): Promise<HubspotOwnerMapping> {
+    const [result] = await db.insert(hubspotOwnerMappings).values(data)
+      .onConflictDoUpdate({
+        target: hubspotOwnerMappings.hubspotOwnerId,
+        set: { email: data.email, name: data.name ?? null, updatedAt: new Date() },
+      })
+      .returning();
+    return result!;
+  }
+
+  async getHubspotOwnerMappings(): Promise<HubspotOwnerMapping[]> {
+    return db.select().from(hubspotOwnerMappings).orderBy(hubspotOwnerMappings.hubspotOwnerId);
+  }
+
+  async deleteHubspotOwnerMapping(hubspotOwnerId: string): Promise<void> {
+    await db.delete(hubspotOwnerMappings).where(eq(hubspotOwnerMappings.hubspotOwnerId, hubspotOwnerId));
   }
 
   async getHubspotCompanyByHubspotId(hubspotId: string): Promise<HubspotCompany | undefined> {

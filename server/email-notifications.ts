@@ -47,6 +47,7 @@
 import { storage } from './storage';
 import { sendEmail, renderTemplate } from './email-service';
 import { getDealOwnerInfo } from './hubspot';
+import { fetchProcoreProjectDetail, getProjectTeamMembers } from './procore';
 
 /**
  * Sends email notifications for new project role assignments.
@@ -160,6 +161,75 @@ export async function sendRoleAssignmentEmails(
   }
 
   return { sent, skipped, failed };
+}
+
+/**
+ * When a new Project Manager is assigned to a Portfolio project (detected via role sync),
+ * trigger the project kickoff email. Kickoff is sent from Portfolio, not BidBoard.
+ */
+export async function triggerKickoffForNewPmOnPortfolio(
+  newAssignments: Array<{
+    procoreProjectId: string;
+    projectName: string;
+    roleName: string;
+    assigneeId: string;
+    assigneeName: string;
+    assigneeEmail: string;
+    assigneeCompany: string;
+  }>
+): Promise<{ triggered: number; failed: number }> {
+  const pmAssignments = newAssignments.filter((a) =>
+    a.roleName.toLowerCase().includes('project manager')
+  );
+  if (pmAssignments.length === 0) return { triggered: 0, failed: 0 };
+
+  let triggered = 0;
+  let failed = 0;
+
+  for (const assignment of pmAssignments) {
+    try {
+      const mapping = await storage.getSyncMappingByPortfolioProjectId(assignment.procoreProjectId);
+      if (!mapping) continue;
+
+      const projectDetail = await fetchProcoreProjectDetail(assignment.procoreProjectId);
+      if (!projectDetail) continue;
+
+      const teamMembers = await getProjectTeamMembers(assignment.procoreProjectId);
+      const formatDate = (d: string | null | undefined) => {
+        if (!d) return 'TBD';
+        try {
+          const dt = new Date(d);
+          return isNaN(dt.getTime()) ? 'TBD' : dt.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        } catch {
+          return 'TBD';
+        }
+      };
+
+      const result = await sendKickoffEmails({
+        projectId: assignment.procoreProjectId,
+        projectName: projectDetail?.name || projectDetail?.display_name || assignment.projectName || 'Unknown Project',
+        clientName: projectDetail?.company?.name || 'Unknown Client',
+        projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
+        scopeSummary: projectDetail?.work_scope || projectDetail?.description || 'See project details in Procore',
+        startDate: formatDate(projectDetail?.start_date),
+        endDate: formatDate(projectDetail?.end_date || projectDetail?.completion_date),
+        teamMembers,
+        nextStep: 'scheduling the project kickoff meeting',
+      });
+
+      if (result.sent > 0) {
+        triggered++;
+        console.log(`[email] Kickoff sent for new PM on Portfolio project ${assignment.procoreProjectId} (${assignment.projectName})`);
+      } else if (result.failed > 0) {
+        failed++;
+      }
+    } catch (err: any) {
+      failed++;
+      console.error(`[email] Failed to trigger kickoff for PM on ${assignment.procoreProjectId}:`, err.message);
+    }
+  }
+
+  return { triggered, failed };
 }
 
 export async function sendStageChangeEmail(params: {

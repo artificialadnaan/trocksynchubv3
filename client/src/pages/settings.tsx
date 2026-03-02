@@ -95,6 +95,8 @@ import {
   Wifi,
   WifiOff,
   Hash,
+  Trash2,
+  Users,
 } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import type { PollJob } from "@shared/schema";
@@ -280,6 +282,8 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      <HubSpotOwnerMappingsCard />
+
       <StageMappingCard />
 
       <HubspotProcoreSyncCard />
@@ -333,6 +337,90 @@ export default function SettingsPage() {
         status={gmailStatus}
       />
     </div>
+  );
+}
+
+function HubSpotOwnerMappingsCard() {
+  const { toast } = useToast();
+  const { data: mappings = [], refetch } = useQuery<{ id: number; hubspotOwnerId: string; email: string; name: string | null }[]>({
+    queryKey: ["/api/hubspot/owner-mappings"],
+  });
+  const [ownerId, setOwnerId] = useState("");
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+
+  const addMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/hubspot/owner-mappings", { hubspotOwnerId: ownerId, email, name: name || null });
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Owner mapping added" });
+      setOwnerId(""); setEmail(""); setName("");
+      refetch();
+    },
+    onError: (e: Error) => toast({ title: "Failed to add mapping", description: e.message, variant: "destructive" }),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (hubspotOwnerId: string) => {
+      await apiRequest("DELETE", `/api/hubspot/owner-mappings/${encodeURIComponent(hubspotOwnerId)}`);
+    },
+    onSuccess: () => {
+      toast({ title: "Mapping removed" });
+      refetch();
+    },
+    onError: (e: Error) => toast({ title: "Failed to remove mapping", variant: "destructive" }),
+  });
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base font-semibold flex items-center gap-2">
+          <Users className="w-4 h-4" />
+          HubSpot Deal Owner Mappings
+        </CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          When HubSpot returns owner ID only (no email), add a mapping so closeout surveys and stage-change emails reach the deal owner.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap gap-2 items-end">
+          <div>
+            <Label className="text-xs">Owner ID</Label>
+            <Input placeholder="e.g. 12345" value={ownerId} onChange={(e) => setOwnerId(e.target.value)} className="w-28 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs">Email</Label>
+            <Input type="email" placeholder="owner@example.com" value={email} onChange={(e) => setEmail(e.target.value)} className="w-48 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs">Name (optional)</Label>
+            <Input placeholder="John Doe" value={name} onChange={(e) => setName(e.target.value)} className="w-36 h-9" />
+          </div>
+          <Button size="sm" onClick={() => addMutation.mutate()} disabled={!ownerId || !email || addMutation.isPending}>
+            {addMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+            Add
+          </Button>
+        </div>
+        {mappings.length > 0 ? (
+          <div className="space-y-2">
+            {mappings.map((m) => (
+              <div key={m.id} className="flex items-center justify-between py-2 px-3 rounded border text-sm">
+                <span className="font-mono text-muted-foreground">{m.hubspotOwnerId}</span>
+                <span>{m.name || "—"}</span>
+                <span>{m.email}</span>
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => deleteMutation.mutate(m.hubspotOwnerId)}>
+                  <Trash2 className="w-4 h-4 text-destructive" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">No owner mappings. Add one when HubSpot only returns owner ID.</p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

@@ -1086,10 +1086,13 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
     }
 
     const localDeal = await storage.getHubspotDealByHubspotId(hubspotDealId);
+    const mapping = await storage.getHubspotOwnerMappingByHubspotId(ownerId);
+    if (mapping?.email) {
+      return { ownerId, ownerName: mapping.name || localDeal?.ownerName || null, ownerEmail: mapping.email };
+    }
     if (localDeal?.ownerName) {
       return { ownerId, ownerName: localDeal.ownerName || null, ownerEmail: null };
     }
-
     return { ownerId, ownerName: null, ownerEmail: null };
   } catch (e: any) {
     console.error(`[HubSpot] Failed to get deal owner for ${hubspotDealId}:`, e.message);
