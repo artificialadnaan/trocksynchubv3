@@ -286,6 +286,8 @@ export default function SettingsPage() {
 
       <PollingCard />
 
+      <ProcorePollingCard />
+
       <RolePollingCard />
 
       <ProjectNumberCard />
@@ -1505,6 +1507,166 @@ function PollingCard() {
                 <span className="font-medium text-foreground">Procore push:</span>{" "}
                 {lastResult.procoreAutoSync.results?.filter((r: any) => r.action === 'created').length || 0} created,{" "}
                 {lastResult.procoreAutoSync.results?.filter((r: any) => r.action === 'updated').length || 0} updated
+              </div>
+            )}
+            {lastResult?.error && (
+              <p className="text-xs text-red-600">Error: {lastResult.error}</p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProcorePollingCard() {
+  const { toast } = useToast();
+
+  const { data: pollingConfig, isLoading } = useQuery<{
+    enabled: boolean;
+    intervalMinutes: number;
+    isRunning: boolean;
+    lastPollAt: string | null;
+    lastPollResult: any;
+    currentlyPolling: boolean;
+  }>({
+    queryKey: ["/api/automation/procore-polling/config"],
+    refetchInterval: 30000,
+  });
+
+  const [pollingEnabled, setPollingEnabled] = useState(false);
+  const [interval, setIntervalVal] = useState(15);
+
+  useEffect(() => {
+    if (pollingConfig) {
+      setPollingEnabled(pollingConfig.enabled);
+      setIntervalVal(pollingConfig.intervalMinutes);
+    }
+  }, [pollingConfig]);
+
+  const savePolling = useMutation({
+    mutationFn: async (config: { enabled: boolean; intervalMinutes: number }) => {
+      const res = await apiRequest("POST", "/api/automation/procore-polling/config", config);
+      return res.json();
+    },
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/automation/procore-polling/config"] });
+      toast({ title: vars.enabled ? `Procore polling enabled (every ${vars.intervalMinutes} min)` : "Procore polling disabled" });
+    },
+  });
+
+  const triggerNow = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/automation/procore-polling/trigger", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Procore sync triggered" });
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/automation/procore-polling/config"] }), 5000);
+    },
+  });
+
+  const handleToggle = (val: boolean) => {
+    setPollingEnabled(val);
+    savePolling.mutate({ enabled: val, intervalMinutes: interval });
+  };
+
+  const handleIntervalChange = (val: string) => {
+    const mins = parseInt(val);
+    setIntervalVal(mins);
+    if (pollingEnabled) {
+      savePolling.mutate({ enabled: true, intervalMinutes: mins });
+    }
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  const lastResult = pollingConfig?.lastPollResult;
+  const lastPollTime = pollingConfig?.lastPollAt ? new Date(pollingConfig.lastPollAt) : null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2" data-testid="text-procore-polling-title">
+            <Clock className="w-4 h-4" />
+            Procore Data Polling
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {pollingEnabled ? (
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse" />
+                  Active
+                </span>
+              ) : "Off"}
+            </span>
+            <Switch
+              checked={pollingEnabled}
+              onCheckedChange={handleToggle}
+              data-testid="switch-procore-polling-enabled"
+            />
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground mt-1">
+          Automatically syncs Procore projects, vendors, and users to the local database on a timer.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center gap-3">
+          <Label className="text-xs whitespace-nowrap">Sync every</Label>
+          <Select value={String(interval)} onValueChange={handleIntervalChange}>
+            <SelectTrigger className="w-32 h-8" data-testid="select-procore-polling-interval">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="15">15 minutes</SelectItem>
+              <SelectItem value="30">30 minutes</SelectItem>
+              <SelectItem value="60">1 hour</SelectItem>
+              <SelectItem value="120">2 hours</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => triggerNow.mutate()}
+            disabled={pollingConfig?.currentlyPolling || triggerNow.isPending}
+            data-testid="button-trigger-procore-poll-now"
+          >
+            {pollingConfig?.currentlyPolling ? (
+              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Syncing...</>
+            ) : (
+              <><RefreshCw className="w-3 h-3 mr-1" /> Sync Now</>
+            )}
+          </Button>
+        </div>
+
+        {lastPollTime && (
+          <div className="rounded-md bg-muted/50 p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium">Last Poll</p>
+              <span className="text-[10px] text-muted-foreground">{lastPollTime.toLocaleString()}</span>
+            </div>
+            {lastResult && !lastResult.error && (
+              <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                <div>
+                  <span className="font-medium text-foreground">Projects:</span>{" "}
+                  {lastResult.projects?.created || 0} new, {lastResult.projects?.updated || 0} updated
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Vendors:</span>{" "}
+                  {lastResult.vendors?.created || 0} new, {lastResult.vendors?.updated || 0} updated
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Users:</span>{" "}
+                  {lastResult.users?.created || 0} new, {lastResult.users?.updated || 0} updated
+                </div>
+              </div>
+            )}
+            {lastResult?.duration && (
+              <div className="text-xs text-muted-foreground border-t pt-2 mt-1">
+                <span className="font-medium text-foreground">Duration:</span>{" "}
+                {(lastResult.duration / 1000).toFixed(1)}s
               </div>
             )}
             {lastResult?.error && (
