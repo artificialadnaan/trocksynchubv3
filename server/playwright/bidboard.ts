@@ -41,7 +41,7 @@
 
 import { Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
-import { PROCORE_SELECTORS, getBidBoardUrl } from "./selectors";
+import { PROCORE_SELECTORS, getBidBoardUrl, getBidBoardUrlNew } from "./selectors";
 import { randomDelay, takeScreenshot, withRetry, waitForNavigation } from "./browser";
 import { log } from "../index";
 import { storage } from "../storage";
@@ -89,27 +89,62 @@ export async function navigateToBidBoard(page: Page): Promise<boolean> {
   }
   
   const sandbox = await isSandbox();
-  const bidboardUrl = getBidBoardUrl(companyId, sandbox);
   
-  log(`Navigating to BidBoard: ${bidboardUrl}`, "playwright");
-  await page.goto(bidboardUrl, { waitUntil: "networkidle" });
+  // Try the new URL format first (Procore's updated UI)
+  const newBidboardUrl = getBidBoardUrlNew(companyId, sandbox);
+  log(`Navigating to BidBoard (new UI): ${newBidboardUrl}`, "playwright");
   
-  await randomDelay(2000, 3000);
-  
-  // Wait for BidBoard to load
   try {
-    await page.waitForSelector(PROCORE_SELECTORS.bidboard.container, { timeout: 15000 });
-    return true;
-  } catch {
-    // Try alternative selectors
+    await page.goto(newBidboardUrl, { waitUntil: "networkidle", timeout: 60000 });
+    await randomDelay(2000, 3000);
+    
+    // Check if BidBoard loaded
     try {
-      await page.waitForSelector(PROCORE_SELECTORS.bidboard.projectList, { timeout: 10000 });
+      await page.waitForSelector(PROCORE_SELECTORS.bidboard.container, { timeout: 15000 });
+      log("BidBoard loaded successfully (new URL)", "playwright");
       return true;
     } catch {
-      const screenshotPath = await takeScreenshot(page, "bidboard-not-found");
-      log(`BidBoard not found. Screenshot: ${screenshotPath}`, "playwright");
-      return false;
+      try {
+        await page.waitForSelector(PROCORE_SELECTORS.bidboard.projectList, { timeout: 10000 });
+        log("BidBoard loaded successfully (new URL, project list)", "playwright");
+        return true;
+      } catch {
+        // New URL didn't work, try old URL format
+        log("New URL format failed, trying legacy URL...", "playwright");
+      }
     }
+  } catch (err: any) {
+    log(`New URL navigation failed: ${err.message}`, "playwright");
+  }
+  
+  // Fallback to legacy URL format
+  const legacyBidboardUrl = getBidBoardUrl(companyId, sandbox);
+  log(`Navigating to BidBoard (legacy): ${legacyBidboardUrl}`, "playwright");
+  
+  try {
+    await page.goto(legacyBidboardUrl, { waitUntil: "networkidle", timeout: 60000 });
+    await randomDelay(2000, 3000);
+    
+    try {
+      await page.waitForSelector(PROCORE_SELECTORS.bidboard.container, { timeout: 15000 });
+      log("BidBoard loaded successfully (legacy URL)", "playwright");
+      return true;
+    } catch {
+      try {
+        await page.waitForSelector(PROCORE_SELECTORS.bidboard.projectList, { timeout: 10000 });
+        log("BidBoard loaded successfully (legacy URL, project list)", "playwright");
+        return true;
+      } catch {
+        const screenshotPath = await takeScreenshot(page, "bidboard-not-found");
+        log(`BidBoard not found. Screenshot: ${screenshotPath}`, "playwright");
+        return false;
+      }
+    }
+  } catch (err: any) {
+    log(`Legacy URL navigation also failed: ${err.message}`, "playwright");
+    const screenshotPath = await takeScreenshot(page, "bidboard-navigation-failed");
+    log(`Screenshot saved: ${screenshotPath}`, "playwright");
+    return false;
   }
 }
 

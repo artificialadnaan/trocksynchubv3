@@ -513,7 +513,7 @@ export async function syncProcoreUsers(): Promise<{ synced: number; created: num
  * Called by webhook handlers for real-time user updates.
  * Uses upsert to handle both create and update cases.
  */
-export async function syncSingleProcoreUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+export async function syncSingleProcoreUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted' | 'error'; error?: string }> {
   try {
     const config = await getProcoreConfig();
     const companyId = config.companyId;
@@ -592,7 +592,7 @@ export async function syncSingleProcoreUser(userId: string): Promise<{ success: 
     return { success: true, action };
   } catch (err: any) {
     console.error(`[procore] Failed to sync user ${userId}:`, err.message);
-    return { success: false, action: 'updated', error: err.message };
+    return { success: false, action: 'error', error: err.message };
   }
 }
 
@@ -1095,56 +1095,55 @@ export async function runFullProcoreSync(): Promise<{
     if (!stageSyncEnabled) {
       console.log(`[procore] Stage sync disabled - skipping HubSpot updates for ${projects.stageChanges.length} stage change(s)`);
     } else {
-    try {
-      const { sendStageChangeEmail } = await import('./email-notifications');
-      const { mapProcoreStageToHubspot, resolveHubspotStageId } = await import('./procore-hubspot-sync');
-      const { updateHubSpotDealStage } = await import('./hubspot');
+      try {
+        const { sendStageChangeEmail } = await import('./email-notifications');
+        const { mapProcoreStageToHubspot, resolveHubspotStageId } = await import('./procore-hubspot-sync');
+        const { updateHubSpotDealStage } = await import('./hubspot');
 
-      for (const sc of projects.stageChanges) {
-        const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
-        if (mapping?.hubspotDealId) {
-          // Map Procore stage to HubSpot stage label, then resolve to actual stage ID
-          const hubspotStageLabel = mapProcoreStageToHubspot(sc.newStage);
-          const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
-          
-          if (!resolvedStage) {
-            console.log(`[procore] Could not resolve HubSpot stage for label: ${hubspotStageLabel}`);
-            continue;
+        for (const sc of projects.stageChanges) {
+          const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
+          if (mapping?.hubspotDealId) {
+            const hubspotStageLabel = mapProcoreStageToHubspot(sc.newStage);
+            const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+            
+            if (!resolvedStage) {
+              console.log(`[procore] Could not resolve HubSpot stage for label: ${hubspotStageLabel}`);
+              continue;
+            }
+            
+            const hubspotStageId = resolvedStage.stageId;
+            const hubspotStageName = resolvedStage.stageName;
+
+            const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
+            console.log(`[procore] Polling stage change: HubSpot deal ${mapping.hubspotDealId} updated to ${hubspotStageName}: ${updateResult.message}`);
+
+            const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+            await sendStageChangeEmail({
+              hubspotDealId: mapping.hubspotDealId,
+              dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
+              procoreProjectId: sc.procoreId,
+              procoreProjectName: sc.projectName,
+              oldStage: sc.oldStage,
+              newStage: sc.newStage,
+              hubspotStageName,
+            });
+
+            await storage.createAuditLog({
+              action: 'polling_stage_change_processed',
+              entityType: 'project_stage',
+              entityId: sc.procoreId,
+              source: 'polling',
+              status: 'success',
+              details: { procoreId: sc.procoreId, projectName: sc.projectName, oldStage: sc.oldStage, newStage: sc.newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName },
+            });
+          } else {
+            console.log(`[procore] Stage change for ${sc.projectName} (${sc.procoreId}) has no HubSpot mapping, skipping email`);
           }
-          
-          const hubspotStageId = resolvedStage.stageId;
-          const hubspotStageName = resolvedStage.stageName;
-
-          const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
-          console.log(`[procore] Polling stage change: HubSpot deal ${mapping.hubspotDealId} updated to ${hubspotStageName}: ${updateResult.message}`);
-
-          const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
-          await sendStageChangeEmail({
-            hubspotDealId: mapping.hubspotDealId,
-            dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
-            procoreProjectId: sc.procoreId,
-            procoreProjectName: sc.projectName,
-            oldStage: sc.oldStage,
-            newStage: sc.newStage,
-            hubspotStageName,
-          });
-
-          await storage.createAuditLog({
-            action: 'polling_stage_change_processed',
-            entityType: 'project_stage',
-            entityId: sc.procoreId,
-            source: 'polling',
-            status: 'success',
-            details: { procoreId: sc.procoreId, projectName: sc.projectName, oldStage: sc.oldStage, newStage: sc.newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName },
-          });
-        } else {
-          console.log(`[procore] Stage change for ${sc.projectName} (${sc.procoreId}) has no HubSpot mapping, skipping email`);
         }
+      } catch (err: any) {
+        console.error(`[procore] Stage change email processing failed:`, err.message);
       }
-    } catch (err: any) {
-      console.error(`[procore] Stage change email processing failed:`, err.message);
     }
-    } // End stageSyncEnabled check
   }
 
   const purgedHistory = await storage.purgeProcoreChangeHistory(14);

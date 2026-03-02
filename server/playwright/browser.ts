@@ -53,6 +53,10 @@ const SESSION_FILE = path.join(STORAGE_DIR, "procore-session.json");
 let browserInstance: Browser | null = null;
 let contextInstance: BrowserContext | null = null;
 
+// Promise locks to prevent race conditions during async initialization
+let browserInitPromise: Promise<Browser> | null = null;
+let contextInitPromise: Promise<BrowserContext> | null = null;
+
 export interface BrowserConfig {
   headless?: boolean;
   slowMo?: number;
@@ -76,53 +80,84 @@ async function ensureStorageDir(): Promise<void> {
 export async function getBrowser(config: BrowserConfig = {}): Promise<Browser> {
   const mergedConfig = { ...defaultConfig, ...config };
   
-  if (!browserInstance || !browserInstance.isConnected()) {
-    log("Launching new browser instance", "playwright");
-    browserInstance = await chromium.launch({
-      headless: mergedConfig.headless,
-      slowMo: mergedConfig.slowMo,
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-      ],
-    });
+  // Return existing connected browser
+  if (browserInstance && browserInstance.isConnected()) {
+    return browserInstance;
   }
   
-  return browserInstance;
+  // If initialization is already in progress, wait for it
+  if (browserInitPromise) {
+    return browserInitPromise;
+  }
+  
+  // Start initialization and store the promise to prevent concurrent launches
+  browserInitPromise = (async () => {
+    try {
+      log("Launching new browser instance", "playwright");
+      browserInstance = await chromium.launch({
+        headless: mergedConfig.headless,
+        slowMo: mergedConfig.slowMo,
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+        ],
+      });
+      return browserInstance;
+    } finally {
+      browserInitPromise = null;
+    }
+  })();
+  
+  return browserInitPromise;
 }
 
 export async function getContext(config: BrowserConfig = {}): Promise<BrowserContext> {
   await ensureStorageDir();
   
+  // Return existing context
   if (contextInstance) {
     return contextInstance;
   }
   
-  const browser = await getBrowser(config);
-  
-  // Try to load existing session
-  let storageState: string | undefined;
-  try {
-    await fs.access(SESSION_FILE);
-    storageState = SESSION_FILE;
-    log("Loading existing session from storage", "playwright");
-  } catch {
-    log("No existing session found, creating new context", "playwright");
+  // If initialization is already in progress, wait for it
+  if (contextInitPromise) {
+    return contextInitPromise;
   }
   
-  contextInstance = await browser.newContext({
-    storageState,
-    viewport: { width: 1920, height: 1080 },
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    locale: "en-US",
-    timezoneId: "America/New_York",
-  });
+  // Start initialization and store the promise to prevent concurrent context creation
+  contextInitPromise = (async () => {
+    try {
+      const browser = await getBrowser(config);
+      
+      // Try to load existing session
+      let storageState: string | undefined;
+      try {
+        await fs.access(SESSION_FILE);
+        storageState = SESSION_FILE;
+        log("Loading existing session from storage", "playwright");
+      } catch {
+        log("No existing session found, creating new context", "playwright");
+      }
+      
+      contextInstance = await browser.newContext({
+        storageState,
+        viewport: { width: 1920, height: 1080 },
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        locale: "en-US",
+        timezoneId: "America/New_York",
+      });
+      
+      contextInstance.setDefaultTimeout(config.timeout || defaultConfig.timeout || 30000);
+      
+      return contextInstance;
+    } finally {
+      contextInitPromise = null;
+    }
+  })();
   
-  contextInstance.setDefaultTimeout(config.timeout || defaultConfig.timeout || 30000);
-  
-  return contextInstance;
+  return contextInitPromise;
 }
 
 export async function getPage(config: BrowserConfig = {}): Promise<Page> {
@@ -155,6 +190,7 @@ export async function clearSession(): Promise<void> {
   if (contextInstance) {
     await contextInstance.close();
     contextInstance = null;
+    contextInitPromise = null;
   }
 }
 
@@ -163,11 +199,13 @@ export async function closeBrowser(): Promise<void> {
     await saveSession();
     await contextInstance.close();
     contextInstance = null;
+    contextInitPromise = null;
   }
   
   if (browserInstance) {
     await browserInstance.close();
     browserInstance = null;
+    browserInitPromise = null;
     log("Browser closed", "playwright");
   }
 }

@@ -1231,6 +1231,14 @@ export async function registerRoutes(
           }
         } catch (err: any) {
           console.error(`[webhook] Error processing CompanyCam project webhook:`, err.message);
+          await storage.createAuditLog({
+            action: "webhook_project_sync",
+            entityType: "project",
+            entityId: resourceId,
+            source: "companycam",
+            status: "error",
+            errorMessage: err.message,
+          });
         }
       }
 
@@ -4518,6 +4526,17 @@ export async function registerRoutes(
       
       const { chromium } = await import('playwright');
       const { loginToProcore } = await import('./playwright/auth');
+      const { getBidBoardUrlNew, getPortfolioProjectUrlNew } = await import('./playwright/selectors');
+      
+      // Get company ID from config
+      const procoreConfig = await storage.getAutomationConfig("procore_config");
+      const companyId = (procoreConfig?.value as any)?.companyId;
+      if (!companyId) {
+        return res.status(400).json({ error: 'Procore company ID not configured' });
+      }
+      
+      const credentialsConfig = await storage.getAutomationConfig("procore_browser_credentials");
+      const sandbox = (credentialsConfig?.value as any)?.sandbox || false;
       
       const browser = await chromium.launch({ headless: true });
       const context = await browser.newContext({
@@ -4531,8 +4550,15 @@ export async function registerRoutes(
         return res.status(400).json({ error: 'Failed to login to Procore' });
       }
       
-      // Navigate to BidBoard project
-      const projectUrl = `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/estimating`;
+      // Navigate to BidBoard list first
+      const bidboardUrl = getBidBoardUrlNew(companyId, sandbox);
+      console.log(`[bidboard-extract] Navigating to BidBoard: ${bidboardUrl}`);
+      await page.goto(bidboardUrl, { waitUntil: 'networkidle', timeout: 60000 });
+      await page.waitForTimeout(3000);
+      
+      // Then navigate to the specific project
+      const projectUrl = getPortfolioProjectUrlNew(companyId, projectId, sandbox);
+      console.log(`[bidboard-extract] Navigating to project: ${projectUrl}`);
       await page.goto(projectUrl, { waitUntil: 'networkidle', timeout: 60000 });
       await page.waitForTimeout(3000);
       
@@ -4728,7 +4754,7 @@ export async function registerRoutes(
     }
   });
 
-  // Test Documents extraction
+  // Test Documents extraction - Downloads all documents as ZIP
   app.post("/api/testing/playwright/documents-extract", requireAuth, async (req, res) => {
     try {
       const { projectId } = req.body;
@@ -4738,10 +4764,25 @@ export async function registerRoutes(
       
       const { chromium } = await import('playwright');
       const { loginToProcore } = await import('./playwright/auth');
+      const archiver = (await import('archiver')).default;
+      const fs = await import('fs/promises');
+      const fsSync = await import('fs');
+      const path = await import('path');
+      
+      // Get company ID from config
+      const procoreConfig = await storage.getAutomationConfig("procore_config");
+      const companyId = (procoreConfig?.value as any)?.companyId;
+      if (!companyId) {
+        return res.status(400).json({ error: 'Procore company ID not configured' });
+      }
       
       const browser = await chromium.launch({ headless: true });
+      const tempDir = `.playwright-temp/docs-${projectId}-${Date.now()}`;
+      await fs.mkdir(tempDir, { recursive: true });
+      
       const context = await browser.newContext({
         viewport: { width: 1920, height: 1080 },
+        acceptDownloads: true,
       });
       const page = await context.newPage();
       
@@ -4752,46 +4793,229 @@ export async function registerRoutes(
       }
       
       // Navigate to Documents tool
-      const documentsUrl = `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${projectId}/tools/documents`;
+      const documentsUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/documents`;
+      console.log(`[documents-extract] Navigating to: ${documentsUrl}`);
       await page.goto(documentsUrl, { waitUntil: 'networkidle', timeout: 60000 });
       await page.waitForTimeout(3000);
       
       const extractedData: Record<string, any> = {
         url: documentsUrl,
         timestamp: new Date().toISOString(),
-        folders: [],
-        files: [],
+        folders: [] as { name: string; files: { name: string; downloaded: boolean }[] }[],
+        totalFiles: 0,
+        downloadedFiles: 0,
       };
       
       try {
-        // Get folder structure
-        const folders = await page.$$('[data-testid="folder"], .folder-item, tr[data-type="folder"], .folder-row');
-        extractedData.folders = await Promise.all(
-          folders.slice(0, 20).map(async (folder) => ({
-            name: await folder.textContent(),
-          }))
-        );
+        // Scrape folder names from the left sidebar tree
+        // Looking for folder items in the tree view
+        const folderSelectors = [
+          '.tree-item span',
+          '[class*="TreeNode"] span',
+          '[class*="folder-tree"] li',
+          'nav[aria-label] li span',
+          '.folder-list li',
+          '[data-qa="folder-item"]',
+          // Try to get text from visible folder names
+          'span:has-text("Commitments"), span:has-text("CompanyCam"), span:has-text("Contracts"), span:has-text("Correspondence"), span:has-text("Documents"), span:has-text("Permits"), span:has-text("RFI"), span:has-text("Schedules"), span:has-text("Submittals")'
+        ];
         
-        // Get files
-        const files = await page.$$('[data-testid="file"], .file-item, tr[data-type="file"], .file-row, a[download]');
-        extractedData.files = await Promise.all(
-          files.slice(0, 20).map(async (file) => ({
-            name: await file.textContent(),
-            href: await file.getAttribute('href'),
-          }))
-        );
+        let folderNames: string[] = [];
+        
+        // Try each selector until we find folders
+        for (const selector of folderSelectors) {
+          try {
+            const elements = await page.$$(selector);
+            if (elements.length > 0) {
+              for (const el of elements) {
+                const text = await el.textContent();
+                if (text && text.trim() && !text.includes('\n')) {
+                  const name = text.trim();
+                  if (name.length > 0 && name.length < 100 && !folderNames.includes(name)) {
+                    folderNames.push(name);
+                  }
+                }
+              }
+              if (folderNames.length > 0) {
+                console.log(`[documents-extract] Found ${folderNames.length} folders using selector: ${selector}`);
+                break;
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+        
+        // If no folders found via selectors, try scraping from the visible table
+        if (folderNames.length === 0) {
+          console.log('[documents-extract] Trying to scrape folders from table...');
+          const rows = await page.$$('tbody tr');
+          for (const row of rows) {
+            const nameCell = await row.$('td:first-child');
+            if (nameCell) {
+              const text = await nameCell.textContent();
+              // Check if it looks like a folder (has folder icon or specific styling)
+              const rowClass = await row.getAttribute('class') || '';
+              const hasIcon = await row.$('svg, [class*="folder"], [class*="icon"]');
+              if (text && text.trim() && (hasIcon || rowClass.includes('folder'))) {
+                const name = text.trim();
+                if (!folderNames.includes(name)) {
+                  folderNames.push(name);
+                }
+              }
+            }
+          }
+        }
+        
+        // If still no folders found, use the visible content
+        if (folderNames.length === 0) {
+          console.log('[documents-extract] Extracting folder names from page content...');
+          const pageText = await page.textContent('body');
+          // Parse visible folder names from the screenshot we saw
+          const knownFolders = ['Commitments', 'CompanyCam', 'Contracts-Admin', 'Correspondence', 
+                               'Estimating Documents', 'Permits-Inspections', 'Punch-Closeout', 
+                               'RFI', 'Schedules', 'Submittals', 'Weekly Construction Report'];
+          for (const folder of knownFolders) {
+            if (pageText && pageText.includes(folder)) {
+              folderNames.push(folder);
+            }
+          }
+        }
+        
+        console.log(`[documents-extract] Found folders: ${folderNames.join(', ')}`);
+        
+        // Process each folder
+        for (const folderName of folderNames) {
+          const folderData = { name: folderName, files: [] as { name: string; downloaded: boolean }[] };
+          
+          try {
+            // Click on the folder in the sidebar or table to navigate into it
+            const folderElement = await page.$(`text="${folderName}"`);
+            if (folderElement) {
+              await folderElement.click();
+              await page.waitForTimeout(2000);
+              await page.waitForLoadState('networkidle');
+              
+              // Now scrape files in this folder
+              const fileRows = await page.$$('tbody tr');
+              for (const row of fileRows) {
+                const nameCell = await row.$('td:first-child');
+                const text = nameCell ? await nameCell.textContent() : null;
+                if (text && text.trim()) {
+                  const fileName = text.trim();
+                  // Skip if it looks like a folder (check for folder indicators)
+                  const isFolder = await row.$('[class*="folder"]');
+                  if (!isFolder && fileName !== folderName) {
+                    folderData.files.push({ name: fileName, downloaded: false });
+                    extractedData.totalFiles++;
+                  }
+                }
+              }
+              
+              // Try to download files in this folder using bulk download if available
+              const selectAll = await page.$('th input[type="checkbox"]');
+              if (selectAll && folderData.files.length > 0) {
+                await selectAll.click();
+                await page.waitForTimeout(500);
+                
+                // Look for download button
+                const downloadBtn = await page.$('button:has-text("Download"), [data-qa="download"]');
+                if (downloadBtn) {
+                  try {
+                    const [download] = await Promise.all([
+                      page.waitForEvent('download', { timeout: 30000 }),
+                      downloadBtn.click(),
+                    ]);
+                    
+                    const filePath = path.join(tempDir, folderName, download.suggestedFilename());
+                    await fs.mkdir(path.dirname(filePath), { recursive: true });
+                    await download.saveAs(filePath);
+                    
+                    extractedData.downloadedFiles++;
+                    folderData.files.forEach(f => f.downloaded = true);
+                    console.log(`[documents-extract] Downloaded: ${filePath}`);
+                  } catch (downloadErr: any) {
+                    console.log(`[documents-extract] Bulk download failed: ${downloadErr.message}`);
+                  }
+                }
+              }
+            }
+          } catch (folderErr: any) {
+            console.log(`[documents-extract] Error processing folder ${folderName}: ${folderErr.message}`);
+          }
+          
+          extractedData.folders.push(folderData);
+        }
         
       } catch (extractError: any) {
         extractedData.extractionError = extractError.message;
+        console.error(`[documents-extract] Extraction error: ${extractError.message}`);
       }
       
+      // Take a final screenshot
       const screenshotBuffer = await page.screenshot({ fullPage: false });
       extractedData.screenshot = `data:image/png;base64,${screenshotBuffer.toString('base64')}`;
       
       await browser.close();
       
-      res.json({ success: true, data: extractedData });
+      // Create ZIP file if any files were downloaded
+      const zipPath = `${tempDir}/documents.zip`;
+      const output = fsSync.createWriteStream(zipPath);
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      
+      archive.pipe(output);
+      
+      // Add downloaded files to ZIP
+      const downloadedFolders = await fs.readdir(tempDir);
+      for (const folder of downloadedFolders) {
+        if (folder === 'documents.zip') continue;
+        const folderPath = path.join(tempDir, folder);
+        const stat = await fs.stat(folderPath);
+        if (stat.isDirectory()) {
+          archive.directory(folderPath, folder);
+        } else {
+          archive.file(folderPath, { name: folder });
+        }
+      }
+      
+      await archive.finalize();
+      
+      // Wait for ZIP to be written
+      await new Promise<void>((resolve, reject) => {
+        output.on('close', resolve);
+        output.on('error', reject);
+      });
+      
+      // Check if ZIP has content
+      const zipStat = await fs.stat(zipPath);
+      if (zipStat.size > 0 && extractedData.downloadedFiles > 0) {
+        // Send ZIP file as download
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename="project-${projectId}-documents.zip"`);
+        const zipStream = fsSync.createReadStream(zipPath);
+        zipStream.pipe(res);
+        
+        // Cleanup after sending
+        zipStream.on('end', async () => {
+          try {
+            await fs.rm(tempDir, { recursive: true, force: true });
+          } catch {}
+        });
+      } else {
+        // No files downloaded, return extraction results as JSON
+        res.json({ 
+          success: true, 
+          data: extractedData,
+          message: 'No files were downloaded. Folders found but download may require manual intervention.',
+        });
+        
+        // Cleanup temp directory
+        try {
+          await fs.rm(tempDir, { recursive: true, force: true });
+        } catch {}
+      }
     } catch (e: any) {
+      console.error(`[documents-extract] Error: ${e.message}`);
       res.status(500).json({ error: e.message });
     }
   });

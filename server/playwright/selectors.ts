@@ -129,13 +129,27 @@ export const PROCORE_SELECTORS = {
     scopeOfWork: '[data-testid="scope-of-work"], .scope-of-work',
   },
   
-  // Documents section
+  // Documents section - Procore Documents tool
   documents: {
-    uploadButton: '[data-testid="upload-document"], button:has-text("Upload")',
+    uploadButton: '[data-testid="upload-document"], button:has-text("Upload"), [data-qa="upload-button"]',
     fileInput: 'input[type="file"]',
-    documentList: '[data-testid="document-list"], .document-list',
-    documentRow: '[data-testid="document-row"], .document-row',
-    downloadButton: '[data-testid="download-document"], .download-button',
+    documentList: '[data-testid="document-list"], .document-list, [data-qa="file-list"]',
+    documentRow: '[data-testid="document-row"], .document-row, [data-qa="file-row"]',
+    downloadButton: '[data-testid="download-document"], .download-button, [data-qa="download-button"]',
+    // Folder tree in left sidebar
+    folderTree: '[data-qa="folder-tree"], .folder-tree, [class*="tree"], nav[aria-label*="folder"]',
+    folderTreeItem: '[data-qa="folder-item"], .tree-node, [class*="tree-item"], [class*="TreeNode"]',
+    folderName: '[data-qa="folder-name"], .folder-name, [class*="folder-name"], span[class*="name"]',
+    // Content area
+    contentTable: 'table, [data-qa="documents-table"], [class*="documents-table"]',
+    contentRow: 'tbody tr, [data-qa="content-row"], [class*="content-row"]',
+    fileLink: 'a[href*="/files/"], a[href*="/documents/"], [data-qa="file-link"]',
+    fileName: 'td:first-child, [data-qa="file-name"], .file-name',
+    // Actions
+    selectAllCheckbox: 'th input[type="checkbox"], [data-qa="select-all"]',
+    rowCheckbox: 'td input[type="checkbox"], [data-qa="row-checkbox"]',
+    downloadSelectedButton: 'button:has-text("Download"), [data-qa="download-selected"]',
+    moreActionsButton: '[data-qa="more-actions"], button[aria-label*="more"], [class*="more-button"]',
   },
   
   // Portfolio section
@@ -204,11 +218,14 @@ export const PROCORE_URLS = {
   loginSandbox: "https://login-sandbox.procore.com/",
   app: "https://app.procore.com/",
   appSandbox: "https://sandbox.procore.com/",
+  // New Procore UI uses regional domains
+  appNew: "https://us02.procore.com/",
+  appNewSandbox: "https://sandbox.procore.com/",
   
   // URL patterns
   patterns: {
-    bidboard: /\/bidding\/?$/,
-    bidboardProject: /\/bidding\/\d+/,
+    bidboard: /\/bidding\/?$|\/tools\/bid-board\/?$/,
+    bidboardProject: /\/bidding\/\d+|\/tools\/bid-board\/\d+/,
     portfolio: /\/projects?\/?$/,
     portfolioProject: /\/projects?\/\d+/,
     budget: /\/budget\/?$/,
@@ -222,12 +239,27 @@ export function getBidBoardUrl(companyId: string, sandbox: boolean = false): str
   return `${baseUrl}${companyId}/company/bidding`;
 }
 
+export function getBidBoardUrlNew(companyId: string, sandbox: boolean = false): string {
+  const baseUrl = sandbox ? PROCORE_URLS.appNewSandbox : PROCORE_URLS.appNew;
+  return `${baseUrl}webclients/host/companies/${companyId}/tools/bid-board`;
+}
+
 export function getProjectUrl(companyId: string, projectId: string, sandbox: boolean = false): string {
   const baseUrl = sandbox ? PROCORE_URLS.appSandbox : PROCORE_URLS.app;
   return `${baseUrl}${companyId}/company/bidding/${projectId}`;
 }
 
+export function getProjectUrlNew(companyId: string, projectId: string, sandbox: boolean = false): string {
+  const baseUrl = sandbox ? PROCORE_URLS.appNewSandbox : PROCORE_URLS.appNew;
+  return `${baseUrl}webclients/host/companies/${companyId}/bidding/${projectId}`;
+}
+
 export function getPortfolioProjectUrl(projectId: string, sandbox: boolean = false): string {
   const baseUrl = sandbox ? PROCORE_URLS.appSandbox : PROCORE_URLS.app;
   return `${baseUrl}projects/${projectId}`;
+}
+
+export function getPortfolioProjectUrlNew(companyId: string, projectId: string, sandbox: boolean = false): string {
+  const baseUrl = sandbox ? PROCORE_URLS.appNewSandbox : PROCORE_URLS.appNew;
+  return `${baseUrl}webclients/host/companies/${companyId}/projects/${projectId}`;
 }

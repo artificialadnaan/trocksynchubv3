@@ -393,22 +393,17 @@ function ArchiveProgressCard({
   archiveId: string;
   onComplete: () => void;
 }) {
-  const [pollInterval, setPollInterval] = useState(2000);
-
   const { data: progress, isLoading } = useQuery<ArchiveProgress>({
     queryKey: ["/api/archive/progress", archiveId],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/archive/progress/${archiveId}`);
       return res.json();
     },
-    refetchInterval: pollInterval || false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "completed" || status === "failed" ? false : 2000;
+    },
   });
-
-  useEffect(() => {
-    if (progress?.status === "completed" || progress?.status === "failed") {
-      setPollInterval(0);
-    }
-  }, [progress?.status]);
 
   if (isLoading || !progress) {
     return <Skeleton className="h-40 w-full" />;

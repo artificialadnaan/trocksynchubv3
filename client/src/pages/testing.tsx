@@ -229,8 +229,30 @@ export default function TestingPage() {
         credentials: 'include',
         body: JSON.stringify({ projectId }),
       });
-      if (!res.ok) throw new Error('Failed to extract documents');
-      return res.json();
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to extract documents');
+      }
+      
+      // Check if response is a ZIP file or JSON
+      const contentType = res.headers.get('Content-Type') || '';
+      if (contentType.includes('application/zip')) {
+        // Download the ZIP file
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `project-${projectId}-documents.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        return { success: true, data: { message: 'Documents downloaded as ZIP file', downloadedFiles: 1 } };
+      }
+      
+      // JSON response - no files downloaded
+      const jsonData = await res.json();
+      return jsonData;
     },
     onSuccess: (data) => {
       setExtractionResult(data.data);

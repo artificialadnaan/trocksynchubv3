@@ -243,7 +243,7 @@ export async function syncCompanycamProjects(): Promise<{ synced: number; create
  * Called by webhook handlers for real-time project updates.
  * Uses upsert to handle both create and update cases.
  */
-export async function syncSingleCompanycamProject(projectId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+export async function syncSingleCompanycamProject(projectId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted' | 'error'; error?: string }> {
   try {
     const token = await getCompanycamToken();
     
@@ -252,7 +252,8 @@ export async function syncSingleCompanycamProject(projectId: string): Promise<{ 
       project = await companycamApiFetch(`/projects/${projectId}`, token);
     } catch (fetchErr: any) {
       if (fetchErr.message?.includes('404')) {
-        console.log(`[companycam] Project ${projectId} not found (may have been deleted)`);
+        await storage.deleteCompanycamProject(projectId);
+        console.log(`[companycam] Project ${projectId} deleted (not found in CompanyCam)`);
         return { success: true, action: 'deleted' };
       }
       throw fetchErr;
@@ -274,7 +275,7 @@ export async function syncSingleCompanycamProject(projectId: string): Promise<{ 
     return { success: true, action };
   } catch (err: any) {
     console.error(`[companycam] Failed to sync project ${projectId}:`, err.message);
-    return { success: false, action: 'updated', error: err.message };
+    return { success: false, action: 'error', error: err.message };
   }
 }
 
@@ -321,7 +322,7 @@ export async function syncCompanycamUsers(): Promise<{ synced: number; created: 
  * Called by webhook handlers for real-time user updates.
  * Uses upsert to handle both create and update cases.
  */
-export async function syncSingleCompanycamUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+export async function syncSingleCompanycamUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted' | 'error'; error?: string }> {
   try {
     const token = await getCompanycamToken();
     
@@ -428,6 +429,7 @@ export async function runFullCompanycamSync(): Promise<any> {
     await storage.createAuditLog({
       action: 'companycam_full_sync',
       entityType: 'companycam',
+      source: 'companycam',
       status: 'success',
       details: { projects: projectStats, users: userStats, photos: photoStats, duration: `${duration}s` } as any,
     });
