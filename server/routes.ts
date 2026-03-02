@@ -5029,6 +5029,7 @@ export async function registerRoutes(
     context: any;
     page: any;
     isRecording: boolean;
+    isHeadless: boolean;
     recordedActions: string[];
     startTime: Date;
   } | null = null;
