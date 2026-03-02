@@ -317,9 +317,12 @@ export async function sendKickoffEmails(params: {
   const pmName = params.pmName || pm?.name || 'TBD';
   const superName = params.superName || superMember?.name || 'TBD';
 
+  // Send kickoff only to the project manager
+  const recipients = pm ? [pm] : [];
+
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.projectId);
 
-  for (const member of params.teamMembers) {
+  for (const member of recipients) {
     if (!member.email) {
       skipped++;
       continue;
