@@ -524,7 +524,7 @@ export async function syncSingleProcoreUser(userId: string): Promise<{ success: 
       const response = await client.get(`/rest/v1.0/companies/${companyId}/users/${userId}`);
       user = response.data;
     } catch (fetchErr: any) {
-      if (fetchErr.response?.status === 404) {
+      if (fetchErr.message?.includes('404')) {
         await storage.deleteProcoreUser(userId);
         console.log(`[procore] User ${userId} deleted (not found in Procore)`);
         return { success: true, action: 'deleted' };
@@ -991,16 +991,35 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
     projectsToSync = Array.from(byId.values());
   }
 
+  const ROLE_SYNC_DELAY_MS = 1500; // Throttle to avoid Procore 429 rate limit (default ~60 req/min)
   console.log(`[procore] Syncing role assignments for ${projectsToSync.length} active projects...`);
   let synced = 0;
   const newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> = [];
 
-  for (const project of projectsToSync) {
+  for (let i = 0; i < projectsToSync.length; i++) {
+    const project = projectsToSync[i];
+    if (i > 0) {
+      await new Promise(r => setTimeout(r, ROLE_SYNC_DELAY_MS));
+    }
     try {
-      const raw = await fetchProcoreJson(
-        `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
-        companyId
-      );
+      let raw: any;
+      try {
+        raw = await fetchProcoreJson(
+          `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+          companyId
+        );
+      } catch (rateErr: any) {
+        if (rateErr.message?.includes('429')) {
+          console.log('[procore] Rate limited (429), waiting 60s before retrying project', project.procoreId);
+          await new Promise(r => setTimeout(r, 60000));
+          raw = await fetchProcoreJson(
+            `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+            companyId
+          );
+        } else {
+          throw rateErr;
+        }
+      }
       const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
 
       const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
@@ -1154,6 +1173,17 @@ export async function runFullProcoreSync(): Promise<{
         console.error(`[procore] Stage change email processing failed:`, err.message);
       }
     }
+  }
+
+  // Sync change orders and prime contracts to HubSpot deal amounts (respects sync_change_orders config)
+  try {
+    const { syncAllProjectChangeOrders } = await import('./change-order-sync');
+    const changeOrderResult = await syncAllProjectChangeOrders();
+    if (changeOrderResult.projectsUpdated > 0) {
+      console.log(`[procore] Change order sync: ${changeOrderResult.projectsUpdated} deal amount(s) updated`);
+    }
+  } catch (err: any) {
+    console.error(`[procore] Change order sync failed:`, err.message);
   }
 
   const purgedHistory = await storage.purgeProcoreChangeHistory(14);
