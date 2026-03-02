@@ -294,14 +294,26 @@ export async function sendKickoffEmails(params: {
   projectId: string;
   projectName: string;
   clientName: string;
-  projectAddress: string;
+  projectAddress?: string;
+  scopeSummary?: string;
+  startDate?: string;
+  endDate?: string;
   teamMembers: Array<{
     name: string;
     email: string;
     role: string;
+    phone?: string;
   }>;
   pmName?: string;
+  pmEmail?: string;
+  pmPhone?: string;
   superName?: string;
+  superEmail?: string;
+  superPhone?: string;
+  primaryContact?: string;
+  preferredMethod?: string;
+  statusFrequency?: string;
+  nextStep?: string;
   hubspotDealId?: string;
 }): Promise<{ sent: number; skipped: number; failed: number }> {
   const template = await storage.getEmailTemplate('project_kickoff');
@@ -315,7 +327,11 @@ export async function sendKickoffEmails(params: {
   const pm = params.teamMembers.find(m => m.role.toLowerCase().includes('project manager'));
   const superMember = params.teamMembers.find(m => m.role.toLowerCase().includes('superintendent'));
   const pmName = params.pmName || pm?.name || 'TBD';
+  const pmEmail = params.pmEmail || pm?.email || 'TBD';
+  const pmPhone = params.pmPhone || pm?.phone || 'TBD';
   const superName = params.superName || superMember?.name || 'TBD';
+  const superEmail = params.superEmail || superMember?.email || 'TBD';
+  const superPhone = params.superPhone || superMember?.phone || 'TBD';
 
   // Send kickoff only to the project manager
   const recipients = pm ? [pm] : [];
@@ -344,9 +360,20 @@ export async function sendKickoffEmails(params: {
       projectName: params.projectName || 'Unknown Project',
       clientName: params.clientName || 'Unknown Client',
       projectAddress: params.projectAddress || 'TBD',
+      scopeSummary: params.scopeSummary || 'See project details in Procore',
+      startDate: params.startDate || 'TBD',
+      endDate: params.endDate || 'TBD',
       roleName: member.role,
       pmName,
+      pmEmail,
+      pmPhone,
       superName,
+      superEmail,
+      superPhone,
+      primaryContact: params.primaryContact || pmName,
+      preferredMethod: params.preferredMethod || 'Email',
+      statusFrequency: params.statusFrequency || 'Weekly',
+      nextStep: params.nextStep || 'scheduling the project kickoff meeting',
       procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.projectId}/tools/projecthome`,
       hubspotUrl: hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${hubspotDealId}` : 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
       companycamUrl: mapping?.companycamProjectId ? `https://app.companycam.com/projects/${mapping.companycamProjectId}` : 'https://app.companycam.com/projects',

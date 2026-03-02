@@ -836,13 +836,27 @@ export async function runFullPortfolioWorkflow(
         m.role.toLowerCase().includes('project manager')
       );
       
+      const formatDate = (d: string | null | undefined) => {
+        if (!d) return 'TBD';
+        try {
+          const dt = new Date(d);
+          return isNaN(dt.getTime()) ? 'TBD' : dt.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        } catch {
+          return 'TBD';
+        }
+      };
+      
       if (pmMembers.length > 0) {
         result.kickoffEmails = await sendKickoffEmails({
           projectId: portfolioProjectId,
           projectName: projectDetail?.name || projectDetail?.display_name || 'Unknown Project',
           clientName: options.clientData?.companyName || projectDetail?.company?.name || 'Unknown Client',
           projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
-          teamMembers: pmMembers,
+          scopeSummary: projectDetail?.work_scope || projectDetail?.description || 'See project details in Procore',
+          startDate: formatDate(projectDetail?.start_date),
+          endDate: formatDate(projectDetail?.end_date || projectDetail?.completion_date),
+          teamMembers,
+          nextStep: 'scheduling the project kickoff meeting',
         });
         
         log(`Kickoff emails sent: ${result.kickoffEmails.sent} sent, ${result.kickoffEmails.skipped} skipped, ${result.kickoffEmails.failed} failed`, 'playwright');

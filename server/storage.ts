@@ -1772,128 +1772,61 @@ export class DatabaseStorage implements IStorage {
       {
         templateKey: "project_kickoff",
         name: "Project Kickoff",
-        description: "Welcome email sent to the Project Manager when project moves to Portfolio/Production",
-        subject: "🚀 Project Kickoff: {{projectName}} | T-Rock Construction",
+        description: "Client kickoff email sent to the Project Manager when assigned – ready to forward to client",
+        subject: "{{projectName}} – Project Kickoff & Team Introduction",
         bodyHtml: emailWrapper(`
-              <!-- Icon Badge -->
-              <div style="text-align: center; margin-bottom: 24px;">
-                <div style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); width: 72px; height: 72px; border-radius: 50%; line-height: 72px;">
-                  <span style="font-size: 32px;">🚀</span>
-                </div>
-              </div>
-              
-              <h1 style="color: #1a1a2e; font-size: 26px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
-                Project Kickoff
-              </h1>
-              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
-                Congratulations! A new project is ready to begin.
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Hello <strong style="color: #1a1a2e;">{{clientName}}</strong>,
               </p>
               
               <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
-                Hello <strong style="color: #1a1a2e;">{{recipientName}}</strong>,
+                We're excited to officially kick off the <strong>{{projectName}}</strong>. This email serves as an introduction to your project team and outlines how we'll be working together moving forward.
               </p>
               
-              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
-                The following project has been approved and moved to production. Please review the project details and coordinate with your team to get started.
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Project Overview</p>
+              <ul style="color: #374151; font-size: 15px; line-height: 1.8; margin: 0 0 24px 0; padding-left: 24px;">
+                <li><strong>Project Name:</strong> {{projectName}}</li>
+                <li><strong>Scope Summary:</strong> {{scopeSummary}}</li>
+                <li><strong>Start Date:</strong> {{startDate}}</li>
+                <li><strong>Target Completion Date:</strong> {{endDate}}</li>
+              </ul>
+              
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Your Project Team</p>
+              <p style="color: #64748b; font-size: 14px; margin: 0 0 16px 0;">Below are the key team members who will be overseeing and supporting this project:</p>
+              <ul style="color: #374151; font-size: 15px; line-height: 1.9; margin: 0 0 24px 0; padding-left: 24px;">
+                <li><strong>Project Manager:</strong> {{pmName}}<br>Email: {{pmEmail}} | Phone: {{pmPhone}}</li>
+                <li><strong>Superintendent:</strong> {{superName}}<br>Email: {{superEmail}} | Phone: {{superPhone}}</li>
+                <li><strong>Accounts Receivable:</strong> Kristy Scheidegger<br>Email: trockAR@trockgc.com | Phone: 469-927-3209</li>
+              </ul>
+              
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Communication &amp; Next Steps</p>
+              <ul style="color: #374151; font-size: 15px; line-height: 1.8; margin: 0 0 16px 0; padding-left: 24px;">
+                <li><strong>Primary Point of Contact:</strong> {{primaryContact}}</li>
+                <li><strong>Preferred Communication Method:</strong> {{preferredMethod}}</li>
+                <li><strong>Status Update Frequency:</strong> {{statusFrequency}}</li>
+              </ul>
+              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
+                Our next step will be {{nextStep}}. We will reach out shortly to confirm timelines and any required information.
               </p>
               
-              <!-- Project Details Card -->
-              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                  <tr>
-                    <td style="padding: 12px 0;">
-                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Name</span><br>
-                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{projectName}}</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
-                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Client</span><br>
-                      <span style="color: #e2e8f0; font-size: 16px; font-weight: 600;">{{clientName}}</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
-                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Address</span><br>
-                      <span style="color: #e2e8f0; font-size: 16px; font-weight: 600;">{{projectAddress}}</span>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
-                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Your Role</span><br>
-                      <span style="color: #d11921; font-size: 18px; font-weight: 700;">{{roleName}}</span>
-                    </td>
-                  </tr>
-                </table>
-              </div>
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Closing</p>
+              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
+                Thank you for the opportunity to work with you. We look forward to a successful collaboration.
+              </p>
+              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0;">
+                Best regards,<br><strong>{{pmName}}</strong>
+              </p>
               
-              <!-- Team Info Card -->
-              <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-left: 4px solid #d11921; border-radius: 0 12px 12px 0; padding: 20px; margin: 0 0 24px 0;">
-                <p style="color: #991b1b; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 12px 0;">👥 Project Team</p>
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                  <tr>
-                    <td style="padding: 6px 0; color: #1a1a2e; font-size: 14px;">
-                      <strong style="color: #991b1b;">PM:</strong> {{pmName}}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td style="padding: 6px 0; color: #1a1a2e; font-size: 14px;">
-                      <strong style="color: #991b1b;">Super:</strong> {{superName}}
-                    </td>
-                  </tr>
-                </table>
-              </div>
-              
-              <!-- Primary CTA Button -->
-              <div style="text-align: center; margin: 24px 0;">
-                <a href="{{procoreUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
-                  Open Project in Procore →
-                </a>
-              </div>
-              
-              <!-- Quick Links Section -->
-              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 24px 0;">
-                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
-                  Access Project In
-                </p>
-                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                  <tr>
-                    <td style="padding: 6px; width: 33.33%; text-align: center;">
-                      <a href="{{procoreUrl}}" style="display: block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
-                        🔧 Procore
-                      </a>
-                    </td>
-                    <td style="padding: 6px; width: 33.33%; text-align: center;">
-                      <a href="{{hubspotUrl}}" style="display: block; background: linear-gradient(135deg, #ff5c35 0%, #e04e2d 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
-                        📊 HubSpot
-                      </a>
-                    </td>
-                    <td style="padding: 6px; width: 33.33%; text-align: center;">
-                      <a href="{{companycamUrl}}" style="display: block; background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
-                        📷 CompanyCam
-                      </a>
-                    </td>
-                  </tr>
-                </table>
-              </div>
-              
-              <!-- Next Steps -->
-              <div style="background-color: #f0fdf4; border-radius: 12px; padding: 20px; margin: 0 0 24px 0; border: 1px solid #bbf7d0;">
-                <p style="color: #166534; font-size: 14px; font-weight: 700; margin: 0 0 12px 0;">📋 Next Steps</p>
-                <ol style="color: #374151; font-size: 14px; line-height: 1.8; margin: 0; padding-left: 20px;">
-                  <li>Review project documents in Procore</li>
-                  <li>Schedule kickoff meeting with team</li>
-                  <li>Verify budget and contract details</li>
-                  <li>Set up CompanyCam project for photos</li>
-                </ol>
-              </div>
-              
-              <p style="color: #64748b; font-size: 13px; line-height: 1.6; margin: 0; text-align: center;">
-                Questions about this project? Contact your team lead or reply to this email.
+              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 32px 0 24px 0;">
+              <p style="color: #94a3b8; font-size: 12px; margin: 0 0 12px 0;">Quick Links</p>
+              <p style="margin: 0;">
+                <a href="{{procoreUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none; margin-right: 16px;">Procore</a>
+                <a href="{{hubspotUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none; margin-right: 16px;">HubSpot</a>
+                <a href="{{companycamUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none;">CompanyCam</a>
               </p>
         `),
         enabled: true,
-        variables: ["recipientName", "projectName", "clientName", "projectAddress", "roleName", "pmName", "superName", "procoreUrl", "hubspotUrl", "companycamUrl"],
+        variables: ["clientName", "projectName", "scopeSummary", "startDate", "endDate", "pmName", "pmEmail", "pmPhone", "superName", "superEmail", "superPhone", "primaryContact", "preferredMethod", "statusFrequency", "nextStep", "procoreUrl", "hubspotUrl", "companycamUrl"],
       },
       {
         templateKey: "closeout_survey",
