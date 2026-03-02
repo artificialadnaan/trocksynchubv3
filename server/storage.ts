@@ -62,6 +62,7 @@ import {
   hubspotContacts, type HubspotContact, type InsertHubspotContact,
   hubspotDeals, type HubspotDeal, type InsertHubspotDeal,
   hubspotPipelines, type HubspotPipeline, type InsertHubspotPipeline,
+  hubspotOwners, type HubspotOwner, type InsertHubspotOwner,
   hubspotChangeHistory, type HubspotChangeHistory, type InsertHubspotChangeHistory,
   procoreProjects, type ProcoreProject, type InsertProcoreProject,
   procoreVendors, type ProcoreVendor, type InsertProcoreVendor,
@@ -187,6 +188,12 @@ export interface IStorage {
   deleteHubspotContact(hubspotId: string): Promise<void>;
   deleteHubspotCompany(hubspotId: string): Promise<void>;
   deleteHubspotDeal(hubspotId: string): Promise<void>;
+
+  // HubSpot Owners
+  upsertHubspotOwner(data: InsertHubspotOwner): Promise<HubspotOwner>;
+  getHubspotOwnerByHubspotId(hubspotId: string): Promise<HubspotOwner | undefined>;
+  getHubspotOwners(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotOwner[]; total: number }>;
+  deleteHubspotOwner(hubspotId: string): Promise<void>;
 
   upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
   getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
@@ -609,6 +616,53 @@ export class DatabaseStorage implements IStorage {
 
   async deleteHubspotDeal(hubspotId: string): Promise<void> {
     await db.delete(hubspotDeals).where(eq(hubspotDeals.hubspotId, hubspotId));
+  }
+
+  async upsertHubspotOwner(data: InsertHubspotOwner): Promise<HubspotOwner> {
+    const [result] = await db.insert(hubspotOwners).values(data)
+      .onConflictDoUpdate({
+        target: hubspotOwners.hubspotId,
+        set: {
+          email: data.email,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          userId: data.userId,
+          teams: data.teams,
+          archived: data.archived,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result;
+  }
+
+  async getHubspotOwnerByHubspotId(hubspotId: string): Promise<HubspotOwner | undefined> {
+    const [result] = await db.select().from(hubspotOwners).where(eq(hubspotOwners.hubspotId, hubspotId));
+    return result;
+  }
+
+  async getHubspotOwners(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotOwner[]; total: number }> {
+    const { search, limit = 100, offset = 0 } = filters;
+    const conditions = [];
+    if (search) {
+      conditions.push(
+        or(
+          ilike(hubspotOwners.email, `%${search}%`),
+          ilike(hubspotOwners.firstName, `%${search}%`),
+          ilike(hubspotOwners.lastName, `%${search}%`)
+        )
+      );
+    }
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      db.select().from(hubspotOwners).where(whereClause).limit(limit).offset(offset).orderBy(hubspotOwners.firstName),
+      db.select({ count: sql<number>`count(*)::int` }).from(hubspotOwners).where(whereClause),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async deleteHubspotOwner(hubspotId: string): Promise<void> {
+    await db.delete(hubspotOwners).where(eq(hubspotOwners.hubspotId, hubspotId));
   }
 
   async getHubspotCompanyByHubspotId(hubspotId: string): Promise<HubspotCompany | undefined> {

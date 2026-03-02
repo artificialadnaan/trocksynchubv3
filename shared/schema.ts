@@ -418,6 +418,22 @@ export const insertHubspotPipelineSchema = createInsertSchema(hubspotPipelines).
 export type InsertHubspotPipeline = z.infer<typeof insertHubspotPipelineSchema>;
 export type HubspotPipeline = typeof hubspotPipelines.$inferSelect;
 
+export const hubspotOwners = pgTable("hubspot_owners", {
+  id: serial("id").primaryKey(),
+  hubspotId: text("hubspot_id").notNull().unique(),
+  email: text("email").notNull(),
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  userId: text("user_id"),
+  teams: text("teams"),
+  archived: boolean("archived").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertHubspotOwnerSchema = createInsertSchema(hubspotOwners).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertHubspotOwner = z.infer<typeof insertHubspotOwnerSchema>;
+export type HubspotOwner = typeof hubspotOwners.$inferSelect;
+
 export const hubspotChangeHistory = pgTable("hubspot_change_history", {
   id: serial("id").primaryKey(),
   entityType: text("entity_type").notNull(),

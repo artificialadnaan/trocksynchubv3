@@ -466,6 +466,58 @@ async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   return ownerMap;
 }
 
+/**
+ * Sync all HubSpot owners to the local database.
+ * Fetches owner data from HubSpot API and upserts to hubspot_owners table.
+ */
+export async function syncHubSpotOwners(): Promise<{ synced: number; created: number; updated: number }> {
+  const accessToken = await getAccessToken();
+  let synced = 0;
+  let created = 0;
+  let updated = 0;
+
+  try {
+    const response = await fetch('https://api.hubapi.com/crm/v3/owners?limit=500', {
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
+    });
+    
+    if (!response.ok) {
+      console.error(`[hubspot] Failed to fetch owners: ${response.status}`);
+      return { synced, created, updated };
+    }
+
+    const data = await response.json();
+    const owners = data.results || [];
+
+    for (const owner of owners) {
+      const existing = await storage.getHubspotOwnerByHubspotId(String(owner.id));
+      
+      await storage.upsertHubspotOwner({
+        hubspotId: String(owner.id),
+        email: owner.email || '',
+        firstName: owner.firstName || null,
+        lastName: owner.lastName || null,
+        userId: owner.userId ? String(owner.userId) : null,
+        teams: owner.teams ? JSON.stringify(owner.teams) : null,
+        archived: owner.archived || false,
+      });
+
+      synced++;
+      if (existing) {
+        updated++;
+      } else {
+        created++;
+      }
+    }
+
+    console.log(`[hubspot] Synced ${synced} owners (${created} created, ${updated} updated)`);
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to sync owners:`, err.message);
+  }
+
+  return { synced, created, updated };
+}
+
 async function fetchContactCompanyAssociations(contactIds: string[]): Promise<Map<string, string>> {
   const assocMap = new Map<string, string>();
   if (!contactIds.length) return assocMap;
@@ -892,11 +944,15 @@ export async function runFullHubSpotSync(): Promise<{
   companies: { synced: number; created: number; updated: number; changes: number };
   contacts: { synced: number; created: number; updated: number; changes: number };
   deals: { synced: number; created: number; updated: number; changes: number };
+  owners: { synced: number; created: number; updated: number };
   pipelines: number;
   purgedHistory: number;
   duration: number;
 }> {
   const start = Date.now();
+
+  // Sync owners first so owner names are available for deals/contacts
+  const owners = await syncHubSpotOwners();
 
   const companies = await syncHubSpotCompanies();
 
@@ -914,6 +970,7 @@ export async function runFullHubSpotSync(): Promise<{
     companies,
     contacts,
     deals,
+    owners,
     pipelines: pipelinesData.length,
     purgedHistory,
     duration,

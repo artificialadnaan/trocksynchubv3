@@ -84,26 +84,38 @@ export async function triggerCloseoutSurvey(
     }
 
     const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
-    let clientEmail = '';
-    let clientName = '';
+    let recipientEmail = '';
+    let recipientName = '';
     
+    // Primary: Get deal owner email from HubSpot owners table
     if (mapping?.hubspotDealId) {
       const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+      if (deal?.ownerId) {
+        const owner = await storage.getHubspotOwnerByHubspotId(deal.ownerId);
+        if (owner?.email) {
+          recipientEmail = owner.email;
+          recipientName = [owner.firstName, owner.lastName].filter(Boolean).join(' ') || 'Team Member';
+          console.log(`[closeout] Using HubSpot deal owner: ${recipientName} (${recipientEmail})`);
+        }
+      }
+      // Also get company name for context if available
       if (deal?.associatedCompanyId) {
         const company = await storage.getHubspotCompanyByHubspotId(deal.associatedCompanyId);
-        if (company) {
-          clientName = company.name || '';
+        if (company?.name && !recipientName) {
+          recipientName = company.name;
         }
       }
     }
 
-    if (!clientEmail) {
-      clientEmail = projectDetail.client_email || projectDetail.owner_email || '';
-      clientName = clientName || projectDetail.client_name || projectDetail.company?.name || 'Valued Client';
+    // Fallback: Use Procore project data if no HubSpot owner found
+    if (!recipientEmail) {
+      recipientEmail = projectDetail.client_email || projectDetail.owner_email || '';
+      recipientName = recipientName || projectDetail.client_name || projectDetail.company?.name || 'Valued Client';
+      console.log(`[closeout] Using Procore fallback: ${recipientName} (${recipientEmail})`);
     }
 
-    if (!clientEmail) {
-      return { success: false, error: 'No client email found for this project' };
+    if (!recipientEmail) {
+      return { success: false, error: 'No recipient email found - neither HubSpot deal owner nor Procore client email available' };
     }
 
     const template = await storage.getEmailTemplate('closeout_survey');
@@ -117,7 +129,7 @@ export async function triggerCloseoutSurvey(
     const googleReviewUrl = options.googleReviewLink || 'https://g.page/r/YOUR_GOOGLE_REVIEW_LINK/review';
 
     const variables: Record<string, string> = {
-      clientName,
+      clientName: recipientName,
       projectName: projectDetail.name || projectDetail.display_name || 'Your Project',
       surveyUrl,
       googleReviewUrl,
@@ -131,14 +143,14 @@ export async function triggerCloseoutSurvey(
       procoreProjectName: projectDetail.name || projectDetail.display_name || null,
       hubspotDealId: mapping?.hubspotDealId || null,
       surveyToken,
-      clientEmail,
-      clientName,
+      clientEmail: recipientEmail,
+      clientName: recipientName,
       googleReviewLink: options.googleReviewLink || null,
       sentAt: new Date(),
     });
 
     const result = await sendEmail({
-      to: clientEmail,
+      to: recipientEmail,
       subject,
       htmlBody,
       fromName: 'T-Rock Construction',
@@ -154,10 +166,10 @@ export async function triggerCloseoutSurvey(
       entityId: projectId,
       source: 'automation',
       status: 'success',
-      details: { surveyId: survey.id, clientEmail, projectName: projectDetail.name },
+      details: { surveyId: survey.id, recipientEmail, recipientName, projectName: projectDetail.name },
     });
 
-    console.log(`[closeout] Survey sent to ${clientEmail} for project ${projectDetail.name}`);
+    console.log(`[closeout] Survey sent to ${recipientEmail} for project ${projectDetail.name}`);
     return { success: true, surveyId: survey.id };
   } catch (error) {
     const err = error instanceof Error ? error.message : String(error);
