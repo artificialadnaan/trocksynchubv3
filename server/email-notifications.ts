@@ -174,56 +174,12 @@ export async function sendStageChangeEmail(params: {
   const template = await storage.getEmailTemplate('stage_change_notification');
   if (!template || !template.enabled) {
     console.log('[email] Stage change notification template is disabled, skipping');
-    try {
-      await storage.createEmailSendLog({
-        templateKey: 'stage_change_notification',
-        recipientEmail: '(skipped)',
-        recipientName: null,
-        subject: `Stage change: ${params.dealName} (${params.oldStage} → ${params.newStage})`,
-        dedupeKey: `stage_change_skipped:${params.hubspotDealId}:${params.newStage}:${Date.now()}`,
-        status: 'skipped',
-        errorMessage: 'template_disabled',
-        metadata: {
-          hubspotDealId: params.hubspotDealId,
-          dealName: params.dealName,
-          procoreProjectId: params.procoreProjectId,
-          oldStage: params.oldStage,
-          newStage: params.newStage,
-          reason: 'template_disabled',
-        },
-        sentAt: new Date(),
-      });
-    } catch (logErr: any) {
-      console.error('[email] Failed to log skipped stage change email:', logErr.message);
-    }
     return { sent: false, ownerEmail: null, error: 'template_disabled' };
   }
 
   const ownerInfo = await getDealOwnerInfo(params.hubspotDealId);
   if (!ownerInfo.ownerEmail) {
     console.log(`[email] No deal owner found for deal ${params.hubspotDealId}, skipping stage change email`);
-    try {
-      await storage.createEmailSendLog({
-        templateKey: 'stage_change_notification',
-        recipientEmail: '(skipped)',
-        recipientName: null,
-        subject: `Stage change: ${params.dealName} (${params.oldStage} → ${params.newStage})`,
-        dedupeKey: `stage_change_skipped:${params.hubspotDealId}:${params.newStage}:${Date.now()}`,
-        status: 'skipped',
-        errorMessage: 'no_deal_owner',
-        metadata: {
-          hubspotDealId: params.hubspotDealId,
-          dealName: params.dealName,
-          procoreProjectId: params.procoreProjectId,
-          oldStage: params.oldStage,
-          newStage: params.newStage,
-          reason: 'no_deal_owner',
-        },
-        sentAt: new Date(),
-      });
-    } catch (logErr: any) {
-      console.error('[email] Failed to log skipped stage change email:', logErr.message);
-    }
     return { sent: false, ownerEmail: null, error: 'no_deal_owner' };
   }
 
@@ -317,12 +273,9 @@ export async function sendKickoffEmails(params: {
   const pmName = params.pmName || pm?.name || 'TBD';
   const superName = params.superName || superMember?.name || 'TBD';
 
-  // Send kickoff only to the project manager
-  const recipients = pm ? [pm] : [];
-
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.projectId);
 
-  for (const member of recipients) {
+  for (const member of params.teamMembers) {
     if (!member.email) {
       skipped++;
       continue;

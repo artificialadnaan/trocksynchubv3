@@ -833,7 +833,8 @@ export async function runFullPortfolioWorkflow(
       const teamMembers = await getProjectTeamMembers(portfolioProjectId);
       
       const pmMembers = teamMembers.filter(m => 
-        m.role.toLowerCase().includes('project manager')
+        m.role.toLowerCase().includes('project manager') || 
+        m.role.toLowerCase().includes('superintendent')
       );
       
       if (pmMembers.length > 0) {
@@ -847,7 +848,7 @@ export async function runFullPortfolioWorkflow(
         
         log(`Kickoff emails sent: ${result.kickoffEmails.sent} sent, ${result.kickoffEmails.skipped} skipped, ${result.kickoffEmails.failed} failed`, 'playwright');
       } else {
-        log('No Project Manager found for kickoff emails', 'playwright');
+        log('No PM/Superintendent found for kickoff emails', 'playwright');
         result.kickoffEmails = { sent: 0, skipped: 0, failed: 0 };
       }
     } catch (err: any) {
