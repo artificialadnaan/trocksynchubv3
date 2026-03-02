@@ -3321,6 +3321,9 @@ export async function registerRoutes(
   let procorePollingRunning = false;
   let lastProcorePollAt: Date | null = null;
   let lastProcorePollResult: any = null;
+  let lastRolePollAt: Date | null = null;
+  let lastRolePollResult: any = null;
+  let lastWebhookRoleEventAt: Date | null = null;
 
   async function runProcorePollingCycle() {
     if (procorePollingRunning) {
@@ -3335,6 +3338,8 @@ export async function registerRoutes(
       const duration = Date.now() - startTime;
       lastProcorePollAt = new Date();
       lastProcorePollResult = { ...result, duration };
+      lastRolePollAt = new Date();
+      lastRolePollResult = { synced: result.roleAssignments.synced, newAssignments: result.roleAssignments.newAssignments, emails: { sent: 0, skipped: 0, failed: 0 }, duration: 0 };
 
       const hasChanges = result.projects.created > 0 || result.projects.updated > 0 ||
         result.vendors.created > 0 || result.vendors.updated > 0 ||
@@ -3451,9 +3456,6 @@ export async function registerRoutes(
 
   let rolePollingTimer: ReturnType<typeof setInterval> | null = null;
   let rolePollingRunning = false;
-  let lastRolePollAt: Date | null = null;
-  let lastRolePollResult: any = null;
-  let lastWebhookRoleEventAt: Date | null = null;
 
   async function runRolePollingCycle() {
     if (rolePollingRunning) {
@@ -3464,6 +3466,10 @@ export async function registerRoutes(
     const startTime = Date.now();
     try {
       const result = await syncProcoreRoleAssignments();
+      if (result.skipped) {
+        console.log('[RolePolling] Skipped — Procore sync in progress, keeping previous result');
+        return;
+      }
       let emailResult = { sent: 0, skipped: 0, failed: 0 };
       if (result.newAssignments.length > 0) {
         try {

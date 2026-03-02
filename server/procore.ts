@@ -648,12 +648,11 @@ export async function getProjectTeamMembers(projectId: string): Promise<Array<{
   const companyId = config.companyId;
 
   try {
-    const assignments = await fetchProcoreJson(
-      `/rest/v1.0/project_roles?project_id=${projectId}&company_id=${companyId}`,
+    const raw = await fetchProcoreJson(
+      `/rest/v1.0/project_roles?project_id=${projectId}&company_id=${companyId}&per_page=100`,
       companyId
-    ) as any[];
-
-    if (!Array.isArray(assignments)) return [];
+    );
+    const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
 
     const teamMembers: Array<{ name: string; email: string; role: string }> = [];
 
@@ -947,11 +946,11 @@ export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids
 let roleAssignmentSyncInProgress = false;
 const roleAssignmentSyncQueue: string[] = [];
 
-export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
+export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }>; skipped?: boolean }> {
   // Prevent concurrent syncs to avoid duplicate emails
   if (roleAssignmentSyncInProgress) {
     console.log('[procore] Role assignment sync already in progress, skipping to prevent duplicates');
-    return { synced: 0, newAssignments: [] };
+    return { synced: 0, newAssignments: [], skipped: true };
   }
   
   roleAssignmentSyncInProgress = true;
@@ -976,9 +975,20 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
     }
   } else {
     const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
-    projectsToSync = allProjects
+    const fromDb = allProjects
       .filter(p => p.active !== false)
       .map(p => ({ procoreId: p.procoreId, name: p.name || '' }));
+    const byId = new Map(fromDb.map(p => [p.procoreId, p]));
+    const mappings = await storage.getSyncMappings();
+    for (const m of mappings) {
+      for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
+        if (pid && !byId.has(pid)) {
+          const p = await storage.getProcoreProjectByProcoreId(pid);
+          byId.set(pid, { procoreId: pid, name: p?.name || '' });
+        }
+      }
+    }
+    projectsToSync = Array.from(byId.values());
   }
 
   console.log(`[procore] Syncing role assignments for ${projectsToSync.length} active projects...`);
@@ -987,12 +997,11 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
 
   for (const project of projectsToSync) {
     try {
-      const assignments = await fetchProcoreJson(
-        `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}`,
+      const raw = await fetchProcoreJson(
+        `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
         companyId
-      ) as any[];
-
-      if (!Array.isArray(assignments)) continue;
+      );
+      const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
 
       const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
       const existingKeys = new Set(existingAssignments.map(a => `${a.roleName}||${a.assigneeId}`));

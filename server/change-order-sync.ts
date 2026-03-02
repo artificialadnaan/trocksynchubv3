@@ -36,7 +36,7 @@
  * - hs_change_order_pending: Pending changes total
  * 
  * Automation Config:
- * - change_order_hubspot_sync: Enable/disable sync (disabled by default)
+ * - sync_change_orders: Enable/disable (Sync Config: "Update HubSpot deal amount on Change Orders")
  * 
  * @module change-order-sync
  */
@@ -160,9 +160,9 @@ export async function syncChangeOrdersToHubSpot(procoreProjectId: string): Promi
   contractValue?: ContractValue;
   error?: string;
 }> {
-  // Check if change order sync is enabled (disabled by default)
-  const changeOrderSyncConfig = await storage.getAutomationConfig("change_order_hubspot_sync");
-  const syncEnabled = (changeOrderSyncConfig?.value as any)?.enabled === true;
+  // Check if change order sync is enabled (Sync Config: "Update HubSpot deal amount on Change Orders")
+  const changeOrderSyncConfig = await storage.getAutomationConfig("sync_change_orders");
+  const syncEnabled = (changeOrderSyncConfig?.value as any)?.enabled === true || (changeOrderSyncConfig as any)?.isActive === true;
   
   if (!syncEnabled) {
     console.log(`[ChangeOrder] Change order sync disabled - skipping HubSpot update for project ${procoreProjectId}`);
@@ -270,21 +270,23 @@ export async function syncAllProjectChangeOrders(): Promise<{
 
   try {
     const mappings = await storage.getSyncMappings();
-    const projectsWithHubspot = mappings.filter(m => m.procoreProjectId && m.hubspotDealId);
+    const projectsWithHubspot = mappings.filter(m => (m.procoreProjectId || m.portfolioProjectId) && m.hubspotDealId);
 
     for (const mapping of projectsWithHubspot) {
-      if (!mapping.procoreProjectId) continue;
+      // Use Portfolio project ID when available (change orders live on Portfolio projects)
+      const projectId = mapping.portfolioProjectId || mapping.procoreProjectId;
+      if (!projectId) continue;
       
       result.projectsChecked++;
       
       try {
-        const syncResult = await syncChangeOrdersToHubSpot(mapping.procoreProjectId);
+        const syncResult = await syncChangeOrdersToHubSpot(projectId);
         
         if (syncResult.success && syncResult.previousAmount !== syncResult.newAmount) {
           result.projectsUpdated++;
         }
       } catch (err: any) {
-        result.errors.push(`Project ${mapping.procoreProjectId}: ${err.message}`);
+        result.errors.push(`Project ${projectId}: ${err.message}`);
       }
     }
 

@@ -173,7 +173,7 @@ export async function sendToPortfolio(
       if (toastText?.toLowerCase().includes("success") || toastText?.toLowerCase().includes("created")) {
         // Try to extract portfolio project ID from current URL
         const currentUrl = page.url();
-        const urlMatch = currentUrl.match(/\/projects\/(\d+)/);
+        const urlMatch = currentUrl.match(/\/projects?\/(\d+)/);
         if (urlMatch) {
           result.portfolioProjectId = urlMatch[1];
         }
