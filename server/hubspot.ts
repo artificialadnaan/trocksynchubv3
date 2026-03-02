@@ -421,6 +421,45 @@ export async function syncSingleHubSpotCompany(companyId: string): Promise<{ suc
   }
 }
 
+/**
+ * Fetch HubSpot company IDs modified in the last N minutes.
+ * Uses CRM Search API for efficient filtering.
+ */
+export async function fetchRecentHubSpotCompanyIds(modifiedWithinMinutes: number): Promise<string[]> {
+  const accessToken = await getAccessToken();
+  const since = new Date(Date.now() - modifiedWithinMinutes * 60 * 1000).toISOString();
+
+  const response = await fetch('https://api.hubapi.com/crm/v3/objects/companies/search', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      filterGroups: [{
+        filters: [{
+          propertyName: 'hs_lastmodifieddate',
+          operator: 'GTE',
+          value: since,
+        }],
+      }],
+      properties: ['name', 'hs_lastmodifieddate'],
+      limit: 200,
+      sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'DESCENDING' }],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`HubSpot search failed: ${response.status} ${err}`);
+  }
+
+  const data = await response.json();
+  const results = data.results || [];
+  return results.map((r: any) => String(r.id));
+}
+
 async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   const ownerMap = new Map<string, string>();
   const accessToken = await getAccessToken();

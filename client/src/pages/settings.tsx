@@ -1194,6 +1194,7 @@ function HubspotProcoreSyncCard() {
   const [enabled, setEnabled] = useState(false);
   const [bulkSyncing, setBulkSyncing] = useState(false);
   const [bulkResult, setBulkResult] = useState<any>(null);
+  const [companyPollingMinutes, setCompanyPollingMinutes] = useState<number>(60);
 
   const { data: config, isLoading } = useQuery<any>({
     queryKey: ["/api/automation/hubspot-procore/config"],
@@ -1202,14 +1203,13 @@ function HubspotProcoreSyncCard() {
   useEffect(() => {
     if (config) {
       setEnabled(config.enabled || false);
+      setCompanyPollingMinutes(config.companyPollingIntervalMinutes || 60);
     }
   }, [config]);
 
   const saveConfig = useMutation({
-    mutationFn: async (newEnabled: boolean) => {
-      const res = await apiRequest("POST", "/api/automation/hubspot-procore/config", {
-        enabled: newEnabled,
-      });
+    mutationFn: async (payload: { enabled?: boolean; companyPollingIntervalMinutes?: number }) => {
+      const res = await apiRequest("POST", "/api/automation/hubspot-procore/config", payload);
       return res.json();
     },
     onSuccess: () => {
@@ -1220,7 +1220,11 @@ function HubspotProcoreSyncCard() {
 
   const handleToggle = (val: boolean) => {
     setEnabled(val);
-    saveConfig.mutate(val);
+    saveConfig.mutate({ enabled: val, companyPollingIntervalMinutes: companyPollingMinutes || undefined });
+  };
+
+  const handleSavePolling = () => {
+    saveConfig.mutate({ enabled, companyPollingIntervalMinutes: companyPollingMinutes || undefined });
   };
 
   const handleBulkSync = async (type: 'companies' | 'contacts' | 'both') => {
@@ -1278,6 +1282,32 @@ function HubspotProcoreSyncCard() {
             <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">40</Badge> Person name in vendor</div>
           </div>
           <p className="text-[10px] text-muted-foreground">Threshold: score ≥ 60 = match found. Below threshold = new vendor created.</p>
+        </div>
+
+        <Separator />
+
+        <div>
+          <p className="text-xs font-medium mb-2">Company Polling (fallback for missed webhooks)</p>
+          <p className="text-xs text-muted-foreground mb-2">
+            Periodically fetch recent HubSpot companies and sync to Procore. Duplicates are not recreated — matching updates existing vendors.
+          </p>
+          <div className="flex items-center gap-2">
+            <Select value={String(companyPollingMinutes)} onValueChange={(v) => setCompanyPollingMinutes(Number(v))}>
+              <SelectTrigger className="w-32 h-8">
+                <SelectValue placeholder="Interval" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">Off</SelectItem>
+                <SelectItem value="15">Every 15 min</SelectItem>
+                <SelectItem value="30">Every 30 min</SelectItem>
+                <SelectItem value="60">Every 60 min</SelectItem>
+                <SelectItem value="120">Every 2 hours</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button size="sm" variant="outline" disabled={saveConfig.isPending} onClick={handleSavePolling}>
+              {saveConfig.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : "Save"}
+            </Button>
+          </div>
         </div>
 
         <Separator />

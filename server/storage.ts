@@ -1772,7 +1772,7 @@ export class DatabaseStorage implements IStorage {
       {
         templateKey: "project_kickoff",
         name: "Project Kickoff",
-        description: "Welcome email sent to PM and Super when project moves to Portfolio/Production",
+        description: "Welcome email sent to the Project Manager when project moves to Portfolio/Production",
         subject: "🚀 Project Kickoff: {{projectName}} | T-Rock Construction",
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
