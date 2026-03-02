@@ -790,7 +790,7 @@ export async function registerRoutes(
           }
         }
 
-        // Handle deal stage changes - trigger BidBoard project creation
+        // Handle deal stage changes - trigger BidBoard project creation + stage change email
         if (objectType === "deal" && eventType.includes("propertyChange")) {
           const changedProperty = event.propertyName || "";
           const newValue = event.propertyValue || "";
@@ -801,6 +801,26 @@ export async function registerRoutes(
               await processDealStageChange(objectId, newValue);
             } catch (stageErr: any) {
               console.error(`[hubspot-bidboard] Stage change error for deal ${objectId}:`, stageErr.message);
+            }
+            // Send deal stage change email to assigned deal members (deal owner)
+            try {
+              const mapping = await storage.getSyncMappingByHubspotDealId(objectId);
+              const deal = await storage.getHubspotDealByHubspotId(objectId);
+              const resolvedStage = await resolveHubspotStageId(newValue);
+              const newStageName = resolvedStage?.stageName || newValue;
+              const oldStageName = deal?.dealStageName || "Previous stage";
+
+              await sendStageChangeEmail({
+                hubspotDealId: objectId,
+                dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
+                procoreProjectId: mapping?.procoreProjectId || "",
+                procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
+                oldStage: oldStageName,
+                newStage: newStageName,
+                hubspotStageName: newStageName,
+              });
+            } catch (emailErr: any) {
+              console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
             }
           }
         }
@@ -5029,7 +5049,6 @@ export async function registerRoutes(
     context: any;
     page: any;
     isRecording: boolean;
-    isHeadless: boolean;
     recordedActions: string[];
     startTime: Date;
   } | null = null;

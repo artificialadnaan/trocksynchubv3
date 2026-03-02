@@ -664,8 +664,13 @@ function SendLogTab() {
                     <CheckCircle className="w-3 h-3" />
                     Sent
                   </Badge>
+                ) : log.status === "skipped" ? (
+                  <Badge variant="secondary" className="gap-1" title={log.errorMessage || undefined}>
+                    <AlertCircle className="w-3 h-3" />
+                    Skipped
+                  </Badge>
                 ) : (
-                  <Badge variant="destructive" className="gap-1">
+                  <Badge variant="destructive" className="gap-1" title={log.errorMessage || undefined}>
                     <XCircle className="w-3 h-3" />
                     Failed
                   </Badge>
