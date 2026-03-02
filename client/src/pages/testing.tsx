@@ -42,6 +42,7 @@ interface BidBoardConfig {
 interface WorkshopStatus {
   active: boolean;
   isRecording: boolean;
+  isHeadless?: boolean;
   actionsRecorded?: number;
   startTime?: string;
   uptime?: number;
@@ -978,6 +979,9 @@ export default function TestingPage() {
                     <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse" />
                     <span className="text-green-600 dark:text-green-400 flex-1">
                       Session active ({workshopStatus.actionsRecorded || 0} actions recorded)
+                      {workshopStatus.isHeadless && (
+                        <Badge variant="outline" className="ml-2 text-xs">Headless Mode</Badge>
+                      )}
                     </span>
                     {workshopStatus.uptime && (
                       <span className="text-muted-foreground text-sm">
@@ -992,6 +996,14 @@ export default function TestingPage() {
                   </>
                 )}
               </div>
+              
+              {/* Headless mode notice */}
+              {workshopStatus?.active && workshopStatus?.isHeadless && (
+                <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 text-sm">
+                  <strong>Headless Mode:</strong> Running without a visible browser window (server has no display). 
+                  Use the controls below and refresh screenshots to see the current state.
+                </div>
+              )}
 
               {/* Start/Stop controls */}
               {!workshopStatus?.active ? (

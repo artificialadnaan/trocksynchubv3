@@ -5056,7 +5056,7 @@ export async function registerRoutes(
     }
   });
 
-  // Start workshop session with headed browser
+  // Start workshop session with browser (headed if display available, otherwise headless)
   app.post("/api/testing/playwright/workshop/start", requireAuth, async (req, res) => {
     try {
       const { url, loginFirst } = req.body;
@@ -5071,18 +5071,37 @@ export async function registerRoutes(
       
       const { chromium } = await import('playwright');
       
-      // Launch headed browser so user can see it
-      const browser = await chromium.launch({ 
-        headless: false,
-        slowMo: 100,
-        args: [
-          '--start-maximized',
-          '--disable-blink-features=AutomationControlled',
-        ],
-      });
+      let browser;
+      let isHeadless = false;
+      
+      // Try headed mode first, fall back to headless if no display available
+      try {
+        browser = await chromium.launch({ 
+          headless: false,
+          slowMo: 100,
+          args: [
+            '--start-maximized',
+            '--disable-blink-features=AutomationControlled',
+          ],
+        });
+        console.log('[workshop] Launched headed browser');
+      } catch (headedError: any) {
+        // If headed mode fails (no display/XServer), fall back to headless
+        console.log('[workshop] Headed browser failed, falling back to headless:', headedError.message);
+        browser = await chromium.launch({ 
+          headless: true,
+          args: [
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+          ],
+        });
+        isHeadless = true;
+        console.log('[workshop] Launched headless browser');
+      }
       
       const context = await browser.newContext({
-        viewport: null, // Use full window size
+        viewport: isHeadless ? { width: 1920, height: 1080 } : null,
         userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       });
       
@@ -5093,6 +5112,7 @@ export async function registerRoutes(
         context,
         page,
         isRecording: false,
+        isHeadless,
         recordedActions: [],
         startTime: new Date(),
       };
@@ -5116,9 +5136,14 @@ export async function registerRoutes(
       // Take initial screenshot
       const screenshot = await page.screenshot({ fullPage: false });
       
+      const message = isHeadless 
+        ? 'Workshop running in headless mode (no display available). Use the controls below and refresh screenshots to interact.'
+        : 'Workshop session started. Browser window should be visible.';
+      
       res.json({ 
         success: true,
-        message: 'Workshop session started. Browser window should be visible.',
+        message,
+        isHeadless,
         screenshot: `data:image/png;base64,${screenshot.toString('base64')}`,
         currentUrl: page.url(),
       });
