@@ -3994,10 +3994,21 @@ export async function registerRoutes(
   // Transition a project from BidBoard to Portfolio
   app.post("/api/bidboard/transition-to-portfolio", requireAuth, async (req, res) => {
     try {
-      const { bidboardProjectId, portfolioProjectId, portfolioProjectName } = req.body;
+      let { bidboardProjectId, portfolioProjectId, portfolioProjectName } = req.body;
       
       if (!bidboardProjectId || !portfolioProjectId) {
         return res.status(400).json({ message: "bidboardProjectId and portfolioProjectId are required" });
+      }
+
+      // Fetch Portfolio project name from Procore when not provided (BidBoard name must not be used as fallback)
+      if (!portfolioProjectName) {
+        try {
+          const { fetchProcoreProjectDetail } = await import("./procore");
+          const detail = await fetchProcoreProjectDetail(portfolioProjectId);
+          portfolioProjectName = detail?.name || detail?.display_name || null;
+        } catch (e: any) {
+          console.warn(`[transition] Could not fetch Portfolio project name for ${portfolioProjectId}:`, e.message);
+        }
       }
       
       const mapping = await storage.transitionToPortfolio(bidboardProjectId, portfolioProjectId, portfolioProjectName);

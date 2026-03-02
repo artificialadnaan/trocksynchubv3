@@ -346,12 +346,13 @@ export class DatabaseStorage implements IStorage {
       return undefined;
     }
     
-    // Update the mapping with portfolio info, preserving the original BidBoard project ID
+    // Update the mapping with portfolio info, preserving the original BidBoard project ID.
+    // Do not use mapping.procoreProjectName as fallback—that is the BidBoard project name, not the Portfolio project name.
     const [result] = await db.update(syncMappings)
       .set({
         bidboardProjectId: mapping.bidboardProjectId || bidboardProjectId,
         portfolioProjectId,
-        portfolioProjectName: portfolioProjectName || mapping.procoreProjectName,
+        portfolioProjectName: portfolioProjectName ?? null,
         projectPhase: 'portfolio',
         sentToPortfolioAt: new Date(),
         lastSyncAt: new Date(),

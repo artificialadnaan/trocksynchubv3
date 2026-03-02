@@ -338,9 +338,54 @@ export async function sendKickoffEmails(params: {
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.projectId);
 
+  // Log when no PM so it appears in Send History as failed/skipped
+  if (recipients.length === 0) {
+    try {
+      await storage.createEmailSendLog({
+        templateKey: 'project_kickoff',
+        recipientEmail: '(skipped)',
+        recipientName: null,
+        subject: `Project Kickoff: ${params.projectName || 'Unknown Project'}`,
+        dedupeKey: `kickoff_skipped:${params.projectId}:${Date.now()}`,
+        status: 'skipped',
+        errorMessage: 'no_project_manager',
+        metadata: {
+          projectId: params.projectId,
+          projectName: params.projectName,
+          clientName: params.clientName,
+          reason: 'no_project_manager',
+        },
+        sentAt: new Date(),
+      });
+    } catch (logErr: any) {
+      console.error('[email] Failed to log skipped kickoff:', logErr.message);
+    }
+    return { sent: 0, skipped: 1, failed: 0 };
+  }
+
   for (const member of recipients) {
     if (!member.email) {
       skipped++;
+      try {
+        await storage.createEmailSendLog({
+          templateKey: 'project_kickoff',
+          recipientEmail: '(skipped)',
+          recipientName: member.name,
+          subject: `Project Kickoff: ${params.projectName || 'Unknown Project'}`,
+          dedupeKey: `kickoff_skipped_no_email:${params.projectId}:${member.role}:${Date.now()}`,
+          status: 'skipped',
+          errorMessage: 'pm_has_no_email',
+          metadata: {
+            projectId: params.projectId,
+            projectName: params.projectName,
+            role: member.role,
+            reason: 'pm_has_no_email',
+          },
+          sentAt: new Date(),
+        });
+      } catch (logErr: any) {
+        console.error('[email] Failed to log skipped kickoff:', logErr.message);
+      }
       continue;
     }
 
@@ -364,12 +409,12 @@ export async function sendKickoffEmails(params: {
       startDate: params.startDate || 'TBD',
       endDate: params.endDate || 'TBD',
       roleName: member.role,
-      pmName,
-      pmEmail,
-      pmPhone,
-      superName,
-      superEmail,
-      superPhone,
+      pmName: pmName ?? 'TBD',
+      pmEmail: pmEmail ?? 'TBD',
+      pmPhone: pmPhone ?? 'TBD',
+      superName: superName ?? 'TBD',
+      superEmail: superEmail ?? 'TBD',
+      superPhone: superPhone ?? 'TBD',
       primaryContact: params.primaryContact || pmName,
       preferredMethod: params.preferredMethod || 'Email',
       statusFrequency: params.statusFrequency || 'Weekly',
@@ -382,12 +427,17 @@ export async function sendKickoffEmails(params: {
     const subject = renderTemplate(template.subject, variables);
     const htmlBody = renderTemplate(template.bodyHtml, variables);
 
-    const result = await sendEmail({
-      to: member.email,
-      subject,
-      htmlBody,
-      fromName: 'T-Rock Sync Hub',
-    });
+    let result: { success: boolean; error?: string; messageId?: string };
+    try {
+      result = await sendEmail({
+        to: member.email,
+        subject,
+        htmlBody,
+        fromName: 'T-Rock Sync Hub',
+      });
+    } catch (sendErr: any) {
+      result = { success: false, error: sendErr?.message || String(sendErr) };
+    }
 
     try {
       await storage.createEmailSendLog({
