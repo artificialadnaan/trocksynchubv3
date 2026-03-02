@@ -5278,11 +5278,39 @@ export async function registerRoutes(
       
       const page = workshopSession.page;
       
-      // Create a sandboxed function to execute the script
-      // Only allow basic Playwright page operations
-      const allowedMethods = ['goto', 'click', 'fill', 'type', 'press', 'waitForSelector', 'waitForTimeout', 'screenshot', 'evaluate', '$', '$$', 'textContent', 'getAttribute'];
+      // Security: Block dangerous patterns that could enable arbitrary code execution
+      const dangerousPatterns = [
+        /\brequire\s*\(/i,
+        /\bimport\s*\(/i,
+        /\bprocess\s*\./i,
+        /\bchild_process/i,
+        /\bexecSync/i,
+        /\bexec\s*\(/i,
+        /\bspawn\s*\(/i,
+        /\beval\s*\(/i,
+        /\bFunction\s*\(/i,
+        /\bglobal\s*\./i,
+        /\bglobalThis\s*\./i,
+        /\b__dirname/i,
+        /\b__filename/i,
+        /\bfs\s*\./i,
+        /\bpath\s*\./i,
+        /\bnet\s*\./i,
+        /\bhttp\s*\./i,
+        /\bhttps\s*\./i,
+        /\bBuffer\s*\./i,
+        /\bnew\s+Buffer\b/i,
+      ];
       
-      // Execute the script
+      for (const pattern of dangerousPatterns) {
+        if (pattern.test(script)) {
+          return res.status(400).json({ 
+            error: `Script contains disallowed pattern: ${pattern.toString()}. Only Playwright page operations are allowed.` 
+          });
+        }
+      }
+      
+      // Only allow scripts that operate on the page object
       const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
       const fn = new AsyncFunction('page', script);
       
