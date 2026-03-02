@@ -410,8 +410,15 @@ export async function uploadFileToOneDrive(
       throw new Error(`Chunk upload failed: ${error}`);
     }
 
-    if (chunkResponse.status === 200 || chunkResponse.status === 201) {
-      result = await chunkResponse.json();
+    if (chunkResponse.status === 200 || chunkResponse.status === 201 || chunkResponse.status === 202) {
+      const responseText = await chunkResponse.text();
+      if (responseText) {
+        try {
+          result = JSON.parse(responseText);
+        } catch {
+          // 202 may not always have a body during intermediate chunks
+        }
+      }
     }
 
     offset = end;
@@ -795,8 +802,15 @@ export async function uploadFileToSharePoint(
       throw new Error(`SharePoint chunk upload failed: ${error}`);
     }
 
-    if (chunkResponse.status === 200 || chunkResponse.status === 201) {
-      result = await chunkResponse.json();
+    if (chunkResponse.status === 200 || chunkResponse.status === 201 || chunkResponse.status === 202) {
+      const responseText = await chunkResponse.text();
+      if (responseText) {
+        try {
+          result = JSON.parse(responseText);
+        } catch {
+          // 202 may not always have a body during intermediate chunks
+        }
+      }
     }
 
     offset = end;

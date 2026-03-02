@@ -1220,8 +1220,11 @@ export async function registerRoutes(
       if (resourceType === "project" || eventType.startsWith("project.")) {
         try {
           if (resourceId) {
-            const { syncSingleCompanycamProject } = await import("./companycam");
-            if (!eventType.includes("deleted") && !eventType.includes("delete")) {
+            if (eventType.includes("deleted") || eventType.includes("delete")) {
+              await storage.deleteCompanycamProject(resourceId);
+              console.log(`[webhook] CompanyCam project ${resourceId} deleted via webhook`);
+            } else {
+              const { syncSingleCompanycamProject } = await import("./companycam");
               const result = await syncSingleCompanycamProject(resourceId);
               console.log(`[webhook] CompanyCam project ${resourceId} ${result.action} via webhook`);
             }

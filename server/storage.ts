@@ -224,6 +224,7 @@ export interface IStorage {
   upsertCompanycamProject(data: InsertCompanycamProject): Promise<CompanycamProject>;
   getCompanycamProjectByCompanycamId(companycamId: string): Promise<CompanycamProject | undefined>;
   getCompanycamProjects(filters: { search?: string; status?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamProject[]; total: number }>;
+  deleteCompanycamProject(companycamId: string): Promise<void>;
   upsertCompanycamUser(data: InsertCompanycamUser): Promise<CompanycamUser>;
   getCompanycamUserByCompanycamId(companycamId: string): Promise<CompanycamUser | undefined>;
   getCompanycamUsers(filters: { search?: string; role?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamUser[]; total: number }>;
@@ -1147,6 +1148,10 @@ export class DatabaseStorage implements IStorage {
         : db.select({ count: sql<number>`count(*)::int` }).from(companycamProjects),
     ]);
     return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async deleteCompanycamProject(companycamId: string): Promise<void> {
+    await db.delete(companycamProjects).where(eq(companycamProjects.companycamId, companycamId));
   }
 
   async upsertCompanycamUser(data: InsertCompanycamUser): Promise<CompanycamUser> {

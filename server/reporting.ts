@@ -152,14 +152,15 @@ export async function getSyncActivitySummary(): Promise<SyncActivitySummary> {
   const now = new Date();
   for (let i = 6; i >= 0; i--) {
     const date = new Date(now);
-    date.setDate(date.getDate() - i);
+    date.setUTCDate(date.getUTCDate() - i);
     const dateStr = date.toISOString().split('T')[0];
     last7Days.set(dateStr, 0);
   }
 
   for (const log of syncLogs) {
-    const dateStr = log.createdAt?.toISOString().split('T')[0];
-    if (dateStr && last7Days.has(dateStr)) {
+    const createdAt = log.createdAt instanceof Date ? log.createdAt : new Date(log.createdAt || 0);
+    const dateStr = createdAt.toISOString().split('T')[0];
+    if (last7Days.has(dateStr)) {
       last7Days.set(dateStr, last7Days.get(dateStr)! + 1);
     }
   }
@@ -191,15 +192,18 @@ export async function getSurveysCompletedCount(): Promise<number> {
 export async function getRecentActivity(limit: number = 20): Promise<ActivityItem[]> {
   const { logs } = await storage.getAuditLogs({ limit });
   
-  return logs.map(log => ({
-    id: String(log.id),
-    type: log.action,
-    description: formatActivityDescription(log),
-    timestamp: (log.createdAt || new Date()).toISOString(),
-    status: log.status || 'unknown',
-    entityType: log.entityType,
-    entityId: log.entityId,
-  }));
+  return logs.map(log => {
+    const createdAt = log.createdAt instanceof Date ? log.createdAt : new Date(log.createdAt || Date.now());
+    return {
+      id: String(log.id),
+      type: log.action,
+      description: formatActivityDescription(log),
+      timestamp: createdAt.toISOString(),
+      status: log.status || 'unknown',
+      entityType: log.entityType,
+      entityId: log.entityId,
+    };
+  });
 }
 
 function formatActivityDescription(log: any): string {
@@ -377,9 +381,9 @@ export async function getSyncHealthReport(): Promise<SyncHealthReport> {
   }
 
   return {
-    lastHubSpotSync: hubspotSync?.createdAt || null,
-    lastProcoreSync: procoreSync?.createdAt || null,
-    lastCompanyCamSync: companyCamSync?.createdAt || null,
+    lastHubSpotSync: hubspotSync?.createdAt ? new Date(hubspotSync.createdAt) : null,
+    lastProcoreSync: procoreSync?.createdAt ? new Date(procoreSync.createdAt) : null,
+    lastCompanyCamSync: companyCamSync?.createdAt ? new Date(companyCamSync.createdAt) : null,
     webhooksProcessedToday: webhooksToday.length,
     failedWebhooksToday: failedToday.length,
     pendingActions: 0,

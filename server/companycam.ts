@@ -353,7 +353,7 @@ export async function syncSingleCompanycamUser(userId: string): Promise<{ succes
     return { success: true, action };
   } catch (err: any) {
     console.error(`[companycam] Failed to sync user ${userId}:`, err.message);
-    return { success: false, action: 'updated', error: err.message };
+    return { success: false, action: 'error', error: err.message };
   }
 }
 
