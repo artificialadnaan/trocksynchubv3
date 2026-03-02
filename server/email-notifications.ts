@@ -188,13 +188,15 @@ export async function triggerKickoffForNewPmOnPortfolio(
 
   for (const assignment of pmAssignments) {
     try {
-      const mapping = await storage.getSyncMappingByPortfolioProjectId(assignment.procoreProjectId);
+      const mapping = await storage.getSyncMappingByProcoreProjectId(assignment.procoreProjectId);
       if (!mapping) continue;
+      const kickoffProjectId = mapping.portfolioProjectId || mapping.procoreProjectId;
+      if (!kickoffProjectId) continue;
 
-      const projectDetail = await fetchProcoreProjectDetail(assignment.procoreProjectId);
+      const projectDetail = await fetchProcoreProjectDetail(kickoffProjectId);
       if (!projectDetail) continue;
 
-      const teamMembers = await getProjectTeamMembers(assignment.procoreProjectId);
+      const teamMembers = await getProjectTeamMembers(kickoffProjectId);
       const formatDate = (d: string | null | undefined) => {
         if (!d) return 'TBD';
         try {
@@ -206,7 +208,8 @@ export async function triggerKickoffForNewPmOnPortfolio(
       };
 
       const result = await sendKickoffEmails({
-        projectId: assignment.procoreProjectId,
+        projectId: kickoffProjectId,
+        hubspotDealId: mapping.hubspotDealId || undefined,
         projectName: projectDetail?.name || projectDetail?.display_name || assignment.projectName || 'Unknown Project',
         clientName: projectDetail?.company?.name || 'Unknown Client',
         projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
