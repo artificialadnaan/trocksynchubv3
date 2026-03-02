@@ -5040,7 +5040,6 @@ export async function registerRoutes(
         return res.json({ 
           active: false,
           isRecording: false,
-          isHeadless: false,
           message: "No active workshop session"
         });
       }
@@ -5048,7 +5047,6 @@ export async function registerRoutes(
       res.json({
         active: true,
         isRecording: workshopSession.isRecording,
-        isHeadless: workshopSession.isHeadless,
         actionsRecorded: workshopSession.recordedActions.length,
         startTime: workshopSession.startTime.toISOString(),
         uptime: Math.floor((Date.now() - workshopSession.startTime.getTime()) / 1000),
@@ -5096,10 +5094,12 @@ export async function registerRoutes(
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
             '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
           ],
         });
         isHeadless = true;
-        console.log('[workshop] Launched headless browser');
+        console.log('[workshop] Launched headless browser successfully');
       }
       
       const context = await browser.newContext({
