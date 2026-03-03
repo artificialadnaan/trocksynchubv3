@@ -412,18 +412,10 @@ async function getHubSpotCloseoutStageId(): Promise<string | null> {
   }
 }
 
-/** Check if a Procore stage name indicates closed/closeout */
+/** Check if a Procore stage name is "Closed" (only this stage triggers closeout survey) */
 export function isProcoreClosedStage(procoreStageName: string | null): boolean {
   if (!procoreStageName) return false;
-  const s = procoreStageName.toLowerCase();
-  return (
-    s.includes('closeout') ||
-    s.includes('closed') ||
-    s.includes('completed') ||
-    s.includes('sent to production') ||
-    s.includes('production – lost') ||
-    s.includes('production - lost')
-  );
+  return procoreStageName.trim().toLowerCase() === 'closed';
 }
 
 /** Check if a HubSpot stage ID corresponds to a closed/closeout stage */

@@ -1096,17 +1096,6 @@ export async function registerRoutes(
                   });
                   } // End resolvedStage check
                   } // End stageSyncEnabled check
-
-                  // When Procore stage changes to closed, trigger closeout survey (sent to HubSpot deal owner)
-                  const { isProcoreClosedStage, triggerCloseoutSurvey } = await import('./closeout-automation');
-                  if (isProcoreClosedStage(newStage)) {
-                    try {
-                      const surveyResult = await triggerCloseoutSurvey(projectId, {});
-                      console.log(`[webhook] Closeout survey triggered (Procore closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
-                    } catch (surveyErr: any) {
-                      console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);
-                    }
-                  }
                 } else {
                   console.log(`[webhook] No HubSpot mapping found for project ${projectId}, stage change logged but not synced`);
                   await storage.createAuditLog({
@@ -1117,6 +1106,50 @@ export async function registerRoutes(
                     status: 'success',
                     details: { projectId, projectName: project.name, oldStage, newStage, hubspotDealId: null, reason: 'no_hubspot_mapping' },
                   });
+                }
+
+                // When Procore stage changes to closed, trigger closeout survey (runs regardless of mapping)
+                const { isProcoreClosedStage, triggerCloseoutSurvey } = await import('./closeout-automation');
+                if (isProcoreClosedStage(newStage)) {
+                  try {
+                    const surveyResult = await triggerCloseoutSurvey(projectId, {});
+                    if (mapping?.hubspotDealId) {
+                      console.log(`[webhook] Closeout survey triggered (Procore closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
+                    } else {
+                      // No HubSpot mapping - record failed in email send history (survey may have used Procore fallback)
+                      await storage.createEmailSendLog({
+                        templateKey: 'closeout_survey',
+                        recipientEmail: '(no HubSpot mapping)',
+                        recipientName: null,
+                        subject: `Closeout survey: ${project?.name || projectId} (stage: Closed)`,
+                        dedupeKey: `closeout_survey_no_mapping:${projectId}:${Date.now()}`,
+                        status: 'failed',
+                        errorMessage: 'no_hubspot_mapping',
+                        metadata: { projectId, projectName: project?.name, reason: 'No HubSpot deal linked - preferred deal owner recipient unavailable', surveySuccess: surveyResult.success },
+                        sentAt: new Date(),
+                      });
+                      console.log(`[webhook] Closeout survey for project ${projectId} - no HubSpot mapping, logged as failed in email history`);
+                    }
+                  } catch (surveyErr: any) {
+                    console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);
+                    if (!mapping?.hubspotDealId) {
+                      try {
+                        await storage.createEmailSendLog({
+                          templateKey: 'closeout_survey',
+                          recipientEmail: '(no HubSpot mapping)',
+                          recipientName: null,
+                          subject: `Closeout survey: ${project?.name || projectId} (stage: Closed)`,
+                          dedupeKey: `closeout_survey_no_mapping_error:${projectId}:${Date.now()}`,
+                          status: 'failed',
+                          errorMessage: 'no_hubspot_mapping',
+                          metadata: { projectId, projectName: project?.name, error: surveyErr.message },
+                          sentAt: new Date(),
+                        });
+                      } catch (logErr: any) {
+                        console.error(`[webhook] Failed to log closeout survey failure:`, logErr.message);
+                      }
+                    }
+                  }
                 }
               }
             }
