@@ -1096,6 +1096,17 @@ export async function registerRoutes(
                   });
                   } // End resolvedStage check
                   } // End stageSyncEnabled check
+
+                  // When Procore stage changes to closed, trigger closeout survey (sent to HubSpot deal owner)
+                  const { isProcoreClosedStage, triggerCloseoutSurvey } = await import('./closeout-automation');
+                  if (isProcoreClosedStage(newStage)) {
+                    try {
+                      const surveyResult = await triggerCloseoutSurvey(projectId, {});
+                      console.log(`[webhook] Closeout survey triggered (Procore closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
+                    } catch (surveyErr: any) {
+                      console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);
+                    }
+                  }
                 } else {
                   console.log(`[webhook] No HubSpot mapping found for project ${projectId}, stage change logged but not synced`);
                   await storage.createAuditLog({
