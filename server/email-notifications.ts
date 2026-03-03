@@ -191,14 +191,80 @@ export async function triggerKickoffForNewPmOnPortfolio(
       const mapping = await storage.getSyncMappingByProcoreProjectId(assignment.procoreProjectId);
       if (!mapping) {
         console.log(`[email] Kickoff skipped for ${assignment.projectName} (${assignment.procoreProjectId}): no HubSpot/Procore mapping`);
+        // Log to send history so it appears in UI
+        try {
+          await storage.createEmailSendLog({
+            templateKey: 'project_kickoff',
+            recipientEmail: '(skipped)',
+            recipientName: assignment.assigneeName || null,
+            subject: `Project Kickoff: ${assignment.projectName || 'Unknown Project'}`,
+            dedupeKey: `kickoff_skipped_no_mapping:${assignment.procoreProjectId}`,
+            status: 'skipped',
+            errorMessage: 'no_hubspot_procore_mapping',
+            metadata: {
+              projectId: assignment.procoreProjectId,
+              projectName: assignment.projectName,
+              assigneeName: assignment.assigneeName,
+              assigneeEmail: assignment.assigneeEmail,
+              reason: 'no_hubspot_procore_mapping',
+            },
+            sentAt: new Date(),
+          });
+        } catch (logErr: any) {
+          console.error('[email] Failed to log skipped kickoff (no mapping):', logErr.message);
+        }
         continue;
       }
       const kickoffProjectId = mapping.portfolioProjectId || mapping.procoreProjectId || assignment.procoreProjectId;
-      if (!kickoffProjectId) continue;
+      if (!kickoffProjectId) {
+        // Log to send history
+        try {
+          await storage.createEmailSendLog({
+            templateKey: 'project_kickoff',
+            recipientEmail: '(skipped)',
+            recipientName: assignment.assigneeName || null,
+            subject: `Project Kickoff: ${assignment.projectName || 'Unknown Project'}`,
+            dedupeKey: `kickoff_skipped_no_project_id:${assignment.procoreProjectId}`,
+            status: 'skipped',
+            errorMessage: 'no_portfolio_project_id',
+            metadata: {
+              projectId: assignment.procoreProjectId,
+              projectName: assignment.projectName,
+              assigneeName: assignment.assigneeName,
+              reason: 'no_portfolio_project_id',
+            },
+            sentAt: new Date(),
+          });
+        } catch (logErr: any) {
+          console.error('[email] Failed to log skipped kickoff (no project ID):', logErr.message);
+        }
+        continue;
+      }
 
       const projectDetail = await fetchProcoreProjectDetail(kickoffProjectId);
       if (!projectDetail) {
         console.log(`[email] Kickoff skipped for ${assignment.projectName}: could not fetch project detail`);
+        // Log to send history
+        try {
+          await storage.createEmailSendLog({
+            templateKey: 'project_kickoff',
+            recipientEmail: '(skipped)',
+            recipientName: assignment.assigneeName || null,
+            subject: `Project Kickoff: ${assignment.projectName || 'Unknown Project'}`,
+            dedupeKey: `kickoff_skipped_no_detail:${kickoffProjectId}`,
+            status: 'skipped',
+            errorMessage: 'could_not_fetch_project_detail',
+            metadata: {
+              projectId: kickoffProjectId,
+              projectName: assignment.projectName,
+              assigneeName: assignment.assigneeName,
+              reason: 'could_not_fetch_project_detail',
+            },
+            sentAt: new Date(),
+          });
+        } catch (logErr: any) {
+          console.error('[email] Failed to log skipped kickoff (no detail):', logErr.message);
+        }
         continue;
       }
 
