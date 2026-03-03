@@ -1842,6 +1842,39 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/procore/users/bulk", requireAuth, async (req, res) => {
+    try {
+      const { users } = req.body as { users: Array<Record<string, unknown>> };
+      if (!Array.isArray(users)) {
+        return res.status(400).json({ error: "users array is required" });
+      }
+      let created = 0;
+      for (const u of users) {
+        const procoreId = String(u.procoreId ?? u.Id ?? "").trim();
+        const email = String(u.email ?? u.Email ?? "").trim();
+        if (!procoreId || !email) continue;
+        const firstName = String(u.firstName ?? u["First Name"] ?? "").trim() || null;
+        const lastName = String(u.lastName ?? u["Last Name"] ?? "").trim() || null;
+        const name = (firstName && lastName ? `${firstName} ${lastName}` : firstName || lastName || email) || null;
+        await storage.upsertProcoreUser({
+          procoreId,
+          emailAddress: email,
+          firstName,
+          lastName,
+          name,
+          jobTitle: String(u.jobTitle ?? u["Job Title"] ?? "").trim() || null,
+          businessPhone: String(u.businessPhone ?? u["Business Phone"] ?? "").trim() || null,
+          mobilePhone: String(u.mobilePhone ?? u["Mobile Phone"] ?? "").trim() || null,
+          lastSyncedAt: new Date(),
+        });
+        created++;
+      }
+      res.json({ success: true, created });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get("/api/procore/change-history", requireAuth, async (req, res) => {
     try {
       const result = await storage.getProcoreChangeHistory({
@@ -4404,6 +4437,27 @@ export async function registerRoutes(
       }
       const mapping = await storage.upsertHubspotOwnerMapping({ hubspotOwnerId: String(hubspotOwnerId), email, name: name || null });
       res.json(mapping);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/hubspot/owner-mappings/bulk", requireAuth, async (req, res) => {
+    try {
+      const { mappings } = req.body as { mappings: Array<{ hubspotOwnerId: string; email: string; name?: string }> };
+      if (!Array.isArray(mappings)) {
+        return res.status(400).json({ error: "mappings array is required" });
+      }
+      let created = 0;
+      for (const m of mappings) {
+        const id = String(m.hubspotOwnerId ?? (m as any)["HS ID #"] ?? "").trim();
+        const email = String(m.email ?? "").trim();
+        const name = m.name ? String(m.name).trim() : null;
+        if (!id || !email) continue;
+        await storage.upsertHubspotOwnerMapping({ hubspotOwnerId: id, email, name });
+        created++;
+      }
+      res.json({ success: true, created });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

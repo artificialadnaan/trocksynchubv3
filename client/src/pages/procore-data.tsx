@@ -38,6 +38,7 @@ import {
   Camera,
 } from "lucide-react";
 import { useState, useRef } from "react";
+import * as XLSX from "xlsx";
 import { useLocation } from "wouter";
 import { format } from "date-fns";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -611,6 +612,8 @@ function VendorsTab() {
 }
 
 function UsersTab() {
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -624,6 +627,72 @@ function UsersTab() {
   const { data, isLoading, refetch } = useQuery<{ data: ProcoreUser[]; total: number }>({
     queryKey: [`/api/procore/users?${params.toString()}`],
   });
+
+  const bulkImportMutation = useMutation({
+    mutationFn: async (users: Array<{ procoreId: string; email: string; firstName?: string; lastName?: string; jobTitle?: string; businessPhone?: string; mobilePhone?: string }>) => {
+      const res = await apiRequest("POST", "/api/procore/users/bulk", { users });
+      return res.json();
+    },
+    onSuccess: (data: { created: number }) => {
+      toast({ title: `Imported ${data.created} Procore users` });
+      queryClient.invalidateQueries({ queryKey: ["/api/procore/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/integrations/procore/data-counts"] });
+      refetch();
+    },
+    onError: (e: Error) => toast({ title: "Failed to import", description: e.message, variant: "destructive" }),
+  });
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = ev.target?.result;
+        if (!data) return;
+        const wb = typeof data === "string"
+          ? XLSX.read(data, { type: "string", raw: false })
+          : XLSX.read(new Uint8Array(data as ArrayBuffer), { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
+        const header = (rows[0] || []) as string[];
+        const idIdx = header.findIndex((h) => /^id$/i.test(String(h).trim()));
+        const firstNameIdx = header.findIndex((h) => /first\s*name/i.test(String(h)));
+        const lastNameIdx = header.findIndex((h) => /last\s*name/i.test(String(h)));
+        const emailIdx = header.findIndex((h) => /^email$/i.test(String(h).trim()));
+        const jobTitleIdx = header.findIndex((h) => /job\s*title/i.test(String(h)));
+        const businessPhoneIdx = header.findIndex((h) => /business\s*phone/i.test(String(h)));
+        const mobilePhoneIdx = header.findIndex((h) => /mobile\s*phone/i.test(String(h)));
+        if (idIdx < 0 || emailIdx < 0) {
+          toast({ title: "Invalid file", description: "Expected columns: Id, Email", variant: "destructive" });
+          e.target.value = "";
+          return;
+        }
+        const out: Array<{ procoreId: string; email: string; firstName?: string; lastName?: string; jobTitle?: string; businessPhone?: string; mobilePhone?: string }> = [];
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i] as unknown[];
+          const procoreId = String(row[idIdx] ?? "").trim();
+          const email = String(row[emailIdx] ?? "").trim();
+          if (!procoreId || !email) continue;
+          const firstName = firstNameIdx >= 0 ? String(row[firstNameIdx] ?? "").trim() : undefined;
+          const lastName = lastNameIdx >= 0 ? String(row[lastNameIdx] ?? "").trim() : undefined;
+          const jobTitle = jobTitleIdx >= 0 ? String(row[jobTitleIdx] ?? "").trim() || undefined : undefined;
+          const businessPhone = businessPhoneIdx >= 0 ? String(row[businessPhoneIdx] ?? "").trim() || undefined : undefined;
+          const mobilePhone = mobilePhoneIdx >= 0 ? String(row[mobilePhoneIdx] ?? "").trim() || undefined : undefined;
+          out.push({ procoreId, email, firstName, lastName, jobTitle, businessPhone, mobilePhone });
+        }
+        if (out.length === 0) {
+          toast({ title: "No valid rows", description: "Expected columns: Id, First Name, Last Name, Email", variant: "destructive" });
+        } else {
+          bulkImportMutation.mutate(out);
+        }
+      } catch (err: unknown) {
+        toast({ title: "Invalid file", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
+      }
+      e.target.value = "";
+    };
+    reader.readAsBinaryString(file);
+  };
 
   const toggleExpand = (id: number) => {
     const next = new Set(expandedIds);
@@ -653,6 +722,22 @@ function UsersTab() {
             </div>
             <Button variant="outline" size="sm" onClick={() => refetch()} data-testid="button-refresh-procore-users">
               <RefreshCw className="w-3.5 h-3.5" />
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              className="hidden"
+              onChange={handleFileSelect}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={bulkImportMutation.isPending}
+            >
+              {bulkImportMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+              Import Directory
             </Button>
           </div>
         </div>

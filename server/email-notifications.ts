@@ -189,14 +189,27 @@ export async function triggerKickoffForNewPmOnPortfolio(
   for (const assignment of pmAssignments) {
     try {
       const mapping = await storage.getSyncMappingByProcoreProjectId(assignment.procoreProjectId);
-      if (!mapping) continue;
-      const kickoffProjectId = mapping.portfolioProjectId || mapping.procoreProjectId;
+      if (!mapping) {
+        console.log(`[email] Kickoff skipped for ${assignment.projectName} (${assignment.procoreProjectId}): no HubSpot/Procore mapping`);
+        continue;
+      }
+      const kickoffProjectId = mapping.portfolioProjectId || mapping.procoreProjectId || assignment.procoreProjectId;
       if (!kickoffProjectId) continue;
 
       const projectDetail = await fetchProcoreProjectDetail(kickoffProjectId);
-      if (!projectDetail) continue;
+      if (!projectDetail) {
+        console.log(`[email] Kickoff skipped for ${assignment.projectName}: could not fetch project detail`);
+        continue;
+      }
 
-      const teamMembers = await getProjectTeamMembers(kickoffProjectId);
+      // Fetch team from the project where the assignment exists (assignment.procoreProjectId)
+      // so we get the PM who was just assigned - kickoffProjectId may be a different project (Portfolio vs BidBoard)
+      let teamMembers = await getProjectTeamMembers(assignment.procoreProjectId);
+      const pmInTeam = teamMembers.find(m => m.role.toLowerCase().includes('project manager'));
+      if (!pmInTeam && assignment.assigneeEmail) {
+        // PM not in team (e.g. fetched from wrong project) - use assignee from the new assignment
+        teamMembers = [...teamMembers, { name: assignment.assigneeName, email: assignment.assigneeEmail, role: 'Project Manager' }];
+      }
       const formatDate = (d: string | null | undefined) => {
         if (!d) return 'TBD';
         try {
@@ -222,9 +235,12 @@ export async function triggerKickoffForNewPmOnPortfolio(
 
       if (result.sent > 0) {
         triggered++;
-        console.log(`[email] Kickoff sent for new PM on Portfolio project ${assignment.procoreProjectId} (${assignment.projectName})`);
+        console.log(`[email] Kickoff sent for new PM on project ${kickoffProjectId} (${assignment.projectName})`);
       } else if (result.failed > 0) {
         failed++;
+        console.log(`[email] Kickoff failed for ${assignment.projectName} (${kickoffProjectId}): ${result.failed} failed`);
+      } else if (result.skipped > 0) {
+        console.log(`[email] Kickoff skipped for ${assignment.projectName} (${kickoffProjectId}): ${result.skipped} skipped (check dedupe or no PM in team)`);
       }
     } catch (err: any) {
       failed++;
@@ -253,7 +269,7 @@ export async function sendStageChangeEmail(params: {
         recipientEmail: '(skipped)',
         recipientName: null,
         subject: `Stage change: ${params.dealName} (${params.oldStage} → ${params.newStage})`,
-        dedupeKey: `stage_change_skipped:${params.hubspotDealId}:${params.newStage}:${Date.now()}`,
+        dedupeKey: `stage_change_skipped:${params.hubspotDealId}:${params.newStage}`,
         status: 'skipped',
         errorMessage: 'template_disabled',
         metadata: {
@@ -281,7 +297,7 @@ export async function sendStageChangeEmail(params: {
         recipientEmail: '(skipped)',
         recipientName: null,
         subject: `Stage change: ${params.dealName} (${params.oldStage} → ${params.newStage})`,
-        dedupeKey: `stage_change_skipped:${params.hubspotDealId}:${params.newStage}:${Date.now()}`,
+        dedupeKey: `stage_change_skipped:${params.hubspotDealId}:${params.newStage}`,
         status: 'skipped',
         errorMessage: 'no_deal_owner',
         metadata: {
@@ -300,7 +316,13 @@ export async function sendStageChangeEmail(params: {
     return { sent: false, ownerEmail: null, error: 'no_deal_owner' };
   }
 
-  const dedupeKey = `stage_change:${params.procoreProjectId}:${params.newStage}:${Date.now()}`;
+  const dedupeKey = `stage_change:${params.hubspotDealId}:${params.newStage}`;
+
+  const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
+  if (alreadySent) {
+    console.log(`[email] Skipping duplicate stage change: ${dedupeKey}`);
+    return { sent: false, ownerEmail: ownerInfo.ownerEmail, error: 'duplicate' };
+  }
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.procoreProjectId);
 
@@ -397,16 +419,17 @@ export async function sendKickoffEmails(params: {
 
   let sent = 0, skipped = 0, failed = 0;
 
+  // PM and team data must come from Procore (teamMembers from getProjectTeamMembers), not HubSpot
   const pm = params.teamMembers.find(m => m.role.toLowerCase().includes('project manager'));
   const superMember = params.teamMembers.find(m => m.role.toLowerCase().includes('superintendent'));
-  const pmName = params.pmName || pm?.name || 'TBD';
-  const pmEmail = params.pmEmail || pm?.email || 'TBD';
-  const pmPhone = params.pmPhone || pm?.phone || 'TBD';
-  const superName = params.superName || superMember?.name || 'TBD';
-  const superEmail = params.superEmail || superMember?.email || 'TBD';
-  const superPhone = params.superPhone || superMember?.phone || 'TBD';
+  const pmName = pm?.name || 'TBD';
+  const pmEmail = pm?.email || 'TBD';
+  const pmPhone = pm?.phone || 'TBD';
+  const superName = superMember?.name || 'TBD';
+  const superEmail = superMember?.email || 'TBD';
+  const superPhone = superMember?.phone || 'TBD';
 
-  // Send kickoff only to the project manager
+  // Send kickoff only to the project manager (recipient email from Procore)
   const recipients = pm ? [pm] : [];
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.projectId);
@@ -419,7 +442,7 @@ export async function sendKickoffEmails(params: {
         recipientEmail: '(skipped)',
         recipientName: null,
         subject: `Project Kickoff: ${params.projectName || 'Unknown Project'}`,
-        dedupeKey: `kickoff_skipped:${params.projectId}:${Date.now()}`,
+        dedupeKey: `kickoff_skipped:${params.projectId}`,
         status: 'skipped',
         errorMessage: 'no_project_manager',
         metadata: {
@@ -445,7 +468,7 @@ export async function sendKickoffEmails(params: {
           recipientEmail: '(skipped)',
           recipientName: member.name,
           subject: `Project Kickoff: ${params.projectName || 'Unknown Project'}`,
-          dedupeKey: `kickoff_skipped_no_email:${params.projectId}:${member.role}:${Date.now()}`,
+          dedupeKey: `kickoff_skipped_no_email:${params.projectId}:${member.role}`,
           status: 'skipped',
           errorMessage: 'pm_has_no_email',
           metadata: {

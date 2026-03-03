@@ -97,8 +97,10 @@ import {
   Hash,
   Trash2,
   Users,
+  Upload,
 } from "lucide-react";
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import * as XLSX from "xlsx";
 import type { PollJob } from "@shared/schema";
 
 /** Main settings page component with all configuration options */
@@ -342,12 +344,61 @@ export default function SettingsPage() {
 
 function HubSpotOwnerMappingsCard() {
   const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const { data: mappings = [], refetch } = useQuery<{ id: number; hubspotOwnerId: string; email: string; name: string | null }[]>({
     queryKey: ["/api/hubspot/owner-mappings"],
   });
   const [ownerId, setOwnerId] = useState("");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
+
+  const bulkImportMutation = useMutation({
+    mutationFn: async (mappings: Array<{ hubspotOwnerId: string; email: string; name?: string }>) => {
+      const res = await apiRequest("POST", "/api/hubspot/owner-mappings/bulk", { mappings });
+      return res.json();
+    },
+    onSuccess: (data: { created: number }) => {
+      toast({ title: `Imported ${data.created} owner mappings` });
+      refetch();
+    },
+    onError: (e: Error) => toast({ title: "Failed to import", description: e.message, variant: "destructive" }),
+  });
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = ev.target?.result;
+        if (!data) return;
+        const wb = XLSX.read(data, { type: "binary" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
+        const header = (rows[0] || []) as string[];
+        const nameIdx = header.findIndex((h) => /name/i.test(String(h)));
+        const emailIdx = header.findIndex((h) => /email/i.test(String(h)));
+        const idIdx = header.findIndex((h) => /^(HS\s*ID|HubSpot\s*ID|hs_object_id)\s*#?\s*$/i.test(String(h).trim()));
+        const out: Array<{ hubspotOwnerId: string; email: string; name?: string }> = [];
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i] as unknown[];
+          const n = nameIdx >= 0 ? String(row[nameIdx] ?? "").trim() : "";
+          const em = emailIdx >= 0 ? String(row[emailIdx] ?? "").trim() : "";
+          const id = idIdx >= 0 ? String(row[idIdx] ?? "").trim() : "";
+          if (id && em) out.push({ hubspotOwnerId: id, email: em, name: n || undefined });
+        }
+        if (out.length === 0) {
+          toast({ title: "No valid rows", description: "Expected columns: Name, Email, HS ID #", variant: "destructive" });
+        } else {
+          bulkImportMutation.mutate(out);
+        }
+      } catch (err: any) {
+        toast({ title: "Invalid file", description: err?.message, variant: "destructive" });
+      }
+      e.target.value = "";
+    };
+    reader.readAsBinaryString(file);
+  };
 
   const addMutation = useMutation({
     mutationFn: async () => {
@@ -401,6 +452,22 @@ function HubSpotOwnerMappingsCard() {
           <Button size="sm" onClick={() => addMutation.mutate()} disabled={!ownerId || !email || addMutation.isPending}>
             {addMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
             Add
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={bulkImportMutation.isPending}
+          >
+            {bulkImportMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            Import Excel
           </Button>
         </div>
         {mappings.length > 0 ? (
