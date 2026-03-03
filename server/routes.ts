@@ -910,8 +910,9 @@ export async function registerRoutes(
 
       res.status(200).json({ received: true });
 
-      const resourceName = (event.resource_name || "").toLowerCase().replace(/\s+/g, '_');
-      const eventType = (event.event_type || "").toLowerCase();
+      // Procore may send resource_type/reason (e.g. v4.0) instead of resource_name/event_type
+      const resourceName = ((event.resource_name || event.resource_type || "").toString()).toLowerCase().replace(/\s+/g, '_');
+      const eventType = ((event.event_type || event.reason || "").toString()).toLowerCase();
 
       const roleRelatedResources = ["project_role_assignments", "project_roles", "project_users"];
       if (roleRelatedResources.includes(resourceName) && (eventType === "create" || eventType === "update")) {
