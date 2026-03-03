@@ -971,7 +971,11 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
   if (projectIds && projectIds.length > 0) {
     for (const pid of projectIds) {
       const p = await storage.getProcoreProjectByProcoreId(pid);
-      if (p) projectsToSync.push({ procoreId: pid, name: p.name || '' });
+      if (p) {
+        projectsToSync.push({ procoreId: pid, name: p.name || '' });
+      } else {
+        console.log(`[procore] Project ${pid} not found in database, skipping role sync. Project must be synced first.`);
+      }
     }
   } else {
     const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
@@ -1001,6 +1005,12 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
     if (i > 0) {
       await new Promise(r => setTimeout(r, ROLE_SYNC_DELAY_MS));
     }
+    
+    // Debug logging for specific project
+    if (project.procoreId === '598134326480814') {
+      console.log(`[procore] Processing role assignments for project ${project.procoreId} (${project.name})`);
+    }
+    
     try {
       let raw: any;
       try {
@@ -1022,8 +1032,31 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
       }
       const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
 
+      // Debug logging for specific project
+      if (project.procoreId === '598134326480814') {
+        console.log(`[procore] Found ${assignments.length} role assignments from Procore API for project ${project.procoreId}`);
+        const pmAssignments = assignments.filter((a: any) => (a.role || '').toLowerCase().includes('project manager'));
+        console.log(`[procore] PM assignments found: ${pmAssignments.length}`, pmAssignments.map((a: any) => ({
+          role: a.role,
+          name: a.name,
+          user_id: a.user_id,
+          contact_id: a.contact_id,
+          email: a.email_address || a.email
+        })));
+      }
+
       const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
       const existingKeys = new Set(existingAssignments.map(a => `${a.roleName}||${a.assigneeId}`));
+      
+      // Debug logging for specific project
+      if (project.procoreId === '598134326480814') {
+        console.log(`[procore] Existing assignments in DB: ${existingAssignments.length}`, existingAssignments.map(a => ({
+          roleName: a.roleName,
+          assigneeName: a.assigneeName,
+          assigneeId: a.assigneeId,
+          key: `${a.roleName}||${a.assigneeId}`
+        })));
+      }
 
       for (const assignment of assignments) {
         const roleName = assignment.role || 'Unknown Role';
@@ -1039,6 +1072,19 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
         }
 
         const isNew = !existingKeys.has(`${roleName}||${assigneeId}`);
+        
+        // Debug logging for PM assignments on specific project
+        if (roleName.toLowerCase().includes('project manager') && project.procoreId === '598134326480814') {
+          console.log(`[procore] PM assignment found on project ${project.procoreId}:`, {
+            roleName,
+            assigneeName,
+            assigneeEmail,
+            assigneeId,
+            isNew,
+            existingKey: `${roleName}||${assigneeId}`,
+            existingKeysCount: existingKeys.size
+          });
+        }
 
         await storage.upsertProcoreRoleAssignment({
           procoreProjectId: project.procoreId,

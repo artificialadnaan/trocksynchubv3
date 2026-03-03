@@ -178,10 +178,27 @@ export async function triggerKickoffForNewPmOnPortfolio(
     assigneeCompany: string;
   }>
 ): Promise<{ triggered: number; failed: number }> {
+  console.log(`[email] triggerKickoffForNewPmOnPortfolio called with ${newAssignments.length} new assignments`);
+  
+  // Debug logging for specific project
+  const project598134326480814 = newAssignments.filter(a => a.procoreProjectId === '598134326480814');
+  if (project598134326480814.length > 0) {
+    console.log(`[email] Assignments for project 598134326480814:`, project598134326480814.map(a => ({
+      roleName: a.roleName,
+      assigneeName: a.assigneeName,
+      assigneeEmail: a.assigneeEmail
+    })));
+  }
+  
   const pmAssignments = newAssignments.filter((a) =>
     a.roleName.toLowerCase().includes('project manager')
   );
-  if (pmAssignments.length === 0) return { triggered: 0, failed: 0 };
+  
+  console.log(`[email] Filtered to ${pmAssignments.length} PM assignments (from ${newAssignments.length} total)`);
+  if (pmAssignments.length === 0) {
+    console.log(`[email] No PM assignments found. All role names:`, newAssignments.map(a => a.roleName));
+    return { triggered: 0, failed: 0 };
+  }
 
   let triggered = 0;
   let failed = 0;
