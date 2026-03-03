@@ -133,6 +133,14 @@ httpServer.listen(
 (async () => {
   await registerRoutes(httpServer, app);
 
+  // Ensure closeout_surveys has google_review_* columns (schema drift fix)
+  try {
+    const { ensureCloseoutSurveyColumns } = await import("./migrate-closeout-surveys");
+    await ensureCloseoutSurveyColumns();
+  } catch (e) {
+    console.error("[startup] Closeout survey migration failed:", e);
+  }
+
   // Seed default email templates if they don't exist
   try {
     await storage.seedEmailTemplates();

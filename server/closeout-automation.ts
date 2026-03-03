@@ -163,6 +163,22 @@ export async function triggerCloseoutSurvey(
       fromName: 'T-Rock Construction',
     });
 
+    await storage.createEmailSendLog({
+      templateKey: 'closeout_survey',
+      recipientEmail,
+      recipientName: recipientName || null,
+      subject,
+      dedupeKey: `closeout_survey:${projectId}:${survey.id}`,
+      status: result.success ? 'sent' : 'failed',
+      errorMessage: result.error || null,
+      metadata: {
+        projectId,
+        projectName: projectDetail.name || projectDetail.display_name,
+        surveyId: survey.id,
+      },
+      sentAt: new Date(),
+    });
+
     if (!result.success) {
       return { success: false, error: result.error };
     }
