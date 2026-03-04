@@ -411,6 +411,7 @@ export async function processRfpApproval(
       console.error(`[rfp-approval] Failed to refresh deal cache: ${syncErr.message}`);
     }
 
+    const TEMP_DIR = process.env.TEMP_DIR || '.playwright-temp';
     const tempPaths: string[] = [];
     let attachmentsToSync: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }> | undefined;
     if (options && Array.isArray(options.attachmentsOverride)) {
@@ -421,12 +422,14 @@ export async function processRfpApproval(
       }
       for (let i = 0; i < (options.newFiles || []).length; i++) {
         const f = options.newFiles![i];
-        const tmpDir = process.env.TEMP_DIR || '.playwright-temp';
-        await fs.mkdir(tmpDir, { recursive: true });
-        const tmpPath = path.join(tmpDir, `rfp-new-${randomUUID()}-${(f.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+        await fs.mkdir(TEMP_DIR, { recursive: true });
+        const tmpPath = path.join(TEMP_DIR, `rfp-new-${randomUUID()}-${(f.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`);
         await fs.writeFile(tmpPath, f.buffer);
         tempPaths.push(tmpPath);
         attachmentsToSync.push({ name: f.originalname || 'attachment', localPath: tmpPath, type: f.mimetype, size: f.size });
+      }
+      if (tempPaths.length > 0) {
+        log(`[rfp-approval] Stored ${tempPaths.length} new attachment(s) temporarily until BidBoard upload completes`, 'rfp');
       }
     }
 
@@ -438,6 +441,8 @@ export async function processRfpApproval(
         syncDocuments: true,
         attachmentsOverride: attachmentsToSync,
         projectNumberOverride: editedFields.project_number || (dealData.project_number as string) || undefined,
+        editedFieldsOverride: editedFields,
+        proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
       });
       if (bbResult.success && bbResult.projectId) {
         bidboardProjectId = bbResult.projectId;
@@ -448,8 +453,13 @@ export async function processRfpApproval(
     } catch (bbErr: any) {
       console.error(`[rfp-approval] BidBoard creation error for deal ${hubspotDealId}:`, bbErr.message);
     } finally {
+      // Temp files are only deleted AFTER createBidBoardProjectFromDeal completes (including document sync).
+      // This ensures attachments remain available until they have been uploaded to BidBoard.
       for (const p of tempPaths) {
         try { await fs.unlink(p); } catch { /* ignore */ }
+      }
+      if (tempPaths.length > 0) {
+        log(`[rfp-approval] Cleaned up ${tempPaths.length} temporary attachment file(s)`, 'rfp');
       }
     }
 

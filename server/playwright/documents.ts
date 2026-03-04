@@ -180,7 +180,7 @@ export async function uploadDocumentToBidBoard(
     const isNewBidBoard = page.url().includes("/tools/bid-board");
 
     if (isNewBidBoard) {
-      // New BidBoard UI: Upload (header) → Upload Drawings → Upload Files → Attach
+      // New BidBoard UI: Upload (header) → Upload Attachments → Upload Files → Attach
       const uploadBtn = await page.$("button.aid-upload-document, button:has-text('Upload')");
       if (!uploadBtn) {
         log("Upload button not found in BidBoard (new UI)", "playwright");
@@ -188,8 +188,13 @@ export async function uploadDocumentToBidBoard(
       }
       await uploadBtn.click();
       await randomDelay(1000, 1500);
-      const uploadDrawings = page.locator('li.aid-upload-drawings, [role="menuitem"]').filter({ hasText: /Upload Drawings/i }).first();
-      await uploadDrawings.click({ timeout: 30000 });
+      const uploadAttachments = page.locator('li.aid-upload-attachments, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
+      try {
+        await uploadAttachments.click({ timeout: 8000 });
+      } catch {
+        const uploadDrawings = page.locator('li.aid-upload-drawings, [role="menuitem"]').filter({ hasText: /Upload Drawings/i }).first();
+        await uploadDrawings.click({ timeout: 8000 });
+      }
       await randomDelay(2000, 3000);
     } else {
       // Legacy: Documents tab then upload
@@ -213,7 +218,7 @@ export async function uploadDocumentToBidBoard(
     await uploadButton.click();
     await randomDelay(1000, 2000);
     
-    // Get file path - download if needed, keep until upload succeeds
+    // Get file path: use localPath (RFP temp files) or download from URL. Attachments are stored temporarily until upload completes.
     let filePath = document.localPath;
     let tempFileCreated = false;
     
@@ -245,11 +250,16 @@ export async function uploadDocumentToBidBoard(
       await randomDelay(2000, 5000);
     }
     if (isNewBidBoard) {
-      const attachBtn = await page.$('button[data-qa="qa-attach-button"], button:has-text("Attach")');
-      if (attachBtn) {
-        await attachBtn.click();
-        await randomDelay(3000, 5000);
+      // Wait up to 30s for files to finish uploading before clicking Attach
+      await new Promise((r) => setTimeout(r, 5000));
+      const attachBtn = page.locator('button[data-qa="qa-attach-button"], button:has-text("Attach")');
+      try {
+        await attachBtn.first().click({ timeout: 30000 });
+      } catch {
+        await new Promise((r) => setTimeout(r, 25000));
+        await attachBtn.first().click({ timeout: 5000 });
       }
+      await randomDelay(3000, 5000);
     }
     await page.waitForLoadState("networkidle");
     const documentList = await page.$(PROCORE_SELECTORS.documents.documentList);
@@ -480,7 +490,8 @@ export async function syncHubSpotAttachmentsToBidBoard(
   return result;
 }
 
-/** Sync an explicit list of attachments to a BidBoard project. Used by RFP approval flow. */
+/** Sync an explicit list of attachments to a BidBoard project. Used by RFP approval flow.
+ * Attachments with localPath (RFP temp files) are used directly; URL-based are downloaded and stored temporarily until upload. */
 export async function syncAttachmentsListToBidBoard(
   bidboardProjectId: string,
   attachments: DocumentInfo[]

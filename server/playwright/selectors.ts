@@ -104,6 +104,7 @@ export const PROCORE_SELECTORS = {
       addressSaveButton: 'button.aid-confirmButton, [role="dialog"] button:has-text("Save")',
       uploadButton: 'button.aid-upload-document',
       uploadDrawingsMenuItem: 'li.aid-upload-drawings, [role="menuitem"]:has-text("Upload Drawings")',
+      uploadAttachmentsMenuItem: 'li.aid-upload-attachments, [role="menuitem"]:has-text("Upload Attachments")',
       uploadFilesButton: 'button.StyledUploadButton',
       attachButton: 'button[data-qa="qa-attach-button"]',
       customerSearchInput: 'input[placeholder="Search customer"]',
@@ -265,9 +266,17 @@ export function getBidBoardUrl(companyId: string, sandbox: boolean = false): str
   return `${baseUrl}${companyId}/company/bidding`;
 }
 
-export function getBidBoardUrlNew(companyId: string, sandbox: boolean = false): string {
+export function getBidBoardUrlNew(companyId: string, sandbox: boolean = false, params?: { status?: string; proposalId?: string }): string {
   const baseUrl = sandbox ? PROCORE_URLS.appNewSandbox : PROCORE_URLS.appNew;
-  return `${baseUrl}webclients/host/companies/${companyId}/tools/bid-board`;
+  let url = `${baseUrl}webclients/host/companies/${companyId}/tools/bid-board`;
+  if (params && (params.status || params.proposalId)) {
+    const search = new URLSearchParams();
+    if (params.status) search.set("status", params.status);
+    if (params.proposalId && String(params.proposalId).trim()) search.set("proposalId", String(params.proposalId).trim());
+    const qs = search.toString();
+    if (qs) url += "?" + qs;
+  }
+  return url;
 }
 
 export function getProjectUrl(companyId: string, projectId: string, sandbox: boolean = false): string {
