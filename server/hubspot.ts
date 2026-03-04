@@ -820,6 +820,88 @@ export async function deleteHubSpotContact(contactId: string): Promise<boolean> 
   }
 }
 
+export async function syncSingleHubSpotDeal(dealId: string): Promise<{ success: boolean; action: 'created' | 'updated'; error?: string }> {
+  try {
+    const client = await getHubSpotClient();
+    const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
+
+    const deal = await client.crm.deals.basicApi.getById(dealId, properties, undefined, ['companies']);
+    const props = deal.properties || {};
+    const existing = await storage.getHubspotDealByHubspotId(dealId);
+    const ownerMap = await fetchHubSpotOwners();
+
+    const associations = (deal as any).associations || {};
+    const companyIds = associations.companies?.results?.map((a: any) => String(a.id)) || [];
+    const associatedCompanyId = companyIds[0] || null;
+
+    let associatedCompanyName: string | null = null;
+    if (associatedCompanyId) {
+      const company = await storage.getHubspotCompanyByHubspotId(associatedCompanyId);
+      associatedCompanyName = company?.name || null;
+    }
+
+    const pipelines = await storage.getHubspotPipelines();
+    const stageMap = new Map<string, { stageName: string; pipelineName: string }>();
+    for (const p of pipelines) {
+      for (const s of ((p.stages as any[]) || [])) {
+        stageMap.set(s.stageId, { stageName: s.label, pipelineName: p.label });
+      }
+    }
+    const stageInfo = stageMap.get(props.dealstage);
+    const ownerName = props.hubspot_owner_id ? (ownerMap.get(props.hubspot_owner_id) || null) : null;
+
+    const data = {
+      hubspotId: dealId,
+      dealName: props.dealname || null,
+      amount: props.amount || null,
+      dealStage: props.dealstage || null,
+      dealStageName: stageInfo?.stageName || null,
+      pipeline: props.pipeline || null,
+      pipelineName: stageInfo?.pipelineName || null,
+      closeDate: props.closedate || null,
+      ownerId: props.hubspot_owner_id || null,
+      ownerName,
+      associatedCompanyId,
+      associatedCompanyName,
+      properties: props,
+      hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
+    };
+
+    const action = existing ? 'updated' : 'created';
+
+    if (existing) {
+      const changedFields = detectChanges(existing, data, ['dealName', 'amount', 'dealStage', 'dealStageName', 'pipeline', 'pipelineName', 'closeDate', 'ownerId', 'ownerName', 'associatedCompanyId', 'associatedCompanyName']);
+      for (const change of changedFields) {
+        await storage.createChangeHistory({
+          entityType: 'deal',
+          entityHubspotId: dealId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: props,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createChangeHistory({
+        entityType: 'deal',
+        entityHubspotId: dealId,
+        changeType: 'created',
+        fullSnapshot: props,
+        syncedAt: new Date(),
+      });
+    }
+
+    await storage.upsertHubspotDeal(data);
+    console.log(`[hubspot] Deal ${dealId} ${action} via single sync`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to sync deal ${dealId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
 export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number; newDealIds: string[] }> {
   const client = await getHubSpotClient();
   const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];

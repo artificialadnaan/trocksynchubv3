@@ -250,6 +250,15 @@ export async function processRfpApproval(
       }
     }
 
+    // Refresh local deal cache so BidBoard creation picks up any edits
+    try {
+      const { syncSingleHubSpotDeal } = await import('./hubspot');
+      await syncSingleHubSpotDeal(hubspotDealId);
+      log(`[rfp-approval] Local deal cache refreshed for ${hubspotDealId}`, 'rfp');
+    } catch (syncErr: any) {
+      console.error(`[rfp-approval] Failed to refresh deal cache: ${syncErr.message}`);
+    }
+
     let bidboardProjectId: string | undefined;
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');

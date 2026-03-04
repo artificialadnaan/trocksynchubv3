@@ -782,6 +782,16 @@ export async function registerRoutes(
           console.error(`HubSpot→Procore auto-sync error for ${objectType} ${objectId}:`, autoErr.message);
         }
 
+        // Sync deal to local cache on any deal webhook event
+        if (objectType === "deal") {
+          try {
+            const { syncSingleHubSpotDeal } = await import("./hubspot");
+            await syncSingleHubSpotDeal(objectId);
+          } catch (dealSyncErr: any) {
+            console.error(`[hubspot] Deal cache sync error for ${objectId}:`, dealSyncErr.message);
+          }
+        }
+
         if (objectType === "deal" && (eventType.includes("creation") || eventType.includes("create"))) {
           try {
             await processNewDealWebhook(objectId);
