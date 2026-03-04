@@ -127,6 +127,9 @@ export async function createRfpApprovalRequest(
     });
 
     const template = await storage.getEmailTemplate('rfp_review');
+    // #region agent log
+    fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'rfp-approval.ts:130',message:'email template lookup',data:{templateFound:!!template,templateEnabled:template?.enabled||false,templateKey:'rfp_review'},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
+    // #endregion
     if (!template || !template.enabled) {
       log('[rfp-approval] RFP review email template is disabled', 'rfp');
       return { success: true, token };

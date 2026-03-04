@@ -774,8 +774,11 @@ export async function registerRoutes(
         await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
 
         const eventType = event.subscriptionType || event.eventType || "";
-        const objectType = event.objectType || "";
+        const objectType = event.objectType || (eventType.startsWith("deal.") ? "deal" : eventType.startsWith("contact.") ? "contact" : eventType.startsWith("company.") ? "company" : "");
         const objectId = String(event.objectId || "");
+        // #region agent log
+        fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:778',message:'webhook event parsed',data:{eventType,objectType,objectId,rawObjectType:event.objectType,propertyName:event.propertyName,propertyValue:event.propertyValue},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
+        // #endregion
         try {
           await processHubspotWebhookForProcore(eventType, objectType, objectId);
         } catch (autoErr: any) {
@@ -811,10 +814,16 @@ export async function registerRoutes(
             const stageId = newValue.toLowerCase();
             const isRfpStage = ['rfp', 'service rfp', 'service_rfp'].includes(stageName) ||
                                ['rfp', 'service_rfp'].includes(stageId);
+            // #region agent log
+            fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:812',message:'dealstage change evaluation',data:{newValue,resolvedStageName:resolvedNewStage?.stageName||null,stageName,stageId,isRfpStage},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+            // #endregion
             if (isRfpStage) {
               try {
                 const { createRfpApprovalRequest } = await import("./rfp-approval");
                 const result = await createRfpApprovalRequest(objectId);
+                // #region agent log
+                fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:820',message:'RFP approval request result',data:{objectId,success:result.success,token:result.token,error:result.error},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
+                // #endregion
                 console.log(`[hubspot-webhook] RFP approval request for deal ${objectId}: ${result.success ? 'created' : result.error}`);
               } catch (rfpErr: any) {
                 console.error(`[hubspot-webhook] RFP approval error for deal ${objectId}:`, rfpErr.message);
