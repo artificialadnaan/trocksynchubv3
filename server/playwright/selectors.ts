@@ -60,9 +60,9 @@ export const PROCORE_SELECTORS = {
     userMenu: '[data-testid="user-menu"], .user-avatar',
   },
   
-  // BidBoard specific
+  // BidBoard specific (legacy + new Procore UI)
   bidboard: {
-    container: '[data-testid="bidboard"], .bidboard-container, #bidboard, [class*="bidboard"], [class*="estimating"]',
+    container: '[data-testid="bidboard"], .bidboard-container, #bidboard, [class*="bidboard"], [class*="estimating"], bid-board-app#spaContent, #spaContent',
     projectList: '[data-testid="bidboard-projects"], .bidboard-project-list, table.projects, table[class*="project"]',
     projectRow: '[data-testid="bidboard-project-row"], .bidboard-project-row, tr.project-row, tbody tr',
     projectName: '[data-testid="project-name"], .project-name, td.name, td:first-child a',
@@ -77,18 +77,27 @@ export const PROCORE_SELECTORS = {
     // Stage tabs at the top (Estimate in Progress, Service - Estimating, etc.)
     stageTabs: '[class*="stage-tab"], [class*="status-tab"], [role="tablist"] button, [class*="tab-item"]',
     stageDropdown: '[data-testid="stage-dropdown"], .stage-dropdown, select.stage',
-    createNewProject: 'button:has-text("Create New Project"), button:has-text("New Project"), [data-testid="create-project"], [data-testid="new-project"]',
+    createNewProject: 'button.aid-addNewProject, button[label="Create New Project"], button:has-text("Create New Project"), button:has-text("New Project"), [data-testid="create-project"], [data-testid="new-project"]',
     sendToPortfolioButton: '[data-testid="send-to-portfolio"], button:has-text("Send to Portfolio")',
     projectOverviewTab: '[data-testid="overview-tab"], a:has-text("Overview")',
     estimateTab: '[data-testid="estimate-tab"], a:has-text("Estimate")',
     documentsTab: '[data-testid="documents-tab"], a:has-text("Documents")',
+    // New BidBoard UI (us02.procore.com/.../tools/bid-board) - stable aid-* attributes
+    newUi: {
+      app: 'bid-board-app#spaContent, #spaContent',
+      tabEstimateInProgress: 'button.aid-tab:has-text("Estimate in Progress"), [class*="aid-tab"]:has-text("Estimate in Progress")',
+      tabServiceEstimating: 'button.aid-tab:has-text("Service - Estimating"), [class*="aid-tab"]:has-text("Service - Estimating")',
+      createNewProjectButton: 'button.aid-addNewProject, button[label="Create New Project"]',
+      createDialogConfirm: 'button.aid-confirmButton, [role="dialog"] button:has-text("Confirm")',
+      createDialogEmptyProject: 'input[type="radio"][value="false"], [role="dialog"] label:has-text("Empty"), [role="dialog"] label:has-text("empty")',
+    },
   },
   
   // New Project Form (BidBoard project creation modal/page)
   newProject: {
-    modal: '[data-testid="new-project-modal"], [role="dialog"], .modal, [class*="modal"]',
-    nameInput: 'input[name="name"], input[name="project_name"], input[placeholder*="Project Name"], input[placeholder*="Name"], #project_name',
-    numberInput: 'input[name="number"], input[name="project_number"], input[placeholder*="Number"], #project_number',
+    modal: '[data-testid="new-project-modal"], [role="dialog"], .modal, [class*="modal"], .aid-formDialog',
+    nameInput: 'input[name="name"], input[name="project_name"], input[placeholder*="Project Name"], input[placeholder*="Name"], #project_name, .aid-project-detail-estimate-name input',
+    numberInput: 'input[name="projectNumber"], input[name="number"], input[name="project_number"], input[placeholder*="Number"], #project_number',
     stageSelect: 'select[name="stage"], select[name="status"], [data-testid="stage-select"], select[class*="stage"]',
     stageOption: (stage: string) => `option:has-text("${stage}"), [data-value="${stage}"]`,
     clientNameInput: 'input[name="client_name"], input[name="owner_name"], input[placeholder*="Client"], input[placeholder*="Owner"]',

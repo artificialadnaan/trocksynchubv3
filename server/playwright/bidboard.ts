@@ -96,23 +96,26 @@ export async function navigateToBidBoard(page: Page): Promise<boolean> {
   
   try {
     await page.goto(newBidboardUrl, { waitUntil: "networkidle", timeout: 60000 });
-    await randomDelay(2000, 3000);
+    await randomDelay(3000, 5000);
     
-    // Check if BidBoard loaded
-    try {
-      await page.waitForSelector(PROCORE_SELECTORS.bidboard.container, { timeout: 15000 });
-      log("BidBoard loaded successfully (new URL)", "playwright");
-      return true;
-    } catch {
+    // New BidBoard UI (tools/bid-board): wait for spaContent, Create New Project button, or stage tabs
+    const newUiSelectors = [
+      PROCORE_SELECTORS.bidboard.newUi.app,
+      PROCORE_SELECTORS.bidboard.newUi.createNewProjectButton,
+      'button.aid-tab',
+      PROCORE_SELECTORS.bidboard.container,
+      PROCORE_SELECTORS.bidboard.projectList,
+    ];
+    for (const sel of newUiSelectors) {
       try {
-        await page.waitForSelector(PROCORE_SELECTORS.bidboard.projectList, { timeout: 10000 });
-        log("BidBoard loaded successfully (new URL, project list)", "playwright");
+        await page.waitForSelector(sel, { timeout: 20000 });
+        log(`BidBoard loaded successfully (new URL): ${sel}`, "playwright");
         return true;
       } catch {
-        // New URL didn't work, try old URL format
-        log("New URL format failed, trying legacy URL...", "playwright");
+        /* try next */
       }
     }
+    log("New URL format failed, trying legacy URL...", "playwright");
   } catch (err: any) {
     log(`New URL navigation failed: ${err.message}`, "playwright");
   }
@@ -835,25 +838,74 @@ export async function createBidBoardProject(
       return result;
     }
 
-    // Click "Create New Project" button
-    const createButton = await page.$(PROCORE_SELECTORS.bidboard.createNewProject);
-    if (!createButton) {
-      result.error = "Create New Project button not found";
-      result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-button");
-      return result;
+    const isNewBidBoardUi = page.url().includes("/tools/bid-board");
+    if (isNewBidBoardUi) {
+      // New BidBoard UI: click stage tab (Estimate in Progress vs Service - Estimating), then Create New Project → empty → Confirm
+      const isService = projectData.stage.toLowerCase().includes("service");
+      try {
+        const tab = isService
+          ? page.locator('button.aid-tab').filter({ hasText: /Service\s*-\s*Estimating/i })
+          : page.locator('button.aid-tab').filter({ hasText: /Estimate\s*in\s*Progress/i });
+        await tab.first().click({ timeout: 8000 });
+        await randomDelay(1500, 2500);
+      } catch (e: any) {
+        log(`Could not click stage tab: ${e.message}`, "playwright");
+      }
+
+      const createBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.createNewProjectButton);
+      if (!createBtn) {
+        result.error = "Create New Project button not found (new UI)";
+        result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-button");
+        return result;
+      }
+      await createBtn.click();
+      await randomDelay(1500, 2500);
+
+      // Dialog: select "empty new project" (radio value="false") and click Confirm
+      const emptyRadio = page.locator('input[type="radio"][value="false"]').first();
+      try {
+        await emptyRadio.waitFor({ state: "visible", timeout: 5000 });
+        await emptyRadio.click();
+        await randomDelay(300, 500);
+      } catch {
+        // Try clicking by label text for empty option
+        const emptyLabel = page.locator('[role="dialog"] label').filter({ hasText: /empty|new project/i }).first();
+        try {
+          await emptyLabel.click({ timeout: 3000 });
+          await randomDelay(300, 500);
+        } catch { /* continue */ }
+      }
+      const confirmBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.createDialogConfirm);
+      if (confirmBtn) {
+        await confirmBtn.click();
+        await randomDelay(2000, 3500);
+      } else {
+        result.error = "Confirm button not found in Create New Project dialog";
+        result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-confirm");
+        return result;
+      }
+    } else {
+      // Legacy UI: click Create New Project (opens form/modal directly)
+      const createButton = await page.$(PROCORE_SELECTORS.bidboard.createNewProject);
+      if (!createButton) {
+        result.error = "Create New Project button not found";
+        result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-button");
+        return result;
+      }
+      await createButton.click();
+      await randomDelay(1500, 2500);
     }
 
-    await createButton.click();
-    await randomDelay(1500, 2500);
-
-    // Wait for the new project form/modal
+    // Wait for the new project form / detail view (name input)
     try {
-      await page.waitForSelector(PROCORE_SELECTORS.newProject.nameInput, { timeout: 10000 });
+      await page.waitForSelector(PROCORE_SELECTORS.newProject.nameInput, { timeout: 15000 });
     } catch {
       result.error = "New project form did not appear";
       result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-form");
       return result;
     }
+
+    await randomDelay(1000, 1500);
 
     // Fill in project name (required)
     const nameInput = await page.$(PROCORE_SELECTORS.newProject.nameInput);
@@ -967,16 +1019,16 @@ export async function createBidBoardProject(
       }
     }
 
-    // Click Create/Save button
+    // Click Create/Save button (legacy modal); new UI may auto-save on blur
     const submitButton = await page.$(PROCORE_SELECTORS.newProject.createButton);
-    if (!submitButton) {
+    if (submitButton) {
+      await submitButton.click();
+      await randomDelay(2000, 3000);
+    } else if (!isNewBidBoardUi) {
       result.error = "Create button not found in form";
       result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-submit");
       return result;
     }
-
-    await submitButton.click();
-    await randomDelay(2000, 3000);
 
     // Wait for navigation or success indicator
     await page.waitForLoadState("networkidle");
@@ -984,12 +1036,24 @@ export async function createBidBoardProject(
     // Check for success - either redirect to project page or success message
     const currentUrl = page.url();
     const projectIdMatch = currentUrl.match(/\/bidding\/(\d+)|\/projects\/(\d+)/);
-    
-    if (projectIdMatch) {
-      result.projectId = projectIdMatch[1] || projectIdMatch[2];
+    const projectIdFromUrl = projectIdMatch ? (projectIdMatch[1] || projectIdMatch[2]) : null;
+    if (projectIdFromUrl) {
+      result.projectId = projectIdFromUrl;
       result.success = true;
       log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId})`, "playwright");
     } else {
+      // New UI may keep same URL; if we have the name input filled and no error, consider success and try to get ID from DOM/URL later
+      const nameInputFilled = await page.$(`${PROCORE_SELECTORS.newProject.nameInput}[value="${projectData.name.replace(/"/g, '\\"')}"]`);
+      if (nameInputFilled || currentUrl.includes("/tools/bid-board")) {
+        const anyIdInUrl = currentUrl.match(/(\d{12,})/);
+        if (anyIdInUrl) {
+          result.projectId = anyIdInUrl[1];
+          result.success = true;
+          log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId})`, "playwright");
+        }
+      }
+    }
+    if (!result.success) {
       // Check for success toast/message
       const successMsg = await page.$(PROCORE_SELECTORS.newProject.successMessage);
       if (successMsg) {
@@ -1071,6 +1135,7 @@ export async function createBidBoardProjectFromDeal(
   
   const projectData: NewBidBoardProjectData = {
     name: deal.dealName || `Deal ${dealId}`,
+    projectNumber: properties.project_number || undefined,
     stage: initialStage,
     clientName: deal.associatedCompanyName || properties.company_name || undefined,
     clientEmail: properties.client_email || properties.contact_email || undefined,
@@ -1080,6 +1145,7 @@ export async function createBidBoardProjectFromDeal(
     state: properties.state || properties.state_region || undefined,
     zip: properties.zip || properties.postal_code || undefined,
     description: properties.description || properties.notes || undefined,
+    bidDueDate: properties.closedate || undefined,
   };
 
   log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");

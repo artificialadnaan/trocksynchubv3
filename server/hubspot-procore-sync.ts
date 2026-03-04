@@ -563,9 +563,41 @@ export async function processHubspotWebhookForProcore(
     return syncHubspotCompanyToProcore(objectId);
   } else if (objectType === 'contact') {
     return syncHubspotContactToProcore(objectId);
+  } else if (objectType === 'deal') {
+    return processHubspotDealWebhookForProcore(objectId);
   }
 
   return { skipped: true, reason: `unsupported_object_type: ${objectType}` };
+}
+
+/**
+ * On any HubSpot deal webhook (create/update), push deal/company/contact data to linked
+ * Procore project immediately. Does not wait for full sync.
+ */
+async function processHubspotDealWebhookForProcore(hubspotDealId: string): Promise<any> {
+  const syncClientConfig = await storage.getAutomationConfig("sync_client_data");
+  const syncClientEnabled = (syncClientConfig?.value as any)?.enabled !== false;
+  if (!syncClientEnabled) return { skipped: true, reason: 'sync_client_data_disabled' };
+
+  const mapping = await storage.getSyncMappingByHubspotDealId(hubspotDealId);
+  if (!mapping) return { skipped: true, reason: 'no_procore_mapping' };
+
+  // syncHubSpotClientToBidBoard only works for BidBoard projects (BidBoard UI)
+  const projectId = mapping.bidboardProjectId || mapping.procoreProjectId;
+  if (!projectId) return { skipped: true, reason: 'no_linked_procore_project' };
+
+  try {
+    const { syncHubSpotClientToBidBoard } = await import("./playwright/bidboard");
+    const result = await syncHubSpotClientToBidBoard(projectId, hubspotDealId);
+    if (result.success) {
+      console.log(`[HubSpot→Procore] Deal ${hubspotDealId} client data synced to Procore project ${projectId}`);
+      return { success: true, projectId };
+    }
+    return { success: false, error: result.error };
+  } catch (err: any) {
+    console.error(`[HubSpot→Procore] Deal ${hubspotDealId} client data sync error:`, err.message);
+    return { success: false, error: err.message };
+  }
 }
 
 /**
