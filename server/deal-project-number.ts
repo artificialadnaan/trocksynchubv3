@@ -3,9 +3,10 @@ import { getHubSpotClient, getAccessToken } from './hubspot';
 import { sendEmail, renderTemplate } from './email-service';
 import { db } from './db';
 import { projectNumberRegistry } from '@shared/schema';
-import { eq, like, desc } from 'drizzle-orm';
+import { eq, desc } from 'drizzle-orm';
 
-function generateBaseProjectNumber(createDate: Date): string {
+/** Julian date format: DDDYY (e.g. 06326 = 63rd day of 2026) */
+function generateJulianDate(createDate: Date): string {
   const year = createDate.getFullYear();
   const startOfYear = new Date(year, 0, 1);
   const diff = createDate.getTime() - startOfYear.getTime();
@@ -14,6 +15,20 @@ function generateBaseProjectNumber(createDate: Date): string {
   const dayOfYearFormatted = dayOfYear.toString().padStart(3, '0');
   const twoDigitYear = year.toString().slice(-2);
   return dayOfYearFormatted + twoDigitYear;
+}
+
+/** Map project_location to office code: DFW or ATL */
+function resolveOfficeCode(projectLocation: string | null | undefined): 'DFW' | 'ATL' {
+  const loc = String(projectLocation || '').trim().toUpperCase();
+  if (loc.includes('ATL')) return 'ATL';
+  return 'DFW'; // Default to DFW
+}
+
+/** Map project_types dropdown to numeric code (1-9). 4=Service, 9=Residential, etc. */
+function resolveProjectTypeCode(projectTypes: string | null | undefined): string {
+  const val = String(projectTypes || '').trim();
+  if (/^[1-9]$/.test(val)) return val;
+  return '9'; // Default to Residential if not set
 }
 
 function getNextSuffix(existingSuffix: string | null): string {
@@ -81,7 +96,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   const client = await getHubSpotClient();
   const dealResponse = await client.crm.deals.basicApi.getById(hubspotDealId, [
     'dealname', 'createdate', 'hubspot_owner_id', 'project_number',
-    'project_location', 'estimator',
+    'project_location', 'project_types', 'estimator',
   ]);
   const props = dealResponse.properties || {};
 
@@ -95,7 +110,10 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   }
 
   const createDate = props.createdate ? new Date(props.createdate) : new Date();
-  const baseNumber = generateBaseProjectNumber(createDate);
+  const office = resolveOfficeCode(props.project_location);
+  const projectType = resolveProjectTypeCode(props.project_types);
+  const julianDate = generateJulianDate(createDate);
+  const baseNumber = `${office}-${projectType}-${julianDate}`;
   const highestSuffix = await findHighestSuffix(baseNumber);
   const suffix = getNextSuffix(highestSuffix);
   const fullProjectNumber = `${baseNumber}-${suffix}`;
@@ -112,7 +130,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
     suffix,
     fullProjectNumber,
     officeLocation: props.project_location || null,
-    projectTypes: null,
+    projectTypes: props.project_types || null,
     estimator: props.estimator || null,
     ownerName: ownerDetails?.name || null,
     ownerEmail: ownerDetails?.email || null,
@@ -148,6 +166,8 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
     details: {
       dealName: props.dealname,
       projectNumber: fullProjectNumber,
+      office,
+      projectType,
       baseNumber,
       suffix,
       ownerName: ownerDetails?.name,

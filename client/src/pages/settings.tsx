@@ -2355,7 +2355,7 @@ function ProjectNumberCard() {
           </div>
         </div>
         <p className="text-sm text-muted-foreground mt-1">
-          Automatically assigns a project number (dayOfYear + 2-digit year + suffix) to new HubSpot deals. Updates the deal's Project Number field and sends an email notification.
+          Assigns project numbers in the format <code className="font-mono text-xs">OFFICE-TYPE-JULIAN-suffix</code> (e.g. DFW-9-06326-ab) to new HubSpot deals. Office from Project Location (DFW/ATL), type from Project Type dropdown (4=Service, 9=Residential), Julian date (day of year + year), then incremental suffix (aa, ab, ac…). Updates the deal's Project Number field and sends an email notification.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
