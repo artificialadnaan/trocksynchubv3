@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { storage } from './storage';
-import { getHubSpotClient, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
+import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
 import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
 import { log } from './index';
@@ -33,6 +33,18 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
   );
 
   const props = deal.properties || {};
+  let descriptionFromProps = props.description || props.project_description || props.project_description_briefly_describe_the_project
+    || props.hs_project_description || props.hs_description
+    || (() => { const k = Object.keys(props).find(x => x.toLowerCase().includes('description')); return k ? props[k] : ''; })();
+  if (!descriptionFromProps) {
+    try {
+      const cached = await storage.getHubspotDealByHubspotId(dealId);
+      const cp = (cached?.properties || {}) as Record<string, any>;
+      descriptionFromProps = cp.description || cp.project_description || cp.project_description_briefly_describe_the_project
+        || cp.hs_project_description || cp.hs_description
+        || (() => { const k = Object.keys(cp).find(x => x.toLowerCase().includes('description')); return k ? cp[k] : ''; })() || '';
+    } catch { /* ignore */ }
+  }
   let companyName = props.company_name || '';
   let contactEmail = props.client_email || '';
   let contactPhone = props.client_phone || '';
@@ -79,7 +91,7 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
     state: props.state || '',
     zip: props.zip || '',
     country: props.country || '',
-    description: props.description || props.project_description || props.project_description_briefly_describe_the_project || (() => { const k = Object.keys(props).find(x => x.toLowerCase().includes('description')); return k ? props[k] : ''; })(),
+    description: descriptionFromProps,
     notes: props.notes || '',
     closedate: props.closedate || '',
     estimator: props.estimator || '',
@@ -90,8 +102,58 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
     hubspot_owner_id: props.hubspot_owner_id || '',
     pipeline: props.pipeline || '',
     dealstage: props.dealstage || '',
-    attachments: fetchAttachmentsFromProps(props),
+    attachments: await fetchDealAttachments(dealId, props),
   };
+}
+
+async function fetchDealAttachments(dealId: string, props: Record<string, any>): Promise<Array<{ name: string; url: string; type?: string; size?: number }>> {
+  const fromProps = fetchAttachmentsFromProps(props);
+  const fromNotes = await fetchDealAttachmentsFromNotes(dealId);
+  const seen = new Set<string>();
+  const list: Array<{ name: string; url: string; type?: string; size?: number }> = [];
+  for (const a of [...fromProps, ...fromNotes]) {
+    const key = `${a.url}|${a.name}`;
+    if (!seen.has(key)) { seen.add(key); list.push(a); }
+  }
+  return list;
+}
+
+async function fetchDealAttachmentsFromNotes(dealId: string): Promise<Array<{ name: string; url: string; type?: string; size?: number }>> {
+  const list: Array<{ name: string; url: string; type?: string; size?: number }> = [];
+  try {
+    const token = await getAccessToken();
+    const base = 'https://api.hubapi.com';
+    const headers = { Authorization: `Bearer ${token}` };
+    const assocRes = await fetch(`${base}/crm/v4/objects/deal/${dealId}/associations/notes`, { headers });
+    if (!assocRes.ok) return list;
+    const assoc = (await assocRes.json()) as { results?: Array<{ id?: string; toObjectId?: string } | string> };
+    const noteIds = (assoc.results || []).map((r) => (typeof r === 'string' ? r : r?.id || r?.toObjectId)).filter(Boolean) as string[];
+    for (const noteId of noteIds) {
+      const noteRes = await fetch(`${base}/crm/v3/objects/notes/${noteId}?properties=hs_attachment_ids`, { headers });
+      if (!noteRes.ok) continue;
+      const note = (await noteRes.json()) as { properties?: { hs_attachment_ids?: string } };
+      const idsStr = note.properties?.hs_attachment_ids || '';
+      const ids = idsStr.split(';').map((s) => s.trim()).filter(Boolean);
+      for (const fileId of ids) {
+        try {
+          const fileRes = await fetch(`${base}/files/v3/files/${fileId}`, { headers });
+          if (!fileRes.ok) continue;
+          const file = (await fileRes.json()) as { url?: string; defaultHostingUrl?: string; name?: string; extension?: string; size?: number };
+          const url = file.url || file.defaultHostingUrl;
+          if (url) {
+            list.push({
+              name: file.name || `file-${fileId}${file.extension ? '.' + file.extension : ''}`,
+              url,
+              size: file.size,
+            });
+          }
+        } catch { /* skip file */ }
+      }
+    }
+  } catch (e: any) {
+    log(`[rfp-approval] Failed to fetch deal attachments from notes: ${e.message}`, 'rfp');
+  }
+  return list;
 }
 
 function fetchAttachmentsFromProps(props: Record<string, any>): Array<{ name: string; url: string; type?: string; size?: number }> {

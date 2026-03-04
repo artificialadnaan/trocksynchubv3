@@ -1146,12 +1146,16 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
     return { ownerId: null, ownerName: null, ownerEmail: null };
   }
 
-  // Step 2: Resolve owner email — try local DB first, then API, then manual mappings
-  const localOwner = await storage.getHubspotOwnerByHubspotId(ownerId);
-  if (localOwner?.email) {
-    const ownerName = [localOwner.firstName, localOwner.lastName].filter(Boolean).join(' ') || null;
-    console.log(`[HubSpot] Local hubspot_owners table resolved owner ${ownerId}: name=${ownerName}, email=found`);
-    return { ownerId, ownerName, ownerEmail: localOwner.email };
+  // Step 2: Resolve owner email — try local DB first (table may not exist in all deploys), then API, then manual mappings
+  try {
+    const localOwner = await storage.getHubspotOwnerByHubspotId(ownerId);
+    if (localOwner?.email) {
+      const ownerName = [localOwner.firstName, localOwner.lastName].filter(Boolean).join(' ') || null;
+      console.log(`[HubSpot] Local hubspot_owners table resolved owner ${ownerId}: name=${ownerName}, email=found`);
+      return { ownerId, ownerName, ownerEmail: localOwner.email };
+    }
+  } catch (localOwnerErr: any) {
+    console.warn(`[HubSpot] hubspot_owners lookup failed (table may not exist): ${localOwnerErr.message?.slice(0, 80)}`);
   }
 
   try {
