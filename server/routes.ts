@@ -5654,7 +5654,42 @@ main().catch(console.error);
         return res.send(renderRfpPage('Already Processed', statusMsg));
       }
 
-      const d = request.dealData as Record<string, any>;
+      let d = request.dealData as Record<string, any>;
+      const hasDesc = !!(d.description || d.notes);
+      const attCount = (d.attachments || []).length;
+      const needsRefresh = !hasDesc || !attCount;
+      // #region agent log
+      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:rfp-review',message:'RFP review load',data:{token:token.slice(0,8),hubspotDealId:request.hubspotDealId,hasDesc,attCount,needsRefresh},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
+      if (needsRefresh) {
+        try {
+          const { fetchFullDealFromHubSpot } = await import("./rfp-approval");
+          const fresh = await fetchFullDealFromHubSpot(request.hubspotDealId);
+          // #region agent log
+          fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:rfp-review-fresh',message:'Fresh deal from HubSpot',data:{freshDescLen:(fresh.description||'').length,freshNotesLen:(fresh.notes||'').length,freshAttCount:(fresh.attachments||[]).length},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
+          // #endregion
+          d = { ...d };
+          if (!(d.description || d.notes)) {
+            d.description = fresh.description || d.description;
+            d.notes = fresh.notes || d.notes;
+          }
+          if (!((d.attachments || []).length) && (fresh.attachments || []).length > 0) {
+            d.attachments = fresh.attachments;
+          }
+          await storage.updateRfpApprovalRequest(request.id, { dealData: d });
+          // #region agent log
+          fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:rfp-review-after-update',message:'After refresh update',data:{dDescLen:(d.description||'').length,dAttCount:(d.attachments||[]).length},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
+          // #endregion
+        } catch (refreshErr: any) {
+          // #region agent log
+          fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:rfp-review-catch',message:'Refresh failed',data:{error:refreshErr.message},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
+          // #endregion
+          console.warn(`[rfp-review] Could not refresh deal data for ${request.hubspotDealId}:`, refreshErr.message);
+        }
+      }
+      // #region agent log
+      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:rfp-review-render',message:'Rendering with d',data:{descLen:(d.description||'').length,attCount:(d.attachments||[]).length},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
+      // #endregion
       res.send(renderRfpReviewPage(token, d));
     } catch (e: any) {
       console.error('[rfp-review] Error loading review page:', e.message);

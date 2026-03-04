@@ -106,12 +106,47 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
   };
 }
 
+async function fetchDealAttachmentsFromFiles(dealId: string): Promise<Array<{ name: string; url: string; type?: string; size?: number }>> {
+  const list: Array<{ name: string; url: string; type?: string; size?: number }> = [];
+  try {
+    const token = await getAccessToken();
+    const base = 'https://api.hubapi.com';
+    const headers = { Authorization: `Bearer ${token}` };
+    const assocRes = await fetch(`${base}/crm/v4/objects/deal/${dealId}/associations/files`, { headers });
+    if (!assocRes.ok) return list;
+    const assoc = (await assocRes.json()) as { results?: Array<{ id?: string; type?: string }> };
+    const fileIds = (assoc.results || []).map((r) => r.id).filter(Boolean) as string[];
+    for (const fileId of fileIds) {
+      try {
+        const fileRes = await fetch(`${base}/files/v3/files/${fileId}`, { headers });
+        if (!fileRes.ok) continue;
+        const file = (await fileRes.json()) as { url?: string; defaultHostingUrl?: string; name?: string; extension?: string; size?: number };
+        const url = file.url || file.defaultHostingUrl;
+        if (url) {
+          list.push({
+            name: file.name || `file-${fileId}${file.extension ? '.' + file.extension : ''}`,
+            url,
+            size: file.size,
+          });
+        }
+      } catch { /* skip file */ }
+    }
+  } catch (e: any) {
+    log(`[rfp-approval] Failed to fetch deal attachments from files: ${e.message}`, 'rfp');
+  }
+  return list;
+}
+
 async function fetchDealAttachments(dealId: string, props: Record<string, any>): Promise<Array<{ name: string; url: string; type?: string; size?: number }>> {
   const fromProps = fetchAttachmentsFromProps(props);
   const fromNotes = await fetchDealAttachmentsFromNotes(dealId);
+  const fromFiles = await fetchDealAttachmentsFromFiles(dealId);
+  // #region agent log
+  fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'rfp-approval.ts:fetchDealAttachments',message:'Attachment sources',data:{dealId,fromProps:fromProps.length,fromNotes:fromNotes.length,fromFiles:fromFiles.length},timestamp:Date.now(),hypothesisId:'H5'})}).catch(()=>{});
+  // #endregion
   const seen = new Set<string>();
   const list: Array<{ name: string; url: string; type?: string; size?: number }> = [];
-  for (const a of [...fromProps, ...fromNotes]) {
+  for (const a of [...fromProps, ...fromNotes, ...fromFiles]) {
     const key = `${a.url}|${a.name}`;
     if (!seen.has(key)) { seen.add(key); list.push(a); }
   }
