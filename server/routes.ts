@@ -1131,17 +1131,13 @@ export async function registerRoutes(
                 }
               }
 
-              // Trigger closeout when project is Closed even if no stage change was detected (e.g. oldStage was null)
+              // When Procore stage changes to closed/closeout, trigger closeout survey to deal owner
+              const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
               const { isProcoreClosedStage, triggerCloseoutSurvey } = await import('./closeout-automation');
-              if (isProcoreClosedStage(newStage)) {
+              if (mapping?.hubspotDealId && isProcoreClosedStage(newStage)) {
                 try {
                   const surveyResult = await triggerCloseoutSurvey(projectId, {});
-                  const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
-                  if (mapping?.hubspotDealId) {
-                    console.log(`[webhook] Closeout survey triggered (Procore Closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
-                  } else {
-                    console.log(`[webhook] Closeout survey for project ${projectId} (no HubSpot mapping):`, surveyResult.success ? 'sent' : surveyResult.error);
-                  }
+                  console.log(`[webhook] Closeout survey triggered (Procore closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
                 } catch (surveyErr: any) {
                   console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);
                 }

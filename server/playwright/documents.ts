@@ -97,34 +97,44 @@ async function logDocumentAction(
   });
 }
 
+const DOWNLOAD_TIMEOUT_MS = 120_000; // 2 min for large files
+const UPLOAD_ACTION_TIMEOUT_MS = 180_000; // 3 min for upload + Procore processing
+
 async function downloadFile(url: string, destPath: string): Promise<boolean> {
   return new Promise((resolve) => {
     const protocol = url.startsWith("https") ? https : http;
     const file = require("fs").createWriteStream(destPath);
-    
-    file.on("error", () => {
-      file.close();
-      resolve(false);
-    });
-    
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        file.close();
+      } catch {
+        /* ignore */
+      }
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), DOWNLOAD_TIMEOUT_MS);
+
+    file.on("error", () => done(false));
+
     const request = protocol.get(url, (response) => {
       if (response.statusCode === 200) {
         response.pipe(file);
-        file.on("finish", () => {
-          file.close();
-          resolve(true);
-        });
+        file.on("finish", () => done(true));
       } else {
         response.destroy();
-        file.close();
-        resolve(false);
+        done(false);
       }
     });
-    
-    request.on("error", () => {
-      file.close();
-      resolve(false);
+
+    request.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
+      request.destroy();
+      done(false);
     });
+    request.on("error", () => done(false));
   });
 }
 
@@ -163,6 +173,7 @@ export async function uploadDocumentToBidBoard(
   document: DocumentInfo
 ): Promise<boolean> {
   try {
+    page.setDefaultTimeout(UPLOAD_ACTION_TIMEOUT_MS);
     await navigateToProject(page, projectId);
     await randomDelay(2000, 3000);
 
@@ -178,7 +189,7 @@ export async function uploadDocumentToBidBoard(
       await uploadBtn.click();
       await randomDelay(1000, 1500);
       const uploadDrawings = page.locator('li.aid-upload-drawings, [role="menuitem"]').filter({ hasText: /Upload Drawings/i }).first();
-      await uploadDrawings.click({ timeout: 5000 });
+      await uploadDrawings.click({ timeout: 30000 });
       await randomDelay(2000, 3000);
     } else {
       // Legacy: Documents tab then upload
@@ -202,17 +213,24 @@ export async function uploadDocumentToBidBoard(
     await uploadButton.click();
     await randomDelay(1000, 2000);
     
-    // Get file path - download if needed
+    // Get file path - download if needed, keep until upload succeeds
     let filePath = document.localPath;
+    let tempFileCreated = false;
     
     if (!filePath && document.url) {
       await ensureTempDir();
-      filePath = path.join(TEMP_DIR, document.name);
+      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      const subDir = path.join(TEMP_DIR, uploadId);
+      await fs.mkdir(subDir, { recursive: true });
+      const baseName = path.basename((document.name || "file").replace(/[/\\]/g, "_")) || "file";
+      filePath = path.join(subDir, baseName);
       const downloaded = await downloadFile(document.url, filePath);
       if (!downloaded) {
+        try { await fs.rm(subDir, { recursive: true }); } catch { /* ignore */ }
         log(`Failed to download file from ${document.url}`, "playwright");
         return false;
       }
+      tempFileCreated = true;
     }
     
     if (!filePath) {
@@ -239,6 +257,16 @@ export async function uploadDocumentToBidBoard(
     if (documentText && documentText.includes(document.name)) {
       log(`Successfully uploaded ${document.name} to BidBoard project ${projectId}`, "playwright");
       await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentName: document.name });
+      if (tempFileCreated && filePath) {
+        try {
+          const dir = path.dirname(filePath);
+          if (dir.startsWith(path.resolve(TEMP_DIR))) {
+            await fs.rm(dir, { recursive: true });
+          }
+        } catch (e) {
+          log(`Failed to delete temp file after upload: ${filePath}`, "playwright");
+        }
+      }
       return true;
     }
     
@@ -247,6 +275,8 @@ export async function uploadDocumentToBidBoard(
     log(`Error uploading document to BidBoard: ${error}`, "playwright");
     await logDocumentAction(projectId, "upload_to_bidboard", "failed", { documentName: document.name }, String(error));
     return false;
+  } finally {
+    page.setDefaultTimeout(30000);
   }
 }
 
@@ -318,6 +348,7 @@ export async function uploadDocumentToPortfolio(
   document: DocumentInfo
 ): Promise<boolean> {
   try {
+    page.setDefaultTimeout(UPLOAD_ACTION_TIMEOUT_MS);
     await navigateToPortfolioProject(page, projectId);
     
     // Click on Documents tab
@@ -337,17 +368,24 @@ export async function uploadDocumentToPortfolio(
     await uploadButton.click();
     await randomDelay(1000, 2000);
     
-    // Get file path
+    // Get file path - download if needed, keep until upload succeeds
     let filePath = document.localPath;
+    let tempFileCreated = false;
     
     if (!filePath && document.url) {
       await ensureTempDir();
-      filePath = path.join(TEMP_DIR, document.name);
+      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      const subDir = path.join(TEMP_DIR, uploadId);
+      await fs.mkdir(subDir, { recursive: true });
+      const baseName = path.basename((document.name || "file").replace(/[/\\]/g, "_")) || "file";
+      filePath = path.join(subDir, baseName);
       const downloaded = await downloadFile(document.url, filePath);
       if (!downloaded) {
+        try { await fs.rm(subDir, { recursive: true }); } catch { /* ignore */ }
         log(`Failed to download file from ${document.url}`, "playwright");
         return false;
       }
+      tempFileCreated = true;
     }
     
     if (!filePath) {
@@ -372,6 +410,16 @@ export async function uploadDocumentToPortfolio(
     if (documentText && documentText.includes(document.name)) {
       log(`Successfully uploaded ${document.name} to Portfolio project ${projectId}`, "playwright");
       await logDocumentAction(projectId, "upload_to_portfolio", "success", { documentName: document.name });
+      if (tempFileCreated && filePath) {
+        try {
+          const dir = path.dirname(filePath);
+          if (dir.startsWith(path.resolve(TEMP_DIR))) {
+            await fs.rm(dir, { recursive: true });
+          }
+        } catch (e) {
+          log(`Failed to delete temp file after upload: ${filePath}`, "playwright");
+        }
+      }
       return true;
     }
     
@@ -382,6 +430,8 @@ export async function uploadDocumentToPortfolio(
     log(`Error uploading document to Portfolio: ${error}`, "playwright");
     await logDocumentAction(projectId, "upload_to_portfolio", "failed", { documentName: document.name }, String(error));
     return false;
+  } finally {
+    page.setDefaultTimeout(30000);
   }
 }
 
