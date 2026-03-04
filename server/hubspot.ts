@@ -823,7 +823,7 @@ export async function deleteHubSpotContact(contactId: string): Promise<boolean> 
 export async function syncSingleHubSpotDeal(dealId: string): Promise<{ success: boolean; action: 'created' | 'updated'; error?: string }> {
   try {
     const client = await getHubSpotClient();
-    const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
+    const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
 
     const deal = await client.crm.deals.basicApi.getById(dealId, properties, undefined, ['companies']);
     const props = deal.properties || {};
@@ -904,7 +904,7 @@ export async function syncSingleHubSpotDeal(dealId: string): Promise<{ success: 
 
 export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number; newDealIds: string[] }> {
   const client = await getHubSpotClient();
-  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
+  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
 
   const allDeals = await fetchAllPages((after) =>
     client.crm.deals.basicApi.getPage(100, after, properties)
@@ -1123,16 +1123,38 @@ export async function updateHubSpotDeal(hubspotDealId: string, properties: Recor
 }
 
 export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId: string | null; ownerName: string | null; ownerEmail: string | null }> {
-  try {
-    const client = await getHubSpotClient();
-    const deal = await client.crm.deals.basicApi.getById(hubspotDealId, ['hubspot_owner_id']);
-    const ownerId = deal.properties?.hubspot_owner_id;
-    if (!ownerId) {
-      console.log(`[HubSpot] Deal ${hubspotDealId} has no hubspot_owner_id`);
-      return { ownerId: null, ownerName: null, ownerEmail: null };
-    }
-    console.log(`[HubSpot] Deal ${hubspotDealId} has owner ID: ${ownerId}`);
+  // Step 1: Resolve ownerId — prefer local DB (already synced by webhook handler), fall back to API
+  let ownerId: string | null = null;
 
+  const localDeal = await storage.getHubspotDealByHubspotId(hubspotDealId);
+  if (localDeal?.ownerId) {
+    ownerId = localDeal.ownerId;
+    console.log(`[HubSpot] Deal ${hubspotDealId} owner ID from local DB: ${ownerId}`);
+  } else {
+    try {
+      const client = await getHubSpotClient();
+      const deal = await client.crm.deals.basicApi.getById(hubspotDealId, ['hubspot_owner_id']);
+      ownerId = deal.properties?.hubspot_owner_id || null;
+      console.log(`[HubSpot] Deal ${hubspotDealId} owner ID from API: ${ownerId || 'none'}`);
+    } catch (e: any) {
+      console.error(`[HubSpot] API call to get deal ${hubspotDealId} failed: ${e.message}`);
+    }
+  }
+
+  if (!ownerId) {
+    console.log(`[HubSpot] Deal ${hubspotDealId} has no hubspot_owner_id (checked local DB and API)`);
+    return { ownerId: null, ownerName: null, ownerEmail: null };
+  }
+
+  // Step 2: Resolve owner email — try local DB first, then API, then manual mappings
+  const localOwner = await storage.getHubspotOwnerByHubspotId(ownerId);
+  if (localOwner?.email) {
+    const ownerName = [localOwner.firstName, localOwner.lastName].filter(Boolean).join(' ') || null;
+    console.log(`[HubSpot] Local hubspot_owners table resolved owner ${ownerId}: name=${ownerName}, email=found`);
+    return { ownerId, ownerName, ownerEmail: localOwner.email };
+  }
+
+  try {
     const accessToken = await getAccessToken();
 
     try {
@@ -1148,7 +1170,7 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
           return { ownerId, ownerName, ownerEmail };
         }
       } else {
-        console.warn(`[HubSpot] Owner API returned ${ownerResp.status} for owner ${ownerId}, trying owners list...`);
+        console.warn(`[HubSpot] Owner API returned ${ownerResp.status} for owner ${ownerId}`);
       }
     } catch (ownerErr: any) {
       console.warn(`[HubSpot] Owner API failed for ${ownerId}: ${ownerErr.message?.slice(0, 80)}`);
@@ -1176,30 +1198,21 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
     } catch (listErr: any) {
       console.warn(`[HubSpot] Owner list lookup failed: ${listErr.message?.slice(0, 80)}`);
     }
-
-    const localOwner = await storage.getHubspotOwnerByHubspotId(ownerId);
-    if (localOwner?.email) {
-      const ownerName = [localOwner.firstName, localOwner.lastName].filter(Boolean).join(' ') || null;
-      console.log(`[HubSpot] Local hubspot_owners table resolved owner ${ownerId}: name=${ownerName}, email=found`);
-      return { ownerId, ownerName, ownerEmail: localOwner.email };
-    }
-
-    const localDeal = await storage.getHubspotDealByHubspotId(hubspotDealId);
-    const mapping = await storage.getHubspotOwnerMappingByHubspotId(ownerId);
-    if (mapping?.email) {
-      console.log(`[HubSpot] Owner mapping resolved owner ${ownerId}: email=found`);
-      return { ownerId, ownerName: mapping.name || localDeal?.ownerName || null, ownerEmail: mapping.email };
-    }
-
-    console.warn(`[HubSpot] All lookups exhausted for owner ${ownerId} on deal ${hubspotDealId} — no email found`);
-    if (localDeal?.ownerName) {
-      return { ownerId, ownerName: localDeal.ownerName || null, ownerEmail: null };
-    }
-    return { ownerId, ownerName: null, ownerEmail: null };
-  } catch (e: any) {
-    console.error(`[HubSpot] Failed to get deal owner for ${hubspotDealId}:`, e.message);
-    return { ownerId: null, ownerName: null, ownerEmail: null };
+  } catch (tokenErr: any) {
+    console.warn(`[HubSpot] Could not get access token for owner lookup: ${tokenErr.message?.slice(0, 80)}`);
   }
+
+  const mapping = await storage.getHubspotOwnerMappingByHubspotId(ownerId);
+  if (mapping?.email) {
+    console.log(`[HubSpot] Owner mapping resolved owner ${ownerId}: email=found`);
+    return { ownerId, ownerName: mapping.name || localDeal?.ownerName || null, ownerEmail: mapping.email };
+  }
+
+  console.warn(`[HubSpot] All lookups exhausted for owner ${ownerId} on deal ${hubspotDealId} — no email found`);
+  if (localDeal?.ownerName) {
+    return { ownerId, ownerName: localDeal.ownerName || null, ownerEmail: null };
+  }
+  return { ownerId, ownerName: null, ownerEmail: null };
 }
 
 export interface DealClientData {

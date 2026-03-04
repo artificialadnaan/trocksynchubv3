@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import fs from 'fs/promises';
+import path from 'path';
 import { storage } from './storage';
 import { getHubSpotClient, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
 import { resolveHubspotStageId } from './procore-hubspot-sync';
@@ -16,8 +18,9 @@ const RFP_DEAL_PROPERTIES = [
   'dealname', 'amount', 'dealstage', 'pipeline', 'closedate',
   'hubspot_owner_id', 'project_types', 'project_number',
   'project_location', 'city', 'state', 'zip', 'country',
-  'description', 'address', 'company_name', 'client_email',
-  'client_phone', 'estimator', 'notes',
+  'description', 'project_description', 'project_description_briefly_describe_the_project',
+  'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes',
+  'attachments', 'deal_attachments',
 ];
 
 export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<string, any>> {
@@ -76,7 +79,7 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
     state: props.state || '',
     zip: props.zip || '',
     country: props.country || '',
-    description: props.description || '',
+    description: props.description || props.project_description || props.project_description_briefly_describe_the_project || (() => { const k = Object.keys(props).find(x => x.toLowerCase().includes('description')); return k ? props[k] : ''; })(),
     notes: props.notes || '',
     closedate: props.closedate || '',
     estimator: props.estimator || '',
@@ -87,7 +90,42 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
     hubspot_owner_id: props.hubspot_owner_id || '',
     pipeline: props.pipeline || '',
     dealstage: props.dealstage || '',
+    attachments: fetchAttachmentsFromProps(props),
   };
+}
+
+function fetchAttachmentsFromProps(props: Record<string, any>): Array<{ name: string; url: string; type?: string; size?: number }> {
+  const list: Array<{ name: string; url: string; type?: string; size?: number }> = [];
+  const raw = props.attachments || props.deal_attachments;
+  if (Array.isArray(raw)) {
+    for (const a of raw) {
+      if (a && (a.url || a.fileUrl)) {
+        list.push({
+          name: a.name || a.fileName || 'attachment',
+          url: a.url || a.fileUrl,
+          type: a.type || a.mimeType,
+          size: a.size,
+        });
+      }
+    }
+  } else if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const a of parsed) {
+          if (a && (a.url || a.fileUrl)) {
+            list.push({
+              name: a.name || a.fileName || 'attachment',
+              url: a.url || a.fileUrl,
+              type: a.type || a.mimeType,
+              size: a.size,
+            });
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  return list;
 }
 
 export async function createRfpApprovalRequest(
@@ -195,10 +233,16 @@ export async function createRfpApprovalRequest(
   }
 }
 
+export interface RfpApprovalAttachmentOptions {
+  attachmentsOverride: Array<{ name: string; url?: string; _new?: boolean }>;
+  newFiles: Array<{ buffer: Buffer; originalname: string; mimetype?: string; size?: number }>;
+}
+
 export async function processRfpApproval(
   token: string,
   editedFields: Record<string, string>,
-  approverEmail: string
+  approverEmail: string,
+  options?: { attachmentsOverride?: RfpApprovalAttachmentOptions['attachmentsOverride']; newFiles?: RfpApprovalAttachmentOptions['newFiles'] }
 ): Promise<{ success: boolean; error?: string; bidboardProjectId?: string }> {
   try {
     const request = await storage.getRfpApprovalRequestByToken(token);
@@ -222,6 +266,10 @@ export async function processRfpApproval(
              'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
              'notes', 'closedate', 'client_email', 'client_phone', 'company_name'].includes(key)) {
           hubspotUpdateProps[key] = value;
+          if (key === 'description') {
+            hubspotUpdateProps['project_description_briefly_describe_the_project'] = value;
+            hubspotUpdateProps['project_description'] = value;
+          }
         }
       }
 
@@ -262,11 +310,33 @@ export async function processRfpApproval(
       console.error(`[rfp-approval] Failed to refresh deal cache: ${syncErr.message}`);
     }
 
+    const tempPaths: string[] = [];
+    let attachmentsToSync: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }> | undefined;
+    if (options?.attachmentsOverride?.length || options?.newFiles?.length) {
+      attachmentsToSync = [];
+      for (const a of options.attachmentsOverride || []) {
+        if (a._new) continue;
+        if (a.url) attachmentsToSync.push({ name: a.name || 'attachment', url: a.url });
+      }
+      for (let i = 0; i < (options.newFiles || []).length; i++) {
+        const f = options.newFiles![i];
+        const tmpDir = process.env.TEMP_DIR || '.playwright-temp';
+        await fs.mkdir(tmpDir, { recursive: true });
+        const tmpPath = path.join(tmpDir, `rfp-new-${randomUUID()}-${(f.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+        await fs.writeFile(tmpPath, f.buffer);
+        tempPaths.push(tmpPath);
+        attachmentsToSync.push({ name: f.originalname || 'attachment', localPath: tmpPath, type: f.mimetype, size: f.size });
+      }
+    }
+
     let bidboardProjectId: string | undefined;
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
       const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
-      const bbResult = await createBidBoardProjectFromDeal(hubspotDealId, bidboardStage, { syncDocuments: true });
+      const bbResult = await createBidBoardProjectFromDeal(hubspotDealId, bidboardStage, {
+        syncDocuments: true,
+        attachmentsOverride: attachmentsToSync,
+      });
       if (bbResult.success && bbResult.projectId) {
         bidboardProjectId = bbResult.projectId;
         log(`[rfp-approval] BidBoard project created: ${bidboardProjectId} for deal ${hubspotDealId}`, 'rfp');

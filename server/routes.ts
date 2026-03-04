@@ -5662,19 +5662,41 @@ main().catch(console.error);
     }
   });
 
-  app.post("/api/rfp-approval/:token/approve", async (req, res) => {
-    try {
-      const { token } = req.params;
-      const { editedFields, approverEmail } = req.body;
-      if (!approverEmail) return res.status(400).json({ success: false, error: 'Approver email is required' });
-
-      const { processRfpApproval } = await import('./rfp-approval');
-      const result = await processRfpApproval(token, editedFields || {}, approverEmail);
-      res.json(result);
-    } catch (e: any) {
-      console.error('[rfp-approval] Approve error:', e.message);
-      res.status(500).json({ success: false, error: e.message });
-    }
+  app.post("/api/rfp-approval/:token/approve", async (req, res, next) => {
+    const multer = (await import("multer")).default;
+    const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+    upload.fields([
+      { name: 'editedFields', maxCount: 1 },
+      { name: 'approverEmail', maxCount: 1 },
+      { name: 'attachmentsOverride', maxCount: 1 },
+      { name: 'newFiles', maxCount: 20 },
+    ])(req as any, res, async (err: any) => {
+      if (err) return res.status(400).json({ success: false, error: err.message || 'Upload error' });
+      try {
+        const { token } = req.params;
+        const body = (req as any).body || {};
+        const files = (req as any).files || {};
+        let editedFields: Record<string, string> = {};
+        try {
+          const ef = body.editedFields;
+          editedFields = typeof ef === 'string' ? JSON.parse(ef) : ef || {};
+        } catch { /* fallback to empty */ }
+        const approverEmail = (body.approverEmail || '').trim();
+        if (!approverEmail) return res.status(400).json({ success: false, error: 'Approver email is required' });
+        let attachmentsOverride: Array<{ name: string; url?: string; _new?: boolean }> = [];
+        try {
+          const ao = body.attachmentsOverride;
+          attachmentsOverride = typeof ao === 'string' ? JSON.parse(ao || '[]') : ao || [];
+        } catch { /* fallback to empty */ }
+        const newFiles = files.newFiles ? (Array.isArray(files.newFiles) ? files.newFiles : [files.newFiles]) : [];
+        const { processRfpApproval } = await import('./rfp-approval');
+        const result = await processRfpApproval(token, editedFields, approverEmail, { attachmentsOverride, newFiles });
+        res.json(result);
+      } catch (e: any) {
+        console.error('[rfp-approval] Approve error:', e.message);
+        res.status(500).json({ success: false, error: e.message });
+      }
+    });
   });
 
   app.post("/api/rfp-approval/:token/decline", async (req, res) => {
@@ -5714,6 +5736,7 @@ function renderRfpPage(title: string, content: string): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="/favicon.png">
   <title>${title} | T-Rock RFP Review</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -5738,7 +5761,7 @@ function renderRfpPage(title: string, content: string): string {
 </html>`;
 }
 
-const RFP_LOGO_HTML = `<img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction" referrerpolicy="no-referrer" onerror="this.style.display='none';var s=this.nextElementSibling;s.style.display='inline';"><span style="display:none;color:#fff;font-size:22px;font-weight:700;letter-spacing:0.5px;">T-Rock Construction</span>`;
+const RFP_LOGO_HTML = `<img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock GC" referrerpolicy="no-referrer" onerror="this.style.display='none';var s=this.nextElementSibling;s.style.display='inline';" style="max-width:140px;height:auto;vertical-align:middle;"><span style="display:none;color:#fff;font-size:22px;font-weight:700;letter-spacing:0.5px;vertical-align:middle;">T-Rock GC</span>`;
 
 function renderRfpReviewPage(token: string, d: Record<string, any>): string {
   const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -5777,7 +5800,8 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RFP Review: ${esc(d.dealname)} | T-Rock</title>
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <title>RFP Review: ${esc(d.dealname)} | T-Rock GC</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f4f5; min-height: 100vh; padding: 20px; }
@@ -5817,6 +5841,16 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
     .result.success { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
     .result.error { display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
     .result.declined { display: block; background: #f8fafc; border: 1px solid #e2e8f0; color: #64748b; }
+    .attachments-intro { color: #64748b; font-size: 13px; margin-bottom: 12px; }
+    .attachments-list { margin-bottom: 12px; }
+    .att-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #f8fafc; border-radius: 8px; margin-bottom: 8px; border: 1px solid #e2e8f0; }
+    .att-row span { flex: 1; font-size: 14px; color: #1a1a2e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .att-row a { color: #d11921; font-size: 12px; text-decoration: none; }
+    .att-row a:hover { text-decoration: underline; }
+    .att-row .remove-att { color: #dc2626; cursor: pointer; font-size: 14px; }
+    .add-attachments-label { cursor: pointer; display: inline-block; }
+    .btn-outline { display: inline-block; padding: 8px 16px; border: 2px solid #d11921; color: #d11921; border-radius: 8px; font-size: 14px; font-weight: 600; transition: background 0.2s, color 0.2s; }
+    .btn-outline:hover { background: #d11921; color: #fff; }
     .spinner { display: inline-block; width: 18px; height: 18px; border: 3px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .footer { background: #1a1a2e; padding: 20px 40px; text-align: center; }
@@ -5876,6 +5910,17 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
         ${field('Description', 'description', d.description, 'textarea')}
         ${field('Notes', 'notes', d.notes, 'textarea')}
 
+        <div class="section-title">Attachments</div>
+        <p class="attachments-intro">Attachments from the HubSpot deal. Remove any you don't need and add additional files before approval.</p>
+        <div id="attachmentsList" class="attachments-list"></div>
+        <div class="add-attachments">
+          <label class="add-attachments-label">
+            <input type="file" id="newFiles" multiple accept="*/*" style="display:none">
+            <span class="btn btn-outline">+ Add Attachment</span>
+          </label>
+        </div>
+        <input type="hidden" name="attachmentsOverride" id="attachmentsOverride">
+
         <div class="email-field">
           <label>Your Email (required for approval tracking)</label>
           <input type="email" id="approverEmail" required placeholder="your.email@trockgc.com">
@@ -5899,6 +5944,44 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
 
   <script>
     const TOKEN = '${token}';
+    const INITIAL_ATTACHMENTS = ${JSON.stringify((d.attachments || []).map((a: any) => ({ name: a.name, url: a.url, type: a.type, size: a.size })))};
+    const newFilesStore = [];
+
+    function renderAttachments() {
+      const list = document.getElementById('attachmentsList');
+      const kept = INITIAL_ATTACHMENTS.filter((_, i) => !removedIndices.has(i));
+      let rows = kept.map((a) => {
+        const origIdx = INITIAL_ATTACHMENTS.indexOf(a);
+        return '<div class="att-row" data-idx="' + origIdx + '"><span title="' + (a.name || '').replace(/"/g, '&quot;') + '">' + (a.name || 'attachment') + '</span>' +
+          '<a href="' + (a.url || '#') + '" target="_blank">View</a>' +
+          '<span class="remove-att" onclick="removeAttachment(' + origIdx + ')">Remove</span></div>';
+      }).join('');
+      newFilesStore.forEach((f, i) => {
+        rows += '<div class="att-row att-new" data-new="' + i + '"><span>' + (f.name || '').replace(/</g, '&lt;') + '</span><span class="remove-att" onclick="removeNewFile(' + i + ')">Remove</span></div>';
+      });
+      list.innerHTML = rows || '<p class="attachments-empty" style="color:#94a3b8;font-size:13px;">No attachments</p>';
+      updateAttachmentsOverride();
+    }
+
+    const removedIndices = new Set();
+    function removeAttachment(idx) { removedIndices.add(idx); renderAttachments(); }
+    function removeNewFile(idx) { newFilesStore.splice(idx, 1); renderAttachments(); }
+
+    function updateAttachmentsOverride() {
+      const kept = INITIAL_ATTACHMENTS.filter((_, i) => !removedIndices.has(i)).map(a => ({ name: a.name, url: a.url }));
+      const newInfos = newFilesStore.map(f => ({ name: f.name, _new: true }));
+      document.getElementById('attachmentsOverride').value = JSON.stringify([...kept, ...newInfos]);
+    }
+
+    document.getElementById('newFiles').addEventListener('change', function() {
+      for (let i = 0; i < this.files.length; i++) {
+        newFilesStore.push({ file: this.files[i], name: this.files[i].name });
+      }
+      this.value = '';
+      renderAttachments();
+    });
+
+    renderAttachments();
 
     function getFormData() {
       const form = document.getElementById('rfpForm');
@@ -5937,10 +6020,14 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
       decBtn.disabled = true;
 
       try {
+        const fd = new FormData();
+        fd.append('editedFields', JSON.stringify(getFormData()));
+        fd.append('approverEmail', email);
+        fd.append('attachmentsOverride', document.getElementById('attachmentsOverride').value);
+        newFilesStore.forEach((f, i) => fd.append('newFiles', f.file));
         const resp = await fetch('/api/rfp-approval/' + TOKEN + '/approve', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ editedFields: getFormData(), approverEmail: email }),
+          body: fd,
         });
         const data = await resp.json();
         if (data.success) {

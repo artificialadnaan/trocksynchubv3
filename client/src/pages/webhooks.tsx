@@ -18,10 +18,60 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Webhook, RefreshCw, Eye, RotateCcw } from "lucide-react";
+import { Webhook, RefreshCw, Eye, RotateCcw, ExternalLink } from "lucide-react";
 import { useState } from "react";
 import { format } from "date-fns";
 import type { WebhookLog } from "@shared/schema";
+
+const HUBSPOT_PORTAL_ID = "245227962";
+const PROCORE_COMPANY_ID = "598134325683880";
+
+/** Build a clickable URL for the webhook's resource (deal, project, etc.) when possible. */
+function getWebhookExternalLink(log: WebhookLog): { url: string; label: string } | null {
+  const source = (log.source || "").toLowerCase();
+  const resourceType = (log.resourceType || "").toLowerCase();
+  const resourceId = log.resourceId?.trim();
+
+  if (!resourceId) return null;
+
+  if (source === "hubspot") {
+    const objectIds: Record<string, string> = {
+      deal: "0-3",
+      contact: "0-1",
+      company: "0-2",
+    };
+    const objectId = objectIds[resourceType] || "0-3";
+    return {
+      url: `https://app-na2.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/record/${objectId}/${resourceId}`,
+      label: `Open in HubSpot`,
+    };
+  }
+
+  if (source === "procore") {
+    let projectId: string | null = resourceType === "projects" ? resourceId : null;
+    if (!projectId && log.payload && typeof log.payload === "object") {
+      const payload = log.payload as { project_id?: string | number };
+      if (payload.project_id != null) projectId = String(payload.project_id);
+    }
+    if (projectId) {
+      return {
+        url: `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${projectId}/tools/projecthome`,
+        label: `Open in Procore`,
+      };
+    }
+  }
+
+  if (source === "companycam") {
+    if (resourceType === "project") {
+      return {
+        url: `https://app.companycam.com/projects/${resourceId}`,
+        label: `Open in CompanyCam`,
+      };
+    }
+  }
+
+  return null;
+}
 
 export default function WebhooksPage() {
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -146,7 +196,26 @@ export default function WebhooksPage() {
                         </td>
                         <td className="p-3">{sourceBadge(log.source)}</td>
                         <td className="p-3 font-mono text-xs">{log.eventType}</td>
-                        <td className="p-3 text-xs">{log.resourceType} #{log.resourceId}</td>
+                        <td className="p-3 text-xs">
+                          {(() => {
+                            const link = getWebhookExternalLink(log);
+                            if (link) {
+                              return (
+                                <a
+                                  href={link.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-primary hover:underline inline-flex items-center gap-1"
+                                  title={link.label}
+                                >
+                                  {log.resourceType} #{log.resourceId}
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              );
+                            }
+                            return <span>{log.resourceType} #{log.resourceId}</span>;
+                          })()}
+                        </td>
                         <td className="p-3">{statusBadge(log.status)}</td>
                         <td className="p-3 text-right">
                           <div className="flex items-center justify-end gap-1">
@@ -227,6 +296,22 @@ export default function WebhooksPage() {
                   <span className="ml-2">{selectedLog.retryCount}/{selectedLog.maxRetries}</span>
                 </div>
               </div>
+              {(() => {
+                const extLink = getWebhookExternalLink(selectedLog);
+                return extLink ? (
+                  <div>
+                    <a
+                      href={extLink.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      {extLink.label}
+                    </a>
+                  </div>
+                ) : null;
+              })()}
               <div>
                 <p className="text-sm font-medium mb-2">Payload</p>
                 <ScrollArea className="h-48 rounded-lg border bg-muted/30 p-3">
