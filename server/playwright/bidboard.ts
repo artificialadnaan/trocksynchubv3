@@ -1235,7 +1235,7 @@ export async function createBidBoardProjectFromDeal(
     zip: properties.zip || properties.postal_code || undefined,
     country: properties.country || undefined,
     description: properties.description || properties.notes || undefined,
-    bidDueDate: properties.closedate || undefined,
+    bidDueDate: properties.bid_due_date || properties.due_date || undefined,
   };
 
   log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");

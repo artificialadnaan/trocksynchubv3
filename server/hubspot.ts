@@ -823,7 +823,7 @@ export async function deleteHubSpotContact(contactId: string): Promise<boolean> 
 export async function syncSingleHubSpotDeal(dealId: string): Promise<{ success: boolean; action: 'created' | 'updated'; error?: string }> {
   try {
     const client = await getHubSpotClient();
-    const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
+    const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'bid_due_date', 'due_date', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
 
     const deal = await client.crm.deals.basicApi.getById(dealId, properties, undefined, ['companies']);
     const props = deal.properties || {};
@@ -904,7 +904,7 @@ export async function syncSingleHubSpotDeal(dealId: string): Promise<{ success: 
 
 export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number; newDealIds: string[] }> {
   const client = await getHubSpotClient();
-  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
+  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'bid_due_date', 'due_date', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
 
   const allDeals = await fetchAllPages((after) =>
     client.crm.deals.basicApi.getPage(100, after, properties)

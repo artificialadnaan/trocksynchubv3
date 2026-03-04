@@ -16,6 +16,7 @@ const RFP_REVIEW_RECIPIENTS = [
 
 const RFP_DEAL_PROPERTIES = [
   'dealname', 'amount', 'dealstage', 'pipeline', 'closedate',
+  'bid_due_date', 'due_date',
   'hubspot_owner_id', 'project_types', 'project_number',
   'project_location', 'city', 'state', 'zip', 'country',
   'description', 'project_description', 'project_description_briefly_describe_the_project',
@@ -94,6 +95,7 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
     description: descriptionFromProps,
     notes: props.notes || '',
     closedate: props.closedate || '',
+    bid_due_date: props.bid_due_date || props.due_date || '',
     estimator: props.estimator || '',
     company_name: companyName,
     client_email: contactEmail,
@@ -363,7 +365,7 @@ export async function processRfpApproval(
       for (const [key, value] of Object.entries(changedFields)) {
         if (['dealname', 'amount', 'project_types', 'project_number', 'project_location',
              'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
-             'notes', 'closedate', 'client_email', 'client_phone', 'company_name'].includes(key)) {
+             'notes', 'bid_due_date', 'due_date', 'client_email', 'client_phone', 'company_name'].includes(key)) {
           hubspotUpdateProps[key] = value;
           if (key === 'description') {
             hubspotUpdateProps['project_description_briefly_describe_the_project'] = value;

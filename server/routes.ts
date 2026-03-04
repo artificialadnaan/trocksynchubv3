@@ -5978,7 +5978,7 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
         </div>
         <div class="row">
           ${field('Estimator', 'estimator', d.estimator)}
-          ${field('Close Date', 'closedate', d.closedate, 'date')}
+          ${field('Due Date', 'bid_due_date', d.bid_due_date || d.due_date, 'date')}
         </div>
 
         <div class="section-title">Company &amp; Contact</div>
