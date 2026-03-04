@@ -165,9 +165,6 @@ export async function createRfpApprovalRequest(
     });
 
     const template = await storage.getEmailTemplate('rfp_review');
-    // #region agent log
-    fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'rfp-approval.ts:130',message:'email template lookup',data:{templateFound:!!template,templateEnabled:template?.enabled||false,templateKey:'rfp_review'},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
-    // #endregion
     if (!template || !template.enabled) {
       log('[rfp-approval] RFP review email template is disabled', 'rfp');
       return { success: true, token };
@@ -312,9 +309,9 @@ export async function processRfpApproval(
 
     const tempPaths: string[] = [];
     let attachmentsToSync: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }> | undefined;
-    if (options?.attachmentsOverride?.length || options?.newFiles?.length) {
+    if (options && Array.isArray(options.attachmentsOverride)) {
       attachmentsToSync = [];
-      for (const a of options.attachmentsOverride || []) {
+      for (const a of options.attachmentsOverride) {
         if (a._new) continue;
         if (a.url) attachmentsToSync.push({ name: a.name || 'attachment', url: a.url });
       }
@@ -345,6 +342,10 @@ export async function processRfpApproval(
       }
     } catch (bbErr: any) {
       console.error(`[rfp-approval] BidBoard creation error for deal ${hubspotDealId}:`, bbErr.message);
+    } finally {
+      for (const p of tempPaths) {
+        try { await fs.unlink(p); } catch { /* ignore */ }
+      }
     }
 
     await storage.updateRfpApprovalRequest(request.id, {

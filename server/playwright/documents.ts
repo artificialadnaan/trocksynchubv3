@@ -408,6 +408,37 @@ export async function syncHubSpotAttachmentsToBidBoard(
   return result;
 }
 
+/** Sync an explicit list of attachments to a BidBoard project. Used by RFP approval flow. */
+export async function syncAttachmentsListToBidBoard(
+  bidboardProjectId: string,
+  attachments: DocumentInfo[]
+): Promise<DocumentSyncResult> {
+  const result: DocumentSyncResult = {
+    success: false,
+    documentsUploaded: 0,
+    documentsDownloaded: 0,
+    errors: [],
+  };
+  try {
+    const { page, success, error } = await ensureLoggedIn();
+    if (!success) {
+      result.errors.push(error || "Failed to log in");
+      return result;
+    }
+    result.documentsDownloaded = attachments.length;
+    for (const att of attachments) {
+      const doc: DocumentInfo = { name: att.name, url: att.url, localPath: att.localPath, type: att.type, size: att.size };
+      const uploaded = await uploadDocumentToBidBoard(page, bidboardProjectId, doc);
+      if (uploaded) result.documentsUploaded++;
+      else result.errors.push(`Failed to upload ${att.name}`);
+    }
+    result.success = result.errors.length === 0;
+  } catch (e: any) {
+    result.errors.push(e.message || String(e));
+  }
+  return result;
+}
+
 export async function syncBidBoardDocumentsToPortfolio(
   bidboardProjectId: string,
   portfolioProjectId: string

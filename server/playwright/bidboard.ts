@@ -1051,7 +1051,10 @@ export interface CreateBidBoardProjectFromDealResult extends CreateBidBoardProje
 export async function createBidBoardProjectFromDeal(
   dealId: string,
   initialStage: string = "Estimate in Progress",
-  options: { syncDocuments?: boolean } = { syncDocuments: true }
+  options: {
+    syncDocuments?: boolean;
+    attachmentsOverride?: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }>;
+  } = { syncDocuments: true }
 ): Promise<CreateBidBoardProjectFromDealResult> {
   // Fetch deal data from database
   const deal = await storage.getHubspotDealByHubspotId(dealId);
@@ -1102,12 +1105,18 @@ export async function createBidBoardProjectFromDeal(
       log(`Warning: Could not create sync mapping: ${err.message}`, "playwright");
     }
 
-    // Sync documents and photos from HubSpot to BidBoard
+    // Sync documents and photos to BidBoard
     if (options.syncDocuments !== false) {
       try {
-        log(`Syncing documents from HubSpot deal ${dealId} to BidBoard project ${result.projectId}`, "playwright");
-        const { syncHubSpotAttachmentsToBidBoard } = await import("./documents");
-        const docResult = await syncHubSpotAttachmentsToBidBoard(result.projectId, dealId);
+        const { syncHubSpotAttachmentsToBidBoard, syncAttachmentsListToBidBoard } = await import("./documents");
+        let docResult: { success: boolean; documentsUploaded: number; documentsDownloaded: number; errors: string[] };
+        if (Array.isArray(options.attachmentsOverride)) {
+          log(`Syncing ${options.attachmentsOverride.length} attachments (override) to BidBoard project ${result.projectId}`, "playwright");
+          docResult = await syncAttachmentsListToBidBoard(result.projectId, options.attachmentsOverride);
+        } else {
+          log(`Syncing documents from HubSpot deal ${dealId} to BidBoard project ${result.projectId}`, "playwright");
+          docResult = await syncHubSpotAttachmentsToBidBoard(result.projectId, dealId);
+        }
         
         result.documentsUploaded = docResult.documentsUploaded;
         result.documentErrors = docResult.errors;

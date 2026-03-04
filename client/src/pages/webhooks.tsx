@@ -23,7 +23,7 @@ import { useState } from "react";
 import { format } from "date-fns";
 import type { WebhookLog } from "@shared/schema";
 
-const HUBSPOT_PORTAL_ID = "245227962";
+const HUBSPOT_PORTAL_ID = "45644695";
 const PROCORE_COMPANY_ID = "598134325683880";
 
 /** Build a clickable URL for the webhook's resource (deal, project, etc.) when possible. */

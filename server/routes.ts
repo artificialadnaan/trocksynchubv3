@@ -5987,7 +5987,7 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
       const form = document.getElementById('rfpForm');
       const data = {};
       form.querySelectorAll('input, select, textarea').forEach(el => {
-        if (el.name) data[el.name] = el.value;
+        if (el.name && el.name !== 'attachmentsOverride') data[el.name] = el.value;
       });
       return data;
     }
