@@ -822,7 +822,7 @@ export async function deleteHubSpotContact(contactId: string): Promise<boolean> 
 
 export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number; newDealIds: string[] }> {
   const client = await getHubSpotClient();
-  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate'];
+  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
 
   const allDeals = await fetchAllPages((after) =>
     client.crm.deals.basicApi.getPage(100, after, properties)

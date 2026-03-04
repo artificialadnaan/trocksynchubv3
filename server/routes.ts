@@ -796,11 +796,22 @@ export async function registerRoutes(
           const newValue = event.propertyValue || "";
           
           if (changedProperty === "dealstage") {
-            try {
-              const { processDealStageChange } = await import("./hubspot-bidboard-trigger");
-              await processDealStageChange(objectId, newValue);
-            } catch (stageErr: any) {
-              console.error(`[hubspot-bidboard] Stage change error for deal ${objectId}:`, stageErr.message);
+            const isRfpStage = ['rfp', 'service_rfp'].includes(newValue.toLowerCase());
+            if (isRfpStage) {
+              try {
+                const { createRfpApprovalRequest } = await import("./rfp-approval");
+                const result = await createRfpApprovalRequest(objectId);
+                console.log(`[hubspot-webhook] RFP approval request for deal ${objectId}: ${result.success ? 'created' : result.error}`);
+              } catch (rfpErr: any) {
+                console.error(`[hubspot-webhook] RFP approval error for deal ${objectId}:`, rfpErr.message);
+              }
+            } else {
+              try {
+                const { processDealStageChange } = await import("./hubspot-bidboard-trigger");
+                await processDealStageChange(objectId, newValue);
+              } catch (stageErr: any) {
+                console.error(`[hubspot-bidboard] Stage change error for deal ${objectId}:`, stageErr.message);
+              }
             }
             // Send deal stage change email to assigned deal members (deal owner)
             try {
@@ -5620,6 +5631,58 @@ main().catch(console.error);
     }
   });
 
+  // ==================== RFP APPROVAL (PUBLIC - NO AUTH) ====================
+
+  app.get("/rfp-review/:token", async (req, res) => {
+    try {
+      const { token } = req.params;
+      const request = await storage.getRfpApprovalRequestByToken(token);
+      if (!request) return res.status(404).send(renderRfpPage('Not Found', '<p>This review link is invalid or has expired.</p>'));
+      if (request.status !== 'pending') {
+        const statusMsg = request.status === 'approved'
+          ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>`
+          : `<p>This RFP was <strong>declined</strong> by ${request.declinedBy || 'a reviewer'}.</p>`;
+        return res.send(renderRfpPage('Already Processed', statusMsg));
+      }
+
+      const d = request.dealData as Record<string, any>;
+      res.send(renderRfpReviewPage(token, d));
+    } catch (e: any) {
+      console.error('[rfp-review] Error loading review page:', e.message);
+      res.status(500).send(renderRfpPage('Error', '<p>Something went wrong loading the review page.</p>'));
+    }
+  });
+
+  app.post("/api/rfp-approval/:token/approve", async (req, res) => {
+    try {
+      const { token } = req.params;
+      const { editedFields, approverEmail } = req.body;
+      if (!approverEmail) return res.status(400).json({ success: false, error: 'Approver email is required' });
+
+      const { processRfpApproval } = await import('./rfp-approval');
+      const result = await processRfpApproval(token, editedFields || {}, approverEmail);
+      res.json(result);
+    } catch (e: any) {
+      console.error('[rfp-approval] Approve error:', e.message);
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.post("/api/rfp-approval/:token/decline", async (req, res) => {
+    try {
+      const { token } = req.params;
+      const { declinerEmail } = req.body;
+      if (!declinerEmail) return res.status(400).json({ success: false, error: 'Email is required' });
+
+      const { processRfpDecline } = await import('./rfp-approval');
+      const result = await processRfpDecline(token, declinerEmail);
+      res.json(result);
+    } catch (e: any) {
+      console.error('[rfp-approval] Decline error:', e.message);
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
   // Initialize BidBoard polling on startup
   (async () => {
     try {
@@ -5634,4 +5697,281 @@ main().catch(console.error);
   })();
 
   return httpServer;
+}
+
+function renderRfpPage(title: string, content: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} | T-Rock RFP Review</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f4f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .container { max-width: 600px; width: 100%; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .header { background: linear-gradient(135deg, #1a1a2e, #16213e); padding: 30px 40px; text-align: center; }
+    .header img { max-width: 180px; height: auto; }
+    .accent { background: linear-gradient(90deg, #d11921, #e53935); height: 4px; }
+    .body { padding: 40px; text-align: center; }
+    .body h1 { color: #1a1a2e; font-size: 24px; margin-bottom: 16px; }
+    .body p { color: #64748b; font-size: 16px; line-height: 1.6; }
+    .body strong { color: #1a1a2e; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header"><img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction"></div>
+    <div class="accent"></div>
+    <div class="body"><h1>${title}</h1>${content}</div>
+  </div>
+</body>
+</html>`;
+}
+
+function renderRfpReviewPage(token: string, d: Record<string, any>): string {
+  const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  const field = (label: string, name: string, value: any, type = 'text') => {
+    if (name === 'project_types') {
+      const val = String(value || '');
+      return `<div class="field">
+        <label>${label}</label>
+        <select name="${name}">
+          <option value="">-- Select --</option>
+          <option value="1"${val === '1' ? ' selected' : ''}>1 - New Construction</option>
+          <option value="2"${val === '2' ? ' selected' : ''}>2 - Renovation</option>
+          <option value="3"${val === '3' ? ' selected' : ''}>3 - Tenant Improvement</option>
+          <option value="4"${val === '4' ? ' selected' : ''}>4 - Service</option>
+          <option value="5"${val === '5' ? ' selected' : ''}>5 - Emergency</option>
+          <option value="6"${val === '6' ? ' selected' : ''}>6 - Other</option>
+        </select>
+      </div>`;
+    }
+    if (type === 'textarea') {
+      return `<div class="field"><label>${label}</label><textarea name="${name}" rows="3">${esc(value)}</textarea></div>`;
+    }
+    return `<div class="field"><label>${label}</label><input type="${type}" name="${name}" value="${esc(value)}"></div>`;
+  };
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RFP Review: ${esc(d.dealname)} | T-Rock</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f4f5; min-height: 100vh; padding: 20px; }
+    .container { max-width: 700px; margin: 0 auto; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .header { background: linear-gradient(135deg, #1a1a2e, #16213e); padding: 24px 40px; text-align: center; }
+    .header img { max-width: 160px; height: auto; }
+    .accent { background: linear-gradient(90deg, #d11921, #e53935); height: 4px; }
+    .body { padding: 32px 40px; }
+    h1 { color: #1a1a2e; font-size: 22px; text-align: center; margin-bottom: 4px; }
+    .subtitle { color: #64748b; font-size: 14px; text-align: center; margin-bottom: 24px; }
+    .info-banner { background: #fff7ed; border-left: 4px solid #f97316; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 24px; }
+    .info-banner p { color: #9a3412; font-size: 13px; }
+    .section-title { color: #1a1a2e; font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 8px; border-bottom: 2px solid #e2e8f0; margin: 24px 0 16px; }
+    .field { margin-bottom: 16px; }
+    .field label { display: block; color: #64748b; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .field input, .field select, .field textarea { width: 100%; padding: 10px 14px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 14px; font-family: inherit; color: #1a1a2e; transition: border-color 0.2s; background: #fff; }
+    .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: #d11921; }
+    .field textarea { resize: vertical; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+    .highlight-field select { border-color: #d11921; background: #fef2f2; }
+    .email-field { margin: 24px 0 16px; }
+    .email-field label { display: block; color: #1a1a2e; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+    .email-field input { width: 100%; padding: 10px 14px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 14px; font-family: inherit; }
+    .email-field input:focus { outline: none; border-color: #d11921; }
+    .actions { display: flex; gap: 16px; margin-top: 32px; }
+    .btn { flex: 1; padding: 14px; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; text-align: center; transition: transform 0.1s, opacity 0.2s; }
+    .btn:hover { transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+    .btn-approve { background: linear-gradient(135deg, #d11921, #b71c1c); color: #fff; box-shadow: 0 4px 14px rgba(209,25,33,0.3); }
+    .btn-decline { background: #f1f5f9; color: #64748b; border: 2px solid #e2e8f0; }
+    .btn-decline:hover { background: #e2e8f0; }
+    .hubspot-link { text-align: center; margin: 16px 0 0; }
+    .hubspot-link a { color: #d11921; font-size: 14px; text-decoration: underline; }
+    .result { margin-top: 24px; padding: 16px; border-radius: 8px; text-align: center; display: none; }
+    .result.success { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .result.error { display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .result.declined { display: block; background: #f8fafc; border: 1px solid #e2e8f0; color: #64748b; }
+    .spinner { display: inline-block; width: 18px; height: 18px; border: 3px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .footer { background: #1a1a2e; padding: 20px 40px; text-align: center; }
+    .footer p { color: #94a3b8; font-size: 12px; line-height: 1.5; }
+    .footer a { color: #d11921; text-decoration: none; }
+    @media (max-width: 600px) {
+      .body { padding: 24px 20px; }
+      .row, .row-3 { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header"><img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction"></div>
+    <div class="accent"></div>
+    <div class="body">
+      <h1>RFP Review &amp; Approval</h1>
+      <p class="subtitle">Review the deal details below. Edit any fields as needed, then approve or decline.</p>
+
+      <div class="info-banner">
+        <p>Fields you edit here will be updated in HubSpot upon approval. If project type is <strong>4 (Service)</strong>, the deal moves to <strong>Service - Estimating</strong>; otherwise it moves to <strong>Estimating</strong>.</p>
+      </div>
+
+      <form id="rfpForm">
+        <div class="section-title">Deal Information</div>
+        ${field('Deal Name', 'dealname', d.dealname)}
+        <div class="row">
+          ${field('Project Number', 'project_number', d.project_number)}
+          ${field('Amount', 'amount', d.amount)}
+        </div>
+        <div class="highlight-field">
+          ${field('Project Type', 'project_types', d.project_types)}
+        </div>
+        <div class="row">
+          ${field('Estimator', 'estimator', d.estimator)}
+          ${field('Close Date', 'closedate', d.closedate, 'date')}
+        </div>
+
+        <div class="section-title">Company &amp; Contact</div>
+        ${field('Company Name', 'company_name', d.company_name)}
+        <div class="row">
+          ${field('Client Email', 'client_email', d.client_email, 'email')}
+          ${field('Client Phone', 'client_phone', d.client_phone, 'tel')}
+        </div>
+
+        <div class="section-title">Location</div>
+        ${field('Address', 'address', d.address)}
+        <div class="row-3">
+          ${field('City', 'city', d.city)}
+          ${field('State', 'state', d.state)}
+          ${field('Zip', 'zip', d.zip)}
+        </div>
+        ${field('Country', 'country', d.country)}
+
+        <div class="section-title">Details</div>
+        ${field('Description', 'description', d.description, 'textarea')}
+        ${field('Notes', 'notes', d.notes, 'textarea')}
+
+        <div class="email-field">
+          <label>Your Email (required for approval tracking)</label>
+          <input type="email" id="approverEmail" required placeholder="your.email@trockgc.com">
+        </div>
+
+        <div class="actions">
+          <button type="button" class="btn btn-approve" id="approveBtn" onclick="submitApproval()">Approve &amp; Create BidBoard Project</button>
+          <button type="button" class="btn btn-decline" id="declineBtn" onclick="submitDecline()">Decline</button>
+        </div>
+      </form>
+
+      ${d.hubspotDealUrl ? `<div class="hubspot-link"><a href="${esc(d.hubspotDealUrl)}" target="_blank">View Deal in HubSpot</a></div>` : ''}
+
+      <div id="result" class="result"></div>
+    </div>
+    <div class="footer">
+      <p>T-Rock Construction, LLC | 3001 Long Prairie Rd. Ste. 200, Flower Mound, TX 75022</p>
+      <p><a href="tel:2145484733">(214) 548-4733</a> | <a href="https://trockgc.com">trockgc.com</a></p>
+    </div>
+  </div>
+
+  <script>
+    const TOKEN = '${token}';
+
+    function getFormData() {
+      const form = document.getElementById('rfpForm');
+      const data = {};
+      form.querySelectorAll('input, select, textarea').forEach(el => {
+        if (el.name) data[el.name] = el.value;
+      });
+      return data;
+    }
+
+    function showResult(msg, type) {
+      const el = document.getElementById('result');
+      el.className = 'result ' + type;
+      el.innerHTML = msg;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function setLoading(btn, loading) {
+      if (loading) {
+        btn.disabled = true;
+        btn.dataset.originalText = btn.textContent;
+        btn.innerHTML = '<span class="spinner"></span> Processing...';
+      } else {
+        btn.disabled = false;
+        btn.textContent = btn.dataset.originalText;
+      }
+    }
+
+    async function submitApproval() {
+      const email = document.getElementById('approverEmail').value.trim();
+      if (!email) { alert('Please enter your email address.'); return; }
+
+      const btn = document.getElementById('approveBtn');
+      const decBtn = document.getElementById('declineBtn');
+      setLoading(btn, true);
+      decBtn.disabled = true;
+
+      try {
+        const resp = await fetch('/api/rfp-approval/' + TOKEN + '/approve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ editedFields: getFormData(), approverEmail: email }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+          showResult('<strong>Approved!</strong> The deal has been updated in HubSpot and a BidBoard project is being created.' + (data.bidboardProjectId ? ' BidBoard Project ID: ' + data.bidboardProjectId : ''), 'success');
+          document.getElementById('rfpForm').style.display = 'none';
+        } else {
+          showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
+          setLoading(btn, false);
+          decBtn.disabled = false;
+        }
+      } catch (e) {
+        showResult('<strong>Error:</strong> ' + e.message, 'error');
+        setLoading(btn, false);
+        decBtn.disabled = false;
+      }
+    }
+
+    async function submitDecline() {
+      const email = document.getElementById('approverEmail').value.trim();
+      if (!email) { alert('Please enter your email address.'); return; }
+      if (!confirm('Are you sure you want to decline this RFP?')) return;
+
+      const btn = document.getElementById('declineBtn');
+      const appBtn = document.getElementById('approveBtn');
+      setLoading(btn, true);
+      appBtn.disabled = true;
+
+      try {
+        const resp = await fetch('/api/rfp-approval/' + TOKEN + '/decline', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ declinerEmail: email }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+          showResult('This RFP has been <strong>declined</strong>. No BidBoard project will be created. The deal remains at RFP stage in HubSpot.', 'declined');
+          document.getElementById('rfpForm').style.display = 'none';
+        } else {
+          showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
+          setLoading(btn, false);
+          appBtn.disabled = false;
+        }
+      } catch (e) {
+        showResult('<strong>Error:</strong> ' + e.message, 'error');
+        setLoading(btn, false);
+        appBtn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>`;
 }

@@ -83,6 +83,7 @@ import {
   bidboardSyncState, type BidboardSyncState,
   bidboardAutomationLogs, type BidboardAutomationLog,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
+  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -276,6 +277,12 @@ export interface IStorage {
   getCloseoutSurveyByProjectId(projectId: string): Promise<CloseoutSurvey | undefined>;
   updateCloseoutSurvey(id: number, data: Partial<InsertCloseoutSurvey>): Promise<CloseoutSurvey | undefined>;
   getCloseoutSurveys(filters: { limit?: number; offset?: number }): Promise<{ data: CloseoutSurvey[]; total: number }>;
+
+  // ==================== RFP APPROVAL REQUESTS ====================
+  createRfpApprovalRequest(data: InsertRfpApprovalRequest): Promise<RfpApprovalRequest>;
+  getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined>;
+  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1551,6 +1558,28 @@ export class DatabaseStorage implements IStorage {
     return { data, total: countResult?.count || 0 };
   }
 
+  async createRfpApprovalRequest(data: InsertRfpApprovalRequest): Promise<RfpApprovalRequest> {
+    const [result] = await db.insert(rfpApprovalRequests).values(data).returning();
+    return result;
+  }
+
+  async getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests).where(eq(rfpApprovalRequests.token, token));
+    return result;
+  }
+
+  async getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests)
+      .where(and(eq(rfpApprovalRequests.hubspotDealId, dealId), eq(rfpApprovalRequests.status, 'pending')))
+      .orderBy(desc(rfpApprovalRequests.createdAt));
+    return result;
+  }
+
+  async updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.update(rfpApprovalRequests).set(data).where(eq(rfpApprovalRequests.id, id)).returning();
+    return result;
+  }
+
   async seedEmailTemplates(): Promise<void> {
     const existingTemplates = await this.getEmailTemplates();
     
@@ -2031,6 +2060,116 @@ export class DatabaseStorage implements IStorage {
         `),
         enabled: false,
         variables: ["date", "projectsScanned", "stageChanges", "portfolioTransitions", "hubspotUpdates", "changedProjects", "bidboardUrl", "hubspotDealsUrl", "syncHubUrl", "nextSyncTime"],
+      },
+      {
+        templateKey: "rfp_review",
+        name: "RFP Review & Approval",
+        description: "Sent to reviewers when a deal reaches RFP stage for approval before BidBoard project creation",
+        subject: "RFP Review Required: {{dealName}}",
+        bodyHtml: emailWrapper(`
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">📋</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                New RFP Ready for Review
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                A deal requires your review and approval before proceeding
+              </p>
+              
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Deal Name</span><br>
+                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{dealName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Type</span><br>
+                      <span style="color: #d11921; font-size: 18px; font-weight: 700;">{{projectType}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                        <tr>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Number</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{projectNumber}}</span>
+                          </td>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Amount</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{amount}}</span>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                        <tr>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Company</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{companyName}}</span>
+                          </td>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Estimator</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{estimator}}</span>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Location</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{location}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Description</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{description}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Deal Owner</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{ownerName}}</span>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="{{reviewUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  Review &amp; Approve →
+                </a>
+              </div>
+              
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 0 0 24px 0; text-align: center;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; margin: 0 0 12px 0;">
+                  View in HubSpot
+                </p>
+                <a href="{{hubspotDealUrl}}" style="color: #d11921; font-size: 14px; text-decoration: underline;">
+                  Open Deal in HubSpot
+                </a>
+              </div>
+              
+              <div style="text-align: center; padding: 16px; background-color: #fff7ed; border-radius: 8px; border: 1px solid #fed7aa;">
+                <p style="color: #9a3412; font-size: 13px; margin: 0;">
+                  You can edit deal fields and change the project type on the review page before approving.
+                </p>
+              </div>
+        `),
+        enabled: true,
+        variables: ["dealName", "projectType", "projectNumber", "amount", "companyName", "estimator", "location", "description", "ownerName", "hubspotDealUrl", "reviewUrl"],
       },
     ];
 

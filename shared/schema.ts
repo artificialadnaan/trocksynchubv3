@@ -865,3 +865,21 @@ export const closeoutSurveys = pgTable("closeout_surveys", {
 export const insertCloseoutSurveySchema = createInsertSchema(closeoutSurveys).omit({ id: true, createdAt: true });
 export type InsertCloseoutSurvey = z.infer<typeof insertCloseoutSurveySchema>;
 export type CloseoutSurvey = typeof closeoutSurveys.$inferSelect;
+
+export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
+  id: serial("id").primaryKey(),
+  hubspotDealId: text("hubspot_deal_id").notNull(),
+  token: text("token").notNull().unique(),
+  status: text("status").notNull().default("pending"),
+  dealData: jsonb("deal_data").notNull(),
+  editedFields: jsonb("edited_fields"),
+  approvedBy: text("approved_by"),
+  approvedAt: timestamp("approved_at"),
+  declinedBy: text("declined_by"),
+  declinedAt: timestamp("declined_at"),
+  bidboardProjectId: text("bidboard_project_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const insertRfpApprovalRequestSchema = createInsertSchema(rfpApprovalRequests).omit({ id: true, createdAt: true });
+export type InsertRfpApprovalRequest = z.infer<typeof insertRfpApprovalRequestSchema>;
+export type RfpApprovalRequest = typeof rfpApprovalRequests.$inferSelect;
