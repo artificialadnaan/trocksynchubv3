@@ -359,16 +359,15 @@ export async function saveBidBoardState(projects: BidBoardProject[]): Promise<vo
 export async function navigateToProject(page: Page, projectId: string): Promise<boolean> {
   const companyId = await getCompanyId();
   if (!companyId) return false;
-  
+
   const sandbox = await isSandbox();
-  const baseUrl = sandbox ? "https://sandbox.procore.com" : "https://app.procore.com";
-  const projectUrl = `${baseUrl}/${companyId}/company/bidding/${projectId}`;
-  
+  // Use new UI URL (us02) - matches post-login redirect and BidBoard
+  const baseUrl = sandbox ? "https://sandbox.procore.com" : "https://us02.procore.com";
+  const projectUrl = `${baseUrl}/webclients/host/companies/${companyId}/tools/bid-board/project/${projectId}/details`;
+
   log(`Navigating to project: ${projectUrl}`, "playwright");
-  await page.goto(projectUrl, { waitUntil: "networkidle" });
-  
+  await page.goto(projectUrl, { waitUntil: "networkidle", timeout: 60000 });
   await randomDelay(2000, 3000);
-  
   return true;
 }
 
@@ -802,8 +801,18 @@ export interface NewBidBoardProjectData {
   city?: string;
   state?: string;
   zip?: string;
+  country?: string;
   description?: string;
   bidDueDate?: string;
+}
+
+function formatDateForProcore(val: string): string {
+  const d = new Date(val);
+  if (isNaN(d.getTime())) return "";
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const y = d.getFullYear();
+  return `${m}/${day}/${y}`;
 }
 
 export interface CreateBidBoardProjectResult {
@@ -916,10 +925,96 @@ export async function createBidBoardProject(
 
     // Fill in project number if provided
     if (projectData.projectNumber) {
-      const numberInput = await page.$(PROCORE_SELECTORS.newProject.numberInput);
+      const numberInput = await page.$(PROCORE_SELECTORS.newProject.numberInput) || (isNewBidBoardUi ? await page.$(PROCORE_SELECTORS.bidboard.newUi.projectNumberInput) : null);
       if (numberInput) {
         await numberInput.fill(projectData.projectNumber);
         await randomDelay(200, 400);
+      }
+    }
+
+    if (isNewBidBoardUi) {
+      // New UI: office (T-Rock Construction LLC), due date, Add Customer, Add Address
+      try {
+        const officeOption = page.locator('[role="option"]').filter({ hasText: /T-Rock Construction/i });
+        const officeTrigger = page.locator('button, [role="combobox"]').filter({ hasText: /Office|Company/i }).first();
+        if (await officeTrigger.count() > 0) {
+          await officeTrigger.click();
+          await randomDelay(800, 1200);
+          await officeOption.first().click({ timeout: 5000 });
+          await randomDelay(300, 500);
+        }
+      } catch { /* office selection optional */ }
+      if (projectData.bidDueDate) {
+        const dueStr = formatDateForProcore(projectData.bidDueDate);
+        const dueInput = await page.$(PROCORE_SELECTORS.bidboard.newUi.dueDateInput);
+        if (dueInput) {
+          await dueInput.fill(dueStr);
+          await randomDelay(200, 400);
+        }
+      }
+      if (projectData.clientName) {
+        try {
+          const addCustBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.addCustomerButton);
+          if (addCustBtn) {
+            await addCustBtn.click();
+            await randomDelay(1500, 2500);
+            const searchInput = await page.$(PROCORE_SELECTORS.bidboard.newUi.customerSearchInput);
+            if (searchInput) {
+              await searchInput.fill(projectData.clientName);
+              await randomDelay(1500, 2500);
+              const firstOption = page.locator('[role="option"], .StyledItem').filter({ hasText: new RegExp(projectData.clientName.slice(0, 8), "i") }).first();
+              try {
+                await firstOption.click({ timeout: 5000 });
+                await randomDelay(500, 1000);
+              } catch { /* no match */ }
+            }
+          }
+        } catch (e: any) {
+          log(`Add Customer failed: ${e.message}`, "playwright");
+        }
+      }
+      if (projectData.description) {
+        const descInput = await page.$("textarea[name='description'], textarea[placeholder*='Description'], .aid-project-detail textarea");
+        if (descInput) {
+          await descInput.fill(projectData.description);
+          await randomDelay(200, 400);
+        }
+      }
+      if (projectData.address || projectData.city || projectData.state || projectData.zip) {
+        try {
+          const addAddrBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.addAddressButton);
+          if (addAddrBtn) {
+            await addAddrBtn.click();
+            await randomDelay(1500, 2500);
+            if (projectData.address) {
+              const streetInput = await page.$(PROCORE_SELECTORS.bidboard.newUi.addressStreetInput);
+              if (streetInput) await streetInput.fill(projectData.address);
+            }
+            if (projectData.city) {
+              const cityInput = await page.$(PROCORE_SELECTORS.bidboard.newUi.addressCityInput);
+              if (cityInput) await cityInput.fill(projectData.city);
+            }
+            if (projectData.state) {
+              const stateInput = await page.$(PROCORE_SELECTORS.bidboard.newUi.addressStateInput);
+              if (stateInput) await stateInput.fill(projectData.state);
+            }
+            if (projectData.zip) {
+              const zipInput = await page.$(PROCORE_SELECTORS.bidboard.newUi.addressZipInput);
+              if (zipInput) await zipInput.fill(projectData.zip);
+            }
+            if (projectData.country) {
+              const countryInput = await page.$(PROCORE_SELECTORS.bidboard.newUi.addressCountryInput);
+              if (countryInput) await countryInput.fill(projectData.country);
+            }
+            const saveBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.addressSaveButton);
+            if (saveBtn) {
+              await saveBtn.click();
+              await randomDelay(1000, 1500);
+            }
+          }
+        } catch (e: any) {
+          log(`Add Address failed: ${e.message}`, "playwright");
+        }
       }
     }
 
@@ -1033,25 +1128,15 @@ export async function createBidBoardProject(
     // Wait for navigation or success indicator
     await page.waitForLoadState("networkidle");
 
-    // Check for success - either redirect to project page or success message
+    // Check for success - extract project ID from URL (new UI: /project/ID/, legacy: /bidding/ID/)
     const currentUrl = page.url();
-    const projectIdMatch = currentUrl.match(/\/bidding\/(\d+)|\/projects\/(\d+)/);
-    const projectIdFromUrl = projectIdMatch ? (projectIdMatch[1] || projectIdMatch[2]) : null;
+    const newUiProjectMatch = currentUrl.match(/\/tools\/bid-board\/project\/(\d+)/);
+    const legacyMatch = currentUrl.match(/\/(?:bidding|projects)\/(\d+)/);
+    const projectIdFromUrl = newUiProjectMatch?.[1] || legacyMatch?.[1] || null;
     if (projectIdFromUrl) {
       result.projectId = projectIdFromUrl;
       result.success = true;
       log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId})`, "playwright");
-    } else {
-      // New UI may keep same URL; if we have the name input filled and no error, consider success and try to get ID from DOM/URL later
-      const nameInputFilled = await page.$(`${PROCORE_SELECTORS.newProject.nameInput}[value="${projectData.name.replace(/"/g, '\\"')}"]`);
-      if (nameInputFilled || currentUrl.includes("/tools/bid-board")) {
-        const anyIdInUrl = currentUrl.match(/(\d{12,})/);
-        if (anyIdInUrl) {
-          result.projectId = anyIdInUrl[1];
-          result.success = true;
-          log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId})`, "playwright");
-        }
-      }
     }
     if (!result.success) {
       // Check for success toast/message
@@ -1118,6 +1203,8 @@ export async function createBidBoardProjectFromDeal(
   options: {
     syncDocuments?: boolean;
     attachmentsOverride?: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }>;
+    /** HubSpot project_number custom field (e.g. ATL-5-06326-af) - takes precedence over deal properties */
+    projectNumberOverride?: string;
   } = { syncDocuments: true }
 ): Promise<CreateBidBoardProjectFromDealResult> {
   // Fetch deal data from database
@@ -1132,10 +1219,12 @@ export async function createBidBoardProjectFromDeal(
 
   // Extract properties from deal
   const properties = (deal.properties || {}) as Record<string, any>;
+  // Use HubSpot project_number custom field (e.g. ATL-5-06326-af), never the Procore project ID
+  const projectNumber = options.projectNumberOverride ?? properties.project_number ?? undefined;
   
   const projectData: NewBidBoardProjectData = {
     name: deal.dealName || `Deal ${dealId}`,
-    projectNumber: properties.project_number || undefined,
+    projectNumber: projectNumber || undefined,
     stage: initialStage,
     clientName: deal.associatedCompanyName || properties.company_name || undefined,
     clientEmail: properties.client_email || properties.contact_email || undefined,
@@ -1144,6 +1233,7 @@ export async function createBidBoardProjectFromDeal(
     city: properties.city || undefined,
     state: properties.state || properties.state_region || undefined,
     zip: properties.zip || properties.postal_code || undefined,
+    country: properties.country || undefined,
     description: properties.description || properties.notes || undefined,
     bidDueDate: properties.closedate || undefined,
   };

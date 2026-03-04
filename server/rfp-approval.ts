@@ -395,6 +395,7 @@ export async function processRfpApproval(
       const bbResult = await createBidBoardProjectFromDeal(hubspotDealId, bidboardStage, {
         syncDocuments: true,
         attachmentsOverride: attachmentsToSync,
+        projectNumberOverride: editedFields.project_number || (dealData.project_number as string) || undefined,
       });
       if (bbResult.success && bbResult.projectId) {
         bidboardProjectId = bbResult.projectId;

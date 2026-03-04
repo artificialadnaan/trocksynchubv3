@@ -164,16 +164,36 @@ export async function uploadDocumentToBidBoard(
 ): Promise<boolean> {
   try {
     await navigateToProject(page, projectId);
-    
-    // Click on Documents tab
-    const documentsTab = await page.$(PROCORE_SELECTORS.bidboard.documentsTab);
-    if (documentsTab) {
-      await documentsTab.click();
+    await randomDelay(2000, 3000);
+
+    const isNewBidBoard = page.url().includes("/tools/bid-board");
+
+    if (isNewBidBoard) {
+      // New BidBoard UI: Upload (header) → Upload Drawings → Upload Files → Attach
+      const uploadBtn = await page.$("button.aid-upload-document, button:has-text('Upload')");
+      if (!uploadBtn) {
+        log("Upload button not found in BidBoard (new UI)", "playwright");
+        return false;
+      }
+      await uploadBtn.click();
+      await randomDelay(1000, 1500);
+      const uploadDrawings = page.locator('li.aid-upload-drawings, [role="menuitem"]').filter({ hasText: /Upload Drawings/i }).first();
+      await uploadDrawings.click({ timeout: 5000 });
       await randomDelay(2000, 3000);
+    } else {
+      // Legacy: Documents tab then upload
+      const documentsTab = await page.$(PROCORE_SELECTORS.bidboard.documentsTab);
+      if (documentsTab) {
+        await documentsTab.click();
+        await randomDelay(2000, 3000);
+      }
     }
-    
-    // Click upload button
-    const uploadButton = await page.$(PROCORE_SELECTORS.documents.uploadButton);
+
+    // Click upload button (legacy) or Upload Files in modal (new UI)
+    let uploadButton = await page.$(PROCORE_SELECTORS.documents.uploadButton);
+    if (!uploadButton && isNewBidBoard) {
+      uploadButton = await page.$("button.StyledUploadButton, button:has-text('Upload Files')");
+    }
     if (!uploadButton) {
       log("Upload button not found in BidBoard documents", "playwright");
       return false;
@@ -206,14 +226,16 @@ export async function uploadDocumentToBidBoard(
       await fileInput.setInputFiles(filePath);
       await randomDelay(2000, 5000);
     }
-    
-    // Wait for upload to complete
+    if (isNewBidBoard) {
+      const attachBtn = await page.$('button[data-qa="qa-attach-button"], button:has-text("Attach")');
+      if (attachBtn) {
+        await attachBtn.click();
+        await randomDelay(3000, 5000);
+      }
+    }
     await page.waitForLoadState("networkidle");
-    
-    // Verify upload
     const documentList = await page.$(PROCORE_SELECTORS.documents.documentList);
     const documentText = documentList ? await documentList.textContent() : null;
-    
     if (documentText && documentText.includes(document.name)) {
       log(`Successfully uploaded ${document.name} to BidBoard project ${projectId}`, "playwright");
       await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentName: document.name });
