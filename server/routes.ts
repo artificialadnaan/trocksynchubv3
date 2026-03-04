@@ -796,7 +796,11 @@ export async function registerRoutes(
           const newValue = event.propertyValue || "";
           
           if (changedProperty === "dealstage") {
-            const isRfpStage = ['rfp', 'service_rfp'].includes(newValue.toLowerCase());
+            const resolvedNewStage = await resolveHubspotStageId(newValue);
+            const stageName = (resolvedNewStage?.stageName || newValue).toLowerCase();
+            const stageId = newValue.toLowerCase();
+            const isRfpStage = ['rfp', 'service rfp', 'service_rfp'].includes(stageName) ||
+                               ['rfp', 'service_rfp'].includes(stageId);
             if (isRfpStage) {
               try {
                 const { createRfpApprovalRequest } = await import("./rfp-approval");
@@ -833,21 +837,7 @@ export async function registerRoutes(
             } catch (emailErr: any) {
               console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
             }
-            // When deal moves to closed/closeout stage, trigger closeout survey to deal owner
-            try {
-              const { isHubSpotClosedStage } = await import("./closeout-automation");
-              const { triggerCloseoutSurvey } = await import("./closeout-automation");
-              if (await isHubSpotClosedStage(newValue)) {
-                const mapping = await storage.getSyncMappingByHubspotDealId(objectId);
-                const projectId = mapping?.portfolioProjectId || mapping?.procoreProjectId;
-                if (projectId) {
-                  const surveyResult = await triggerCloseoutSurvey(projectId, {});
-                  console.log(`[hubspot-webhook] Closeout survey triggered for deal ${objectId} → project ${projectId}:`, surveyResult.success ? "sent" : surveyResult.error);
-                }
-              }
-            } catch (surveyErr: any) {
-              console.error(`[hubspot-webhook] Closeout survey trigger error for deal ${objectId}:`, surveyErr.message);
-            }
+            // Closeout survey is only triggered by Procore project stage → Closed, not by HubSpot deal stage changes
           }
         }
 
