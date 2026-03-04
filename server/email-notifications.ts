@@ -395,11 +395,16 @@ export async function sendStageChangeEmail(params: {
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.procoreProjectId);
 
+  // When no Procore project linked, use deal name instead of "Not yet linked to Procore"
+  const displayProjectName = params.procoreProjectId
+    ? (params.procoreProjectName || params.dealName || 'Unknown Project')
+    : (params.dealName || 'Unknown Deal');
+
   const variables: Record<string, string> = {
     ownerName: ownerInfo.ownerName || ownerInfo.ownerEmail,
     dealName: params.dealName || 'Unknown Deal',
-    projectName: params.procoreProjectName || params.dealName || 'Unknown Project',
-    procoreProjectName: params.procoreProjectName || 'Unknown Project',
+    projectName: displayProjectName,
+    procoreProjectName: displayProjectName,
     projectId: params.procoreProjectId,
     previousStage: params.oldStage || 'Unknown',
     newStage: params.newStage || 'Unknown',
