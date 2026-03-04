@@ -44,7 +44,7 @@
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken } from './hubspot';
 import { db } from './db';
-import { syncMappings, hubspotDeals, procoreProjects } from '@shared/schema';
+import { syncMappings, hubspotDeals, procoreProjects, type SyncMapping } from '@shared/schema';
 import { eq, and, ilike, or, isNull, sql, desc, ne } from 'drizzle-orm';
 
 /** Result of a sync operation */
@@ -100,7 +100,8 @@ const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
   'Service – sent to production': 'Service – Won',
   'Service - sent to production': 'Service – Won',
   'Sent to production': 'Closed Won',
-  
+  'Closed': 'Closed Won',
+
   // Lost stages
   'Service – lost': 'Service – Lost',
   'Service - lost': 'Service – Lost',
@@ -698,4 +699,44 @@ export async function getUnmatchedProjects(): Promise<{
     unmatchedProcore: allProcore.filter(p => !mappedProcoreIds.has(p.procoreId)),
     unmatchedHubspot: allHubspot.filter(d => !mappedHubspotIds.has(d.hubspotId)),
   };
+}
+
+/**
+ * Auto-link: Find HubSpot deal by project number and create sync mapping if not exists.
+ * Used when Procore webhook arrives and no mapping exists - enables stage sync without manual link.
+ */
+export async function findOrCreateMappingByProjectNumber(params: {
+  procoreProjectId: string;
+  projectNumber: string;
+  projectName: string | null;
+  companyId?: string | null;
+}): Promise<SyncMapping | null> {
+  const { procoreProjectId, projectNumber, projectName, companyId } = params;
+  if (!projectNumber?.trim()) return null;
+
+  const existing = await storage.getSyncMappingByProcoreProjectId(procoreProjectId);
+  if (existing) return existing;
+
+  const deal = await storage.getHubspotDealByProjectNumber(projectNumber.trim());
+  if (!deal?.hubspotId) return null;
+
+  const mapping = await storage.createSyncMapping({
+    hubspotDealId: deal.hubspotId,
+    hubspotDealName: deal.dealName,
+    procoreProjectId,
+    procoreProjectName: projectName,
+    procoreProjectNumber: projectNumber.trim(),
+    procoreCompanyId: companyId ?? null,
+    lastSyncAt: new Date(),
+    lastSyncStatus: 'synced',
+    lastSyncDirection: 'auto_project_number',
+    metadata: {
+      matchType: 'project_number',
+      autoLinkedAt: new Date().toISOString(),
+      lastSyncTimestamp: new Date().toISOString(),
+    },
+  });
+
+  console.log(`[procore-hubspot-sync] Auto-linked project ${procoreProjectId} to deal ${deal.hubspotId} by project number ${projectNumber}`);
+  return mapping;
 }

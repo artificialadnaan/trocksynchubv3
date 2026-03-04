@@ -73,7 +73,7 @@ import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifica
 import { sendEmail } from "./email-service";
 import { isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
-import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot, resolveHubspotStageId } from "./procore-hubspot-sync";
+import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber } from "./procore-hubspot-sync";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject, onBidBoardProjectCreated, detectAndProcessNewProjects } from "./bidboard-automation";
 import { testLogin as testProcoreLogin, saveProcoreCredentials, logout as logoutProcore } from "./playwright/auth";
 import { runPortfolioTransition, runFullPortfolioWorkflow } from "./playwright/portfolio";
@@ -982,8 +982,27 @@ export async function registerRoutes(
 
             const project = await storage.getProcoreProjectByProcoreId(projectId);
             if (!project) {
-              // Project not in local DB - still try to sync stage to HubSpot if we have a mapping
-              const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+              // Project not in local DB - try auto-link by project number, then sync stage
+              let mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+              if (!mapping?.hubspotDealId) {
+                try {
+                  const { fetchProcoreProjectDetail } = await import('./procore');
+                  const freshProject = await fetchProcoreProjectDetail(projectId);
+                  const projectNumber = freshProject?.project_number || (freshProject?.properties as any)?.project_number || null;
+                  const projectName = freshProject?.name || freshProject?.display_name || null;
+                  const companyId = freshProject?.company?.id ? String(freshProject.company.id) : null;
+                  if (projectNumber) {
+                    mapping = await findOrCreateMappingByProjectNumber({
+                      procoreProjectId: projectId,
+                      projectNumber,
+                      projectName,
+                      companyId,
+                    });
+                  }
+                } catch (err: any) {
+                  console.error(`[webhook] Error auto-linking project ${projectId} by project number:`, err.message);
+                }
+              }
               if (mapping?.hubspotDealId) {
                 try {
                   const { fetchProcoreProjectDetail } = await import('./procore');
@@ -1087,7 +1106,16 @@ export async function registerRoutes(
                   lastSyncedAt: new Date(),
                 });
 
-                const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+                let mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+                // Auto-link by project number if no mapping exists (e.g. DFW-2-06326-ah)
+                if (!mapping?.hubspotDealId && project.projectNumber) {
+                  mapping = await findOrCreateMappingByProjectNumber({
+                    procoreProjectId: projectId,
+                    projectNumber: project.projectNumber,
+                    projectName: project.name,
+                    companyId: project.companyId,
+                  }) ?? undefined;
+                }
                 if (mapping?.hubspotDealId) {
                   // Stage sync enabled by default; set procore_hubspot_stage_sync.enabled = false to disable
                   const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");

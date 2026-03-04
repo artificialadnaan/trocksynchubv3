@@ -235,6 +235,8 @@ export interface IStorage {
   clearBidboardEstimates(): Promise<void>;
   getBidboardDistinctStatuses(): Promise<string[]>;
   getHubspotDealsByDealNames(names: string[]): Promise<HubspotDeal[]>;
+  /** Find HubSpot deal by project_number in properties (for auto-link by project number) */
+  getHubspotDealByProjectNumber(projectNumber: string): Promise<HubspotDeal | undefined>;
 
   upsertCompanycamProject(data: InsertCompanycamProject): Promise<CompanycamProject>;
   getCompanycamProjectByCompanycamId(companycamId: string): Promise<CompanycamProject | undefined>;
@@ -1205,6 +1207,14 @@ export class DatabaseStorage implements IStorage {
       sql`LOWER(TRIM(${hubspotDeals.dealName})) IN (${sql.join(lowerNames.map(n => sql`${n}`), sql`, `)})`
     );
     return results;
+  }
+
+  async getHubspotDealByProjectNumber(projectNumber: string): Promise<HubspotDeal | undefined> {
+    if (!projectNumber?.trim()) return undefined;
+    const [deal] = await db.select().from(hubspotDeals).where(
+      sql`(${hubspotDeals.properties}->>'project_number') = ${projectNumber.trim()}`
+    ).limit(1);
+    return deal;
   }
 
   async upsertCompanycamProject(data: InsertCompanycamProject): Promise<CompanycamProject> {
