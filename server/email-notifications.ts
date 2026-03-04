@@ -189,33 +189,13 @@ export async function triggerKickoffForNewPmOnPortfolio(
   for (const assignment of pmAssignments) {
     try {
       const mapping = await storage.getSyncMappingByProcoreProjectId(assignment.procoreProjectId);
+      // When no mapping: fall back to Procore assignment data (recipient email from Procore assignments)
+      const kickoffProjectId = mapping
+        ? (mapping.portfolioProjectId || mapping.procoreProjectId || assignment.procoreProjectId)
+        : assignment.procoreProjectId;
       if (!mapping) {
-        console.log(`[email] Kickoff skipped for ${assignment.projectName} (${assignment.procoreProjectId}): no HubSpot/Procore mapping`);
-        // Log to send history so it appears in UI
-        try {
-          await storage.createEmailSendLog({
-            templateKey: 'project_kickoff',
-            recipientEmail: '(skipped)',
-            recipientName: assignment.assigneeName || null,
-            subject: `Project Kickoff: ${assignment.projectName || 'Unknown Project'}`,
-            dedupeKey: `kickoff_skipped_no_mapping:${assignment.procoreProjectId}`,
-            status: 'skipped',
-            errorMessage: 'no_hubspot_procore_mapping',
-            metadata: {
-              projectId: assignment.procoreProjectId,
-              projectName: assignment.projectName,
-              assigneeName: assignment.assigneeName,
-              assigneeEmail: assignment.assigneeEmail,
-              reason: 'no_hubspot_procore_mapping',
-            },
-            sentAt: new Date(),
-          });
-        } catch (logErr: any) {
-          console.error('[email] Failed to log skipped kickoff (no mapping):', logErr.message);
-        }
-        continue;
+        console.log(`[email] No HubSpot-Procore mapping for ${assignment.procoreProjectId}; using Procore assignment data (recipient: ${assignment.assigneeEmail || 'from team'})`);
       }
-      const kickoffProjectId = mapping.portfolioProjectId || mapping.procoreProjectId || assignment.procoreProjectId;
       if (!kickoffProjectId) {
         // Log to send history
         try {
