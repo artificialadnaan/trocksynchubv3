@@ -241,10 +241,9 @@ export async function createRfpApprovalRequest(
     const ownerInfo = await getDealOwnerInfo(hubspotDealId);
 
     const hubspotConfig = await storage.getAutomationConfig('hubspot_config');
-    const portalId = (hubspotConfig?.value as any)?.portalId || '';
-    const hubspotDealUrl = portalId
-      ? `https://app-na2.hubspot.com/contacts/${portalId}/record/0-3/${hubspotDealId}`
-      : `https://app-na2.hubspot.com/contacts/deal/${hubspotDealId}`;
+    const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
+    const portalId = (hubspotConfig?.value as any)?.portalId?.trim() || DEFAULT_HUBSPOT_PORTAL_ID;
+    const hubspotDealUrl = `https://app-na2.hubspot.com/contacts/${portalId}/record/0-3/${hubspotDealId}`;
 
     const appUrl = process.env.APP_URL || 'http://localhost:5000';
     const reviewUrl = `${appUrl}/rfp-review/${token}`;
