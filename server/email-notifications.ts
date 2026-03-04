@@ -356,7 +356,8 @@ export async function sendStageChangeEmail(params: {
 
   const ownerInfo = await getDealOwnerInfo(params.hubspotDealId);
   if (!ownerInfo.ownerEmail) {
-    console.log(`[email] No deal owner found for deal ${params.hubspotDealId}, skipping stage change email`);
+    const skipReason = ownerInfo.ownerId ? 'no_owner_email' : 'no_owner_id';
+    console.log(`[email] Skipping stage change email for deal ${params.hubspotDealId}: ${skipReason} (ownerId=${ownerInfo.ownerId || 'none'}, ownerName=${ownerInfo.ownerName || 'none'})`);
     try {
       await storage.createEmailSendLog({
         templateKey: 'stage_change_notification',
@@ -365,21 +366,23 @@ export async function sendStageChangeEmail(params: {
         subject: `Stage change: ${params.dealName} (${params.oldStage} → ${params.newStage})`,
         dedupeKey: `stage_change_skipped:${params.hubspotDealId}:${params.newStage}`,
         status: 'skipped',
-        errorMessage: 'no_deal_owner',
+        errorMessage: skipReason,
         metadata: {
           hubspotDealId: params.hubspotDealId,
           dealName: params.dealName,
           procoreProjectId: params.procoreProjectId,
           oldStage: params.oldStage,
           newStage: params.newStage,
-          reason: 'no_deal_owner',
+          reason: skipReason,
+          ownerId: ownerInfo.ownerId,
+          ownerName: ownerInfo.ownerName,
         },
         sentAt: new Date(),
       });
     } catch (logErr: any) {
       console.error('[email] Failed to log skipped stage change email:', logErr.message);
     }
-    return { sent: false, ownerEmail: null, error: 'no_deal_owner' };
+    return { sent: false, ownerEmail: null, error: skipReason };
   }
 
   const dedupeKey = `stage_change:${params.hubspotDealId}:${params.newStage}`;

@@ -1127,7 +1127,11 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
     const client = await getHubSpotClient();
     const deal = await client.crm.deals.basicApi.getById(hubspotDealId, ['hubspot_owner_id']);
     const ownerId = deal.properties?.hubspot_owner_id;
-    if (!ownerId) return { ownerId: null, ownerName: null, ownerEmail: null };
+    if (!ownerId) {
+      console.log(`[HubSpot] Deal ${hubspotDealId} has no hubspot_owner_id`);
+      return { ownerId: null, ownerName: null, ownerEmail: null };
+    }
+    console.log(`[HubSpot] Deal ${hubspotDealId} has owner ID: ${ownerId}`);
 
     const accessToken = await getAccessToken();
 
@@ -1137,41 +1141,57 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
       });
       if (ownerResp.ok) {
         const ownerData = await ownerResp.json();
-        return {
-          ownerId,
-          ownerName: `${ownerData.firstName || ''} ${ownerData.lastName || ''}`.trim() || null,
-          ownerEmail: ownerData.email || null,
-        };
+        const ownerEmail = ownerData.email || null;
+        const ownerName = `${ownerData.firstName || ''} ${ownerData.lastName || ''}`.trim() || null;
+        console.log(`[HubSpot] Owner API resolved owner ${ownerId}: name=${ownerName}, email=${ownerEmail ? 'found' : 'missing'}`);
+        if (ownerEmail) {
+          return { ownerId, ownerName, ownerEmail };
+        }
+      } else {
+        console.warn(`[HubSpot] Owner API returned ${ownerResp.status} for owner ${ownerId}, trying owners list...`);
       }
-      console.warn(`[HubSpot] Owner lookup returned ${ownerResp.status}, trying owners list...`);
     } catch (ownerErr: any) {
-      console.warn(`[HubSpot] Owner lookup failed: ${ownerErr.message?.slice(0, 80)}`);
+      console.warn(`[HubSpot] Owner API failed for ${ownerId}: ${ownerErr.message?.slice(0, 80)}`);
     }
 
     try {
-      const listResp = await fetch(`https://api.hubapi.com/crm/v3/owners/?limit=100`, {
+      const listResp = await fetch(`https://api.hubapi.com/crm/v3/owners/?limit=500`, {
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
       });
       if (listResp.ok) {
         const listData = await listResp.json();
         const owner = listData.results?.find((o: any) => String(o.id) === String(ownerId));
-        if (owner) {
+        if (owner?.email) {
+          console.log(`[HubSpot] Owner list resolved owner ${ownerId}: email found`);
           return {
             ownerId,
             ownerName: `${owner.firstName || ''} ${owner.lastName || ''}`.trim() || null,
-            ownerEmail: owner.email || null,
+            ownerEmail: owner.email,
           };
         }
+        console.warn(`[HubSpot] Owner list: owner ${ownerId} ${owner ? 'found but has no email' : 'not found in list'}`);
+      } else {
+        console.warn(`[HubSpot] Owner list API returned ${listResp.status}`);
       }
     } catch (listErr: any) {
       console.warn(`[HubSpot] Owner list lookup failed: ${listErr.message?.slice(0, 80)}`);
     }
 
+    const localOwner = await storage.getHubspotOwnerByHubspotId(ownerId);
+    if (localOwner?.email) {
+      const ownerName = [localOwner.firstName, localOwner.lastName].filter(Boolean).join(' ') || null;
+      console.log(`[HubSpot] Local hubspot_owners table resolved owner ${ownerId}: name=${ownerName}, email=found`);
+      return { ownerId, ownerName, ownerEmail: localOwner.email };
+    }
+
     const localDeal = await storage.getHubspotDealByHubspotId(hubspotDealId);
     const mapping = await storage.getHubspotOwnerMappingByHubspotId(ownerId);
     if (mapping?.email) {
+      console.log(`[HubSpot] Owner mapping resolved owner ${ownerId}: email=found`);
       return { ownerId, ownerName: mapping.name || localDeal?.ownerName || null, ownerEmail: mapping.email };
     }
+
+    console.warn(`[HubSpot] All lookups exhausted for owner ${ownerId} on deal ${hubspotDealId} — no email found`);
     if (localDeal?.ownerName) {
       return { ownerId, ownerName: localDeal.ownerName || null, ownerEmail: null };
     }
