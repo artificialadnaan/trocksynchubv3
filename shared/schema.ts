@@ -873,6 +873,8 @@ export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
   status: text("status").notNull().default("pending"),
   dealData: jsonb("deal_data").notNull(),
   editedFields: jsonb("edited_fields"),
+  /** Final attachment list approved for upload (names, urls) - stored until BidBoard upload completes */
+  approvedAttachments: jsonb("approved_attachments"),
   approvedBy: text("approved_by"),
   approvedAt: timestamp("approved_at"),
   declinedBy: text("declined_by"),

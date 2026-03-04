@@ -219,7 +219,7 @@ async function sendNewDealNotification(params: {
     officeLocation: params.officeLocation,
     estimator: params.estimator,
     hubspotDealId: params.hubspotDealId,
-    hubspotDealUrl: `https://app.hubspot.com/contacts/45644695/deal/${params.hubspotDealId}`,
+    hubspotDealUrl: `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${params.hubspotDealId}`,
   };
 
   const subject = renderTemplate(template.subject, variables);

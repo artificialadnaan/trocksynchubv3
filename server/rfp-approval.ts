@@ -208,8 +208,8 @@ export async function createRfpApprovalRequest(
     const hubspotConfig = await storage.getAutomationConfig('hubspot_config');
     const portalId = (hubspotConfig?.value as any)?.portalId || '';
     const hubspotDealUrl = portalId
-      ? `https://app.hubspot.com/contacts/${portalId}/deal/${hubspotDealId}`
-      : `https://app.hubspot.com/contacts/deal/${hubspotDealId}`;
+      ? `https://app-na2.hubspot.com/contacts/${portalId}/record/0-3/${hubspotDealId}`
+      : `https://app-na2.hubspot.com/contacts/deal/${hubspotDealId}`;
 
     const appUrl = process.env.APP_URL || 'http://localhost:5000';
     const reviewUrl = `${appUrl}/rfp-review/${token}`;
@@ -232,6 +232,11 @@ export async function createRfpApprovalRequest(
       return { success: true, token };
     }
 
+    const attachments = (dealData.attachments || []) as Array<{ name: string; url?: string }>;
+    const attachmentListHtml = attachments.length > 0
+      ? attachments.map(a => `<a href="${(a.url || '#').replace(/"/g, '&quot;')}" style="color: #d11921; text-decoration: underline;">${String(a.name || 'Attachment').replace(/</g, '&lt;')}</a>`).join('<br>')
+      : 'None';
+
     const variables: Record<string, string> = {
       dealName: dealData.dealname,
       projectNumber: dealData.project_number,
@@ -244,6 +249,7 @@ export async function createRfpApprovalRequest(
       ownerName: ownerInfo.ownerName || 'N/A',
       hubspotDealUrl,
       reviewUrl,
+      attachmentList: attachmentListHtml,
     };
 
     const subject = renderTemplate(template.subject, variables);
@@ -411,9 +417,16 @@ export async function processRfpApproval(
       }
     }
 
+    const approvedAttachmentsForStorage = (attachmentsToSync || []).map(a => ({
+      name: a.name,
+      url: a.url || undefined,
+      _new: !!a.localPath,
+    }));
+
     await storage.updateRfpApprovalRequest(request.id, {
       status: 'approved',
       editedFields: changedFields,
+      approvedAttachments: approvedAttachmentsForStorage,
       approvedBy: approverEmail,
       approvedAt: new Date(),
       bidboardProjectId: bidboardProjectId || null,
@@ -429,6 +442,7 @@ export async function processRfpApproval(
         token,
         approvedBy: approverEmail,
         changedFields,
+        approvedAttachments: approvedAttachmentsForStorage,
         projectType: finalProjectType,
         targetStage: targetStageName,
         bidboardProjectId,

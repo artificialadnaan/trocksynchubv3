@@ -12,6 +12,7 @@
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "db:push": "drizzle-kit push",
+    "db:migrate-approved-attachments": "tsx scripts/migrate-approved-attachments.ts",
     "import:owner-mappings": "tsx scripts/import-hubspot-owner-mappings.ts",
     "import:procore-users": "tsx scripts/import-procore-users.ts"
   },

@@ -2144,6 +2144,12 @@ export class DatabaseStorage implements IStorage {
                       <span style="color: #e2e8f0; font-size: 14px;">{{ownerName}}</span>
                     </td>
                   </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Attachments</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{attachmentList}}</span>
+                    </td>
+                  </tr>
                 </table>
               </div>
               
@@ -2169,7 +2175,7 @@ export class DatabaseStorage implements IStorage {
               </div>
         `),
         enabled: true,
-        variables: ["dealName", "projectType", "projectNumber", "amount", "companyName", "estimator", "location", "description", "ownerName", "hubspotDealUrl", "reviewUrl"],
+        variables: ["dealName", "projectType", "projectNumber", "amount", "companyName", "estimator", "location", "description", "ownerName", "attachmentList", "hubspotDealUrl", "reviewUrl"],
       },
     ];
 
