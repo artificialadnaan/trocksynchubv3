@@ -1126,17 +1126,20 @@ export async function registerRoutes(
                   if (mapping?.hubspotDealId) {
                     console.log(`[webhook] Closeout survey triggered (Procore Closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
                   } else {
-                    await storage.createEmailSendLog({
-                      templateKey: 'closeout_survey',
-                      recipientEmail: '(no HubSpot mapping)',
-                      recipientName: null,
-                      subject: `Closeout survey: ${project?.name || projectId} (stage: Closed)`,
-                      dedupeKey: `closeout_survey_no_mapping:${projectId}:${Date.now()}`,
-                      status: 'failed',
-                      errorMessage: 'no_hubspot_mapping',
-                      metadata: { projectId, projectName: project?.name, reason: 'No HubSpot deal linked', surveySuccess: surveyResult.success },
-                      sentAt: new Date(),
-                    });
+                    // Only log failed when the survey actually failed; if PM fallback succeeded, skip this to avoid misleading UI
+                    if (!surveyResult.success) {
+                      await storage.createEmailSendLog({
+                        templateKey: 'closeout_survey',
+                        recipientEmail: '(no HubSpot mapping)',
+                        recipientName: null,
+                        subject: `Closeout survey: ${project?.name || projectId} (stage: Closed)`,
+                        dedupeKey: `closeout_survey_no_mapping:${projectId}:${Date.now()}`,
+                        status: 'failed',
+                        errorMessage: surveyResult.error || 'no_hubspot_mapping',
+                        metadata: { projectId, projectName: project?.name, reason: 'No HubSpot deal linked', surveyError: surveyResult.error },
+                        sentAt: new Date(),
+                      });
+                    }
                   }
                 } catch (surveyErr: any) {
                   console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);

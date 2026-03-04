@@ -51,7 +51,7 @@
 
 import { storage } from './storage';
 import { sendEmail, renderTemplate } from './email-service';
-import { deactivateProject, fetchProcoreProjectDetail } from './procore';
+import { deactivateProject, fetchProcoreProjectDetail, syncProcoreRoleAssignments } from './procore';
 import { startProjectArchive, getArchiveProgress } from './project-archive';
 import crypto from 'crypto';
 
@@ -114,7 +114,39 @@ export async function triggerCloseoutSurvey(
       }
     }
 
-    // Fallback: Use Procore project data if no HubSpot owner found
+    // Fallback: Project Manager from Procore role assignments (Portfolio project)
+    if (!recipientEmail) {
+      let assignments = await storage.getProcoreRoleAssignmentsByProject(projectId);
+      // If no assignments yet (e.g. project not in role sync), sync this project's roles once
+      if (assignments.length === 0) {
+        try {
+          await syncProcoreRoleAssignments([projectId]);
+          assignments = await storage.getProcoreRoleAssignmentsByProject(projectId);
+        } catch (syncErr) {
+          console.warn(`[closeout] Role sync for project ${projectId} failed:`, syncErr);
+        }
+      }
+      const roleLower = (r: string | null | undefined) => (r || '').toLowerCase();
+      const isProjectManagerRole = (r: string | null | undefined) => {
+        const lower = roleLower(r);
+        return lower.includes('project manager') || lower === 'pm' || lower.includes('proj. manager');
+      };
+      const pmAssignment = assignments.find(a => isProjectManagerRole(a.roleName));
+      if (pmAssignment) {
+        let pmEmail = pmAssignment.assigneeEmail;
+        if (!pmEmail && pmAssignment.assigneeId) {
+          const procoreUser = await storage.getProcoreUserByProcoreId(pmAssignment.assigneeId);
+          pmEmail = procoreUser?.emailAddress || '';
+        }
+        if (pmEmail) {
+          recipientEmail = pmEmail;
+          recipientName = pmAssignment.assigneeName || 'Project Manager';
+          console.log(`[closeout] Using Project Manager from Procore: ${recipientName} (${recipientEmail})`);
+        }
+      }
+    }
+
+    // Fallback: Use Procore project data (client/owner) if still no recipient
     if (!recipientEmail) {
       recipientEmail = projectDetail.client_email || projectDetail.owner_email || '';
       recipientName = recipientName || projectDetail.client_name || projectDetail.company?.name || 'Valued Client';
