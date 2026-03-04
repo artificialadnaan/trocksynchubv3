@@ -5730,7 +5730,7 @@ function renderRfpPage(title: string, content: string): string {
 </head>
 <body>
   <div class="container">
-    <div class="header"><img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction"></div>
+    <div class="header">${RFP_LOGO_HTML}</div>
     <div class="accent"></div>
     <div class="body"><h1>${title}</h1>${content}</div>
   </div>
@@ -5738,22 +5738,31 @@ function renderRfpPage(title: string, content: string): string {
 </html>`;
 }
 
+const RFP_LOGO_HTML = `<img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction" referrerpolicy="no-referrer" onerror="this.style.display='none';var s=this.nextElementSibling;s.style.display='inline';"><span style="display:none;color:#fff;font-size:22px;font-weight:700;letter-spacing:0.5px;">T-Rock Construction</span>`;
+
 function renderRfpReviewPage(token: string, d: Record<string, any>): string {
   const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
   const field = (label: string, name: string, value: any, type = 'text') => {
     if (name === 'project_types') {
-      const val = String(value || '');
+      const val = String(value || '').trim();
+      const options = [
+        { id: '1', name: 'Exterior Renovation' },
+        { id: '2', name: 'Interior Renovation' },
+        { id: '3', name: 'Roofing' },
+        { id: '4', name: 'Service' },
+        { id: '5', name: 'Commercial' },
+        { id: '6', name: 'Hospitality' },
+        { id: '7', name: 'Emergency' },
+        { id: '8', name: 'Development' },
+        { id: '9', name: 'Residential' },
+      ];
+      const opts = options.map(o => `<option value="${o.id}"${val === o.id ? ' selected' : ''}>${o.id} - ${o.name}</option>`).join('');
       return `<div class="field">
         <label>${label}</label>
         <select name="${name}">
           <option value="">-- Select --</option>
-          <option value="1"${val === '1' ? ' selected' : ''}>1 - New Construction</option>
-          <option value="2"${val === '2' ? ' selected' : ''}>2 - Renovation</option>
-          <option value="3"${val === '3' ? ' selected' : ''}>3 - Tenant Improvement</option>
-          <option value="4"${val === '4' ? ' selected' : ''}>4 - Service</option>
-          <option value="5"${val === '5' ? ' selected' : ''}>5 - Emergency</option>
-          <option value="6"${val === '6' ? ' selected' : ''}>6 - Other</option>
+          ${opts}
         </select>
       </div>`;
     }
@@ -5822,7 +5831,7 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
 </head>
 <body>
   <div class="container">
-    <div class="header"><img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction"></div>
+    <div class="header">${RFP_LOGO_HTML}</div>
     <div class="accent"></div>
     <div class="body">
       <h1>RFP Review &amp; Approval</h1>
