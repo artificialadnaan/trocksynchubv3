@@ -52,6 +52,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/drizzle.config.ts ./
 COPY --from=builder /app/shared ./shared
+COPY --from=builder /app/scripts ./scripts
 
 # Install Playwright browsers in production image
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
