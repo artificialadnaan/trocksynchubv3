@@ -154,7 +154,19 @@ export async function triggerCloseoutSurvey(
     }
 
     if (!recipientEmail) {
-      return { success: false, error: 'No recipient email found - neither HubSpot deal owner nor Procore client email available' };
+      const errMsg = 'No recipient email found - neither HubSpot deal owner nor Procore client email available';
+      await storage.createEmailSendLog({
+        templateKey: 'closeout_survey',
+        recipientEmail: '(no recipient)',
+        recipientName: null,
+        subject: `Closeout survey: ${projectDetail.name || projectId} (no recipient)`,
+        dedupeKey: `closeout_survey_no_recipient:${projectId}:${Date.now()}`,
+        status: 'failed',
+        errorMessage: errMsg,
+        metadata: { projectId, projectName: projectDetail.name, reason: 'no_recipient' },
+        sentAt: new Date(),
+      });
+      return { success: false, error: errMsg };
     }
 
     const template = await storage.getEmailTemplate('closeout_survey');

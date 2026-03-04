@@ -959,10 +959,8 @@ export async function registerRoutes(
           const projectId = String(event.project_id || event.resource_id || "");
           if (projectId) {
             console.log(`[webhook] Project update detected for ${projectId}, checking for changes...`);
-            console.log(`[DEBUG-CLOSEOUT] H1: projects block entered, projectId=${projectId}`);
 
             const project = await storage.getProcoreProjectByProcoreId(projectId);
-            console.log(`[DEBUG-CLOSEOUT] H4: projectFound=${!!project}`);
             if (!project) {
               console.log(`[webhook] Project ${projectId} not found locally, skipping change check`);
             } else {
@@ -1026,7 +1024,6 @@ export async function registerRoutes(
               const newStage = freshProject?.project_stage?.name || freshProject?.stage_name || freshProject?.stage || freshProject?.status_name || null;
               const oldStage = project.projectStageName || project.stage || null;
               const stageChangeDetected = !!(newStage && oldStage && newStage.trim() !== oldStage.trim());
-              console.log(`[DEBUG-CLOSEOUT] H2: newStage="${newStage}" oldStage="${oldStage}" stageChangeDetected=${stageChangeDetected} rawProjectStage=${JSON.stringify(freshProject?.project_stage)} rawStage=${freshProject?.stage}`);
 
               if (newStage && oldStage && newStage.trim() !== oldStage.trim()) {
                 console.log(`[webhook] Stage change detected: "${oldStage}" → "${newStage}" for project ${project.name}`);
@@ -1112,8 +1109,6 @@ export async function registerRoutes(
                     details: { projectId, projectName: project.name, oldStage, newStage, hubspotDealId: null, reason: 'no_hubspot_mapping' },
                   });
                 }
-              } else {
-                console.log(`[DEBUG-CLOSEOUT] Stage change block NOT entered (no change or missing stage data)`);
               }
 
               // Trigger closeout when project is Closed even if no stage change was detected (e.g. oldStage was null)
@@ -1121,25 +1116,11 @@ export async function registerRoutes(
               if (isProcoreClosedStage(newStage)) {
                 try {
                   const surveyResult = await triggerCloseoutSurvey(projectId, {});
-                  console.log(`[DEBUG-CLOSEOUT] Closeout (standalone): surveySuccess=${surveyResult.success} surveyError=${surveyResult.error}`);
                   const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
                   if (mapping?.hubspotDealId) {
                     console.log(`[webhook] Closeout survey triggered (Procore Closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
                   } else {
-                    // Only log failed when the survey actually failed; if PM fallback succeeded, skip this to avoid misleading UI
-                    if (!surveyResult.success) {
-                      await storage.createEmailSendLog({
-                        templateKey: 'closeout_survey',
-                        recipientEmail: '(no HubSpot mapping)',
-                        recipientName: null,
-                        subject: `Closeout survey: ${project?.name || projectId} (stage: Closed)`,
-                        dedupeKey: `closeout_survey_no_mapping:${projectId}:${Date.now()}`,
-                        status: 'failed',
-                        errorMessage: surveyResult.error || 'no_hubspot_mapping',
-                        metadata: { projectId, projectName: project?.name, reason: 'No HubSpot deal linked', surveyError: surveyResult.error },
-                        sentAt: new Date(),
-                      });
-                    }
+                    console.log(`[webhook] Closeout survey for project ${projectId} (no HubSpot mapping):`, surveyResult.success ? 'sent' : surveyResult.error);
                   }
                 } catch (surveyErr: any) {
                   console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);
