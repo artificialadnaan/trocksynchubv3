@@ -982,7 +982,39 @@ export async function registerRoutes(
 
             const project = await storage.getProcoreProjectByProcoreId(projectId);
             if (!project) {
-              console.log(`[webhook] Project ${projectId} not found locally, skipping change check`);
+              // Project not in local DB - still try to sync stage to HubSpot if we have a mapping
+              const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+              if (mapping?.hubspotDealId) {
+                try {
+                  const { fetchProcoreProjectDetail } = await import('./procore');
+                  const freshProject = await fetchProcoreProjectDetail(projectId);
+                  const newStage = freshProject?.project_stage?.name || freshProject?.stage_name || freshProject?.stage || freshProject?.status_name || null;
+                  if (newStage) {
+                    const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
+                    const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled !== false;
+                    if (stageSyncEnabled) {
+                      const hubspotStageLabel = mapProcoreStageToHubspot(newStage);
+                      const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+                      if (resolvedStage) {
+                        const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, resolvedStage.stageId);
+                        console.log(`[webhook] Project ${projectId} not in local DB - synced stage "${newStage}" to HubSpot deal ${mapping.hubspotDealId}: ${updateResult.message}`);
+                        await storage.createAuditLog({
+                          action: 'webhook_stage_change_processed',
+                          entityType: 'project_stage',
+                          entityId: projectId,
+                          source: 'procore',
+                          status: 'success',
+                          details: { projectId, newStage, hubspotDealId: mapping.hubspotDealId, reason: 'project_not_in_local_db' },
+                        });
+                      }
+                    }
+                  }
+                } catch (err: any) {
+                  console.error(`[webhook] Error syncing stage for project ${projectId} (not in local DB):`, err.message);
+                }
+              } else {
+                console.log(`[webhook] Project ${projectId} not found locally, skipping change check`);
+              }
             } else {
               const { fetchProcoreProjectDetail } = await import('./procore');
               const freshProject = await fetchProcoreProjectDetail(projectId);
@@ -1057,9 +1089,9 @@ export async function registerRoutes(
 
                 const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
                 if (mapping?.hubspotDealId) {
-                  // Check if stage sync automation is enabled (disabled by default)
+                  // Stage sync enabled by default; set procore_hubspot_stage_sync.enabled = false to disable
                   const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
-                  const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
+                  const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled !== false;
                   
                   if (!stageSyncEnabled) {
                     console.log(`[webhook] Stage sync disabled - skipping HubSpot update for deal ${mapping.hubspotDealId}`);
