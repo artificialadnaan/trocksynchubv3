@@ -971,12 +971,28 @@ export async function createBidBoardProject(
       if (projectData.estimator) {
         log(`Setting estimator: ${projectData.estimator}`, "playwright");
         try {
-          // Find the estimator field — look for the label first, then the adjacent select trigger
-          const estimatorLabel = page.locator('label, [class*="label"]').filter({ hasText: /estimator/i }).first();
-          let trigger = page.locator('div.aid-estimatorSelector div.StyledSelectButton, div.aid-estimatorSelector [role="button"]').first();
+          // Strategy 1: BidBoard adds aid-estimatorSelector class on the container
+          let trigger = page.locator('div.aid-estimatorSelector').locator('div.StyledSelectButton, [role="button"]').first();
           if ((await trigger.count()) === 0) {
-            // Fallback: any StyledSelectButton that isn't the office selector
-            trigger = page.locator('div.StyledSelectButton').first();
+            // Strategy 2: aria-label or title attribute containing "estimator"
+            trigger = page.locator('[aria-label*="estimator" i], [title*="estimator" i]').first();
+          }
+          if ((await trigger.count()) === 0) {
+            // Strategy 3: XPath — find a StyledSelectButton or role=button immediately following a label with text "Estimator"
+            trigger = page.locator('xpath=//label[contains(translate(normalize-space(),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"estimator")]/following::*[contains(@class,"StyledSelectButton") or @role="button"][1]').first();
+          }
+          if ((await trigger.count()) === 0) {
+            // Strategy 4: find any div with StyledSelectButton that is NOT inside the office or customer selectors
+            const allBtns = page.locator('div.StyledSelectButton');
+            const btnCount = await allBtns.count();
+            log(`Estimator fallback: found ${btnCount} StyledSelectButton elements. Trying second one (index 1).`, "playwright");
+            await takeScreenshot(page, "bidboard-estimator-lookup");
+            // Office is usually first; estimator is typically second
+            if (btnCount >= 2) {
+              trigger = allBtns.nth(1);
+            } else if (btnCount === 1) {
+              trigger = allBtns.first();
+            }
           }
           if ((await trigger.count()) > 0) {
             await trigger.click({ timeout: 8000 });
@@ -1197,23 +1213,54 @@ export async function createBidBoardProject(
               const countryInput = await page.$('input[name="country"], input[placeholder*="Country"]');
               if (countryInput) await countryInput.fill(projectData.country);
             }
-            // Save the address dialog — try Save, then Confirm, then any primary button
+            // Save the address dialog — try Save, then Confirm, then any primary/submit button
             const dialogBtns = page.locator('[role="dialog"]').locator('button');
-            const saveBtn = dialogBtns.filter({ hasText: /^Save$/i }).first();
-            const confirmBtn = dialogBtns.filter({ hasText: /^(Confirm|Done|OK)$/i }).first();
+            // Use loose regex (no anchors) so "Save Address", "Save Changes", etc. all match
+            const saveBtn = dialogBtns.filter({ hasText: /save/i }).first();
+            const confirmBtn = dialogBtns.filter({ hasText: /confirm|done|ok|submit/i }).first();
             const closeAddressDialog = async (method: string) => {
-              const closed = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 8000 })
+              // Give the form/server time to process after the save button click
+              const closed = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 12000 })
                 .then(() => true).catch(() => false);
               if (!closed) {
-                log(`Address dialog still open after ${method}, trying Enter key`, "playwright");
-                await page.keyboard.press('Enter');
-                await randomDelay(500, 800);
-                const closedAfterEnter = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 5000 })
+                log(`Address dialog still open after ${method}, trying close/X button`, "playwright");
+                // Step 1: look for a close/X button in the dialog header (most reliable)
+                try {
+                  const closeBtn = page.locator('[role="dialog"]').locator('button[aria-label*="close" i], button[aria-label*="dismiss" i], button.MuiIconButton-root').first();
+                  if ((await closeBtn.count()) > 0) {
+                    await closeBtn.click({ force: true, timeout: 3000 });
+                    await randomDelay(500, 800);
+                  }
+                } catch { /* ignore */ }
+                const closedAfterX = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 4000 })
                   .then(() => true).catch(() => false);
-                if (!closedAfterEnter) {
-                  log("Address dialog still open after Enter — pressing Escape to force-close", "playwright");
-                  await page.keyboard.press('Escape');
-                  await randomDelay(500, 800);
+                if (!closedAfterX) {
+                  // Step 2: click the MUI backdrop (semi-transparent overlay)
+                  log(`Address dialog still open after X button, clicking backdrop`, "playwright");
+                  try {
+                    const backdrop = page.locator('.MuiBackdrop-root').first();
+                    if ((await backdrop.count()) > 0) {
+                      await backdrop.click({ force: true, timeout: 3000 });
+                      await randomDelay(500, 800);
+                    }
+                  } catch { /* ignore */ }
+                  const closedAfterBackdrop = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 5000 })
+                    .then(() => true).catch(() => false);
+                  if (!closedAfterBackdrop) {
+                    // Step 3: dispatch Escape on the document via JavaScript (bypasses input key handlers)
+                    log("Backdrop click did not close dialog, dispatching Escape via JS", "playwright");
+                    await page.evaluate(() => {
+                      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true }));
+                    });
+                    await randomDelay(500, 800);
+                    const closedAfterJS = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 5000 })
+                      .then(() => true).catch(() => false);
+                    if (!closedAfterJS) {
+                      log("Address dialog could not be closed — will proceed anyway", "playwright");
+                      await page.mouse.click(10, 10, { force: true }).catch(() => {});
+                      await randomDelay(500, 800);
+                    }
+                  }
                 }
               }
             };
@@ -1236,8 +1283,19 @@ export async function createBidBoardProject(
                 await randomDelay(500, 1000);
                 log("Address saved via aid-confirmButton", "playwright");
               } else {
-                await takeScreenshot(page, "bidboard-address-save-not-found");
-                log("Address Save/Confirm button not found — check screenshot", "playwright");
+                // Last resort: any type="submit" button inside the dialog
+                const submitBtn = await page.$('[role="dialog"] button[type="submit"]');
+                if (submitBtn) {
+                  await submitBtn.click({ force: true });
+                  await closeAddressDialog("type=submit");
+                  await randomDelay(500, 1000);
+                  log("Address saved via type=submit button", "playwright");
+                } else {
+                  await takeScreenshot(page, "bidboard-address-save-not-found");
+                  log("Address Save/Confirm button not found — check screenshot", "playwright");
+                  // Still try to close the dialog even if we couldn't find the save button
+                  await closeAddressDialog("no-save-btn");
+                }
               }
             }
           } else {
