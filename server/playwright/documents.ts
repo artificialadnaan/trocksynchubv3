@@ -267,6 +267,10 @@ export async function uploadDocumentToBidBoard(
     const isNewBidBoard = page.url().includes("/tools/bid-board");
 
     const { paths: filePaths, names: documentNames, tempDirs } = await resolveDocumentPaths(documents);
+    if (filePaths.length === 0) {
+      log("No file paths available for upload", "playwright");
+      return false;
+    }
 
     if (isNewBidBoard) {
       // Wait for SPA content to fully render before looking for the upload button
@@ -623,16 +627,12 @@ export async function syncHubSpotAttachmentsToBidBoard(
     const attachments = await getHubSpotDealAttachments(hubspotDealId);
     result.documentsDownloaded = attachments.length;
     
-    // Upload each attachment to BidBoard
-    for (const attachment of attachments) {
-      const uploaded = await uploadDocumentToBidBoard(page, bidboardProjectId, attachment);
-      if (uploaded) {
-        result.documentsUploaded++;
-      } else {
-        result.errors.push(`Failed to upload ${attachment.name}`);
-      }
+    // Batch upload all attachments in one modal session
+    if (attachments.length > 0) {
+      const uploaded = await uploadDocumentToBidBoard(page, bidboardProjectId, attachments);
+      result.documentsUploaded = uploaded ? attachments.length : 0;
+      if (!uploaded) result.errors.push(`Failed to upload ${attachments.length} attachment(s)`);
     }
-    
     result.success = result.errors.length === 0;
     
     log(`Synced ${result.documentsUploaded}/${attachments.length} documents from HubSpot to BidBoard`, "playwright");
@@ -664,11 +664,17 @@ export async function syncAttachmentsListToBidBoard(
       return result;
     }
     result.documentsDownloaded = attachments.length;
-    for (const att of attachments) {
-      const doc: DocumentInfo = { name: att.name, url: att.url, localPath: att.localPath, type: att.type, size: att.size };
-      const uploaded = await uploadDocumentToBidBoard(page, bidboardProjectId, doc);
-      if (uploaded) result.documentsUploaded++;
-      else result.errors.push(`Failed to upload ${att.name}`);
+    if (attachments.length > 0) {
+      const docs: DocumentInfo[] = attachments.map((att) => ({
+        name: att.name,
+        url: att.url,
+        localPath: att.localPath,
+        type: att.type,
+        size: att.size,
+      }));
+      const uploaded = await uploadDocumentToBidBoard(page, bidboardProjectId, docs);
+      result.documentsUploaded = uploaded ? docs.length : 0;
+      if (!uploaded) result.errors.push(`Failed to upload ${docs.length} attachment(s)`);
     }
     result.success = result.errors.length === 0;
   } catch (e: any) {
