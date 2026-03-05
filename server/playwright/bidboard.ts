@@ -369,7 +369,16 @@ export async function navigateToProject(page: Page, projectId: string): Promise<
   const projectUrl = `${baseUrl}/webclients/host/companies/${companyId}/tools/bid-board/project/${projectId}/details`;
 
   log(`Navigating to project: ${projectUrl}`, "playwright");
-  await page.goto(projectUrl, { waitUntil: "networkidle", timeout: 60000 });
+  try {
+    await page.goto(projectUrl, { waitUntil: "load", timeout: 90000 });
+  } catch (navErr: any) {
+    if (navErr.message?.includes('Timeout')) {
+      log(`Navigation timeout (load), continuing with domcontentloaded`, "playwright");
+      await page.goto(projectUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    } else {
+      throw navErr;
+    }
+  }
   await randomDelay(2000, 3000);
   return true;
 }
@@ -984,12 +993,13 @@ export async function createBidBoardProject(
       }
       // Office: always select T-Rock Construction LLC
       try {
-        const officeSelector = page.locator('div.aid-officeSelector');
-        if ((await officeSelector.count()) > 0) {
-          await officeSelector.locator('div.StyledSelectButton').click();
+        const officeSelector = page.locator('div.aid-officeSelector').first();
+        const trigger = officeSelector.locator('div.StyledSelectButton, button[aria-haspopup="listbox"], [role="button"]').first();
+        if ((await officeSelector.count()) > 0 && (await trigger.count()) > 0) {
+          await trigger.click({ timeout: 15000 });
           await randomDelay(800, 1200);
-          const officeOption = page.locator('div[role="option"]').filter({ hasText: /T-Rock Construction LLC/i }).first();
-          await officeOption.click({ timeout: 5000 });
+          const officeOption = page.locator('div[role="option"], li[role="option"]').filter({ hasText: /T-Rock Construction LLC/i }).first();
+          await officeOption.click({ timeout: 8000 });
           await randomDelay(300, 500);
         }
       } catch (e: any) {
@@ -1059,9 +1069,10 @@ export async function createBidBoardProject(
       // Add Address: must run AFTER Add Customer dialog is closed (Select clicked)
       if (projectData.address || projectData.city || projectData.state || projectData.zip || projectData.country) {
         try {
-          const addAddrBtn = await page.$('button.aid-add-address-button');
-          if (addAddrBtn) {
-            await addAddrBtn.click();
+          await page.locator('[role="dialog"].aid-itemPickerDialog').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+          const addAddrBtn = page.locator('button.aid-add-address-button').first();
+          if ((await addAddrBtn.count()) > 0) {
+            await addAddrBtn.click({ force: true, timeout: 10000 });
             await randomDelay(1500, 2500);
             if (projectData.address) {
               const streetInput = await page.$('input[name="street"]');
@@ -1088,7 +1099,7 @@ export async function createBidBoardProject(
             }
             const saveBtn = page.locator('[role="dialog"].aid-formDialog').locator('button.aid-confirmButton').filter({ hasText: /Save/i }).first();
             if ((await saveBtn.count()) > 0) {
-              await saveBtn.click();
+              await saveBtn.click({ force: true });
               await randomDelay(1500, 2500);
             }
           }

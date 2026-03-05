@@ -91,7 +91,8 @@ const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
   'Estimate in Progress': 'Estimating',
   'Service – Estimating': 'Service – Estimating',
   'Service - Estimating': 'Service – Estimating',
-  
+  'Estimating - Under Review': 'Estimating',
+
   // Review stages
   'Estimate under review': 'Internal Review',
   'Estimate sent to Client': 'Proposal Sent',

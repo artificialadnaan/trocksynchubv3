@@ -508,6 +508,7 @@ async function fetchHubSpotOwners(): Promise<Map<string, string>> {
 /**
  * Sync all HubSpot owners to the local database.
  * Fetches owner data from HubSpot API and upserts to hubspot_owners table.
+ * If hubspot_owners table does not exist (e.g. fresh deploy), logs a warning and returns without failing.
  */
 export async function syncHubSpotOwners(): Promise<{ synced: number; created: number; updated: number }> {
   const accessToken = await getAccessToken();
@@ -519,7 +520,7 @@ export async function syncHubSpotOwners(): Promise<{ synced: number; created: nu
     const response = await fetch('https://api.hubapi.com/crm/v3/owners?limit=500', {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
     });
-    
+
     if (!response.ok) {
       console.error(`[hubspot] Failed to fetch owners: ${response.status}`);
       return { synced, created, updated };
@@ -529,29 +530,39 @@ export async function syncHubSpotOwners(): Promise<{ synced: number; created: nu
     const owners = data.results || [];
 
     for (const owner of owners) {
-      const existing = await storage.getHubspotOwnerByHubspotId(String(owner.id));
-      
-      await storage.upsertHubspotOwner({
-        hubspotId: String(owner.id),
-        email: owner.email || '',
-        firstName: owner.firstName || null,
-        lastName: owner.lastName || null,
-        userId: owner.userId ? String(owner.userId) : null,
-        teams: owner.teams ? JSON.stringify(owner.teams) : null,
-        archived: owner.archived || false,
-      });
-
-      synced++;
-      if (existing) {
-        updated++;
-      } else {
-        created++;
+      try {
+        const existing = await storage.getHubspotOwnerByHubspotId(String(owner.id));
+        await storage.upsertHubspotOwner({
+          hubspotId: String(owner.id),
+          email: owner.email || '',
+          firstName: owner.firstName || null,
+          lastName: owner.lastName || null,
+          userId: owner.userId ? String(owner.userId) : null,
+          teams: owner.teams ? JSON.stringify(owner.teams) : null,
+          archived: owner.archived || false,
+        });
+        synced++;
+        if (existing) {
+          updated++;
+        } else {
+          created++;
+        }
+      } catch (rowErr: any) {
+        if (rowErr.message?.includes('does not exist') || rowErr.code === '42P01') {
+          console.warn(`[hubspot] hubspot_owners table missing; owner sync skipped. Run db:push to create it.`);
+          return { synced, created, updated };
+        }
+        throw rowErr;
       }
     }
 
     console.log(`[hubspot] Synced ${synced} owners (${created} created, ${updated} updated)`);
   } catch (err: any) {
-    console.error(`[hubspot] Failed to sync owners:`, err.message);
+    if (err.message?.includes('does not exist') || err.code === '42P01') {
+      console.warn(`[hubspot] hubspot_owners table missing; owner sync skipped. Run db:push to create it.`);
+    } else {
+      console.error(`[hubspot] Failed to sync owners:`, err.message);
+    }
   }
 
   return { synced, created, updated };
@@ -1117,6 +1128,39 @@ export async function updateHubSpotDeal(hubspotDealId: string, properties: Recor
     await client.crm.deals.basicApi.update(hubspotDealId, { properties });
     return { success: true, message: `Deal ${hubspotDealId} updated` };
   } catch (e: any) {
+    let body = e.body ?? e.response?.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = null;
+      }
+    }
+    const invalidProps: string[] = [];
+    if (body?.errors && Array.isArray(body.errors)) {
+      for (const err of body.errors) {
+        if (err.code === 'PROPERTY_DOESNT_EXIST' && err.context?.propertyName) {
+          const names = Array.isArray(err.context.propertyName) ? err.context.propertyName : [err.context.propertyName];
+          invalidProps.push(...names);
+        }
+      }
+    }
+    if (invalidProps.length > 0) {
+      const filtered = { ...properties };
+      for (const key of invalidProps) {
+        delete filtered[key];
+      }
+      if (Object.keys(filtered).length > 0) {
+        try {
+          await (await getHubSpotClient()).crm.deals.basicApi.update(hubspotDealId, { properties: filtered });
+          console.warn(`[hubspot] Updated deal ${hubspotDealId} without unsupported properties: ${invalidProps.join(', ')}`);
+          return { success: true, message: `Deal ${hubspotDealId} updated (omitted ${invalidProps.length} unsupported properties)` };
+        } catch (retryErr: any) {
+          console.error(`Failed to update HubSpot deal ${hubspotDealId} (retry):`, retryErr.message);
+          return { success: false, message: retryErr.message };
+        }
+      }
+    }
     console.error(`Failed to update HubSpot deal ${hubspotDealId}:`, e.message);
     return { success: false, message: e.message };
   }

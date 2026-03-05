@@ -1452,8 +1452,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createEmailSendLog(data: InsertEmailSendLog): Promise<EmailSendLog> {
-    const [result] = await db.insert(emailSendLog).values(data).returning();
-    return result;
+    try {
+      const [result] = await db.insert(emailSendLog).values(data).returning();
+      return result!;
+    } catch (err: any) {
+      if (err.code === '23505' && err.constraint === 'email_send_log_dedupe_key_unique') {
+        const [existing] = await db.select().from(emailSendLog).where(eq(emailSendLog.dedupeKey, data.dedupeKey)).limit(1);
+        if (existing) return existing;
+      }
+      throw err;
+    }
   }
 
   async checkEmailDedupeKey(dedupeKey: string): Promise<boolean> {
