@@ -371,8 +371,8 @@ export async function uploadDocumentToBidBoard(
       }
     }
 
-    // Legacy: click upload button. New BidBoard: do NOT click "Upload Files" — it opens native
-    // file picker which closes the modal. We'll setInputFiles on the hidden input directly.
+    // Legacy: click upload button. New BidBoard: click "Upload Files" to open native file picker,
+    // then intercept with page.waitForEvent('filechooser') — setInputFiles on hidden input closes the modal.
     if (!isNewBidBoard) {
       const uploadButton = await page.$(PROCORE_SELECTORS.documents.uploadButton);
       if (!uploadButton) {
@@ -384,71 +384,88 @@ export async function uploadDocumentToBidBoard(
     }
     await randomDelay(1000, 2000);
 
-    // Upload file: New BidBoard — per-file loop (one file per modal cycle). Legacy — batch.
+    // Upload file: New BidBoard — per-file loop (one file per modal cycle). Use filechooser
+    // instead of setInputFiles on hidden input, which causes the modal to close.
     let success: boolean;
     if (isNewBidBoard) {
       let successCount = 0;
+
       for (let i = 0; i < filePaths.length; i++) {
         const filePath = filePaths[i];
         const fileName = documentNames[i];
 
         try {
+          // Re-open the upload modal for each file (first file: modal already open from caller)
           if (i > 0) {
-            await dismissOverlays(page);
-
-            let uploadBtn = await page.$("div.aid-upload-documents button, button:has-text('Upload')");
-            if (!uploadBtn) {
-              await page.waitForSelector("div.aid-upload-documents button, button:has-text('Upload')", { timeout: 10000 });
-              uploadBtn = await page.$("div.aid-upload-documents button, button:has-text('Upload')");
-            }
-            if (!uploadBtn) {
-              log(`Upload button not found for file ${fileName}, skipping`, "playwright");
-              continue;
-            }
-            await uploadBtn.click({ force: true });
-            await randomDelay(500, 1000);
-
-            const uploadAttachments = page.locator('li.aid-upload-attachments, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
-            await uploadAttachments.click({ timeout: 8000, force: true });
             await randomDelay(2000, 3000);
 
-            await page.waitForSelector('[class*="StyledDropzoneContainer"], button:has-text("Upload Files")', { timeout: 10000 }).catch(() => {});
+            // Click the Upload button (top right of project page)
+            const uploadBtn = page.locator('button:has-text("Upload"), div.aid-upload-documents button').first();
+            await uploadBtn.click({ force: true, timeout: 10000 });
+            await randomDelay(600, 1000);
+
+            // Click Upload Attachments from dropdown menu
+            const uploadAttachmentsItem = page.locator('li, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
+            await uploadAttachmentsItem.click({ timeout: 8000 });
+            await randomDelay(2000, 3000);
           }
 
-          let fileInputLoc = page.locator('input[type="file"]').first();
-          await fileInputLoc.waitFor({ state: 'attached', timeout: 8000 });
-          await fileInputLoc.setInputFiles(filePath, { noWaitAfter: true });
+          // Wait for the Attach Files modal to be fully open
+          await page.waitForSelector('text=Attach Files', { timeout: 10000 });
+          await randomDelay(500, 800);
 
-          log(`File set in dropzone: ${fileName}`, "playwright");
+          log(`Upload modal open for file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
+          await takeScreenshot(page, `upload-modal-open-${i + 1}`);
+
+          // Set up the file chooser interceptor BEFORE clicking Upload Files
+          const [fileChooser] = await Promise.all([
+            page.waitForEvent('filechooser', { timeout: 15000 }),
+            // Click the "Upload Files" button inside the modal (the dropzone button)
+            page.locator('[role="dialog"] button:has-text("Upload Files"), .StyledDropzoneContainer button').first().click({ timeout: 8000 }),
+          ]);
+
+          // Set the file via the intercepted file chooser
+          await fileChooser.setFiles(filePath);
+          await randomDelay(1500, 2500);
+
+          log(`File set via filechooser: ${fileName}`, "playwright");
           await takeScreenshot(page, `upload-file-set-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
 
-          try {
-            await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled])', { timeout: 60000 });
-          } catch {
-            await page.waitForSelector('[data-qa="qa-attach-button"]', { timeout: 60000 });
-            await randomDelay(2000, 3000);
-          }
+          // Wait for Attach button to become enabled (file name should appear in modal)
+          await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled]), button:has-text("Attach"):not([disabled])', { timeout: 30000 });
+          await randomDelay(500, 800);
 
-          await dismissOverlays(page);
           await takeScreenshot(page, `upload-before-attach-${i + 1}`);
 
-          const attachSpan = page.locator('[data-qa="qa-attach-button"] span').first();
-          await attachSpan.click({ timeout: 30000, force: true });
+          // Click Attach
+          const attachBtn = page.locator('[data-qa="qa-attach-button"], button:has-text("Attach")').first();
+          await attachBtn.click({ force: true, timeout: 15000 });
 
-          await page.waitForSelector('div.StyledModalBody-core-12_35_0__sc-1ijdug2-4', { state: 'hidden', timeout: 30000 }).catch(() => {});
+          // Wait for modal to close (success)
+          await page.waitForSelector('text=Attach Files', { state: 'hidden', timeout: 30000 });
           await randomDelay(2000, 3000);
 
           successCount++;
-          log(`Uploaded file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
+          log(`Successfully uploaded file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
+          await takeScreenshot(page, `upload-success-${i + 1}`);
         } catch (err: any) {
-          log(`Failed to upload ${fileName}: ${err.message}`, "playwright");
+          log(`Failed to upload file ${i + 1} (${fileName}): ${err.message}`, "playwright");
+          await takeScreenshot(page, `upload-error-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
+
+          // Try to dismiss modal if still open before next iteration
+          try {
+            const cancelBtn = page.locator('button:has-text("Cancel")').first();
+            if (await cancelBtn.isVisible({ timeout: 2000 })) {
+              await cancelBtn.click();
+              await randomDelay(1000, 1500);
+            }
+          } catch { /* ignore */ }
         }
       }
 
       success = successCount > 0;
-      const namesStr = documentNames.slice(0, successCount).join(", ");
+      log(`Upload complete: ${successCount}/${filePaths.length} files uploaded to BidBoard project ${projectId}`, "playwright");
       if (success) {
-        log(`Successfully uploaded ${successCount}/${filePaths.length} file(s) to BidBoard project ${projectId}: ${namesStr}`, "playwright");
         await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentNames: documentNames.slice(0, successCount), count: successCount });
       } else {
         log(`Failed to upload any files to BidBoard project ${projectId}`, "playwright");

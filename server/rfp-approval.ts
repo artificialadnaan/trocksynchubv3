@@ -33,27 +33,24 @@ async function uploadFileToHubSpotAndAttachToDeal(
     throw new Error(`HubSpot file upload failed: ${uploadRes.status} ${errText}`);
   }
   const uploadJson = (await uploadRes.json()) as { id?: string };
-  const fileId = uploadJson.id;
+  const fileId = String(uploadJson.id ?? '');
   if (!fileId) throw new Error('HubSpot file upload did not return file id');
 
-  // HubSpot v4 associations: "file" is not a valid object type; use "0-4" or associate from deal side
-  let assocRes = await fetch(
-    `${base}/crm/v4/objects/0-4/${fileId}/associations/default/deal/${dealId}`,
-    { method: 'PUT', headers: { Authorization: `Bearer ${token}` } }
-  );
-  if (!assocRes.ok) {
-    const errText = await assocRes.text();
-    // Fallback: associate from deal to file
-    assocRes = await fetch(
-      `${base}/crm/v4/objects/deals/${dealId}/associations/default/0-4/${fileId}`,
-      { method: 'PUT', headers: { Authorization: `Bearer ${token}` } }
+  // Associate file with deal: from deal → to file. Use "deals" and "files" object types.
+  // (0-4 was incorrectly interpreted as engagement; "files" is the correct type.)
+  try {
+    const client = await getHubSpotClient();
+    await client.crm.associations.v4.basicApi.create(
+      'deals',
+      dealId,
+      'files',
+      fileId,
+      [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }]
     );
-    if (!assocRes.ok) {
-      const fallbackErr = await assocRes.text();
-      console.error(`[rfp-approval] HubSpot file-deal association failed: ${fallbackErr}`);
-      // Do NOT throw — BidBoard upload is the priority; log and continue
-      return;
-    }
+    log(`[rfp-approval] Associated file ${fileId} with deal ${dealId}`, 'rfp');
+  } catch (assocErr: any) {
+    log(`[rfp-approval] HubSpot file-deal association failed: ${assocErr.message}`, 'rfp');
+    // Non-fatal — file was uploaded successfully, association is best-effort
   }
 }
 
