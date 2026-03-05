@@ -1236,10 +1236,9 @@ export async function createBidBoardProject(
         log("Address: no address fields provided in project data", "playwright");
       }
 
-      // Fill Project Description
+      // Fill Project Description (after estimator, due date, customer, address; before save)
       if (projectData.description) {
-        const descTextarea = (await page.$('div.aid-project-description textarea'))
-          || (await page.$('textarea[placeholder]'))
+        const descTextarea = (await page.$('label:has-text("Project Description") + * textarea'))
           || (await page.$('textarea'));
         if (descTextarea) {
           await descTextarea.fill(projectData.description);
