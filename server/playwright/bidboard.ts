@@ -71,6 +71,27 @@ export interface BidBoardSyncResult {
   errors: string[];
 }
 
+const STATE_ABBREVIATIONS: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
+  colorado: "CO", connecticut: "CT", delaware: "DE", florida: "FL", georgia: "GA",
+  hawaii: "HI", idaho: "ID", illinois: "IL", indiana: "IN", iowa: "IA",
+  kansas: "KS", kentucky: "KY", louisiana: "LA", maine: "ME", maryland: "MD",
+  massachusetts: "MA", michigan: "MI", minnesota: "MN", mississippi: "MS",
+  missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV", "new hampshire": "NH",
+  "new jersey": "NJ", "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+  "north dakota": "ND", ohio: "OH", oklahoma: "OK", oregon: "OR", pennsylvania: "PA",
+  "rhode island": "RI", "south carolina": "SC", "south dakota": "SD", tennessee: "TN",
+  texas: "TX", utah: "UT", vermont: "VT", virginia: "VA", washington: "WA",
+  "west virginia": "WV", wisconsin: "WI", wyoming: "WY",
+};
+
+function normalizeState(state: string): string {
+  if (!state) return state;
+  if (state.trim().length === 2) return state.trim().toUpperCase();
+  const abbrev = STATE_ABBREVIATIONS[state.trim().toLowerCase()];
+  return abbrev || state.trim();
+}
+
 async function getCompanyId(): Promise<string | null> {
   const config = await storage.getAutomationConfig("procore_config");
   return (config?.value as any)?.companyId || null;
@@ -946,27 +967,55 @@ export async function createBidBoardProject(
 
     if (isNewBidBoardUi) {
       // New UI: office (T-Rock Construction LLC), due date, Add Customer, Add Address
-      // Estimator: click to open, clear default, search, select
+      // Estimator: open the dropdown, clear default, search by name, select
       if (projectData.estimator) {
+        log(`Setting estimator: ${projectData.estimator}`, "playwright");
         try {
-          const estimatorTrigger = page.locator('div.StyledSelectButton').filter({ has: page.locator('button[data-qa="core-select-clear"]') }).first();
-          const trigger = estimatorTrigger;
+          // Find the estimator field — look for the label first, then the adjacent select trigger
+          const estimatorLabel = page.locator('label, [class*="label"]').filter({ hasText: /estimator/i }).first();
+          let trigger = page.locator('div.aid-estimatorSelector div.StyledSelectButton, div.aid-estimatorSelector [role="button"]').first();
+          if ((await trigger.count()) === 0) {
+            // Fallback: any StyledSelectButton that isn't the office selector
+            trigger = page.locator('div.StyledSelectButton').first();
+          }
           if ((await trigger.count()) > 0) {
-            await trigger.click();
+            await trigger.click({ timeout: 8000 });
             await randomDelay(800, 1200);
-            const clearBtn = await page.$('button[data-qa="core-select-clear"], button[aria-label="Delete field"]');
+            // Clear existing value
+            const clearBtn = await page.$('button[data-qa="core-select-clear"], button[aria-label="Delete field"], button[aria-label="Clear"]');
             if (clearBtn) {
               await clearBtn.click();
               await randomDelay(500, 800);
             }
-            const searchInput = await page.$('input[data-qa="core-typeahead-input"], input[role="searchbox"][placeholder="Search"]');
+            // Type to search
+            const searchInput = await page.$('input[data-qa="core-typeahead-input"], input[role="combobox"], input[role="searchbox"]');
             if (searchInput) {
               await searchInput.fill(projectData.estimator);
               await randomDelay(1500, 2500);
-              const option = page.locator('div[role="option"]').filter({ hasText: new RegExp(projectData.estimator.slice(0, 8), "i") }).first();
-              await option.click({ timeout: 5000 });
+              // Wait for dropdown options to appear then click best match
+              try {
+                await page.waitForSelector('div[role="option"], li[role="option"]', { timeout: 5000 });
+                const option = page.locator('div[role="option"], li[role="option"]')
+                  .filter({ hasText: new RegExp(projectData.estimator.split(' ')[0], "i") })
+                  .first();
+                if ((await option.count()) > 0) {
+                  await option.click({ timeout: 5000 });
+                  log(`Estimator selected: ${projectData.estimator}`, "playwright");
+                } else {
+                  log(`No estimator option matched "${projectData.estimator}"`, "playwright");
+                  await page.keyboard.press('Escape');
+                }
+              } catch {
+                log(`Estimator dropdown options not found for "${projectData.estimator}"`, "playwright");
+                await page.keyboard.press('Escape');
+              }
               await randomDelay(500, 1000);
+            } else {
+              log("Estimator search input not found", "playwright");
+              await page.keyboard.press('Escape');
             }
+          } else {
+            log("Estimator trigger button not found", "playwright");
           }
         } catch (e: any) {
           log(`Estimator selection failed: ${e.message}`, "playwright");
@@ -1128,13 +1177,15 @@ export async function createBidBoardProject(
               if (cityInput) await cityInput.fill(projectData.city);
             }
             if (projectData.state) {
+              const stateAbbrev = normalizeState(projectData.state);
+              log(`State normalized: "${projectData.state}" → "${stateAbbrev}"`, "playwright");
               const stateInput = await page.$('input[name="state"], input[placeholder*="State"], select[name="state"]');
               if (stateInput) {
                 const tag = await stateInput.evaluate(el => el.tagName.toUpperCase());
                 if (tag === 'SELECT') {
-                  await stateInput.selectOption({ label: projectData.state });
+                  await stateInput.selectOption({ value: stateAbbrev }).catch(() => stateInput.selectOption({ label: projectData.state }));
                 } else {
-                  await stateInput.fill(projectData.state);
+                  await stateInput.fill(stateAbbrev);
                 }
               }
             }
@@ -1150,29 +1201,38 @@ export async function createBidBoardProject(
             const dialogBtns = page.locator('[role="dialog"]').locator('button');
             const saveBtn = dialogBtns.filter({ hasText: /^Save$/i }).first();
             const confirmBtn = dialogBtns.filter({ hasText: /^(Confirm|Done|OK)$/i }).first();
+            const closeAddressDialog = async (method: string) => {
+              const closed = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 8000 })
+                .then(() => true).catch(() => false);
+              if (!closed) {
+                log(`Address dialog still open after ${method}, trying Enter key`, "playwright");
+                await page.keyboard.press('Enter');
+                await randomDelay(500, 800);
+                const closedAfterEnter = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 5000 })
+                  .then(() => true).catch(() => false);
+                if (!closedAfterEnter) {
+                  log("Address dialog still open after Enter — pressing Escape to force-close", "playwright");
+                  await page.keyboard.press('Escape');
+                  await randomDelay(500, 800);
+                }
+              }
+            };
+
             if ((await saveBtn.count()) > 0) {
               await saveBtn.click({ force: true });
-              // Wait for the address dialog to actually close before proceeding
-              await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 10000 }).catch(() => {
-                log("Address dialog did not close after Save — may still be open", "playwright");
-              });
+              await closeAddressDialog("Save");
               await randomDelay(500, 1000);
               log("Address saved", "playwright");
             } else if ((await confirmBtn.count()) > 0) {
               await confirmBtn.click({ force: true });
-              await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 10000 }).catch(() => {
-                log("Address dialog did not close after Confirm — may still be open", "playwright");
-              });
+              await closeAddressDialog("Confirm");
               await randomDelay(500, 1000);
               log("Address confirmed", "playwright");
             } else {
-              // Last resort: click button.aid-confirmButton
               const aidBtn = await page.$('[role="dialog"] button.aid-confirmButton');
               if (aidBtn) {
                 await aidBtn.click({ force: true });
-                await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 10000 }).catch(() => {
-                  log("Address dialog did not close after aid-confirmButton — may still be open", "playwright");
-                });
+                await closeAddressDialog("aid-confirmButton");
                 await randomDelay(500, 1000);
                 log("Address saved via aid-confirmButton", "playwright");
               } else {
