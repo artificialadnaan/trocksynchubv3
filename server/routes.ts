@@ -4526,12 +4526,21 @@ export async function registerRoutes(
   app.post("/api/hubspot/owner-mappings", requireAuth, async (req, res) => {
     try {
       const { hubspotOwnerId, email, name } = req.body;
+      // #region agent log
+      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7325e4'},body:JSON.stringify({sessionId:'7325e4',location:'routes.ts:owner-mappings',message:'POST owner-mappings entry',data:{hasOwnerId:!!hubspotOwnerId,hasEmail:!!email,hubspotOwnerIdLen:String(hubspotOwnerId||'').length},hypothesisId:'H3',timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       if (!hubspotOwnerId || !email) {
         return res.status(400).json({ error: "hubspotOwnerId and email are required" });
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7325e4'},body:JSON.stringify({sessionId:'7325e4',location:'routes.ts:before-upsert',message:'before upsertHubspotOwnerMapping',data:{},hypothesisId:'H1',timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       const mapping = await storage.upsertHubspotOwnerMapping({ hubspotOwnerId: String(hubspotOwnerId), email, name: name || null });
       res.json(mapping);
     } catch (e: any) {
+      // #region agent log
+      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7325e4'},body:JSON.stringify({sessionId:'7325e4',location:'routes.ts:owner-mappings-catch',message:'POST owner-mappings error',data:{errMsg:(e?.message||'').slice(0,120)},hypothesisId:'H1',timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       res.status(500).json({ error: e.message });
     }
   });
@@ -4666,6 +4675,78 @@ export async function registerRoutes(
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==================== PLAYWRIGHT SCREENSHOTS ====================
+
+  // List all saved Playwright screenshots
+  app.get("/api/testing/playwright/screenshots", requireAuth, async (_req, res) => {
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const storageDir = process.env.PLAYWRIGHT_STORAGE_DIR || ".playwright-storage";
+      try {
+        await fs.access(storageDir);
+      } catch {
+        return res.json({ screenshots: [] });
+      }
+      const files = await fs.readdir(storageDir);
+      const screenshots = [];
+      for (const file of files) {
+        if (!file.match(/\.(png|jpg|jpeg)$/i)) continue;
+        const stat = await fs.stat(path.join(storageDir, file));
+        screenshots.push({
+          filename: file,
+          size: stat.size,
+          createdAt: stat.mtime.toISOString(),
+        });
+      }
+      screenshots.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      res.json({ screenshots });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Serve a specific screenshot file for viewing/downloading
+  app.get("/api/testing/playwright/screenshots/:filename", requireAuth, async (req, res) => {
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const storageDir = process.env.PLAYWRIGHT_STORAGE_DIR || ".playwright-storage";
+      const filename = path.basename(req.params.filename);
+      const filePath = path.join(storageDir, filename);
+      try {
+        await fs.access(filePath);
+      } catch {
+        return res.status(404).json({ error: "Screenshot not found" });
+      }
+      const ext = path.extname(filename).toLowerCase();
+      const mimeType = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'application/octet-stream';
+      res.setHeader('Content-Type', mimeType);
+      if (req.query.download === 'true') {
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      }
+      const data = await fs.readFile(filePath);
+      res.send(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Delete a specific screenshot
+  app.delete("/api/testing/playwright/screenshots/:filename", requireAuth, async (req, res) => {
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const storageDir = process.env.PLAYWRIGHT_STORAGE_DIR || ".playwright-storage";
+      const filename = path.basename(req.params.filename);
+      const filePath = path.join(storageDir, filename);
+      await fs.unlink(filePath);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 

@@ -41,7 +41,7 @@
 
 import { Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
-import { PROCORE_SELECTORS, getBidBoardUrl, getBidBoardUrlNew } from "./selectors";
+import { PROCORE_SELECTORS, getBidBoardUrlNew } from "./selectors";
 import { randomDelay, takeScreenshot, withRetry, waitForNavigation } from "./browser";
 import { log } from "../index";
 import { storage } from "../storage";
@@ -98,7 +98,9 @@ export async function navigateToBidBoard(
   log(`Navigating to BidBoard (new UI): ${newBidboardUrl}`, "playwright");
   
   try {
-    await page.goto(newBidboardUrl, { waitUntil: "networkidle", timeout: 60000 });
+    // Use 'load' instead of 'networkidle' - Procore's SPA has persistent connections
+    // (websockets, polling) that prevent networkidle from ever firing
+    await page.goto(newBidboardUrl, { waitUntil: "load", timeout: 60000 });
     await randomDelay(3000, 5000);
     
     // New BidBoard UI (tools/bid-board): wait for spaContent, Create New Project button, or stage tabs
@@ -111,47 +113,26 @@ export async function navigateToBidBoard(
     ];
     for (const sel of newUiSelectors) {
       try {
-        await page.waitForSelector(sel, { timeout: 20000 });
+        await page.waitForSelector(sel, { timeout: 15000 });
         log(`BidBoard loaded successfully (new URL): ${sel}`, "playwright");
         return true;
       } catch {
         /* try next */
       }
     }
-    log("New URL format failed, trying legacy URL...", "playwright");
-  } catch (err: any) {
-    log(`New URL navigation failed: ${err.message}`, "playwright");
-  }
-  
-  // Fallback to legacy URL format
-  const legacyBidboardUrl = getBidBoardUrl(companyId, sandbox);
-  log(`Navigating to BidBoard (legacy): ${legacyBidboardUrl}`, "playwright");
-  
-  try {
-    await page.goto(legacyBidboardUrl, { waitUntil: "networkidle", timeout: 60000 });
-    await randomDelay(2000, 3000);
-    
-    try {
-      await page.waitForSelector(PROCORE_SELECTORS.bidboard.container, { timeout: 15000 });
-      log("BidBoard loaded successfully (legacy URL)", "playwright");
+    // If we're on the new bid-board URL, treat as success - create flow will verify Create button
+    const url = page.url();
+    if (url.includes("/tools/bid-board")) {
+      log("BidBoard URL confirmed, treating as loaded (selectors may have changed)", "playwright");
       return true;
-    } catch {
-      try {
-        await page.waitForSelector(PROCORE_SELECTORS.bidboard.projectList, { timeout: 10000 });
-        log("BidBoard loaded successfully (legacy URL, project list)", "playwright");
-        return true;
-      } catch {
-        const screenshotPath = await takeScreenshot(page, "bidboard-not-found");
-        log(`BidBoard not found. Screenshot: ${screenshotPath}`, "playwright");
-        return false;
-      }
     }
   } catch (err: any) {
-    log(`Legacy URL navigation also failed: ${err.message}`, "playwright");
-    const screenshotPath = await takeScreenshot(page, "bidboard-navigation-failed");
-    log(`Screenshot saved: ${screenshotPath}`, "playwright");
-    return false;
+    log(`BidBoard navigation failed: ${err.message}`, "playwright");
   }
+  
+  const screenshotPath = await takeScreenshot(page, "bidboard-not-found");
+  log(`BidBoard not found. Screenshot: ${screenshotPath}`, "playwright");
+  return false;
 }
 
 export async function scrapeProjectList(page: Page): Promise<BidBoardProject[]> {

@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
-import { AlertCircle, CheckCircle2, Mail, Play, Camera, FileText, Loader2, AlertTriangle, Settings, Code, StopCircle, Navigation, MousePointer, Type, RefreshCw, Copy, Eye } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Mail, Play, Camera, FileText, Loader2, AlertTriangle, Settings, Code, StopCircle, Navigation, MousePointer, Type, RefreshCw, Copy, Eye, Download, Trash2, Image } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface TestingMode {
@@ -95,6 +95,28 @@ export default function TestingPage() {
       screenshotRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }, [screenshotResult]);
+
+  // Screenshot gallery state
+  const [previewScreenshot, setPreviewScreenshot] = useState<string | null>(null);
+
+  // Fetch saved screenshots
+  const { data: screenshotsData, isLoading: loadingScreenshots } = useQuery<{ screenshots: { filename: string; size: number; createdAt: string }[] }>({
+    queryKey: ['/api/testing/playwright/screenshots'],
+  });
+
+  const deleteScreenshot = useMutation({
+    mutationFn: async (filename: string) => {
+      const res = await fetch(`/api/testing/playwright/screenshots/${encodeURIComponent(filename)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error('Failed to delete screenshot');
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/testing/playwright/screenshots'] });
+    },
+  });
 
   // Fetch testing mode status
   const { data: testingMode, isLoading: loadingMode } = useQuery<TestingMode>({
@@ -866,6 +888,77 @@ export default function TestingPage() {
                   Portfolio
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Saved Screenshots Gallery */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <Image className="w-5 h-5 text-primary" />
+                Saved Screenshots
+              </CardTitle>
+              <CardDescription>
+                View and download screenshots captured by Playwright automation
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {loadingScreenshots ? (
+                <Skeleton className="h-20 w-full" />
+              ) : !screenshotsData?.screenshots?.length ? (
+                <p className="text-sm text-muted-foreground">No screenshots saved yet.</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="grid gap-3">
+                    {screenshotsData.screenshots.map((ss) => (
+                      <div key={ss.filename} className="flex items-center justify-between p-3 rounded-lg border bg-muted/30">
+                        <div className="flex-1 min-w-0 mr-3">
+                          <p className="text-sm font-medium truncate">{ss.filename}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {new Date(ss.createdAt).toLocaleString()} &middot; {(ss.size / 1024).toFixed(0)} KB
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setPreviewScreenshot(
+                              previewScreenshot === ss.filename ? null : ss.filename
+                            )}
+                          >
+                            <Eye className="w-4 h-4" />
+                          </Button>
+                          <a
+                            href={`/api/testing/playwright/screenshots/${encodeURIComponent(ss.filename)}?download=true`}
+                            download={ss.filename}
+                          >
+                            <Button size="sm" variant="ghost">
+                              <Download className="w-4 h-4" />
+                            </Button>
+                          </a>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => deleteScreenshot.mutate(ss.filename)}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {previewScreenshot && (
+                    <div className="mt-4 rounded-lg border overflow-hidden">
+                      <img
+                        src={`/api/testing/playwright/screenshots/${encodeURIComponent(previewScreenshot)}`}
+                        alt={previewScreenshot}
+                        className="w-full h-auto"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </CardContent>
           </Card>
 
