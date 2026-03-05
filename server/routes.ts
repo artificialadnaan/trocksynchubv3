@@ -5796,7 +5796,7 @@ main().catch(console.error);
           // #region agent log
           fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:rfp-review-fresh',message:'Fresh deal from HubSpot',data:{freshDescLen:(fresh.description||'').length,freshNotesLen:(fresh.notes||'').length,freshAttCount:(fresh.attachments||[]).length},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
           // #endregion
-          d = { ...d };
+          d = { ...d, ...fresh };
           if (!(d.description || d.notes)) {
             d.description = fresh.description || d.description;
             d.notes = fresh.notes || d.notes;
@@ -5814,6 +5814,20 @@ main().catch(console.error);
           // #endregion
           console.warn(`[rfp-review] Could not refresh deal data for ${request.hubspotDealId}:`, refreshErr.message);
         }
+      }
+      // Enrich from cached hubspot_deals if proposal_due_date or project_description__briefly_describe_the_project_ missing (e.g. legacy RFP requests)
+      const needsEnrichment = !(d.proposal_due_date || d.project_description__briefly_describe_the_project_);
+      if (needsEnrichment) {
+        try {
+          const cached = await storage.getHubspotDealByHubspotId(request.hubspotDealId);
+          const cp = (cached?.properties || {}) as Record<string, any>;
+          if (cp) {
+            if (!d.proposal_due_date && cp.proposal_due_date) d = { ...d, proposal_due_date: cp.proposal_due_date };
+            if (!d.project_description__briefly_describe_the_project_ && cp.project_description__briefly_describe_the_project_) {
+              d = { ...d, project_description__briefly_describe_the_project_: cp.project_description__briefly_describe_the_project_ };
+            }
+          }
+        } catch { /* ignore */ }
       }
       // #region agent log
       fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'1eb215'},body:JSON.stringify({sessionId:'1eb215',location:'routes.ts:rfp-review-render',message:'Rendering with d',data:{descLen:(d.description||'').length,attCount:(d.attachments||[]).length},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
@@ -5932,12 +5946,19 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
     if (val == null || val === '') return '';
     const n = typeof val === 'string' && /^\d+$/.test(val) ? parseInt(val, 10) : val;
     const date = new Date(n);
-    if (isNaN(date.getTime())) return esc(val);
+    if (isNaN(date.getTime())) return '';
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     return `${y}-${m}-${day}`;
   };
+
+  // Proposal Due Date: prefer proposal_due_date (HubSpot, Unix ms) over bid_due_date/due_date
+  const proposalDueDateRaw = d.proposal_due_date || d.bid_due_date || d.due_date;
+  const proposalDueDateFormatted = formatDateForInput(proposalDueDateRaw);
+
+  // Project Description: prefer project_description__briefly_describe_the_project_ over description
+  const projectDescription = (d.project_description__briefly_describe_the_project_ || d.description || '').trim();
 
   const field = (label: string, name: string, value: any, type = 'text') => {
     if (name === 'project_types') {
@@ -6060,7 +6081,7 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
         </div>
         <div class="row">
           ${field('Estimator', 'estimator', d.estimator)}
-          ${field('Proposal Due Date', 'bid_due_date', formatDateForInput(d.bid_due_date || d.due_date), 'date')}
+          ${field('Project Due Date', 'bid_due_date', proposalDueDateFormatted, 'date')}
         </div>
 
         <div class="section-title">Company &amp; Contact</div>
@@ -6080,7 +6101,7 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
         ${field('Country', 'country', d.country)}
 
         <div class="section-title">Details</div>
-        ${field('Description', 'description', d.description, 'textarea')}
+        ${field('Project Description', 'description', projectDescription, 'textarea')}
         ${field('Notes', 'notes', d.notes, 'textarea')}
 
         <div class="section-title">Attachments</div>

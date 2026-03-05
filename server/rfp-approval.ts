@@ -16,10 +16,11 @@ const RFP_REVIEW_RECIPIENTS = [
 
 const RFP_DEAL_PROPERTIES = [
   'dealname', 'amount', 'dealstage', 'pipeline', 'closedate',
-  'bid_due_date', 'due_date',
+  'bid_due_date', 'due_date', 'proposal_due_date',
   'hubspot_owner_id', 'project_types', 'project_number',
   'project_location', 'city', 'state', 'zip', 'country',
   'description', 'project_description', 'project_description_briefly_describe_the_project',
+  'project_description__briefly_describe_the_project_',
   'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes',
   'attachments', 'deal_attachments',
 ];
@@ -96,6 +97,8 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
     notes: props.notes || '',
     closedate: props.closedate || '',
     bid_due_date: props.bid_due_date || props.due_date || '',
+    proposal_due_date: props.proposal_due_date || '',
+    project_description__briefly_describe_the_project_: props.project_description__briefly_describe_the_project_ || '',
     estimator: props.estimator || '',
     company_name: companyName,
     client_email: contactEmail,
@@ -362,12 +365,22 @@ export async function processRfpApproval(
 
     if (Object.keys(changedFields).length > 0) {
       const hubspotUpdateProps: Record<string, string> = {};
+      const ALLOWED_HUBSPOT_KEYS = ['dealname', 'amount', 'project_types', 'project_number', 'project_location',
+        'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
+        'notes', 'bid_due_date', 'due_date', 'client_email', 'client_phone', 'company_name'];
       for (const [key, value] of Object.entries(changedFields)) {
-        if (['dealname', 'amount', 'project_types', 'project_number', 'project_location',
-             'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
-             'notes', 'bid_due_date', 'due_date', 'client_email', 'client_phone', 'company_name'].includes(key)) {
+        if (ALLOWED_HUBSPOT_KEYS.includes(key)) {
           hubspotUpdateProps[key] = value;
-          // Use only standard 'description'; project_description/project_description_briefly_describe_the_project are custom and may not exist
+        }
+      }
+      // Sync custom HubSpot properties when form fields change
+      if (changedFields.description !== undefined) {
+        hubspotUpdateProps.project_description__briefly_describe_the_project_ = changedFields.description;
+      }
+      if (changedFields.bid_due_date !== undefined) {
+        const dateStr = changedFields.bid_due_date;
+        if (dateStr && /^\d{4}-\d{2}-\d{2}/.test(dateStr)) {
+          hubspotUpdateProps.proposal_due_date = String(new Date(dateStr).getTime());
         }
       }
 

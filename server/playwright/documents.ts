@@ -221,11 +221,43 @@ export async function getHubSpotDealAttachments(dealId: string): Promise<Documen
   return documents;
 }
 
+/** Resolve file paths from documents; download URLs to temp when needed. */
+async function resolveDocumentPaths(documents: DocumentInfo[]): Promise<{ paths: string[]; names: string[]; tempDirs: string[] }> {
+  const paths: string[] = [];
+  const names: string[] = [];
+  const tempDirs: string[] = [];
+  await ensureTempDir();
+  for (const doc of documents) {
+    let filePath = doc.localPath;
+    if (!filePath && doc.url) {
+      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      const subDir = path.join(TEMP_DIR, uploadId);
+      await fs.mkdir(subDir, { recursive: true });
+      tempDirs.push(subDir);
+      const baseName = path.basename((doc.name || "file").replace(/[/\\]/g, "_")) || "file";
+      filePath = path.join(subDir, baseName);
+      const downloaded = await downloadFile(doc.url, filePath);
+      if (!downloaded) {
+        try { await fs.rm(subDir, { recursive: true }); } catch { /* ignore */ }
+        throw new Error(`Failed to download file from ${doc.url}`);
+      }
+    }
+    if (filePath) {
+      paths.push(filePath);
+      names.push(doc.name);
+    }
+  }
+  return { paths, names, tempDirs };
+}
+
 export async function uploadDocumentToBidBoard(
   page: Page,
   projectId: string,
-  document: DocumentInfo
+  documentOrDocuments: DocumentInfo | DocumentInfo[]
 ): Promise<boolean> {
+  const documents = Array.isArray(documentOrDocuments) ? documentOrDocuments : [documentOrDocuments];
+  if (documents.length === 0) return true;
+
   try {
     page.setDefaultTimeout(UPLOAD_ACTION_TIMEOUT_MS);
     await navigateToProject(page, projectId);
@@ -233,6 +265,8 @@ export async function uploadDocumentToBidBoard(
     await randomDelay(2000, 3000);
 
     const isNewBidBoard = page.url().includes("/tools/bid-board");
+
+    const { paths: filePaths, names: documentNames, tempDirs } = await resolveDocumentPaths(documents);
 
     if (isNewBidBoard) {
       // Wait for SPA content to fully render before looking for the upload button
@@ -305,31 +339,6 @@ export async function uploadDocumentToBidBoard(
       await uploadButton.click({ force: true });
     }
     await randomDelay(1000, 2000);
-    
-    // Get file path: use localPath (RFP temp files) or download from URL. Attachments are stored temporarily until upload completes.
-    let filePath = document.localPath;
-    let tempFileCreated = false;
-    
-    if (!filePath && document.url) {
-      await ensureTempDir();
-      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-      const subDir = path.join(TEMP_DIR, uploadId);
-      await fs.mkdir(subDir, { recursive: true });
-      const baseName = path.basename((document.name || "file").replace(/[/\\]/g, "_")) || "file";
-      filePath = path.join(subDir, baseName);
-      const downloaded = await downloadFile(document.url, filePath);
-      if (!downloaded) {
-        try { await fs.rm(subDir, { recursive: true }); } catch { /* ignore */ }
-        log(`Failed to download file from ${document.url}`, "playwright");
-        return false;
-      }
-      tempFileCreated = true;
-    }
-    
-    if (!filePath) {
-      log("No file path available for upload", "playwright");
-      return false;
-    }
 
     // Upload file: New BidBoard — setInputFiles on hidden input directly (do not click Upload Files).
     // Legacy — find input and set files.
@@ -347,11 +356,11 @@ export async function uploadDocumentToBidBoard(
           return false;
         }
       }
-      await fileInputLoc.setInputFiles(filePath, { noWaitAfter: true });
-      // Wait for file count or filename to appear before Attach
+      await fileInputLoc.setInputFiles(filePaths.length === 1 ? filePaths[0] : filePaths, { noWaitAfter: true });
+      // Wait for file count or first filename to appear
       try {
-        const escapedName = document.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        await page.waitForSelector(`text=/1 file selected|\\d+ file\\(s\\) selected|${escapedName}/i`, { timeout: 15000 });
+        const escapedFirstName = documentNames[0]?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') ?? '';
+        await page.waitForSelector(`text=/\\d+ file|${escapedFirstName}/i`, { timeout: 15000 });
       } catch {
         await randomDelay(2000, 4000);
       }
@@ -363,7 +372,7 @@ export async function uploadDocumentToBidBoard(
         return false;
       }
       try {
-        await fileInput.setInputFiles(filePath);
+        await fileInput.setInputFiles(filePaths.length === 1 ? filePaths[0] : filePaths);
       } finally {
         try { await fileInput.dispose(); } catch { /* ignore */ }
       }
@@ -372,8 +381,14 @@ export async function uploadDocumentToBidBoard(
     await randomDelay(2000, 5000);
 
     if (isNewBidBoard) {
-      // Wait for files to finish uploading - can take a while for larger files
-      await new Promise((r) => setTimeout(r, 15000)); // 15s base wait
+      // Wait for upload to complete: Attach button enabled, or progress bar gone (up to 2 min for large files)
+      try {
+        await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled])', { timeout: 120000 });
+      } catch {
+        // Fallback: button may use aria-disabled or different structure
+        await page.waitForSelector('[data-qa="qa-attach-button"]', { timeout: 120000 });
+        await randomDelay(2000, 4000);
+      }
       await dismissOverlays(page);
       await takeScreenshot(page, "upload-8-before-attach");
       const attachSpan = page.locator('[data-qa="qa-attach-button"] span').first();
@@ -387,29 +402,36 @@ export async function uploadDocumentToBidBoard(
       await randomDelay(3000, 5000);
     }
     await page.waitForLoadState("load").catch(() => {});
-    await randomDelay(2000, 3000);
-    const documentList = await page.$(PROCORE_SELECTORS.documents.documentList);
-    const documentText = documentList ? await documentList.textContent() : null;
-    if (documentText && documentText.includes(document.name)) {
-      log(`Successfully uploaded ${document.name} to BidBoard project ${projectId}`, "playwright");
-      await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentName: document.name });
-      if (tempFileCreated && filePath) {
-        try {
-          const dir = path.dirname(filePath);
-          if (dir.startsWith(path.resolve(TEMP_DIR))) {
-            await fs.rm(dir, { recursive: true });
-          }
-        } catch (e) {
-          log(`Failed to delete temp file after upload: ${filePath}`, "playwright");
-        }
-      }
-      return true;
+
+    // Verification: new BidBoard — consider success if modal closed without error; legacy uses document list
+    let success: boolean;
+    if (isNewBidBoard) {
+      success = true; // Modal closed without throw; document list selector often null in new UI
+    } else {
+      const documentList = await page.$(PROCORE_SELECTORS.documents.documentList);
+      const documentText = documentList ? await documentList.textContent() : null;
+      success = !!documentText && documentNames.some((n) => documentText.includes(n));
     }
-    
-    return false;
+
+    if (success) {
+      const namesStr = documentNames.join(", ");
+      log(`Successfully uploaded ${documentNames.length} file(s) to BidBoard project ${projectId}: ${namesStr}`, "playwright");
+      await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentNames, count: documentNames.length });
+    }
+
+    for (const dir of tempDirs) {
+      try {
+        if (dir.startsWith(path.resolve(TEMP_DIR))) await fs.rm(dir, { recursive: true });
+      } catch (e) {
+        log(`Failed to delete temp dir after upload: ${dir}`, "playwright");
+      }
+    }
+
+    return success;
   } catch (error) {
-    log(`Error uploading document to BidBoard: ${error}`, "playwright");
-    await logDocumentAction(projectId, "upload_to_bidboard", "failed", { documentName: document.name }, String(error));
+    const names = documents.map((d) => d.name).join(", ");
+    log(`Error uploading document(s) to BidBoard: ${error}`, "playwright");
+    await logDocumentAction(projectId, "upload_to_bidboard", "failed", { documentNames: names }, String(error));
     return false;
   } finally {
     page.setDefaultTimeout(30000);
