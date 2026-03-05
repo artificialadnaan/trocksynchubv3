@@ -7,6 +7,44 @@ import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
 import { log } from './index';
 
+/** Upload a file to HubSpot Files API and associate it with a deal. */
+async function uploadFileToHubSpotAndAttachToDeal(
+  localPath: string,
+  fileName: string,
+  dealId: string
+): Promise<void> {
+  const token = await getAccessToken();
+  const base = 'https://api.hubapi.com';
+  const fileBuffer = await fs.readFile(localPath);
+
+  const formData = new FormData();
+  formData.append('file', new Blob([fileBuffer]), fileName);
+  formData.append('options', JSON.stringify({ access: 'PRIVATE' }));
+  formData.append('folderPath', '/rfp-attachments');
+
+  const uploadRes = await fetch(`${base}/files/v3/files`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text();
+    throw new Error(`HubSpot file upload failed: ${uploadRes.status} ${errText}`);
+  }
+  const uploadJson = (await uploadRes.json()) as { id?: string };
+  const fileId = uploadJson.id;
+  if (!fileId) throw new Error('HubSpot file upload did not return file id');
+
+  const assocRes = await fetch(
+    `${base}/crm/v4/objects/file/${fileId}/associations/default/deal/${dealId}`,
+    { method: 'PUT', headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!assocRes.ok) {
+    const errText = await assocRes.text();
+    throw new Error(`HubSpot file-deal association failed: ${assocRes.status} ${errText}`);
+  }
+}
+
 const RFP_REVIEW_RECIPIENTS = [
   'sgibson@trockgc.com',
   'jhelms@trockgc.com',
@@ -444,6 +482,7 @@ export async function processRfpApproval(
     }
 
     let bidboardProjectId: string | undefined;
+    let bidboardFailed = false;
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
       const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
@@ -457,10 +496,24 @@ export async function processRfpApproval(
       if (bbResult.success && bbResult.projectId) {
         bidboardProjectId = bbResult.projectId;
         log(`[rfp-approval] BidBoard project created: ${bidboardProjectId} for deal ${hubspotDealId}`, 'rfp');
+
+        // Upload _new attachments to HubSpot and associate with deal (BidBoard upload succeeded)
+        const newAttachments = (attachmentsToSync || []).filter((a) => a.localPath);
+        for (const att of newAttachments) {
+          if (!att.localPath || !att.name) continue;
+          try {
+            await uploadFileToHubSpotAndAttachToDeal(att.localPath, att.name, hubspotDealId);
+            log(`[rfp-approval] Uploaded ${att.name} to HubSpot and attached to deal ${hubspotDealId}`, 'rfp');
+          } catch (hubErr: any) {
+            console.error(`[rfp-approval] Failed to upload ${att.name} to HubSpot:`, hubErr.message);
+          }
+        }
       } else {
-        console.error(`[rfp-approval] BidBoard creation failed for deal ${hubspotDealId}: ${bbResult.error}`);
+        bidboardFailed = true;
+        console.error(`[rfp-approval] HubSpot updated successfully but BidBoard creation failed for deal ${hubspotDealId}: ${bbResult.error}`);
       }
     } catch (bbErr: any) {
+      bidboardFailed = true;
       console.error(`[rfp-approval] BidBoard creation error for deal ${hubspotDealId}:`, bbErr.message);
     } finally {
       // Temp files are only deleted AFTER createBidBoardProjectFromDeal completes (including document sync).
@@ -471,6 +524,14 @@ export async function processRfpApproval(
       if (tempPaths.length > 0) {
         log(`[rfp-approval] Cleaned up ${tempPaths.length} temporary attachment file(s)`, 'rfp');
       }
+    }
+
+    if (bidboardFailed) {
+      return {
+        success: false,
+        error: 'BidBoard project creation failed',
+        bidboardProjectId,
+      };
     }
 
     const approvedAttachmentsForStorage = (attachmentsToSync || []).map(a => ({

@@ -5868,6 +5868,13 @@ main().catch(console.error);
         const newFiles = files.newFiles ? (Array.isArray(files.newFiles) ? files.newFiles : [files.newFiles]) : [];
         const { processRfpApproval } = await import('./rfp-approval');
         const result = await processRfpApproval(token, editedFields, approverEmail, { attachmentsOverride, newFiles });
+        if (!result.success) {
+          return res.status(500).json({
+            success: false,
+            error: result.error || 'Approval failed',
+            details: result.error,
+          });
+        }
         res.json(result);
       } catch (e: any) {
         console.error('[rfp-approval] Approve error:', e.message);

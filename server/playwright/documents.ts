@@ -154,7 +154,30 @@ async function findFileInputForUpload(page: Page, waitMs: number = 8000): Promis
   }
 }
 
-async function downloadFile(url: string, destPath: string): Promise<boolean> {
+/** Download file from URL. For HubSpot signed URLs, pass accessToken and use fetch with auth. */
+async function downloadFile(
+  url: string,
+  destPath: string,
+  options?: { accessToken?: string; fileName?: string; logPrefix?: string }
+): Promise<boolean> {
+  const isHubSpot = /hubspot\.com/i.test(url);
+  if (isHubSpot && options?.accessToken) {
+    try {
+      if (options.fileName) {
+        log(`Downloading HubSpot file: ${options.fileName} from ${url}`, "playwright");
+      }
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${options.accessToken}` },
+        redirect: "follow",
+      });
+      if (!response.ok) return false;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      await fs.writeFile(destPath, buffer);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   return new Promise((resolve) => {
     const protocol = url.startsWith("https") ? https : http;
     const file = require("fs").createWriteStream(destPath);
@@ -221,25 +244,42 @@ export async function getHubSpotDealAttachments(dealId: string): Promise<Documen
   return documents;
 }
 
-/** Resolve file paths from documents; download URLs to temp when needed. */
+/** Resolve file paths from documents; download URLs to temp when needed. Failures are isolated — skip failed files, continue with rest. */
 async function resolveDocumentPaths(documents: DocumentInfo[]): Promise<{ paths: string[]; names: string[]; tempDirs: string[] }> {
   const paths: string[] = [];
   const names: string[] = [];
   const tempDirs: string[] = [];
   await ensureTempDir();
+  let accessToken: string | undefined;
+  const needsHubSpotToken = documents.some((d) => d.url && /hubspot\.com/i.test(d.url));
+  if (needsHubSpotToken) {
+    try {
+      const { getAccessToken } = await import("../hubspot");
+      accessToken = await getAccessToken();
+    } catch (e: any) {
+      log(`Could not get HubSpot token for download: ${e.message}`, "playwright");
+    }
+  }
   for (const doc of documents) {
     let filePath = doc.localPath;
     if (!filePath && doc.url) {
-      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-      const subDir = path.join(TEMP_DIR, uploadId);
-      await fs.mkdir(subDir, { recursive: true });
-      tempDirs.push(subDir);
-      const baseName = path.basename((doc.name || "file").replace(/[/\\]/g, "_")) || "file";
-      filePath = path.join(subDir, baseName);
-      const downloaded = await downloadFile(doc.url, filePath);
-      if (!downloaded) {
-        try { await fs.rm(subDir, { recursive: true }); } catch { /* ignore */ }
-        throw new Error(`Failed to download file from ${doc.url}`);
+      try {
+        const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const subDir = path.join(TEMP_DIR, uploadId);
+        await fs.mkdir(subDir, { recursive: true });
+        tempDirs.push(subDir);
+        const baseName = (doc.name || "file").replace(/[/\\]/g, "_") || "file";
+        filePath = path.join(subDir, baseName);
+        const isHubSpot = /hubspot\.com/i.test(doc.url);
+        const downloaded = await downloadFile(doc.url, filePath, {
+          accessToken: isHubSpot ? accessToken : undefined,
+          fileName: doc.name,
+        });
+        if (!downloaded) throw new Error(`Failed to download from ${doc.url}`);
+        log(`Ready to upload: ${doc.name}`, "playwright");
+      } catch (err: any) {
+        log(`Skipping ${doc.name}: ${err.message}`, "playwright");
+        continue;
       }
     }
     if (filePath) {
@@ -268,7 +308,7 @@ export async function uploadDocumentToBidBoard(
 
     const { paths: filePaths, names: documentNames, tempDirs } = await resolveDocumentPaths(documents);
     if (filePaths.length === 0) {
-      log("No file paths available for upload", "playwright");
+      log(`No attachments could be downloaded for project ${projectId}`, "playwright");
       return false;
     }
 
