@@ -287,7 +287,8 @@ export async function uploadDocumentToBidBoard(
       }
       await randomDelay(3000, 5000);
     }
-    await page.waitForLoadState("networkidle");
+    await page.waitForLoadState("load").catch(() => {});
+    await randomDelay(2000, 3000);
     const documentList = await page.$(PROCORE_SELECTORS.documents.documentList);
     const documentText = documentList ? await documentList.textContent() : null;
     if (documentText && documentText.includes(document.name)) {

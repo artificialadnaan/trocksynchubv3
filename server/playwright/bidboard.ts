@@ -1096,63 +1096,87 @@ export async function createBidBoardProject(
       if (projectData.address || projectData.city || projectData.state || projectData.zip || projectData.country) {
         log(`Adding address: ${projectData.address || ''}, ${projectData.city || ''}, ${projectData.state || ''} ${projectData.zip || ''}`, "playwright");
         try {
-          // Wait for any open dialog to close first
-          await page.locator('[role="dialog"]').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
-          await randomDelay(500, 1000);
+          // Wait for the customer picker dialog to disappear specifically (not any dialog)
+          // Use a fixed delay rather than waitFor to avoid race conditions
+          await randomDelay(2000, 3000);
+
           let addAddrBtn = await page.$('button.aid-add-address-button');
           if (!addAddrBtn) {
             addAddrBtn = await page.$("button:has-text('Add Address')");
           }
           if (addAddrBtn) {
             await addAddrBtn.click({ force: true });
-            await randomDelay(1500, 2500);
+            // Wait for the address dialog to appear
+            await randomDelay(2000, 3000);
+
+            // Take screenshot to capture actual field names in the address dialog
+            await takeScreenshot(page, "bidboard-address-dialog");
+
+            // Try both 'street' and common alternatives for the street field
             if (projectData.address) {
-              const streetInput = await page.$('input[name="street"]');
+              const streetInput = await page.$('input[name="street"], input[name="address1"], input[name="streetAddress"], input[placeholder*="Street"], input[placeholder*="Address"]');
               if (streetInput) {
                 await streetInput.click();
                 await streetInput.fill(projectData.address);
                 log(`Address street filled: ${projectData.address}`, "playwright");
               } else {
-                log("Street input not found in address dialog", "playwright");
+                log("Street input not found in address dialog — check bidboard-address-dialog screenshot", "playwright");
               }
             }
             if (projectData.city) {
-              const cityInput = await page.$('input[name="city"]');
+              const cityInput = await page.$('input[name="city"], input[placeholder*="City"]');
               if (cityInput) await cityInput.fill(projectData.city);
             }
             if (projectData.state) {
-              const stateInput = await page.$('input[name="state"]');
-              if (stateInput) await stateInput.fill(projectData.state);
+              const stateInput = await page.$('input[name="state"], input[placeholder*="State"], select[name="state"]');
+              if (stateInput) {
+                const tag = await stateInput.evaluate(el => el.tagName.toUpperCase());
+                if (tag === 'SELECT') {
+                  await stateInput.selectOption({ label: projectData.state });
+                } else {
+                  await stateInput.fill(projectData.state);
+                }
+              }
             }
             if (projectData.zip) {
-              const zipInput = await page.$('input[name="zip"]');
+              const zipInput = await page.$('input[name="zip"], input[name="postalCode"], input[name="postal_code"], input[placeholder*="ZIP"], input[placeholder*="Postal"]');
               if (zipInput) await zipInput.fill(projectData.zip);
             }
             if (projectData.country) {
-              const countryInput = await page.$('input[name="country"]');
+              const countryInput = await page.$('input[name="country"], input[placeholder*="Country"]');
               if (countryInput) await countryInput.fill(projectData.country);
             }
-            // Save the address dialog
-            const saveBtn = page.locator('[role="dialog"]').locator('button').filter({ hasText: /Save/i }).first();
+            // Save the address dialog — try Save, then Confirm, then any primary button
+            const dialogBtns = page.locator('[role="dialog"]').locator('button');
+            const saveBtn = dialogBtns.filter({ hasText: /^Save$/i }).first();
+            const confirmBtn = dialogBtns.filter({ hasText: /^(Confirm|Done|OK)$/i }).first();
             if ((await saveBtn.count()) > 0) {
               await saveBtn.click({ force: true });
               await randomDelay(1500, 2500);
               log("Address saved", "playwright");
+            } else if ((await confirmBtn.count()) > 0) {
+              await confirmBtn.click({ force: true });
+              await randomDelay(1500, 2500);
+              log("Address confirmed", "playwright");
             } else {
-              const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
-              if ((await confirmBtn.count()) > 0) {
-                await confirmBtn.click({ force: true });
+              // Last resort: click button.aid-confirmButton
+              const aidBtn = await page.$('[role="dialog"] button.aid-confirmButton');
+              if (aidBtn) {
+                await aidBtn.click({ force: true });
                 await randomDelay(1500, 2500);
-                log("Address confirmed", "playwright");
+                log("Address saved via aid-confirmButton", "playwright");
               } else {
-                log("Address Save/Confirm button not found", "playwright");
+                await takeScreenshot(page, "bidboard-address-save-not-found");
+                log("Address Save/Confirm button not found — check screenshot", "playwright");
               }
             }
           } else {
-            log("Add Address button not found on page", "playwright");
+            await takeScreenshot(page, "bidboard-add-address-btn-not-found");
+            log("Add Address button not found on page — check screenshot", "playwright");
           }
         } catch (e: any) {
           log(`Add Address failed: ${e.message}`, "playwright");
+          await takeScreenshot(page, "bidboard-address-error");
         }
       } else {
         log("Address: no address fields provided in project data", "playwright");
