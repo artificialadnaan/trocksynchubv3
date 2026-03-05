@@ -229,6 +229,7 @@ export async function uploadDocumentToBidBoard(
   try {
     page.setDefaultTimeout(UPLOAD_ACTION_TIMEOUT_MS);
     await navigateToProject(page, projectId);
+    await takeScreenshot(page, "upload-1-after-navigate");
     await randomDelay(2000, 3000);
 
     const isNewBidBoard = page.url().includes("/tools/bid-board");
@@ -244,6 +245,7 @@ export async function uploadDocumentToBidBoard(
 
       // New BidBoard UI: Upload (header) → Upload Attachments → Upload Files → Attach
       await dismissOverlays(page);
+      await takeScreenshot(page, "upload-2-after-toast-dismiss");
       let uploadBtn = await page.$("div.aid-upload-documents button");
       if (!uploadBtn) {
         uploadBtn = await page.$("button:has-text('Upload')");
@@ -267,6 +269,7 @@ export async function uploadDocumentToBidBoard(
         return false;
       }
       await uploadBtn.click({ force: true });
+      await takeScreenshot(page, "upload-3-after-upload-click");
       await randomDelay(1000, 1500);
       await dismissOverlays(page);
       const uploadAttachments = page.locator('li.aid-upload-attachments, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
@@ -276,9 +279,11 @@ export async function uploadDocumentToBidBoard(
         const uploadDrawings = page.locator('li.aid-upload-drawings, [role="menuitem"]').filter({ hasText: /Upload Drawings/i }).first();
         await uploadDrawings.click({ timeout: 8000, force: true });
       }
+      await takeScreenshot(page, "upload-4-after-menu-click");
       await randomDelay(2000, 3000);
       // Wait for upload modal and dropzone to appear
       await page.waitForSelector('[class*="StyledDropzoneContainer"], button.StyledUploadButton, button:has-text("Upload Files")', { timeout: 10000 }).catch(() => {});
+      await takeScreenshot(page, "upload-5-dropzone-ready");
     } else {
       // Legacy: Documents tab then upload
       const documentsTab = await page.$(PROCORE_SELECTORS.bidboard.documentsTab);
@@ -303,6 +308,7 @@ export async function uploadDocumentToBidBoard(
         await dismissOverlays(page);
         await uploadButton.click({ force: true });
       }
+      await takeScreenshot(page, "upload-6-after-upload-files-click");
     } else {
       const uploadButton = await page.$(PROCORE_SELECTORS.documents.uploadButton);
       if (!uploadButton) {
@@ -351,12 +357,14 @@ export async function uploadDocumentToBidBoard(
     } finally {
       try { await fileInput.dispose(); } catch { /* ignore */ }
     }
+    await takeScreenshot(page, "upload-7-after-file-set");
     await randomDelay(2000, 5000);
 
     if (isNewBidBoard) {
       // Wait for files to finish uploading - can take a while for larger files
       await new Promise((r) => setTimeout(r, 15000)); // 15s base wait
       await dismissOverlays(page);
+      await takeScreenshot(page, "upload-8-before-attach");
       const attachSpan = page.locator('[data-qa="qa-attach-button"] span').first();
       try {
         await attachSpan.click({ timeout: 60000, force: true });

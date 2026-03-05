@@ -1236,6 +1236,18 @@ export async function createBidBoardProject(
         log("Address: no address fields provided in project data", "playwright");
       }
 
+      // Fill Project Description
+      if (projectData.description) {
+        const descTextarea = (await page.$('div.aid-project-description textarea'))
+          || (await page.$('textarea[placeholder]'))
+          || (await page.$('textarea'));
+        if (descTextarea) {
+          await descTextarea.fill(projectData.description);
+          log(`Project description filled: ${projectData.description}`, "playwright");
+          await randomDelay(200, 400);
+        }
+      }
+
       // Capture screenshot after filling all project details (for debugging)
       await takeScreenshot(page, "bidboard-after-details-filled");
     }

@@ -367,10 +367,7 @@ export async function processRfpApproval(
              'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
              'notes', 'bid_due_date', 'due_date', 'client_email', 'client_phone', 'company_name'].includes(key)) {
           hubspotUpdateProps[key] = value;
-          if (key === 'description') {
-            hubspotUpdateProps['project_description_briefly_describe_the_project'] = value;
-            hubspotUpdateProps['project_description'] = value;
-          }
+          // Use only standard 'description'; project_description/project_description_briefly_describe_the_project are custom and may not exist
         }
       }
 
