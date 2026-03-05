@@ -1213,6 +1213,9 @@ export async function createBidBoardProject(
               const countryInput = await page.$('input[name="country"], input[placeholder*="Country"]');
               if (countryInput) await countryInput.fill(projectData.country);
             }
+            // Blur last field to trigger validation before Save (some forms need this)
+            await page.keyboard.press('Tab');
+            await randomDelay(300, 500);
             // Save the address dialog — scope to .aid-formDialog (not [role="dialog"] which doesn't match MUI)
             // The Save button has class aid-confirmButton; use that as primary selector
             const dialogContainer = page.locator('.aid-formDialog');
@@ -1258,8 +1261,22 @@ export async function createBidBoardProject(
                     const closedAfterJS = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 5000 })
                       .then(() => true).catch(() => false);
                     if (!closedAfterJS) {
-                      log("Address dialog could not be closed — will proceed anyway", "playwright");
-                      await page.mouse.click(10, 10, { force: true }).catch(() => {});
+                      // Last resort: force-hide the dialog via JS so it stops intercepting pointer events
+                      // (e.g. zip input was blocking clicks on elements below)
+                      log("Address dialog could not be closed — force-hiding via JS to unblock", "playwright");
+                      await page.evaluate(() => {
+                        const dialog = document.querySelector('.aid-formDialog, .MuiDialog-root.aid-formDialog');
+                        if (dialog instanceof HTMLElement) {
+                          dialog.style.setProperty('display', 'none');
+                          dialog.style.setProperty('visibility', 'hidden');
+                          dialog.style.setProperty('pointer-events', 'none');
+                        }
+                        const backdrop = document.querySelector('.MuiBackdrop-root');
+                        if (backdrop instanceof HTMLElement) {
+                          backdrop.style.setProperty('display', 'none');
+                          backdrop.style.setProperty('pointer-events', 'none');
+                        }
+                      });
                       await randomDelay(500, 800);
                     }
                   }
@@ -1269,11 +1286,14 @@ export async function createBidBoardProject(
 
             if ((await saveBtn.count()) > 0) {
               await saveBtn.click({ force: true });
+              // Allow loading screen + API call to complete (~2s) before checking if dialog closed
+              await randomDelay(2500, 3500);
               await closeAddressDialog("Save");
               await randomDelay(500, 1000);
               log("Address saved", "playwright");
             } else if ((await confirmBtn.count()) > 0) {
               await confirmBtn.click({ force: true });
+              await randomDelay(2500, 3500);
               await closeAddressDialog("Confirm");
               await randomDelay(500, 1000);
               log("Address confirmed", "playwright");
@@ -1282,6 +1302,7 @@ export async function createBidBoardProject(
               const aidBtn = await page.$('.aid-formDialog button.aid-confirmButton');
               if (aidBtn) {
                 await aidBtn.click({ force: true });
+                await randomDelay(2500, 3500);
                 await closeAddressDialog("aid-confirmButton");
                 await randomDelay(500, 1000);
                 log("Address saved via aid-confirmButton", "playwright");
