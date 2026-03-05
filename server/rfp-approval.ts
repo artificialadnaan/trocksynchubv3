@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
+import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from './constants';
 import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
 import { log } from './index';
@@ -405,6 +406,33 @@ export async function processRfpApproval(
     const dealData = request.dealData as Record<string, any>;
     const hubspotDealId = request.hubspotDealId;
 
+    // Check if project type changed — update project number and HubSpot immediately
+    const submittedProjectType = editedFields.project_types;
+    const currentProjectNumber = (dealData.project_number ?? '') as string;
+    const currentTypeDigit = parseProjectTypeFromNumber(currentProjectNumber) ?? dealData.project_types ?? '';
+
+    let finalProjectNumber = currentProjectNumber;
+    let finalProjectTypeDigit = currentTypeDigit || submittedProjectType || dealData.project_types || '2';
+
+    if (submittedProjectType && submittedProjectType !== currentTypeDigit) {
+      const updatedProjectNumber = replaceProjectTypeInNumber(currentProjectNumber, submittedProjectType);
+      finalProjectNumber = updatedProjectNumber;
+      finalProjectTypeDigit = submittedProjectType;
+
+      try {
+        await updateHubSpotDeal(hubspotDealId, {
+          project_number: updatedProjectNumber,
+          project_types: submittedProjectType,
+        });
+        log(`[rfp-approval] Updated project number: ${currentProjectNumber} → ${updatedProjectNumber}`, 'rfp');
+      } catch (err: any) {
+        log(`[rfp-approval] Warning: Failed to update project number in HubSpot: ${err.message}`, 'rfp');
+        // Non-fatal — continue with BidBoard creation
+      }
+    } else if (currentProjectNumber && !submittedProjectType && currentTypeDigit) {
+      finalProjectTypeDigit = currentTypeDigit;
+    }
+
     const changedFields: Record<string, string> = {};
     for (const [key, value] of Object.entries(editedFields)) {
       if (value !== undefined && value !== dealData[key]) {
@@ -445,14 +473,13 @@ export async function processRfpApproval(
       }
     }
 
-    const finalProjectType = editedFields.project_types || dealData.project_types || '';
-    const isService = String(finalProjectType) === '4';
+    const isService = String(finalProjectTypeDigit) === '4';
     const targetStageName = isService ? 'Service - Estimating' : 'Estimating';
 
     const resolvedStage = await resolveHubspotStageId(targetStageName);
     if (resolvedStage) {
       await updateHubSpotDealStage(hubspotDealId, resolvedStage.stageId);
-      log(`[rfp-approval] Deal ${hubspotDealId} moved to stage "${resolvedStage.stageName}" (type=${finalProjectType})`, 'rfp');
+      log(`[rfp-approval] Deal ${hubspotDealId} moved to stage "${resolvedStage.stageName}" (type=${finalProjectTypeDigit})`, 'rfp');
     } else {
       const altName = isService ? 'Service – Estimating' : 'Estimating';
       const altStage = await resolveHubspotStageId(altName);
@@ -503,8 +530,11 @@ export async function processRfpApproval(
       const bbResult = await createBidBoardProjectFromDeal(hubspotDealId, bidboardStage, {
         syncDocuments: true,
         attachmentsOverride: attachmentsToSync,
-        projectNumberOverride: editedFields.project_number || (dealData.project_number as string) || undefined,
-        editedFieldsOverride: editedFields,
+        projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
+        editedFieldsOverride: {
+          ...editedFields,
+          project_types: finalProjectTypeDigit,
+        },
         proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
       });
       if (bbResult.success && bbResult.projectId) {
@@ -574,7 +604,7 @@ export async function processRfpApproval(
         approvedBy: approverEmail,
         changedFields,
         approvedAttachments: approvedAttachmentsForStorage,
-        projectType: finalProjectType,
+        projectType: finalProjectTypeDigit,
         targetStage: targetStageName,
         bidboardProjectId,
       },

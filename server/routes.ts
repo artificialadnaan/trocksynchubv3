@@ -73,6 +73,7 @@ import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifica
 import { sendEmail } from "./email-service";
 import { isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
+import { parseProjectTypeFromNumber } from "./constants";
 import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber } from "./procore-hubspot-sync";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject, onBidBoardProjectCreated, detectAndProcessNewProjects } from "./bidboard-automation";
 import { testLogin as testProcoreLogin, saveProcoreCredentials, logout as logoutProcore } from "./playwright/auth";
@@ -5967,6 +5968,9 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
   // Project Description: prefer project_description__briefly_describe_the_project_ over description
   const projectDescription = (d.project_description__briefly_describe_the_project_ || d.description || '').trim();
 
+  // Project type: pre-select from project number digit (e.g. DFW-2-06426-ah → "2") or deal property
+  const currentTypeDigit = parseProjectTypeFromNumber(d.project_number || '') ?? d.project_types ?? '2';
+
   const field = (label: string, name: string, value: any, type = 'text') => {
     if (name === 'project_types') {
       const val = String(value || '').trim();
@@ -6084,7 +6088,8 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
           ${field('Amount', 'amount', d.amount)}
         </div>
         <div class="highlight-field">
-          ${field('Project Type', 'project_types', d.project_types)}
+          ${field('Project Type', 'project_types', currentTypeDigit)}
+          <small style="display:block;color:#64748b;font-size:12px;margin-top:6px;">Changing the project type will update the project number in HubSpot.</small>
         </div>
         <div class="row">
           ${field('Estimator', 'estimator', d.estimator)}
@@ -6183,6 +6188,16 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
     });
 
     renderAttachments();
+
+    // When project type changes, update project number to reflect new type digit (DFW-X-06426-ah)
+    document.querySelector('select[name="project_types"]').addEventListener('change', function() {
+      const projNumInput = document.querySelector('input[name="project_number"]');
+      const val = (projNumInput && projNumInput.value) || '';
+      const m = val.match(/^(DFW-)\d+(-)/i);
+      if (m && this.value) {
+        projNumInput.value = m[1] + this.value + m[2] + val.slice(m[0].length);
+      }
+    });
 
     function getFormData() {
       const form = document.getElementById('rfpForm');

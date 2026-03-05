@@ -880,8 +880,11 @@ export async function createBidBoardProject(
         }
       }
       // New BidBoard UI: Service - Estimating if project type 4 or stage includes "service", else Estimate in Progress
+      const projectNumberTypeDigit = projectData.projectNumber?.match(/^DFW-(\d+)-/i)?.[1];
       const isService =
-        projectData.stage.toLowerCase().includes("service") || projectData.projectTypes === "4";
+        projectData.stage.toLowerCase().includes("service") ||
+        projectData.projectTypes === "4" ||
+        projectNumberTypeDigit === "4";
       try {
         const tab = isService
           ? page.locator('button.aid-tab').filter({ hasText: /Service\s*-\s*Estimating/i })
