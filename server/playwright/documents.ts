@@ -115,6 +115,21 @@ const FILE_INPUT_SELECTORS = [
   'input[type="file"][accept]',
 ];
 
+/** Dismiss toast/notification overlays that block clicks. Call before any click in Procore BidBoard. */
+async function dismissOverlays(page: Page): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const closeBtn = page.locator('[data-internal="close-button"][aria-label="Close"], [class*="StyledPortal"] button[aria-label="Close"]');
+      const count = await closeBtn.count();
+      if (count === 0) break;
+      await closeBtn.first().click({ force: true });
+      await new Promise((r) => setTimeout(r, 500));
+    } catch {
+      break;
+    }
+  }
+}
+
 /** Find file input with fallbacks and optional wait. Returns null if not found. */
 async function findFileInputForUpload(page: Page, waitMs: number = 8000): Promise<Awaited<ReturnType<Page["$"]>>> {
   const endTime = Date.now() + waitMs;
@@ -228,6 +243,7 @@ export async function uploadDocumentToBidBoard(
       await randomDelay(2000, 3000);
 
       // New BidBoard UI: Upload (header) → Upload Attachments → Upload Files → Attach
+      await dismissOverlays(page);
       let uploadBtn = await page.$("button.aid-upload-document");
       if (!uploadBtn) {
         uploadBtn = await page.$("button:has-text('Upload')");
@@ -251,14 +267,15 @@ export async function uploadDocumentToBidBoard(
         log(`Upload button not found in BidBoard (new UI). Screenshot: ${ssPath}`, "playwright");
         return false;
       }
-      await uploadBtn.click();
+      await uploadBtn.click({ force: true });
       await randomDelay(1000, 1500);
+      await dismissOverlays(page);
       const uploadAttachments = page.locator('li.aid-upload-attachments, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
       try {
-        await uploadAttachments.click({ timeout: 8000 });
+        await uploadAttachments.click({ timeout: 8000, force: true });
       } catch {
         const uploadDrawings = page.locator('li.aid-upload-drawings, [role="menuitem"]').filter({ hasText: /Upload Drawings/i }).first();
-        await uploadDrawings.click({ timeout: 8000 });
+        await uploadDrawings.click({ timeout: 8000, force: true });
       }
       await randomDelay(2000, 3000);
       // Wait for upload modal and dropzone to appear
@@ -281,8 +298,9 @@ export async function uploadDocumentToBidBoard(
       log("Upload button not found in BidBoard documents", "playwright");
       return false;
     }
-    
-    await uploadButton.click();
+
+    await dismissOverlays(page);
+    await uploadButton.click({ force: true });
     await randomDelay(1000, 2000);
     
     // Get file path: use localPath (RFP temp files) or download from URL. Attachments are stored temporarily until upload completes.
@@ -327,12 +345,13 @@ export async function uploadDocumentToBidBoard(
     if (isNewBidBoard) {
       // Wait for files to finish uploading - can take a while for larger files
       await new Promise((r) => setTimeout(r, 15000)); // 15s base wait
+      await dismissOverlays(page);
       const attachBtn = page.locator('button[data-qa="qa-attach-button"], button:has-text("Attach")');
       try {
-        await attachBtn.first().click({ timeout: 60000 }); // 60s for Attach to be clickable
+        await attachBtn.first().click({ timeout: 60000, force: true }); // 60s for Attach to be clickable
       } catch {
         await new Promise((r) => setTimeout(r, 45000)); // extra 45s for slow uploads
-        await attachBtn.first().click({ timeout: 10000 });
+        await attachBtn.first().click({ timeout: 10000, force: true });
       }
       await randomDelay(3000, 5000);
     }
