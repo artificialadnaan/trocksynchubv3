@@ -1174,145 +1174,56 @@ export async function createBidBoardProject(
             // Wait for the address dialog to appear
             await randomDelay(2000, 3000);
 
-            // Take screenshot to capture actual field names in the address dialog
-            await takeScreenshot(page, "bidboard-address-dialog");
+            // Fill address fields using aid-* selectors; Tab/Escape to dismiss autocomplete dropdown
+            const streetInput = page.locator('div.aid-street input').first();
+            const cityInput = page.locator('div.aid-city input').first();
+            const stateInput = page.locator('div.aid-state input').first();
+            const zipInput = page.locator('div.aid-zip input').first();
 
-            // Try both 'street' and common alternatives for the street field
             if (projectData.address) {
-              const streetInput = await page.$('input[name="street"], input[name="address1"], input[name="streetAddress"], input[placeholder*="Street"], input[placeholder*="Address"]');
-              if (streetInput) {
-                await streetInput.click();
-                await streetInput.fill(projectData.address);
-                log(`Address street filled: ${projectData.address}`, "playwright");
-              } else {
-                log("Street input not found in address dialog — check bidboard-address-dialog screenshot", "playwright");
-              }
+              await streetInput.fill(projectData.address);
+              log(`Address street filled: ${projectData.address}`, "playwright");
+              await page.keyboard.press('Tab');
             }
             if (projectData.city) {
-              const cityInput = await page.$('input[name="city"], input[placeholder*="City"]');
-              if (cityInput) await cityInput.fill(projectData.city);
+              await cityInput.fill(projectData.city);
+              await page.keyboard.press('Tab');
             }
             if (projectData.state) {
               const stateAbbrev = normalizeState(projectData.state);
               log(`State normalized: "${projectData.state}" → "${stateAbbrev}"`, "playwright");
-              const stateInput = await page.$('input[name="state"], input[placeholder*="State"], select[name="state"]');
-              if (stateInput) {
-                const tag = await stateInput.evaluate(el => el.tagName.toUpperCase());
-                if (tag === 'SELECT') {
-                  await stateInput.selectOption({ value: stateAbbrev }).catch(() => stateInput.selectOption({ label: projectData.state }));
-                } else {
-                  await stateInput.fill(stateAbbrev);
-                }
-              }
+              await stateInput.fill(stateAbbrev);
+              await page.keyboard.press('Escape'); // Dismiss state autocomplete dropdown
             }
             if (projectData.zip) {
-              const zipInput = await page.$('input[name="zip"], input[name="postalCode"], input[name="postal_code"], input[placeholder*="ZIP"], input[placeholder*="Postal"]');
-              if (zipInput) await zipInput.fill(projectData.zip);
+              await zipInput.fill(projectData.zip);
+              await page.keyboard.press('Tab');
             }
             if (projectData.country) {
-              const countryInput = await page.$('input[name="country"], input[placeholder*="Country"]');
-              if (countryInput) await countryInput.fill(projectData.country);
-            }
-            // Blur last field to trigger validation before Save (some forms need this)
-            await page.keyboard.press('Tab');
-            await randomDelay(300, 500);
-            // Save the address dialog — scope to .aid-formDialog (not [role="dialog"] which doesn't match MUI)
-            // The Save button has class aid-confirmButton; use that as primary selector
-            const dialogContainer = page.locator('.aid-formDialog');
-            const dialogBtns = dialogContainer.locator('button');
-            // aid-confirmButton is the actual Save button class confirmed from DOM inspection
-            const saveBtn = dialogContainer.locator('button.aid-confirmButton').first();
-            const confirmBtn = dialogBtns.filter({ hasText: /confirm|done|ok|submit/i }).first();
-            const closeAddressDialog = async (method: string) => {
-              // Give the form/server time to process after the save button click
-              const closed = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 12000 })
-                .then(() => true).catch(() => false);
-              if (!closed) {
-                log(`Address dialog still open after ${method}, trying close/X button`, "playwright");
-                // Step 1: look for a close/X button in the dialog header (most reliable)
-                try {
-                  const closeBtn = page.locator('.aid-formDialog').locator('button[aria-label*="close" i], button[aria-label*="dismiss" i], button.MuiIconButton-root').first();
-                  if ((await closeBtn.count()) > 0) {
-                    await closeBtn.click({ force: true, timeout: 3000 });
-                    await randomDelay(500, 800);
-                  }
-                } catch { /* ignore */ }
-                const closedAfterX = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 4000 })
-                  .then(() => true).catch(() => false);
-                if (!closedAfterX) {
-                  // Step 2: click the MUI backdrop (semi-transparent overlay)
-                  log(`Address dialog still open after X button, clicking backdrop`, "playwright");
-                  try {
-                    const backdrop = page.locator('.MuiBackdrop-root').first();
-                    if ((await backdrop.count()) > 0) {
-                      await backdrop.click({ force: true, timeout: 3000 });
-                      await randomDelay(500, 800);
-                    }
-                  } catch { /* ignore */ }
-                  const closedAfterBackdrop = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 5000 })
-                    .then(() => true).catch(() => false);
-                  if (!closedAfterBackdrop) {
-                    // Step 3: dispatch Escape on the document via JavaScript (bypasses input key handlers)
-                    log("Backdrop click did not close dialog, dispatching Escape via JS", "playwright");
-                    await page.evaluate(() => {
-                      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true }));
-                    });
-                    await randomDelay(500, 800);
-                    const closedAfterJS = await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 5000 })
-                      .then(() => true).catch(() => false);
-                    if (!closedAfterJS) {
-                      // Last resort: force-hide the dialog via JS so it stops intercepting pointer events
-                      // (e.g. zip input was blocking clicks on elements below)
-                      log("Address dialog could not be closed — force-hiding via JS to unblock", "playwright");
-                      await page.evaluate(() => {
-                        const dialog = document.querySelector('.aid-formDialog, .MuiDialog-root.aid-formDialog');
-                        if (dialog instanceof HTMLElement) {
-                          dialog.style.setProperty('display', 'none');
-                          dialog.style.setProperty('visibility', 'hidden');
-                          dialog.style.setProperty('pointer-events', 'none');
-                        }
-                        const backdrop = document.querySelector('.MuiBackdrop-root');
-                        if (backdrop instanceof HTMLElement) {
-                          backdrop.style.setProperty('display', 'none');
-                          backdrop.style.setProperty('pointer-events', 'none');
-                        }
-                      });
-                      await randomDelay(500, 800);
-                    }
-                  }
-                }
+              const countryInput = page.locator('div.aid-country input, input[name="country"], input[placeholder*="Country"]').first();
+              if ((await countryInput.count()) > 0) {
+                await countryInput.fill(projectData.country);
+                await page.keyboard.press('Tab');
               }
-            };
+            }
 
-            if ((await saveBtn.count()) > 0) {
-              await saveBtn.click({ force: true });
-              // Wait 5s for loading/API to complete (per DOM inspection)
-              await new Promise((r) => setTimeout(r, 5000));
-              await closeAddressDialog("Save");
-              await randomDelay(500, 1000);
-              log("Address saved", "playwright");
-            } else if ((await confirmBtn.count()) > 0) {
-              await confirmBtn.click({ force: true });
-              await new Promise((r) => setTimeout(r, 5000));
-              await closeAddressDialog("Confirm");
-              await randomDelay(500, 1000);
-              log("Address confirmed", "playwright");
-            } else {
-              // Scope to .aid-formDialog to avoid [role="dialog"] mismatch with MUI
-              const aidBtn = await page.$('.aid-formDialog button.aid-confirmButton');
-              if (aidBtn) {
-                await aidBtn.click({ force: true });
-                await new Promise((r) => setTimeout(r, 5000));
-                await closeAddressDialog("aid-confirmButton");
-                await randomDelay(500, 1000);
-                log("Address saved via aid-confirmButton", "playwright");
-              } else {
-                await takeScreenshot(page, "bidboard-address-save-not-found");
-                log("Address Save/Confirm button not found — check screenshot", "playwright");
-                // Still try to close the dialog even if we couldn't find the save button
-                await closeAddressDialog("no-save-btn");
-              }
+            await new Promise((r) => setTimeout(r, 500)); // Let form settle before Save
+
+            const saveBtn = page.locator('div[role="dialog"] button:has-text("Save"), button.btn-confirm, button:has-text("Save")').last();
+            await saveBtn.scrollIntoViewIfNeeded();
+            await saveBtn.click({ force: true });
+            await new Promise((r) => setTimeout(r, 1500));
+
+            const dialogStillOpen = await page.locator('text=Edit Address').isVisible().catch(() => false);
+            if (dialogStillOpen) {
+              await page.evaluate(() => {
+                const buttons = [...document.querySelectorAll('button')];
+                const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save');
+                if (saveBtn) (saveBtn as HTMLButtonElement).click();
+              });
+              await new Promise((r) => setTimeout(r, 1000));
             }
+            log("Address saved", "playwright");
           } else {
             await takeScreenshot(page, "bidboard-add-address-btn-not-found");
             log("Add Address button not found on page — check screenshot", "playwright");
@@ -1428,7 +1339,9 @@ export async function createBidBoardProject(
     // Click Create/Save button (legacy modal); new UI may auto-save on blur
     const submitButton = await page.$(PROCORE_SELECTORS.newProject.createButton);
     if (submitButton) {
-      await submitButton.click();
+      await submitButton.scrollIntoViewIfNeeded().catch(() => {});
+      await randomDelay(200, 400);
+      await submitButton.click({ force: true });
       await randomDelay(2000, 3000);
     } else if (!isNewBidBoardUi) {
       result.error = "Create button not found in form";
