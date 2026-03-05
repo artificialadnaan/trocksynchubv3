@@ -384,29 +384,74 @@ export async function uploadDocumentToBidBoard(
     }
     await randomDelay(1000, 2000);
 
-    // Upload file: New BidBoard — setInputFiles on hidden input directly (do not click Upload Files).
-    // Legacy — find input and set files.
+    // Upload file: New BidBoard — per-file loop (one file per modal cycle). Legacy — batch.
+    let success: boolean;
     if (isNewBidBoard) {
-      let fileInputLoc = page.locator('input[type="file"]').first();
-      try {
-        await fileInputLoc.waitFor({ state: 'attached', timeout: 5000 });
-      } catch {
-        fileInputLoc = page.locator('body').locator('input[type="file"]').first();
+      let successCount = 0;
+      for (let i = 0; i < filePaths.length; i++) {
+        const filePath = filePaths[i];
+        const fileName = documentNames[i];
+
         try {
-          await fileInputLoc.waitFor({ state: 'attached', timeout: 5000 });
-        } catch {
-          const ssPath = await takeScreenshot(page, "file-input-not-found-bidboard");
-          log(`File input not found in BidBoard upload modal. Screenshot: ${ssPath}`, "playwright");
-          return false;
+          if (i > 0) {
+            await dismissOverlays(page);
+
+            let uploadBtn = await page.$("div.aid-upload-documents button, button:has-text('Upload')");
+            if (!uploadBtn) {
+              await page.waitForSelector("div.aid-upload-documents button, button:has-text('Upload')", { timeout: 10000 });
+              uploadBtn = await page.$("div.aid-upload-documents button, button:has-text('Upload')");
+            }
+            if (!uploadBtn) {
+              log(`Upload button not found for file ${fileName}, skipping`, "playwright");
+              continue;
+            }
+            await uploadBtn.click({ force: true });
+            await randomDelay(500, 1000);
+
+            const uploadAttachments = page.locator('li.aid-upload-attachments, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
+            await uploadAttachments.click({ timeout: 8000, force: true });
+            await randomDelay(2000, 3000);
+
+            await page.waitForSelector('[class*="StyledDropzoneContainer"], button:has-text("Upload Files")', { timeout: 10000 }).catch(() => {});
+          }
+
+          let fileInputLoc = page.locator('input[type="file"]').first();
+          await fileInputLoc.waitFor({ state: 'attached', timeout: 8000 });
+          await fileInputLoc.setInputFiles(filePath, { noWaitAfter: true });
+
+          log(`File set in dropzone: ${fileName}`, "playwright");
+          await takeScreenshot(page, `upload-file-set-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
+
+          try {
+            await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled])', { timeout: 60000 });
+          } catch {
+            await page.waitForSelector('[data-qa="qa-attach-button"]', { timeout: 60000 });
+            await randomDelay(2000, 3000);
+          }
+
+          await dismissOverlays(page);
+          await takeScreenshot(page, `upload-before-attach-${i + 1}`);
+
+          const attachSpan = page.locator('[data-qa="qa-attach-button"] span').first();
+          await attachSpan.click({ timeout: 30000, force: true });
+
+          await page.waitForSelector('div.StyledModalBody-core-12_35_0__sc-1ijdug2-4', { state: 'hidden', timeout: 30000 }).catch(() => {});
+          await randomDelay(2000, 3000);
+
+          successCount++;
+          log(`Uploaded file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
+        } catch (err: any) {
+          log(`Failed to upload ${fileName}: ${err.message}`, "playwright");
         }
       }
-      await fileInputLoc.setInputFiles(filePaths.length === 1 ? filePaths[0] : filePaths, { noWaitAfter: true });
-      // Wait for file count or first filename to appear
-      try {
-        const escapedFirstName = documentNames[0]?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') ?? '';
-        await page.waitForSelector(`text=/\\d+ file|${escapedFirstName}/i`, { timeout: 15000 });
-      } catch {
-        await randomDelay(2000, 4000);
+
+      success = successCount > 0;
+      const namesStr = documentNames.slice(0, successCount).join(", ");
+      if (success) {
+        log(`Successfully uploaded ${successCount}/${filePaths.length} file(s) to BidBoard project ${projectId}: ${namesStr}`, "playwright");
+        await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentNames: documentNames.slice(0, successCount), count: successCount });
+      } else {
+        log(`Failed to upload any files to BidBoard project ${projectId}`, "playwright");
       }
     } else {
       const fileInput = await findFileInputForUpload(page, 8000);
@@ -420,48 +465,23 @@ export async function uploadDocumentToBidBoard(
       } finally {
         try { await fileInput.dispose(); } catch { /* ignore */ }
       }
-    }
-    await takeScreenshot(page, "upload-7-after-file-set");
-    await randomDelay(2000, 5000);
+      await takeScreenshot(page, "upload-7-after-file-set");
+      await randomDelay(2000, 5000);
 
-    if (isNewBidBoard) {
-      // Wait for upload to complete: Attach button enabled, or progress bar gone (up to 2 min for large files)
-      try {
-        await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled])', { timeout: 120000 });
-      } catch {
-        // Fallback: button may use aria-disabled or different structure
-        await page.waitForSelector('[data-qa="qa-attach-button"]', { timeout: 120000 });
-        await randomDelay(2000, 4000);
-      }
-      await dismissOverlays(page);
-      await takeScreenshot(page, "upload-8-before-attach");
-      const attachSpan = page.locator('[data-qa="qa-attach-button"] span').first();
-      try {
-        await attachSpan.click({ timeout: 60000, force: true });
-      } catch {
-        await new Promise((r) => setTimeout(r, 45000));
-        await attachSpan.click({ timeout: 10000, force: true });
-      }
-      await page.waitForSelector('div.StyledModalBody-core-12_35_0__sc-1ijdug2-4', { state: 'hidden', timeout: 30000 }).catch(() => {});
-      await randomDelay(3000, 5000);
-    }
-    await page.waitForLoadState("load").catch(() => {});
+      await page.waitForLoadState("load").catch(() => {});
 
-    // Verification: new BidBoard — consider success if modal closed without error; legacy uses document list
-    let success: boolean;
-    if (isNewBidBoard) {
-      success = true; // Modal closed without throw; document list selector often null in new UI
-    } else {
       const documentList = await page.$(PROCORE_SELECTORS.documents.documentList);
       const documentText = documentList ? await documentList.textContent() : null;
       success = !!documentText && documentNames.some((n) => documentText.includes(n));
+
+      if (success) {
+        const namesStr = documentNames.join(", ");
+        log(`Successfully uploaded ${documentNames.length} file(s) to BidBoard project ${projectId}: ${namesStr}`, "playwright");
+        await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentNames, count: documentNames.length });
+      }
     }
 
-    if (success) {
-      const namesStr = documentNames.join(", ");
-      log(`Successfully uploaded ${documentNames.length} file(s) to BidBoard project ${projectId}: ${namesStr}`, "playwright");
-      await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentNames, count: documentNames.length });
-    }
+    await page.waitForLoadState("load").catch(() => {});
 
     for (const dir of tempDirs) {
       try {
