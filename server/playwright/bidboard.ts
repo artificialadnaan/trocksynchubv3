@@ -1242,8 +1242,10 @@ export async function createBidBoardProject(
           || (await page.$('textarea'));
         if (descTextarea) {
           await descTextarea.fill(projectData.description);
-          log(`Project description filled: ${projectData.description}`, "playwright");
+          await page.keyboard.press('Tab'); // Trigger blur/save
           await randomDelay(200, 400);
+          log(`Project description filled: ${projectData.description}`, "playwright");
+          log("Project description saved", "playwright");
         }
       }
 

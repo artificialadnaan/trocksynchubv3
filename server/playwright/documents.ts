@@ -293,23 +293,9 @@ export async function uploadDocumentToBidBoard(
       }
     }
 
-    // Click upload button (legacy) or Upload Files in modal (new UI)
-    if (isNewBidBoard) {
-      const uploadFilesSpan = page.locator('div.StyledModalBody-core-12_35_0__sc-1ijdug2-4 span > span').filter({ hasText: 'Upload Files' }).first();
-      if ((await uploadFilesSpan.count()) > 0) {
-        await dismissOverlays(page);
-        await uploadFilesSpan.click({ force: true });
-      } else {
-        const uploadButton = await page.$("button.StyledUploadButton, button:has-text('Upload Files')");
-        if (!uploadButton) {
-          log("Upload button not found in BidBoard documents", "playwright");
-          return false;
-        }
-        await dismissOverlays(page);
-        await uploadButton.click({ force: true });
-      }
-      await takeScreenshot(page, "upload-6-after-upload-files-click");
-    } else {
+    // Legacy: click upload button. New BidBoard: do NOT click "Upload Files" — it opens native
+    // file picker which closes the modal. We'll setInputFiles on the hidden input directly.
+    if (!isNewBidBoard) {
       const uploadButton = await page.$(PROCORE_SELECTORS.documents.uploadButton);
       if (!uploadButton) {
         log("Upload button not found in BidBoard documents", "playwright");
@@ -345,17 +331,42 @@ export async function uploadDocumentToBidBoard(
       return false;
     }
 
-    // Upload file - use fallbacks and wait for input (modal may render async)
-    let fileInput = await findFileInputForUpload(page, 8000);
-    if (!fileInput) {
-      const ssPath = await takeScreenshot(page, "file-input-not-found-bidboard");
-      log(`File input not found in BidBoard upload modal. Screenshot: ${ssPath}`, "playwright");
-      return false;
-    }
-    try {
-      await fileInput.setInputFiles(filePath);
-    } finally {
-      try { await fileInput.dispose(); } catch { /* ignore */ }
+    // Upload file: New BidBoard — setInputFiles on hidden input directly (do not click Upload Files).
+    // Legacy — find input and set files.
+    if (isNewBidBoard) {
+      let fileInputLoc = page.locator('input[type="file"]').first();
+      try {
+        await fileInputLoc.waitFor({ state: 'attached', timeout: 5000 });
+      } catch {
+        fileInputLoc = page.locator('body').locator('input[type="file"]').first();
+        try {
+          await fileInputLoc.waitFor({ state: 'attached', timeout: 5000 });
+        } catch {
+          const ssPath = await takeScreenshot(page, "file-input-not-found-bidboard");
+          log(`File input not found in BidBoard upload modal. Screenshot: ${ssPath}`, "playwright");
+          return false;
+        }
+      }
+      await fileInputLoc.setInputFiles(filePath, { noWaitAfter: true });
+      // Wait for file count or filename to appear before Attach
+      try {
+        const escapedName = document.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        await page.waitForSelector(`text=/1 file selected|\\d+ file\\(s\\) selected|${escapedName}/i`, { timeout: 15000 });
+      } catch {
+        await randomDelay(2000, 4000);
+      }
+    } else {
+      const fileInput = await findFileInputForUpload(page, 8000);
+      if (!fileInput) {
+        const ssPath = await takeScreenshot(page, "file-input-not-found-bidboard");
+        log(`File input not found in BidBoard upload modal. Screenshot: ${ssPath}`, "playwright");
+        return false;
+      }
+      try {
+        await fileInput.setInputFiles(filePath);
+      } finally {
+        try { await fileInput.dispose(); } catch { /* ignore */ }
+      }
     }
     await takeScreenshot(page, "upload-7-after-file-set");
     await randomDelay(2000, 5000);
