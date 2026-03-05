@@ -180,10 +180,36 @@ export async function uploadDocumentToBidBoard(
     const isNewBidBoard = page.url().includes("/tools/bid-board");
 
     if (isNewBidBoard) {
+      // Wait for SPA content to fully render before looking for the upload button
+      try {
+        await page.waitForSelector('bid-board-app#spaContent, #spaContent', { timeout: 15000 });
+      } catch {
+        log("SPA content container not found, continuing anyway", "playwright");
+      }
+      await randomDelay(2000, 3000);
+
       // New BidBoard UI: Upload (header) → Upload Attachments → Upload Files → Attach
-      const uploadBtn = await page.$("button.aid-upload-document, button:has-text('Upload')");
+      let uploadBtn = await page.$("button.aid-upload-document");
       if (!uploadBtn) {
-        log("Upload button not found in BidBoard (new UI)", "playwright");
+        uploadBtn = await page.$("button:has-text('Upload')");
+      }
+      if (!uploadBtn) {
+        // Try waiting for it to appear (SPA may still be rendering)
+        try {
+          await page.waitForSelector("button.aid-upload-document, button:has-text('Upload')", { timeout: 15000 });
+          uploadBtn = await page.$("button.aid-upload-document, button:has-text('Upload')");
+        } catch {
+          // Take screenshot for debugging
+          const { takeScreenshot } = await import("./browser");
+          const ssPath = await takeScreenshot(page, "upload-button-not-found");
+          log(`Upload button not found in BidBoard (new UI). Screenshot: ${ssPath}`, "playwright");
+          return false;
+        }
+      }
+      if (!uploadBtn) {
+        const { takeScreenshot } = await import("./browser");
+        const ssPath = await takeScreenshot(page, "upload-button-not-found");
+        log(`Upload button not found in BidBoard (new UI). Screenshot: ${ssPath}`, "playwright");
         return false;
       }
       await uploadBtn.click();

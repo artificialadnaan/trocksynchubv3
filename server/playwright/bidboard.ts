@@ -986,80 +986,134 @@ export async function createBidBoardProject(
       } catch (e: any) {
         log(`Office selection failed: ${e.message}`, "playwright");
       }
-      // Due date: click calendar button, navigate to month/year, select day
+      // Due date: try direct input fill first (MM/DD/YYYY), fall back to calendar picker
       if (projectData.bidDueDate) {
+        const formattedDate = formatDateForProcore(projectData.bidDueDate);
+        log(`Setting due date: raw=${projectData.bidDueDate}, formatted=${formattedDate}`, "playwright");
         try {
-          const dueDateCalendarBtn = page.locator('div.MuiInputAdornment-root').locator('button[aria-label="Icon Button"]').first();
-          if ((await dueDateCalendarBtn.count()) > 0) {
-            await dueDateCalendarBtn.click();
-            await randomDelay(800, 1200);
-            const targetDate = new Date(String(projectData.bidDueDate).length === 13 ? parseInt(String(projectData.bidDueDate)) : projectData.bidDueDate);
-            if (!isNaN(targetDate.getTime())) {
-              const targetMonth = targetDate.getMonth();
-              const targetYear = targetDate.getFullYear();
-              const targetDay = targetDate.getDate();
-              for (let i = 0; i < 24; i++) {
-                const headerText = await page.locator('div.MuiPickersCalendarHeader-labelContainer').textContent();
-                const match = headerText?.match(/(\w+)\s+(\d+)/);
-                if (match) {
-                  const months: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
-                  const curMonth = months[match[1]] ?? 0;
-                  const curYear = parseInt(match[2], 10) || new Date().getFullYear();
-                  if (curMonth === targetMonth && curYear === targetYear) {
-                    const dayBtn = page.locator('button.MuiPickersDay-root').filter({ hasText: String(targetDay) }).first();
-                    await dayBtn.click({ timeout: 5000 });
+          // Try filling the date input directly
+          const dueDateInput = await page.$('input[placeholder="MM/DD/YYYY"], input[name="dueDate"], input[type="date"]');
+          if (dueDateInput) {
+            await dueDateInput.click();
+            await dueDateInput.fill('');
+            await randomDelay(200, 400);
+            await dueDateInput.type(formattedDate, { delay: 50 });
+            await dueDateInput.press('Tab');
+            await randomDelay(500, 800);
+            log(`Due date filled via input: ${formattedDate}`, "playwright");
+          } else {
+            // Fallback: calendar picker
+            log("Due date input not found, trying calendar picker", "playwright");
+            const dueDateCalendarBtn = page.locator('div.MuiInputAdornment-root').locator('button').first();
+            if ((await dueDateCalendarBtn.count()) > 0) {
+              await dueDateCalendarBtn.click();
+              await randomDelay(800, 1200);
+              const targetDate = new Date(String(projectData.bidDueDate).length === 13 ? parseInt(String(projectData.bidDueDate)) : projectData.bidDueDate);
+              if (!isNaN(targetDate.getTime())) {
+                const targetMonth = targetDate.getMonth();
+                const targetYear = targetDate.getFullYear();
+                const targetDay = targetDate.getDate();
+                for (let i = 0; i < 24; i++) {
+                  const headerText = await page.locator('div.MuiPickersCalendarHeader-labelContainer').textContent();
+                  const match = headerText?.match(/(\w+)\s+(\d+)/);
+                  if (match) {
+                    const months: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+                    const curMonth = months[match[1]] ?? 0;
+                    const curYear = parseInt(match[2], 10) || new Date().getFullYear();
+                    if (curMonth === targetMonth && curYear === targetYear) {
+                      const dayBtn = page.locator('button.MuiPickersDay-root').filter({ hasText: String(targetDay) }).first();
+                      await dayBtn.click({ timeout: 5000 });
+                      await randomDelay(500, 800);
+                      log(`Due date selected via calendar: ${formattedDate}`, "playwright");
+                      break;
+                    }
+                    const nextBtn = page.locator('button[aria-label="Next month"]');
+                    if ((await nextBtn.count()) > 0) await nextBtn.click();
                     await randomDelay(500, 800);
-                    break;
                   }
-                  const nextBtn = page.locator('button[aria-label="Next month"]');
-                  if ((await nextBtn.count()) > 0) await nextBtn.click();
-                  await randomDelay(500, 800);
                 }
               }
+            } else {
+              log("Due date: neither input nor calendar button found", "playwright");
             }
           }
         } catch (e: any) {
           log(`Due date selection failed: ${e.message}`, "playwright");
         }
+      } else {
+        log("Due date: no bidDueDate provided in project data", "playwright");
       }
-      // Add Customer: search, select from list, click Select (must close dialog before Add Address)
+      // Add Customer: click + Add Customer, search, select from list, click Select
       if (projectData.clientName) {
+        log(`Adding customer: ${projectData.clientName}`, "playwright");
         try {
-          const addCustBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.addCustomerButton);
+          // Try multiple selectors for the Add Customer button
+          let addCustBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.addCustomerButton);
+          if (!addCustBtn) {
+            addCustBtn = await page.$("button:has-text('Add Customer')");
+          }
           if (addCustBtn) {
             await addCustBtn.click();
             await randomDelay(1500, 2500);
-            const searchInput = await page.$('input[data-qa="core-search-input"], input[placeholder="Search customer"]');
+            const searchInput = await page.$('input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"]');
             if (searchInput) {
               await searchInput.fill(projectData.clientName);
               await randomDelay(2000, 3000);
-              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root').filter({ hasText: new RegExp(projectData.clientName.slice(0, 10), "i") }).first();
-              await listItem.click({ timeout: 8000 });
-              await randomDelay(500, 1000);
-              const selectBtn = page.locator('[role="dialog"].aid-itemPickerDialog').locator('button.aid-confirmButton').filter({ hasText: /Select/i });
+              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(projectData.clientName.slice(0, 10), "i") }).first();
+              try {
+                await listItem.click({ timeout: 8000 });
+                await randomDelay(500, 1000);
+                log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
+              } catch (e: any) {
+                log(`Customer list item not found for "${projectData.clientName}": ${e.message}`, "playwright");
+              }
+              const selectBtn = page.locator('[role="dialog"]').locator('button').filter({ hasText: /Select/i }).first();
               if ((await selectBtn.count()) > 0) {
                 await selectBtn.click();
                 await randomDelay(1500, 2500);
+                log("Customer selected and dialog closed", "playwright");
+              } else {
+                // Try confirm button
+                const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
+                if ((await confirmBtn.count()) > 0) {
+                  await confirmBtn.click();
+                  await randomDelay(1500, 2500);
+                }
               }
+            } else {
+              log("Customer search input not found in dialog", "playwright");
             }
+          } else {
+            log("Add Customer button not found on page", "playwright");
           }
         } catch (e: any) {
           log(`Add Customer failed: ${e.message}`, "playwright");
         }
+      } else {
+        log("Customer: no clientName provided in project data", "playwright");
       }
-      // Add Address: must run AFTER Add Customer dialog is closed (Select clicked)
+      // Add Address: must run AFTER Add Customer dialog is closed
       if (projectData.address || projectData.city || projectData.state || projectData.zip || projectData.country) {
+        log(`Adding address: ${projectData.address || ''}, ${projectData.city || ''}, ${projectData.state || ''} ${projectData.zip || ''}`, "playwright");
         try {
-          await page.locator('[role="dialog"].aid-itemPickerDialog').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
-          const addAddrBtn = page.locator('button.aid-add-address-button').first();
-          if ((await addAddrBtn.count()) > 0) {
-            await addAddrBtn.click({ force: true, timeout: 10000 });
+          // Wait for any open dialog to close first
+          await page.locator('[role="dialog"]').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+          await randomDelay(500, 1000);
+          let addAddrBtn = await page.$('button.aid-add-address-button');
+          if (!addAddrBtn) {
+            addAddrBtn = await page.$("button:has-text('Add Address')");
+          }
+          if (addAddrBtn) {
+            await addAddrBtn.click({ force: true });
             await randomDelay(1500, 2500);
             if (projectData.address) {
               const streetInput = await page.$('input[name="street"]');
               if (streetInput) {
                 await streetInput.click();
                 await streetInput.fill(projectData.address);
+                log(`Address street filled: ${projectData.address}`, "playwright");
+              } else {
+                log("Street input not found in address dialog", "playwright");
               }
             }
             if (projectData.city) {
@@ -1078,15 +1132,30 @@ export async function createBidBoardProject(
               const countryInput = await page.$('input[name="country"]');
               if (countryInput) await countryInput.fill(projectData.country);
             }
-            const saveBtn = page.locator('[role="dialog"].aid-formDialog').locator('button.aid-confirmButton').filter({ hasText: /Save/i }).first();
+            // Save the address dialog
+            const saveBtn = page.locator('[role="dialog"]').locator('button').filter({ hasText: /Save/i }).first();
             if ((await saveBtn.count()) > 0) {
               await saveBtn.click({ force: true });
               await randomDelay(1500, 2500);
+              log("Address saved", "playwright");
+            } else {
+              const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
+              if ((await confirmBtn.count()) > 0) {
+                await confirmBtn.click({ force: true });
+                await randomDelay(1500, 2500);
+                log("Address confirmed", "playwright");
+              } else {
+                log("Address Save/Confirm button not found", "playwright");
+              }
             }
+          } else {
+            log("Add Address button not found on page", "playwright");
           }
         } catch (e: any) {
           log(`Add Address failed: ${e.message}`, "playwright");
         }
+      } else {
+        log("Address: no address fields provided in project data", "playwright");
       }
     }
 
@@ -1320,6 +1389,7 @@ export async function createBidBoardProjectFromDeal(
   };
 
   log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");
+  log(`Project data — clientName: ${projectData.clientName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
   
   const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
   
