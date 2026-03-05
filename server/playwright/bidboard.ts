@@ -1157,6 +1157,9 @@ export async function createBidBoardProject(
       } else {
         log("Address: no address fields provided in project data", "playwright");
       }
+
+      // Capture screenshot after filling all project details (for debugging)
+      await takeScreenshot(page, "bidboard-after-details-filled");
     }
 
     // Select stage
@@ -1267,7 +1270,7 @@ export async function createBidBoardProject(
     }
 
     // Wait for navigation or success indicator
-    await page.waitForLoadState("networkidle");
+    await page.waitForLoadState("load").catch(() => {});
 
     // Check for success - extract project ID from URL (new UI: /project/ID/, legacy: /bidding/ID/)
     const currentUrl = page.url();
@@ -1278,6 +1281,7 @@ export async function createBidBoardProject(
       result.projectId = projectIdFromUrl;
       result.success = true;
       log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId})`, "playwright");
+      await takeScreenshot(page, "bidboard-project-created");
     }
     if (!result.success) {
       // Check for success toast/message
