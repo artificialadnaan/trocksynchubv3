@@ -384,8 +384,8 @@ export async function uploadDocumentToBidBoard(
     }
     await randomDelay(1000, 2000);
 
-    // Upload file: New BidBoard — per-file loop (one file per modal cycle). Use filechooser
-    // instead of setInputFiles on hidden input, which causes the modal to close.
+    // Upload file: New BidBoard — per-file loop (one file per modal cycle). Use setInputFiles
+    // on the hidden input inside the modal (no click on Upload Files — that doesn't trigger filechooser).
     let success: boolean;
     if (isNewBidBoard) {
       let successCount = 0;
@@ -417,18 +417,12 @@ export async function uploadDocumentToBidBoard(
           log(`Upload modal open for file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
           await takeScreenshot(page, `upload-modal-open-${i + 1}`);
 
-          // Set up the file chooser interceptor BEFORE clicking Upload Files
-          const [fileChooser] = await Promise.all([
-            page.waitForEvent('filechooser', { timeout: 15000 }),
-            // Click the "Upload Files" button inside the modal (the dropzone button)
-            page.locator('[role="dialog"] button:has-text("Upload Files"), .StyledDropzoneContainer button').first().click({ timeout: 8000 }),
-          ]);
-
-          // Set the file via the intercepted file chooser
-          await fileChooser.setFiles(filePath);
+          // Set file on hidden input — do NOT click Upload Files (no filechooser event)
+          const fileInput = page.locator('[role="dialog"] input[type="file"], .StyledDropzoneContainer input[type="file"]').first();
+          await fileInput.setInputFiles(filePath);
           await randomDelay(1500, 2500);
 
-          log(`File set via filechooser: ${fileName}`, "playwright");
+          log(`File set in dropzone: ${fileName}`, "playwright");
           await takeScreenshot(page, `upload-file-set-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
 
           // Wait for Attach button to become enabled (file name should appear in modal)

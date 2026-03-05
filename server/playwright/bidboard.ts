@@ -869,7 +869,12 @@ export async function createBidBoardProject(
     }
 
     const isNewBidBoardUi = page.url().includes("/tools/bid-board");
+    let isService = false;
     if (isNewBidBoardUi) {
+      // Parse type digit from project number (DFW-4-... = Service, all others = Estimate in Progress)
+      const projectNumberTypeDigit = projectData.projectNumber?.match(/^[A-Z]{2,4}-(\d+)-/i)?.[1];
+      isService = projectNumberTypeDigit === "4";
+
       // Description before estimator
       if (projectData.description) {
         const descInput = await page.$('textarea[name="description"]');
@@ -879,12 +884,6 @@ export async function createBidBoardProject(
           await randomDelay(200, 400);
         }
       }
-      // Parse type digit from project number (DFW-4-... = Service, all others = Estimate in Progress)
-      const projectNumberTypeDigit = projectData.projectNumber?.match(/^(?:DFW|ATL)-(\d+)-/i)?.[1];
-
-      // ONLY type 4 goes to Service - Estimating. Everything else goes to Estimate in Progress.
-      const isService = projectNumberTypeDigit === "4";
-
       log(`Tab selection: projectNumber=${projectData.projectNumber}, typeDigit=${projectNumberTypeDigit ?? "none"}, isService=${isService}`, "playwright");
       try {
         const tab = isService
@@ -950,6 +949,23 @@ export async function createBidBoardProject(
     }
 
     await randomDelay(1000, 1500);
+
+    // New BidBoard: stage dropdown defaults to SERVICE - ESTIMATING; change to ESTIMATE IN PROGRESS when not service
+    if (isNewBidBoardUi && !isService) {
+      try {
+        const stageDropdown = page.locator('div.StyledPageHeader div.StyledSelectArrowContainer-core-12_35_0__sc-mr8gwe-3, div.StyledPageHeader [class*="StyledSelectArrowContainer"]').first();
+        await stageDropdown.click({ timeout: 5000 });
+        await randomDelay(500, 800);
+        const estimateOption = page.locator('[role="option"]').filter({ hasText: /ESTIMATE IN PROGRESS/i }).first();
+        await estimateOption.click({ timeout: 5000 });
+        await randomDelay(300, 500);
+        log(`[playwright] Stage set to: ESTIMATE IN PROGRESS`, "playwright");
+      } catch (e: any) {
+        log(`[playwright] Could not change stage dropdown: ${e.message}`, "playwright");
+      }
+    } else if (isNewBidBoardUi && isService) {
+      log(`[playwright] Stage set to: SERVICE - ESTIMATING`, "playwright");
+    }
 
     // Fill in project name (required)
     const nameInput = await page.$(PROCORE_SELECTORS.newProject.nameInput);
