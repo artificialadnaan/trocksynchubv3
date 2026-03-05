@@ -1213,10 +1213,12 @@ export async function createBidBoardProject(
               const countryInput = await page.$('input[name="country"], input[placeholder*="Country"]');
               if (countryInput) await countryInput.fill(projectData.country);
             }
-            // Save the address dialog — try Save, then Confirm, then any primary/submit button
-            const dialogBtns = page.locator('[role="dialog"]').locator('button');
-            // Use loose regex (no anchors) so "Save Address", "Save Changes", etc. all match
-            const saveBtn = dialogBtns.filter({ hasText: /save/i }).first();
+            // Save the address dialog — scope to .aid-formDialog (not [role="dialog"] which doesn't match MUI)
+            // The Save button has class aid-confirmButton; use that as primary selector
+            const dialogContainer = page.locator('.aid-formDialog');
+            const dialogBtns = dialogContainer.locator('button');
+            // aid-confirmButton is the actual Save button class confirmed from DOM inspection
+            const saveBtn = dialogContainer.locator('button.aid-confirmButton').first();
             const confirmBtn = dialogBtns.filter({ hasText: /confirm|done|ok|submit/i }).first();
             const closeAddressDialog = async (method: string) => {
               // Give the form/server time to process after the save button click
@@ -1226,7 +1228,7 @@ export async function createBidBoardProject(
                 log(`Address dialog still open after ${method}, trying close/X button`, "playwright");
                 // Step 1: look for a close/X button in the dialog header (most reliable)
                 try {
-                  const closeBtn = page.locator('[role="dialog"]').locator('button[aria-label*="close" i], button[aria-label*="dismiss" i], button.MuiIconButton-root').first();
+                  const closeBtn = page.locator('.aid-formDialog').locator('button[aria-label*="close" i], button[aria-label*="dismiss" i], button.MuiIconButton-root').first();
                   if ((await closeBtn.count()) > 0) {
                     await closeBtn.click({ force: true, timeout: 3000 });
                     await randomDelay(500, 800);
@@ -1276,26 +1278,18 @@ export async function createBidBoardProject(
               await randomDelay(500, 1000);
               log("Address confirmed", "playwright");
             } else {
-              const aidBtn = await page.$('[role="dialog"] button.aid-confirmButton');
+              // Scope to .aid-formDialog to avoid [role="dialog"] mismatch with MUI
+              const aidBtn = await page.$('.aid-formDialog button.aid-confirmButton');
               if (aidBtn) {
                 await aidBtn.click({ force: true });
                 await closeAddressDialog("aid-confirmButton");
                 await randomDelay(500, 1000);
                 log("Address saved via aid-confirmButton", "playwright");
               } else {
-                // Last resort: any type="submit" button inside the dialog
-                const submitBtn = await page.$('[role="dialog"] button[type="submit"]');
-                if (submitBtn) {
-                  await submitBtn.click({ force: true });
-                  await closeAddressDialog("type=submit");
-                  await randomDelay(500, 1000);
-                  log("Address saved via type=submit button", "playwright");
-                } else {
-                  await takeScreenshot(page, "bidboard-address-save-not-found");
-                  log("Address Save/Confirm button not found — check screenshot", "playwright");
-                  // Still try to close the dialog even if we couldn't find the save button
-                  await closeAddressDialog("no-save-btn");
-                }
+                await takeScreenshot(page, "bidboard-address-save-not-found");
+                log("Address Save/Confirm button not found — check screenshot", "playwright");
+                // Still try to close the dialog even if we couldn't find the save button
+                await closeAddressDialog("no-save-btn");
               }
             }
           } else {
