@@ -1286,14 +1286,14 @@ export async function createBidBoardProject(
 
             if ((await saveBtn.count()) > 0) {
               await saveBtn.click({ force: true });
-              // Allow loading screen + API call to complete (~2s) before checking if dialog closed
-              await randomDelay(2500, 3500);
+              // Wait 5s for loading/API to complete (per DOM inspection)
+              await new Promise((r) => setTimeout(r, 5000));
               await closeAddressDialog("Save");
               await randomDelay(500, 1000);
               log("Address saved", "playwright");
             } else if ((await confirmBtn.count()) > 0) {
               await confirmBtn.click({ force: true });
-              await randomDelay(2500, 3500);
+              await new Promise((r) => setTimeout(r, 5000));
               await closeAddressDialog("Confirm");
               await randomDelay(500, 1000);
               log("Address confirmed", "playwright");
@@ -1302,7 +1302,7 @@ export async function createBidBoardProject(
               const aidBtn = await page.$('.aid-formDialog button.aid-confirmButton');
               if (aidBtn) {
                 await aidBtn.click({ force: true });
-                await randomDelay(2500, 3500);
+                await new Promise((r) => setTimeout(r, 5000));
                 await closeAddressDialog("aid-confirmButton");
                 await randomDelay(500, 1000);
                 log("Address saved via aid-confirmButton", "playwright");
