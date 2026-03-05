@@ -35,13 +35,24 @@ async function uploadFileToHubSpotAndAttachToDeal(
   const fileId = uploadJson.id;
   if (!fileId) throw new Error('HubSpot file upload did not return file id');
 
-  const assocRes = await fetch(
-    `${base}/crm/v4/objects/file/${fileId}/associations/default/deal/${dealId}`,
+  // HubSpot v4 associations: "file" is not a valid object type; use "0-4" or associate from deal side
+  let assocRes = await fetch(
+    `${base}/crm/v4/objects/0-4/${fileId}/associations/default/deal/${dealId}`,
     { method: 'PUT', headers: { Authorization: `Bearer ${token}` } }
   );
   if (!assocRes.ok) {
     const errText = await assocRes.text();
-    throw new Error(`HubSpot file-deal association failed: ${assocRes.status} ${errText}`);
+    // Fallback: associate from deal to file
+    assocRes = await fetch(
+      `${base}/crm/v4/objects/deals/${dealId}/associations/default/0-4/${fileId}`,
+      { method: 'PUT', headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!assocRes.ok) {
+      const fallbackErr = await assocRes.text();
+      console.error(`[rfp-approval] HubSpot file-deal association failed: ${fallbackErr}`);
+      // Do NOT throw — BidBoard upload is the priority; log and continue
+      return;
+    }
   }
 }
 
@@ -405,7 +416,7 @@ export async function processRfpApproval(
       const hubspotUpdateProps: Record<string, string> = {};
       const ALLOWED_HUBSPOT_KEYS = ['dealname', 'amount', 'project_types', 'project_number', 'project_location',
         'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
-        'notes', 'bid_due_date', 'due_date', 'client_email', 'client_phone', 'company_name'];
+        'notes', 'due_date', 'client_email', 'client_phone', 'company_name'];
       for (const [key, value] of Object.entries(changedFields)) {
         if (ALLOWED_HUBSPOT_KEYS.includes(key)) {
           hubspotUpdateProps[key] = value;
@@ -415,10 +426,13 @@ export async function processRfpApproval(
       if (changedFields.description !== undefined) {
         hubspotUpdateProps.project_description__briefly_describe_the_project_ = changedFields.description;
       }
+      // bid_due_date: map to closedate (HubSpot native) and proposal_due_date (custom)
       if (changedFields.bid_due_date !== undefined) {
         const dateStr = changedFields.bid_due_date;
         if (dateStr && /^\d{4}-\d{2}-\d{2}/.test(dateStr)) {
-          hubspotUpdateProps.proposal_due_date = String(new Date(dateStr).getTime());
+          const date = new Date(dateStr);
+          hubspotUpdateProps.closedate = date.getTime().toString();
+          hubspotUpdateProps.proposal_due_date = date.getTime().toString();
         }
       }
 

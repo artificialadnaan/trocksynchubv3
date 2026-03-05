@@ -1008,21 +1008,36 @@ export async function createBidBoardProject(
             if (searchInput) {
               await searchInput.fill(projectData.estimator);
               await randomDelay(1500, 2500);
-              // Wait for dropdown options to appear then click best match
+              // Wait for dropdown options to appear (longer timeout for slow loads)
               try {
-                await page.waitForSelector('div[role="option"], li[role="option"]', { timeout: 5000 });
-                const option = page.locator('div[role="option"], li[role="option"]')
-                  .filter({ hasText: new RegExp(projectData.estimator.split(' ')[0], "i") })
-                  .first();
-                if ((await option.count()) > 0) {
-                  await option.click({ timeout: 5000 });
+                await page.waitForSelector('div[role="option"], li[role="option"]', { timeout: 9000 });
+                const optionLocator = page.locator('div[role="option"], li[role="option"]');
+                const optionCount = await optionLocator.count();
+                const optionTexts: string[] = [];
+                for (let i = 0; i < optionCount; i++) {
+                  const text = await optionLocator.nth(i).textContent();
+                  if (text) optionTexts.push(text.trim());
+                }
+                const estimatorLower = projectData.estimator.toLowerCase();
+                let matchedOption = optionLocator.first();
+                let found = false;
+                for (let i = 0; i < optionTexts.length; i++) {
+                  if (optionTexts[i].toLowerCase().includes(estimatorLower)) {
+                    matchedOption = optionLocator.nth(i);
+                    found = true;
+                    break;
+                  }
+                }
+                if (found && (await matchedOption.count()) > 0) {
+                  await matchedOption.click({ timeout: 5000 });
                   log(`Estimator selected: ${projectData.estimator}`, "playwright");
                 } else {
-                  log(`No estimator option matched "${projectData.estimator}"`, "playwright");
+                  log(`Estimator dropdown options available: ${optionTexts.join(', ')}`, "playwright");
+                  log(`No estimator option matched "${projectData.estimator}" (continuing)`, "playwright");
                   await page.keyboard.press('Escape');
                 }
               } catch {
-                log(`Estimator dropdown options not found for "${projectData.estimator}"`, "playwright");
+                log(`Estimator dropdown options not found for "${projectData.estimator}" (continuing)`, "playwright");
                 await page.keyboard.press('Escape');
               }
               await randomDelay(500, 1000);

@@ -1123,9 +1123,18 @@ export async function updateHubSpotDealStage(hubspotDealId: string, stageId: str
 }
 
 export async function updateHubSpotDeal(hubspotDealId: string, properties: Record<string, string>): Promise<{ success: boolean; message: string }> {
+  const props = { ...properties };
+  // bid_due_date is not a HubSpot property; map to closedate (Unix ms)
+  if (props.bid_due_date !== undefined) {
+    const dateStr = props.bid_due_date;
+    if (dateStr && /^\d{4}-\d{2}-\d{2}/.test(dateStr)) {
+      props.closedate = String(new Date(dateStr).getTime());
+    }
+    delete props.bid_due_date;
+  }
   try {
     const client = await getHubSpotClient();
-    await client.crm.deals.basicApi.update(hubspotDealId, { properties });
+    await client.crm.deals.basicApi.update(hubspotDealId, { properties: props });
     return { success: true, message: `Deal ${hubspotDealId} updated` };
   } catch (e: any) {
     let body = e.body ?? e.response?.body;
@@ -1146,7 +1155,7 @@ export async function updateHubSpotDeal(hubspotDealId: string, properties: Recor
       }
     }
     if (invalidProps.length > 0) {
-      const filtered = { ...properties };
+      const filtered = { ...props };
       for (const key of invalidProps) {
         delete filtered[key];
       }

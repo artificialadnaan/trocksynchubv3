@@ -112,20 +112,22 @@ const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
 
 export function mapProcoreStageToHubspot(procoreStage: string | null): string {
   if (!procoreStage) return 'Estimating'; // Default to Estimating for new projects
-  return PROCORE_TO_HUBSPOT_STAGE[procoreStage] || procoreStage; // Pass through if no mapping
+  const trimmed = procoreStage.trim();
+  return PROCORE_TO_HUBSPOT_STAGE[trimmed] || trimmed; // Pass through if no mapping
 }
 
 // Resolve stage label to actual HubSpot stage ID
 // mapProcoreStageToHubspot returns labels, but HubSpot API requires stage IDs
 export async function resolveHubspotStageId(stageLabel: string): Promise<{ stageId: string; stageName: string } | null> {
   const pipelines = await storage.getHubspotPipelines();
-  
+  const trimmedLabel = stageLabel.trim();
+
   for (const pipeline of pipelines) {
     const stages = (pipeline.stages as any[]) || [];
     for (const stage of stages) {
-      // Match by label (case-insensitive) or by stageId
-      const label = stage.label || stage.stageName || '';
-      if (label.toLowerCase() === stageLabel.toLowerCase() || stage.stageId === stageLabel) {
+      // Match by label (case-insensitive, trimmed) or by stageId
+      const label = (stage.label || stage.stageName || '').trim();
+      if (label.toLowerCase() === trimmedLabel.toLowerCase() || stage.stageId === trimmedLabel) {
         return {
           stageId: stage.stageId,
           stageName: label,
