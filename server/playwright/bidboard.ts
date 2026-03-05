@@ -1152,18 +1152,28 @@ export async function createBidBoardProject(
             const confirmBtn = dialogBtns.filter({ hasText: /^(Confirm|Done|OK)$/i }).first();
             if ((await saveBtn.count()) > 0) {
               await saveBtn.click({ force: true });
-              await randomDelay(1500, 2500);
+              // Wait for the address dialog to actually close before proceeding
+              await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 10000 }).catch(() => {
+                log("Address dialog did not close after Save — may still be open", "playwright");
+              });
+              await randomDelay(500, 1000);
               log("Address saved", "playwright");
             } else if ((await confirmBtn.count()) > 0) {
               await confirmBtn.click({ force: true });
-              await randomDelay(1500, 2500);
+              await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 10000 }).catch(() => {
+                log("Address dialog did not close after Confirm — may still be open", "playwright");
+              });
+              await randomDelay(500, 1000);
               log("Address confirmed", "playwright");
             } else {
               // Last resort: click button.aid-confirmButton
               const aidBtn = await page.$('[role="dialog"] button.aid-confirmButton');
               if (aidBtn) {
                 await aidBtn.click({ force: true });
-                await randomDelay(1500, 2500);
+                await page.waitForSelector('.aid-formDialog', { state: 'hidden', timeout: 10000 }).catch(() => {
+                  log("Address dialog did not close after aid-confirmButton — may still be open", "playwright");
+                });
+                await randomDelay(500, 1000);
                 log("Address saved via aid-confirmButton", "playwright");
               } else {
                 await takeScreenshot(page, "bidboard-address-save-not-found");
