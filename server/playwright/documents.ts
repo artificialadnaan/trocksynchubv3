@@ -100,6 +100,45 @@ async function logDocumentAction(
 const DOWNLOAD_TIMEOUT_MS = 120_000; // 2 min for large files
 const UPLOAD_ACTION_TIMEOUT_MS = 180_000; // 3 min for upload + Procore processing
 
+/** Multiple fallback selectors for file input - Procore BidBoard uses dropzone in modal */
+const FILE_INPUT_SELECTORS = [
+  // BidBoard modal: StyledDropzoneContainer wraps the hidden input
+  '[class*="StyledDropzoneContainer"] input[type="file"]',
+  '[class*="StyledDropzoneWrapper"] input[type="file"]',
+  '[class*="StyledDropzone"] input[type="file"]',
+  '[class*="StyledModal"] input[type="file"]',
+  '[class*="StyledPortal"] input[type="file"]',
+  PROCORE_SELECTORS.documents.fileInput,
+  'input[type="file"]',
+  '[role="dialog"] input[type="file"]',
+  '.modal input[type="file"], [class*="Modal"] input[type="file"]',
+  'input[type="file"][accept]',
+];
+
+/** Find file input with fallbacks and optional wait. Returns null if not found. */
+async function findFileInputForUpload(page: Page, waitMs: number = 8000): Promise<Awaited<ReturnType<Page["$"]>>> {
+  const endTime = Date.now() + waitMs;
+  while (Date.now() < endTime) {
+    for (const sel of FILE_INPUT_SELECTORS) {
+      try {
+        const el = await page.$(sel);
+        if (el) return el;
+      } catch {
+        /* ignore */
+      }
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  // Final fallback: use locator with wait (better for React/SPA that renders async)
+  try {
+    const loc = page.locator('input[type="file"]').first();
+    await loc.waitFor({ state: "attached", timeout: 3000 });
+    return await loc.elementHandle();
+  } catch {
+    return null;
+  }
+}
+
 async function downloadFile(url: string, destPath: string): Promise<boolean> {
   return new Promise((resolve) => {
     const protocol = url.startsWith("https") ? https : http;
@@ -222,6 +261,8 @@ export async function uploadDocumentToBidBoard(
         await uploadDrawings.click({ timeout: 8000 });
       }
       await randomDelay(2000, 3000);
+      // Wait for upload modal and dropzone to appear
+      await page.waitForSelector('[class*="StyledDropzoneContainer"], button.StyledUploadButton, button:has-text("Upload Files")', { timeout: 10000 }).catch(() => {});
     } else {
       // Legacy: Documents tab then upload
       const documentsTab = await page.$(PROCORE_SELECTORS.bidboard.documentsTab);
@@ -268,22 +309,30 @@ export async function uploadDocumentToBidBoard(
       log("No file path available for upload", "playwright");
       return false;
     }
-    
-    // Upload file
-    const fileInput = await page.$(PROCORE_SELECTORS.documents.fileInput);
-    if (fileInput) {
-      await fileInput.setInputFiles(filePath);
-      await randomDelay(2000, 5000);
+
+    // Upload file - use fallbacks and wait for input (modal may render async)
+    let fileInput = await findFileInputForUpload(page, 8000);
+    if (!fileInput) {
+      const ssPath = await takeScreenshot(page, "file-input-not-found-bidboard");
+      log(`File input not found in BidBoard upload modal. Screenshot: ${ssPath}`, "playwright");
+      return false;
     }
+    try {
+      await fileInput.setInputFiles(filePath);
+    } finally {
+      try { await fileInput.dispose(); } catch { /* ignore */ }
+    }
+    await randomDelay(2000, 5000);
+
     if (isNewBidBoard) {
-      // Wait up to 30s for files to finish uploading before clicking Attach
-      await new Promise((r) => setTimeout(r, 5000));
+      // Wait for files to finish uploading - can take a while for larger files
+      await new Promise((r) => setTimeout(r, 15000)); // 15s base wait
       const attachBtn = page.locator('button[data-qa="qa-attach-button"], button:has-text("Attach")');
       try {
-        await attachBtn.first().click({ timeout: 30000 });
+        await attachBtn.first().click({ timeout: 60000 }); // 60s for Attach to be clickable
       } catch {
-        await new Promise((r) => setTimeout(r, 25000));
-        await attachBtn.first().click({ timeout: 5000 });
+        await new Promise((r) => setTimeout(r, 45000)); // extra 45s for slow uploads
+        await attachBtn.first().click({ timeout: 10000 });
       }
       await randomDelay(3000, 5000);
     }
@@ -429,14 +478,21 @@ export async function uploadDocumentToPortfolio(
       log("No file path available for upload", "playwright");
       return false;
     }
-    
-    // Upload file
-    const fileInput = await page.$(PROCORE_SELECTORS.documents.fileInput);
-    if (fileInput) {
-      await fileInput.setInputFiles(filePath);
-      await randomDelay(2000, 5000);
+
+    // Upload file - use fallbacks and wait for input
+    let fileInput = await findFileInputForUpload(page, 8000);
+    if (!fileInput) {
+      const ssPath = await takeScreenshot(page, "file-input-not-found-portfolio");
+      log(`File input not found in Portfolio upload. Screenshot: ${ssPath}`, "playwright");
+      return false;
     }
-    
+    try {
+      await fileInput.setInputFiles(filePath);
+    } finally {
+      try { await fileInput.dispose(); } catch { /* ignore */ }
+    }
+    await randomDelay(2000, 5000);
+
     // Wait for upload to complete
     await page.waitForLoadState("networkidle");
     
