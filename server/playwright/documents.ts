@@ -102,7 +102,7 @@ const UPLOAD_ACTION_TIMEOUT_MS = 180_000; // 3 min for upload + Procore processi
 
 /** Multiple fallback selectors for file input - Procore BidBoard uses dropzone in modal */
 const FILE_INPUT_SELECTORS = [
-  // BidBoard modal: StyledDropzoneContainer wraps the hidden input
+  'body > div:nth-of-type(2) input[type="file"]', // From Puppeteer recording
   '[class*="StyledDropzoneContainer"] input[type="file"]',
   '[class*="StyledDropzoneWrapper"] input[type="file"]',
   '[class*="StyledDropzone"] input[type="file"]',
@@ -244,15 +244,14 @@ export async function uploadDocumentToBidBoard(
 
       // New BidBoard UI: Upload (header) → Upload Attachments → Upload Files → Attach
       await dismissOverlays(page);
-      let uploadBtn = await page.$("button.aid-upload-document");
+      let uploadBtn = await page.$("div.aid-upload-documents button");
       if (!uploadBtn) {
         uploadBtn = await page.$("button:has-text('Upload')");
       }
       if (!uploadBtn) {
-        // Try waiting for it to appear (SPA may still be rendering)
         try {
-          await page.waitForSelector("button.aid-upload-document, button:has-text('Upload')", { timeout: 15000 });
-          uploadBtn = await page.$("button.aid-upload-document, button:has-text('Upload')");
+          await page.waitForSelector("div.aid-upload-documents button, button:has-text('Upload')", { timeout: 15000 });
+          uploadBtn = await page.$("div.aid-upload-documents button, button:has-text('Upload')");
         } catch {
           // Take screenshot for debugging
           const { takeScreenshot } = await import("./browser");
@@ -290,17 +289,29 @@ export async function uploadDocumentToBidBoard(
     }
 
     // Click upload button (legacy) or Upload Files in modal (new UI)
-    let uploadButton = await page.$(PROCORE_SELECTORS.documents.uploadButton);
-    if (!uploadButton && isNewBidBoard) {
-      uploadButton = await page.$("button.StyledUploadButton, button:has-text('Upload Files')");
+    if (isNewBidBoard) {
+      const uploadFilesSpan = page.locator('div.StyledModalBody-core-12_35_0__sc-1ijdug2-4 span > span').filter({ hasText: 'Upload Files' }).first();
+      if ((await uploadFilesSpan.count()) > 0) {
+        await dismissOverlays(page);
+        await uploadFilesSpan.click({ force: true });
+      } else {
+        const uploadButton = await page.$("button.StyledUploadButton, button:has-text('Upload Files')");
+        if (!uploadButton) {
+          log("Upload button not found in BidBoard documents", "playwright");
+          return false;
+        }
+        await dismissOverlays(page);
+        await uploadButton.click({ force: true });
+      }
+    } else {
+      const uploadButton = await page.$(PROCORE_SELECTORS.documents.uploadButton);
+      if (!uploadButton) {
+        log("Upload button not found in BidBoard documents", "playwright");
+        return false;
+      }
+      await dismissOverlays(page);
+      await uploadButton.click({ force: true });
     }
-    if (!uploadButton) {
-      log("Upload button not found in BidBoard documents", "playwright");
-      return false;
-    }
-
-    await dismissOverlays(page);
-    await uploadButton.click({ force: true });
     await randomDelay(1000, 2000);
     
     // Get file path: use localPath (RFP temp files) or download from URL. Attachments are stored temporarily until upload completes.
@@ -346,13 +357,14 @@ export async function uploadDocumentToBidBoard(
       // Wait for files to finish uploading - can take a while for larger files
       await new Promise((r) => setTimeout(r, 15000)); // 15s base wait
       await dismissOverlays(page);
-      const attachBtn = page.locator('button[data-qa="qa-attach-button"], button:has-text("Attach")');
+      const attachSpan = page.locator('[data-qa="qa-attach-button"] span').first();
       try {
-        await attachBtn.first().click({ timeout: 60000, force: true }); // 60s for Attach to be clickable
+        await attachSpan.click({ timeout: 60000, force: true });
       } catch {
-        await new Promise((r) => setTimeout(r, 45000)); // extra 45s for slow uploads
-        await attachBtn.first().click({ timeout: 10000, force: true });
+        await new Promise((r) => setTimeout(r, 45000));
+        await attachSpan.click({ timeout: 10000, force: true });
       }
+      await page.waitForSelector('div.StyledModalBody-core-12_35_0__sc-1ijdug2-4', { state: 'hidden', timeout: 30000 }).catch(() => {});
       await randomDelay(3000, 5000);
     }
     await page.waitForLoadState("load").catch(() => {});
