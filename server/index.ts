@@ -141,6 +141,14 @@ httpServer.listen(
     console.error("[startup] Closeout survey migration failed:", e);
   }
 
+  // Ensure hubspot_owners and hubspot_owner_mappings tables exist
+  try {
+    const { ensureHubspotOwnerTables } = await import("./migrate-hubspot-owner-tables");
+    await ensureHubspotOwnerTables();
+  } catch (e) {
+    console.error("[startup] HubSpot owner tables migration failed:", e);
+  }
+
   // Seed default email templates if they don't exist
   try {
     await storage.seedEmailTemplates();

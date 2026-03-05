@@ -4526,21 +4526,12 @@ export async function registerRoutes(
   app.post("/api/hubspot/owner-mappings", requireAuth, async (req, res) => {
     try {
       const { hubspotOwnerId, email, name } = req.body;
-      // #region agent log
-      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7325e4'},body:JSON.stringify({sessionId:'7325e4',location:'routes.ts:owner-mappings',message:'POST owner-mappings entry',data:{hasOwnerId:!!hubspotOwnerId,hasEmail:!!email,hubspotOwnerIdLen:String(hubspotOwnerId||'').length},hypothesisId:'H3',timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       if (!hubspotOwnerId || !email) {
         return res.status(400).json({ error: "hubspotOwnerId and email are required" });
       }
-      // #region agent log
-      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7325e4'},body:JSON.stringify({sessionId:'7325e4',location:'routes.ts:before-upsert',message:'before upsertHubspotOwnerMapping',data:{},hypothesisId:'H1',timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       const mapping = await storage.upsertHubspotOwnerMapping({ hubspotOwnerId: String(hubspotOwnerId), email, name: name || null });
       res.json(mapping);
     } catch (e: any) {
-      // #region agent log
-      fetch('http://127.0.0.1:7661/ingest/4b6ff940-aff2-4741-a4b8-68a9fe5f9534',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'7325e4'},body:JSON.stringify({sessionId:'7325e4',location:'routes.ts:owner-mappings-catch',message:'POST owner-mappings error',data:{errMsg:(e?.message||'').slice(0,120)},hypothesisId:'H1',timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       res.status(500).json({ error: e.message });
     }
   });

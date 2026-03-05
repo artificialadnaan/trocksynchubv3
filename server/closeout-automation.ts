@@ -91,18 +91,24 @@ export async function triggerCloseoutSurvey(
     if (mapping?.hubspotDealId) {
       const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
       if (deal?.ownerId) {
-        let owner = await storage.getHubspotOwnerByHubspotId(deal.ownerId);
-        if (!owner?.email) {
+        let owner;
+        try {
+          owner = await storage.getHubspotOwnerByHubspotId(deal.ownerId);
+        } catch (err: any) {
+          // hubspot_owners table may not exist yet (run db:push); fall through to owner mapping
+          console.warn(`[closeout] hubspot_owners lookup failed for ${deal.ownerId}: ${err?.message?.slice(0, 80)}`);
+        }
+        if (owner?.email) {
+          recipientEmail = owner.email;
+          recipientName = [owner.firstName, owner.lastName].filter(Boolean).join(' ') || 'Team Member';
+          console.log(`[closeout] Using HubSpot deal owner: ${recipientName} (${recipientEmail})`);
+        } else {
           const mappingEntry = await storage.getHubspotOwnerMappingByHubspotId(deal.ownerId);
           if (mappingEntry?.email) {
             recipientEmail = mappingEntry.email;
             recipientName = mappingEntry.name || 'Team Member';
             console.log(`[closeout] Using owner mapping for ${deal.ownerId}: ${recipientName} (${recipientEmail})`);
           }
-        } else {
-          recipientEmail = owner.email;
-          recipientName = [owner.firstName, owner.lastName].filter(Boolean).join(' ') || 'Team Member';
-          console.log(`[closeout] Using HubSpot deal owner: ${recipientName} (${recipientEmail})`);
         }
       }
       // Also get company name for context if available
