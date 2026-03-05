@@ -5928,6 +5928,16 @@ const RFP_LOGO_HTML = `<img src="https://trockgc.com/wp-content/uploads/2024/10/
 
 function renderRfpReviewPage(token: string, d: Record<string, any>): string {
   const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const formatDateForInput = (val: any): string => {
+    if (val == null || val === '') return '';
+    const n = typeof val === 'string' && /^\d+$/.test(val) ? parseInt(val, 10) : val;
+    const date = new Date(n);
+    if (isNaN(date.getTime())) return esc(val);
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
 
   const field = (label: string, name: string, value: any, type = 'text') => {
     if (name === 'project_types') {
@@ -6050,7 +6060,7 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
         </div>
         <div class="row">
           ${field('Estimator', 'estimator', d.estimator)}
-          ${field('Due Date', 'bid_due_date', d.bid_due_date || d.due_date, 'date')}
+          ${field('Proposal Due Date', 'bid_due_date', formatDateForInput(d.bid_due_date || d.due_date), 'date')}
         </div>
 
         <div class="section-title">Company &amp; Contact</div>
