@@ -154,12 +154,12 @@ async function findFileInputForUpload(page: Page, waitMs: number = 8000): Promis
   }
 }
 
-/** Download file from URL. Returns final path on success, false on failure. For HubSpot, may append extension from headers. */
+/** Download file from URL. Returns { success, finalPath }. For HubSpot, may append extension from headers. */
 async function downloadFile(
   url: string,
   destPath: string,
   options?: { accessToken?: string; fileName?: string; logPrefix?: string }
-): Promise<string | false> {
+): Promise<{ success: boolean; finalPath: string }> {
   const isHubSpot = /hubspot\.com/i.test(url);
   if (isHubSpot && options?.accessToken) {
     try {
@@ -170,43 +170,41 @@ async function downloadFile(
         headers: { Authorization: `Bearer ${options.accessToken}` },
         redirect: "follow",
       });
-      if (!response.ok) return false;
+      if (!response.ok) return { success: false, finalPath: destPath };
 
       const contentType = response.headers.get("content-type") || "";
       const contentDisp = response.headers.get("content-disposition") || "";
+      log(`HubSpot download headers — Content-Type: ${contentType}, Content-Disposition: ${contentDisp}`, "playwright");
 
-      // Try to get filename from Content-Disposition
+      // Extract extension from Content-Disposition filename
       const filenameMatch = contentDisp.match(/filename[*]?=(?:UTF-8''|"?)([^";]+)/i);
-      if (filenameMatch && path.extname(filenameMatch[1])) {
-        const originalName = filenameMatch[1].replace(/"/g, "");
-        const origExt = path.extname(originalName);
-        if (origExt && !destPath.endsWith(origExt)) {
+      if (filenameMatch) {
+        const origExt = path.extname(filenameMatch[1].replace(/"/g, ""));
+        if (origExt && !destPath.toLowerCase().endsWith(origExt.toLowerCase())) {
           destPath = destPath + origExt;
         }
-      }
-      // Or use content-type as fallback
-      else if (!path.extname(destPath)) {
+      } else if (!path.extname(destPath)) {
+        // Use Content-Type as fallback (don't add .txt for text/plain — let magic bytes handle it)
         if (contentType.includes("pdf")) destPath += ".pdf";
         else if (contentType.includes("png")) destPath += ".png";
         else if (contentType.includes("jpeg") || contentType.includes("jpg")) destPath += ".jpg";
         else if (contentType.includes("spreadsheet") || contentType.includes("excel")) destPath += ".xlsx";
-        else if (contentType.includes("word") || contentType.includes("msword")) destPath += ".docx";
+        else if (contentType.includes("msword") || contentType.includes("wordprocessing")) destPath += ".docx";
         else if (contentType.includes("csv")) destPath += ".csv";
-        else if (contentType.includes("text")) destPath += ".txt";
       }
 
       const buffer = Buffer.from(await response.arrayBuffer());
       await fs.writeFile(destPath, buffer);
-      return destPath;
+      return { success: true, finalPath: destPath };
     } catch {
-      return false;
+      return { success: false, finalPath: destPath };
     }
   }
-  return new Promise<string | false>((resolve) => {
+  return new Promise<{ success: boolean; finalPath: string }>((resolve) => {
     const protocol = url.startsWith("https") ? https : http;
     const file = require("fs").createWriteStream(destPath);
     let settled = false;
-    const done = (result: string | false) => {
+    const done = (result: { success: boolean; finalPath: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -217,25 +215,25 @@ async function downloadFile(
       }
       resolve(result);
     };
-    const timer = setTimeout(() => done(false), DOWNLOAD_TIMEOUT_MS);
+    const timer = setTimeout(() => done({ success: false, finalPath: destPath }), DOWNLOAD_TIMEOUT_MS);
 
-    file.on("error", () => done(false));
+    file.on("error", () => done({ success: false, finalPath: destPath }));
 
     const request = protocol.get(url, (response) => {
       if (response.statusCode === 200) {
         response.pipe(file);
-        file.on("finish", () => done(destPath));
+        file.on("finish", () => done({ success: true, finalPath: destPath }));
       } else {
         response.destroy();
-        done(false);
+        done({ success: false, finalPath: destPath });
       }
     });
 
     request.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
       request.destroy();
-      done(false);
+      done({ success: false, finalPath: destPath });
     });
-    request.on("error", () => done(false));
+    request.on("error", () => done({ success: false, finalPath: destPath }));
   });
 }
 
@@ -299,25 +297,29 @@ async function resolveDocumentPaths(documents: DocumentInfo[]): Promise<{ paths:
           accessToken: isHubSpot ? accessToken : undefined,
           fileName: doc.name,
         });
-        if (!downloadResult) throw new Error(`Failed to download from ${doc.url}`);
-        filePath = downloadResult;
+        if (!downloadResult.success) throw new Error(`Failed to download from ${doc.url}`);
+        filePath = downloadResult.finalPath;
 
         // After download, ensure file has a recognized extension (Procore rejects files without one)
         const ext = path.extname(filePath).toLowerCase();
         const RECOGNIZED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".csv", ".txt", ".xlsx", ".xls", ".doc", ".docx"];
         if (!ext || !RECOGNIZED_EXTENSIONS.includes(ext)) {
-          const fd = await fs.open(filePath, "r");
-          const header = Buffer.alloc(8);
-          await fd.read(header, 0, 8, 0);
-          await fd.close();
-          let detectedExt = ".pdf";
+          const fileBuffer = await fs.readFile(filePath);
+          const header = fileBuffer.subarray(0, 8);
           const hex = header.toString("hex").toLowerCase();
+          let detectedExt = "";
           if (hex.startsWith("25504446")) detectedExt = ".pdf"; // %PDF
           else if (hex.startsWith("89504e47")) detectedExt = ".png"; // PNG
           else if (hex.startsWith("ffd8ff")) detectedExt = ".jpg"; // JPEG
-          else if (hex.startsWith("504b0304")) detectedExt = ".xlsx"; // ZIP/XLSX/DOCX
-          else if (hex.startsWith("d0cf11e0")) detectedExt = ".doc"; // OLE (doc/xls)
+          else if (hex.startsWith("504b0304")) detectedExt = ".xlsx"; // ZIP-based (xlsx/docx)
+          else if (hex.startsWith("d0cf11e0")) detectedExt = ".doc"; // OLE compound
           else if (hex.startsWith("47494638")) detectedExt = ".gif"; // GIF
+          else {
+            const firstChars = fileBuffer.subarray(0, 100).toString("utf8");
+            if (firstChars.includes(",") && firstChars.includes("\n")) detectedExt = ".csv";
+            else detectedExt = ".pdf"; // Final fallback — most HubSpot deal attachments are PDFs
+          }
+          log(`File type detection for ${doc.name}: hex=${hex.substring(0, 16)}, detected=${detectedExt}`, "playwright");
           const newFilePath = filePath + detectedExt;
           await fs.rename(filePath, newFilePath);
           filePath = newFilePath;
@@ -480,6 +482,7 @@ export async function uploadDocumentToBidBoard(
             page.waitForEvent('filechooser', { timeout: 15000 }),
             page.locator('button:has-text("Upload Files"), div[data-qa="ci-Image"]').first().click({ timeout: 8000 }),
           ]);
+          log(`Uploading to Procore: path=${filePath}, ext=${path.extname(filePath)}`, "playwright");
           await fileChooser.setFiles(filePath);
 
           // Wait for file to register in upload list (filename appears in modal)
@@ -677,12 +680,12 @@ export async function uploadDocumentToPortfolio(
       const baseName = path.basename((document.name || "file").replace(/[/\\]/g, "_")) || "file";
       filePath = path.join(subDir, baseName);
       const downloadResult = await downloadFile(document.url, filePath);
-      if (!downloadResult) {
+      if (!downloadResult.success) {
         try { await fs.rm(subDir, { recursive: true }); } catch { /* ignore */ }
         log(`Failed to download file from ${document.url}`, "playwright");
         return false;
       }
-      filePath = downloadResult;
+      filePath = downloadResult.finalPath;
       tempFileCreated = true;
     }
     
