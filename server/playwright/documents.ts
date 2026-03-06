@@ -397,6 +397,8 @@ export async function uploadDocumentToBidBoard(
         try {
           // Re-open the upload modal for each file (first file: modal already open from caller)
           if (i > 0) {
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await page.waitForTimeout(3000);
             await randomDelay(2000, 3000);
 
             // Dismiss any existing toasts that might block clicks
@@ -424,14 +426,26 @@ export async function uploadDocumentToBidBoard(
           ]);
           await fileChooser.setFiles(filePath);
 
-          // Wait for React to process the file and enable Attach button
-          await page.waitForTimeout(2000);
-          await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled])', { state: 'visible', timeout: 15000 });
-          await page.locator('[data-qa="qa-attach-button"]').first().click({ force: true });
+          // Wait for file to register in upload list (filename appears in modal)
+          const fileNameBase = path.basename(filePath);
+          await page.waitForFunction(
+            (name) => {
+              const modal = document.querySelector('[class*="StyledModalBody"], [class*="StyledModal"], [role="dialog"]');
+              return modal && modal.textContent && modal.textContent.includes(name);
+            },
+            fileNameBase.substring(0, 20), // Use first 20 chars to avoid encoding issues
+            { timeout: 15000 }
+          ).catch(() => {});
+          await page.waitForTimeout(1000);
 
-          // Wait for upload to complete (modal closes or success toast)
-          await page.waitForSelector('text=Attach Files', { state: 'hidden', timeout: 30000 }).catch(() => {});
-          await page.waitForTimeout(1500);
+          // Try multiple selectors for the Attach button (inside StyledModalFooter, may be obscured)
+          const attachButton = page.locator('[data-qa="qa-attach-button"], [class*="StyledModalFooter"] button:has-text("Attach")').first();
+          await attachButton.waitFor({ state: 'visible', timeout: 20000 });
+          await attachButton.click({ force: true });
+
+          // Wait for modal to close (modal itself disappearing, not just "Attach Files" text)
+          await page.waitForSelector('[class*="StyledModal"][class*="StyledModalBody"], [role="dialog"]:has(button[data-qa="qa-attach-button"])', { state: 'hidden', timeout: 45000 }).catch(() => {});
+          await page.waitForTimeout(2000);
 
           successCount++;
           log(`Successfully uploaded file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
