@@ -384,8 +384,8 @@ export async function uploadDocumentToBidBoard(
     }
     await randomDelay(1000, 2000);
 
-    // Upload file: New BidBoard — per-file loop (one file per modal cycle). Use setInputFiles
-    // on the hidden input inside the modal (no click on Upload Files — that doesn't trigger filechooser).
+    // Upload file: New BidBoard — per-file loop (one file per modal cycle).
+    // Use filechooser event: Procore's React dropzone doesn't detect setInputFiles on the input.
     let success: boolean;
     if (isNewBidBoard) {
       let successCount = 0;
@@ -398,6 +398,11 @@ export async function uploadDocumentToBidBoard(
           // Re-open the upload modal for each file (first file: modal already open from caller)
           if (i > 0) {
             await randomDelay(2000, 3000);
+
+            // Dismiss any existing toasts that might block clicks
+            const toasts = await page.$$('.Toastify__close-button, [aria-label="close"]');
+            for (const toast of toasts) await toast.click().catch(() => {});
+            await randomDelay(300, 500);
 
             // Click the Upload button (top right of project page)
             const uploadBtn = page.locator('button:has-text("Upload"), div.aid-upload-documents button').first();
@@ -412,19 +417,19 @@ export async function uploadDocumentToBidBoard(
 
           log(`Upload file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
 
-          // Set file directly on the hidden input — do NOT click "Upload Files"
-          const fileInput = page.locator('input[type="file"]').first();
-          await fileInput.setInputFiles(filePath);
+          // Use filechooser event — clicking "Upload Files" triggers native picker which Procore detects
+          const [fileChooser] = await Promise.all([
+            page.waitForEvent('filechooser', { timeout: 15000 }),
+            page.locator('button:has-text("Upload Files"), div[data-qa="ci-Image"]').first().click({ timeout: 8000 }),
+          ]);
+          await fileChooser.setFiles(filePath);
+
+          // Wait for React to process the file and enable Attach button
           await page.waitForTimeout(2000);
+          await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled])', { state: 'visible', timeout: 15000 });
+          await page.locator('[data-qa="qa-attach-button"]').first().click({ force: true });
 
-          // Wait for Attach button to become active (only activates after file is staged)
-          await page.waitForSelector(
-            '[data-qa="qa-attach-button"]:not([disabled]), button:has-text("Attach"):not([disabled])',
-            { timeout: 30000 }
-          );
-          await page.locator('[data-qa="qa-attach-button"], button:has-text("Attach")').first().click({ force: true });
-
-          // Wait for modal to close
+          // Wait for upload to complete (modal closes or success toast)
           await page.waitForSelector('text=Attach Files', { state: 'hidden', timeout: 30000 }).catch(() => {});
           await page.waitForTimeout(1500);
 
