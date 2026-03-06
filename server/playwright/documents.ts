@@ -154,12 +154,12 @@ async function findFileInputForUpload(page: Page, waitMs: number = 8000): Promis
   }
 }
 
-/** Download file from URL. For HubSpot signed URLs, pass accessToken and use fetch with auth. */
+/** Download file from URL. Returns final path on success, false on failure. For HubSpot, may append extension from headers. */
 async function downloadFile(
   url: string,
   destPath: string,
   options?: { accessToken?: string; fileName?: string; logPrefix?: string }
-): Promise<boolean> {
+): Promise<string | false> {
   const isHubSpot = /hubspot\.com/i.test(url);
   if (isHubSpot && options?.accessToken) {
     try {
@@ -171,18 +171,42 @@ async function downloadFile(
         redirect: "follow",
       });
       if (!response.ok) return false;
+
+      const contentType = response.headers.get("content-type") || "";
+      const contentDisp = response.headers.get("content-disposition") || "";
+
+      // Try to get filename from Content-Disposition
+      const filenameMatch = contentDisp.match(/filename[*]?=(?:UTF-8''|"?)([^";]+)/i);
+      if (filenameMatch && path.extname(filenameMatch[1])) {
+        const originalName = filenameMatch[1].replace(/"/g, "");
+        const origExt = path.extname(originalName);
+        if (origExt && !destPath.endsWith(origExt)) {
+          destPath = destPath + origExt;
+        }
+      }
+      // Or use content-type as fallback
+      else if (!path.extname(destPath)) {
+        if (contentType.includes("pdf")) destPath += ".pdf";
+        else if (contentType.includes("png")) destPath += ".png";
+        else if (contentType.includes("jpeg") || contentType.includes("jpg")) destPath += ".jpg";
+        else if (contentType.includes("spreadsheet") || contentType.includes("excel")) destPath += ".xlsx";
+        else if (contentType.includes("word") || contentType.includes("msword")) destPath += ".docx";
+        else if (contentType.includes("csv")) destPath += ".csv";
+        else if (contentType.includes("text")) destPath += ".txt";
+      }
+
       const buffer = Buffer.from(await response.arrayBuffer());
       await fs.writeFile(destPath, buffer);
-      return true;
+      return destPath;
     } catch {
       return false;
     }
   }
-  return new Promise((resolve) => {
+  return new Promise<string | false>((resolve) => {
     const protocol = url.startsWith("https") ? https : http;
     const file = require("fs").createWriteStream(destPath);
     let settled = false;
-    const done = (ok: boolean) => {
+    const done = (result: string | false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -191,7 +215,7 @@ async function downloadFile(
       } catch {
         /* ignore */
       }
-      resolve(ok);
+      resolve(result);
     };
     const timer = setTimeout(() => done(false), DOWNLOAD_TIMEOUT_MS);
 
@@ -200,7 +224,7 @@ async function downloadFile(
     const request = protocol.get(url, (response) => {
       if (response.statusCode === 200) {
         response.pipe(file);
-        file.on("finish", () => done(true));
+        file.on("finish", () => done(destPath));
       } else {
         response.destroy();
         done(false);
@@ -271,11 +295,34 @@ async function resolveDocumentPaths(documents: DocumentInfo[]): Promise<{ paths:
         const baseName = (doc.name || "file").replace(/[/\\]/g, "_") || "file";
         filePath = path.join(subDir, baseName);
         const isHubSpot = /hubspot\.com/i.test(doc.url);
-        const downloaded = await downloadFile(doc.url, filePath, {
+        const downloadResult = await downloadFile(doc.url, filePath, {
           accessToken: isHubSpot ? accessToken : undefined,
           fileName: doc.name,
         });
-        if (!downloaded) throw new Error(`Failed to download from ${doc.url}`);
+        if (!downloadResult) throw new Error(`Failed to download from ${doc.url}`);
+        filePath = downloadResult;
+
+        // After download, ensure file has a recognized extension (Procore rejects files without one)
+        const ext = path.extname(filePath).toLowerCase();
+        const RECOGNIZED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".csv", ".txt", ".xlsx", ".xls", ".doc", ".docx"];
+        if (!ext || !RECOGNIZED_EXTENSIONS.includes(ext)) {
+          const fd = await fs.open(filePath, "r");
+          const header = Buffer.alloc(8);
+          await fd.read(header, 0, 8, 0);
+          await fd.close();
+          let detectedExt = ".pdf";
+          const hex = header.toString("hex").toLowerCase();
+          if (hex.startsWith("25504446")) detectedExt = ".pdf"; // %PDF
+          else if (hex.startsWith("89504e47")) detectedExt = ".png"; // PNG
+          else if (hex.startsWith("ffd8ff")) detectedExt = ".jpg"; // JPEG
+          else if (hex.startsWith("504b0304")) detectedExt = ".xlsx"; // ZIP/XLSX/DOCX
+          else if (hex.startsWith("d0cf11e0")) detectedExt = ".doc"; // OLE (doc/xls)
+          else if (hex.startsWith("47494638")) detectedExt = ".gif"; // GIF
+          const newFilePath = filePath + detectedExt;
+          await fs.rename(filePath, newFilePath);
+          filePath = newFilePath;
+          log(`Added extension ${detectedExt} to ${doc.name} (detected from file header)`, "playwright");
+        }
         log(`Ready to upload: ${doc.name}`, "playwright");
       } catch (err: any) {
         log(`Skipping ${doc.name}: ${err.message}`, "playwright");
@@ -411,9 +458,18 @@ export async function uploadDocumentToBidBoard(
             await uploadBtn.click({ force: true, timeout: 10000 });
             await randomDelay(600, 1000);
 
-            // Click Upload Attachments from dropdown menu
-            const uploadAttachmentsItem = page.locator('li, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
-            await uploadAttachmentsItem.click({ timeout: 8000 });
+            // Click Upload Attachments from dropdown menu (or three-dot fallback if dropdown is stale)
+            try {
+              const uploadAttachmentsItem = page.locator('li, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
+              await uploadAttachmentsItem.click({ timeout: 15000 });
+            } catch {
+              // After a failed upload the dropdown state may be stale; try three-dot menu
+              const threeDotBtn = page.locator('div.aid-upload-documents [aria-label*="more" i], div.aid-upload-documents button[class*="icon"], [data-qa*="more"]').first();
+              await threeDotBtn.click({ timeout: 5000, force: true }).catch(() => {});
+              await randomDelay(500, 800);
+              const uploadAttachmentsItem = page.locator('li, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
+              await uploadAttachmentsItem.click({ timeout: 15000 });
+            }
             await randomDelay(2000, 3000);
           }
 
@@ -620,12 +676,13 @@ export async function uploadDocumentToPortfolio(
       await fs.mkdir(subDir, { recursive: true });
       const baseName = path.basename((document.name || "file").replace(/[/\\]/g, "_")) || "file";
       filePath = path.join(subDir, baseName);
-      const downloaded = await downloadFile(document.url, filePath);
-      if (!downloaded) {
+      const downloadResult = await downloadFile(document.url, filePath);
+      if (!downloadResult) {
         try { await fs.rm(subDir, { recursive: true }); } catch { /* ignore */ }
         log(`Failed to download file from ${document.url}`, "playwright");
         return false;
       }
+      filePath = downloadResult;
       tempFileCreated = true;
     }
     
