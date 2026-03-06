@@ -953,16 +953,22 @@ export async function createBidBoardProject(
     // New BidBoard: stage dropdown defaults to SERVICE - ESTIMATING; change to ESTIMATE IN PROGRESS when not service
     if (isNewBidBoardUi && !isService) {
       try {
-        const stageDropdown = page.locator('div.StyledPageHeader div.StyledSelectArrowContainer-core-12_35_0__sc-mr8gwe-3, div.StyledPageHeader [class*="StyledSelectArrowContainer"]').first();
-        await stageDropdown.click({ timeout: 5000 });
-        await randomDelay(500, 800);
-        const estimateOption = page.locator('[role="option"]').filter({ hasText: /ESTIMATE IN PROGRESS/i }).first();
-        await estimateOption.click({ timeout: 5000 });
-        await randomDelay(300, 500);
+        // Click the stage pill to open the dropdown
+        await page.locator(
+          '#mount-point span:nth-of-type(2) > div > div, div.StyledPageHeader-core-12_35_0__sc-1cvdbsv-0 div.StyledSelectArrowContainer-core-12_35_0__sc-mr8gwe-3'
+        ).first().click({ timeout: 8000 });
+
+        await page.waitForTimeout(800);
+
+        // Click "ESTIMATE IN PROGRESS" from the dropdown
+        await page.locator('::-p-text(ESTIMATE IN PROGRESS), [role="option"]').filter({ hasText: /ESTIMATE IN PROGRESS/i }).first().click({ timeout: 5000 });
+
         log(`[playwright] Stage set to: ESTIMATE IN PROGRESS`, "playwright");
+        await page.waitForTimeout(500);
       } catch (e: any) {
         log(`[playwright] Could not change stage dropdown: ${e.message}`, "playwright");
       }
+      await takeScreenshot(page, "stage-dropdown-attempt");
     } else if (isNewBidBoardUi && isService) {
       log(`[playwright] Stage set to: SERVICE - ESTIMATING`, "playwright");
     }

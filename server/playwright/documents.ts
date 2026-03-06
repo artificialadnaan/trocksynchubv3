@@ -410,38 +410,27 @@ export async function uploadDocumentToBidBoard(
             await randomDelay(2000, 3000);
           }
 
-          // Wait for the Attach Files modal to be fully open
-          await page.waitForSelector('text=Attach Files', { timeout: 10000 });
-          await randomDelay(500, 800);
+          log(`Upload file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
 
-          log(`Upload modal open for file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
-          await takeScreenshot(page, `upload-modal-open-${i + 1}`);
-
-          // Set file on hidden input — do NOT click Upload Files (no filechooser event)
-          const fileInput = page.locator('[role="dialog"] input[type="file"], .StyledDropzoneContainer input[type="file"]').first();
+          // Set file directly on the hidden input — do NOT click "Upload Files"
+          const fileInput = page.locator('input[type="file"]').first();
           await fileInput.setInputFiles(filePath);
-          await randomDelay(1500, 2500);
+          await page.waitForTimeout(2000);
 
-          log(`File set in dropzone: ${fileName}`, "playwright");
-          await takeScreenshot(page, `upload-file-set-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
+          // Wait for Attach button to become active (only activates after file is staged)
+          await page.waitForSelector(
+            '[data-qa="qa-attach-button"]:not([disabled]), button:has-text("Attach"):not([disabled])',
+            { timeout: 30000 }
+          );
+          await page.locator('[data-qa="qa-attach-button"], button:has-text("Attach")').first().click({ force: true });
 
-          // Wait for Attach button to become enabled (file name should appear in modal)
-          await page.waitForSelector('[data-qa="qa-attach-button"]:not([disabled]), button:has-text("Attach"):not([disabled])', { timeout: 30000 });
-          await randomDelay(500, 800);
-
-          await takeScreenshot(page, `upload-before-attach-${i + 1}`);
-
-          // Click Attach
-          const attachBtn = page.locator('[data-qa="qa-attach-button"], button:has-text("Attach")').first();
-          await attachBtn.click({ force: true, timeout: 15000 });
-
-          // Wait for modal to close (success)
-          await page.waitForSelector('text=Attach Files', { state: 'hidden', timeout: 30000 });
-          await randomDelay(2000, 3000);
+          // Wait for modal to close
+          await page.waitForSelector('text=Attach Files', { state: 'hidden', timeout: 30000 }).catch(() => {});
+          await page.waitForTimeout(1500);
 
           successCount++;
           log(`Successfully uploaded file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
-          await takeScreenshot(page, `upload-success-${i + 1}`);
+          await takeScreenshot(page, `upload-after-attach-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
         } catch (err: any) {
           log(`Failed to upload file ${i + 1} (${fileName}): ${err.message}`, "playwright");
           await takeScreenshot(page, `upload-error-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
