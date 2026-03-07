@@ -81,6 +81,7 @@ import {
   emailTemplates, type EmailTemplate, type InsertEmailTemplate,
   emailSendLog, type EmailSendLog, type InsertEmailSendLog,
   bidboardSyncState, type BidboardSyncState,
+  bidboardStageSyncRuns, type BidboardStageSyncRun,
   bidboardAutomationLogs, type BidboardAutomationLog,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
   rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
@@ -1558,6 +1559,39 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
     return result;
+  }
+
+  async createBidboardStageSyncRun(data: {
+    status: string;
+    totalChanges?: number;
+    syncedCount?: number;
+    failedCount?: number;
+    changes?: any;
+    errors?: any;
+    exportPath?: string;
+    options?: any;
+  }): Promise<BidboardStageSyncRun> {
+    const [result] = await db.insert(bidboardStageSyncRuns).values({
+      status: data.status,
+      completedAt: new Date(),
+      totalChanges: data.totalChanges ?? 0,
+      syncedCount: data.syncedCount ?? 0,
+      failedCount: data.failedCount ?? 0,
+      changes: data.changes ?? null,
+      errors: data.errors ?? null,
+      exportPath: data.exportPath ?? null,
+      options: data.options ?? null,
+    }).returning();
+    return result;
+  }
+
+  async updateBidboardStageSyncRun(id: number, data: { status?: string; completedAt?: Date; totalChanges?: number; syncedCount?: number; failedCount?: number; changes?: any; errors?: any; exportPath?: string }): Promise<BidboardStageSyncRun | undefined> {
+    const [result] = await db.update(bidboardStageSyncRuns).set(data).where(eq(bidboardStageSyncRuns.id, id)).returning();
+    return result;
+  }
+
+  async getBidboardStageSyncRuns(limit: number = 50): Promise<BidboardStageSyncRun[]> {
+    return db.select().from(bidboardStageSyncRuns).orderBy(desc(bidboardStageSyncRuns.startedAt)).limit(limit);
   }
 
   async createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey> {

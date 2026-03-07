@@ -90,6 +90,25 @@ export const bidboardSyncState = pgTable("bidboard_sync_state", {
 
 export type BidboardSyncState = typeof bidboardSyncState.$inferSelect;
 
+// BidBoard stage sync runs (Excel export → HubSpot)
+export const bidboardStageSyncRuns = pgTable("bidboard_stage_sync_runs", {
+  id: serial("id").primaryKey(),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
+  completedAt: timestamp("completed_at"),
+  status: text("status").notNull().default("running"), // running | success | failed | partial
+  totalChanges: integer("total_changes").notNull().default(0),
+  syncedCount: integer("synced_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  changes: jsonb("changes"),
+  errors: jsonb("errors"),
+  exportPath: text("export_path"),
+  options: jsonb("options"),
+}, (table) => [
+  index("IDX_bidboard_stage_sync_started").on(table.startedAt),
+]);
+
+export type BidboardStageSyncRun = typeof bidboardStageSyncRuns.$inferSelect;
+
 // BidBoard automation logs
 export const bidboardAutomationLogs = pgTable("bidboard_automation_logs", {
   id: serial("id").primaryKey(),

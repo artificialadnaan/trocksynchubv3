@@ -3866,7 +3866,107 @@ export async function registerRoutes(
     }
   });
 
-  // Bid Board → HubSpot stage sync via Excel export RPA
+  // Bid Board Stage Sync (Excel export → HubSpot) — config, trigger, history
+  let bidboardStageSyncTimer: ReturnType<typeof setInterval> | null = null;
+  let bidboardStageSyncRunning = false;
+  let lastBidboardStageSyncAt: Date | null = null;
+
+  async function runBidBoardStageSyncCycle() {
+    if (bidboardStageSyncRunning) {
+      console.log("[BidBoardStageSync] Already running, skipping");
+      return;
+    }
+    bidboardStageSyncRunning = true;
+    console.log("[BidBoardStageSync] Starting sync cycle");
+    try {
+      const result = await runBidBoardStageSync({});
+      lastBidboardStageSyncAt = new Date();
+      await storage.createBidboardStageSyncRun({
+        status: result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success",
+        totalChanges: result.total,
+        syncedCount: result.changed,
+        failedCount: result.failed,
+        changes: result.changes,
+        errors: result.errors,
+        exportPath: result.exportPath,
+      });
+      console.log(`[BidBoardStageSync] Complete — ${result.changed} synced, ${result.failed} failed`);
+    } catch (e: any) {
+      lastBidboardStageSyncAt = new Date();
+      await storage.createBidboardStageSyncRun({
+        status: "failed",
+        errors: [e.message],
+      });
+      console.error("[BidBoardStageSync] Failed:", e.message);
+    } finally {
+      bidboardStageSyncRunning = false;
+    }
+  }
+
+  app.get("/api/bidboard/stage-sync/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("bidboard_stage_sync");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 15,
+        isRunning: bidboardStageSyncTimer !== null,
+        lastSyncAt: lastBidboardStageSyncAt?.toISOString() || null,
+        currentlySyncing: bidboardStageSyncRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/stage-sync/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes } = req.body;
+      const interval = Math.min(60, Math.max(5, parseInt(String(intervalMinutes)) || 15));
+      await storage.upsertAutomationConfig({
+        key: "bidboard_stage_sync",
+        value: { enabled: !!enabled, intervalMinutes: interval },
+        description: "BidBoard Excel → HubSpot stage sync schedule",
+      });
+      const config = await storage.getAutomationConfig("bidboard_stage_sync");
+      const val = (config?.value as any) || {};
+      if (val.enabled) {
+        bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, interval * 60 * 1000);
+        setTimeout(runBidBoardStageSyncCycle, 10000);
+      } else {
+        if (bidboardStageSyncTimer) {
+          clearInterval(bidboardStageSyncTimer);
+          bidboardStageSyncTimer = null;
+        }
+      }
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/bidboard/stage-sync/history", requireAuth, async (req, res) => {
+    try {
+      const limit = Math.min(100, parseInt(req.query.limit as string) || 50);
+      const runs = await storage.getBidboardStageSyncRuns(limit);
+      res.json(runs);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/stage-sync/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (bidboardStageSyncRunning) {
+        return res.json({ message: "Stage sync already in progress", running: true });
+      }
+      runBidBoardStageSyncCycle();
+      res.json({ message: "Stage sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/bidboard/stage-sync", requireAuth, async (req, res) => {
     try {
       const { dryRun, forceExport, initialize } = req.body || {};
@@ -3875,6 +3975,17 @@ export async function registerRoutes(
         forceExport: typeof forceExport === "string" ? forceExport : undefined,
         initialize: !!initialize,
       });
+      if (!dryRun && !initialize) {
+        await storage.createBidboardStageSyncRun({
+          status: result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success",
+          totalChanges: result.total,
+          syncedCount: result.changed,
+          failedCount: result.failed,
+          changes: result.changes,
+          errors: result.errors,
+          exportPath: result.exportPath,
+        });
+      }
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e.message, errors: [e.message] });
@@ -5925,6 +6036,21 @@ main().catch(console.error);
       }
     } catch (e) {
       console.log('[BidBoardPolling] No saved config, BidBoard polling disabled by default');
+    }
+  })();
+
+  (async () => {
+    try {
+      const config = await storage.getAutomationConfig("bidboard_stage_sync");
+      const val = (config?.value as any);
+      if (val?.enabled) {
+        const interval = Math.min(60, Math.max(5, val.intervalMinutes || 15));
+        bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, interval * 60 * 1000);
+        setTimeout(runBidBoardStageSyncCycle, 15000);
+        console.log(`[BidBoardStageSync] Scheduled every ${interval} minutes`);
+      }
+    } catch (e) {
+      console.log('[BidBoardStageSync] No saved config, stage sync disabled by default');
     }
   })();
 

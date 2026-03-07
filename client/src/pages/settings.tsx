@@ -98,6 +98,7 @@ import {
   Trash2,
   Users,
   Upload,
+  FileText,
 } from "lucide-react";
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
@@ -287,6 +288,8 @@ export default function SettingsPage() {
       <HubSpotOwnerMappingsCard />
 
       <StageMappingCard />
+
+      <BidBoardStageSyncCard />
 
       <HubspotProcoreSyncCard />
 
@@ -2036,6 +2039,222 @@ function RolePollingCard() {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+interface StageSyncRun {
+  id: number;
+  startedAt: string;
+  completedAt: string | null;
+  status: string;
+  totalChanges: number;
+  syncedCount: number;
+  failedCount: number;
+  changes: Array<{ projectName: string; previousStage: string; newStage: string; hubspotDealId: string }> | null;
+  errors: string[] | null;
+}
+
+function BidBoardStageSyncCard() {
+  const { toast } = useToast();
+  const [reportOpen, setReportOpen] = useState(false);
+
+  const { data: config, isLoading } = useQuery<{
+    enabled: boolean;
+    intervalMinutes: number;
+    lastSyncAt: string | null;
+    currentlySyncing: boolean;
+  }>({
+    queryKey: ["/api/bidboard/stage-sync/config"],
+    refetchInterval: 15000,
+  });
+
+  const { data: history = [], refetch: refetchHistory } = useQuery<StageSyncRun[]>({
+    queryKey: ["/api/bidboard/stage-sync/history"],
+    enabled: reportOpen,
+  });
+
+  const [enabled, setEnabled] = useState(false);
+  const [interval, setIntervalVal] = useState(15);
+
+  useEffect(() => {
+    if (config) {
+      setEnabled(config.enabled);
+      setIntervalVal(config.intervalMinutes || 15);
+    }
+  }, [config]);
+
+  const saveConfig = useMutation({
+    mutationFn: async (vars: { enabled: boolean; intervalMinutes: number }) => {
+      const res = await apiRequest("POST", "/api/bidboard/stage-sync/config", vars);
+      return res.json();
+    },
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/config"] });
+      toast({ title: vars.enabled ? `Stage sync enabled (every ${vars.intervalMinutes} min)` : "Stage sync disabled" });
+    },
+  });
+
+  const triggerNow = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/bidboard/stage-sync/trigger", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Stage sync triggered" });
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/history"] });
+    },
+  });
+
+  const handleToggle = (val: boolean) => {
+    setEnabled(val);
+    saveConfig.mutate({ enabled: val, intervalMinutes: interval });
+  };
+
+  const handleIntervalChange = (val: string) => {
+    const mins = parseInt(val);
+    setIntervalVal(mins);
+    if (enabled) {
+      saveConfig.mutate({ enabled: true, intervalMinutes: mins });
+    }
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  const lastSyncTime = config?.lastSyncAt ? new Date(config.lastSyncAt) : null;
+
+  return (
+    <>
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <RefreshCw className="w-4 h-4" />
+              BidBoard Stage Sync
+            </CardTitle>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">
+                {enabled ? (
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse" />
+                    Active
+                  </span>
+                ) : "Off"}
+              </span>
+              <Switch checked={enabled} onCheckedChange={handleToggle} />
+            </div>
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">
+            Exports Bid Board project list from Procore and syncs stage changes to HubSpot deals.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <Label className="text-xs whitespace-nowrap">Sync every</Label>
+            <Select value={String(interval)} onValueChange={handleIntervalChange}>
+              <SelectTrigger className="w-32 h-8">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {[5, 10, 15, 20, 30, 45, 60].map((m) => (
+                  <SelectItem key={m} value={String(m)}>
+                    {m === 60 ? "60 minutes" : `${m} minutes`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => triggerNow.mutate()}
+              disabled={config?.currentlySyncing || triggerNow.isPending}
+            >
+              {config?.currentlySyncing ? (
+                <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Syncing...</>
+              ) : (
+                <><RefreshCw className="w-3 h-3 mr-1" /> Sync Now</>
+              )}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => { setReportOpen(true); refetchHistory(); }}
+            >
+              <FileText className="w-3 h-3 mr-1" /> View Report
+            </Button>
+          </div>
+
+          {lastSyncTime && (
+            <div className="rounded-md bg-muted/50 p-3">
+              <p className="text-xs text-muted-foreground">
+                Last sync: {lastSyncTime.toLocaleString()}
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={reportOpen} onOpenChange={setReportOpen}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Stage Sync Report</DialogTitle>
+            <DialogDescription>
+              Sync runs and changes detected at each run
+            </DialogDescription>
+          </DialogHeader>
+          <div className="overflow-y-auto flex-1 min-h-0 -mx-6 px-6">
+            {history.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">No sync runs yet</p>
+            ) : (
+              <div className="space-y-4">
+                {history.map((run) => (
+                  <div key={run.id} className="rounded-lg border p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        {new Date(run.startedAt).toLocaleString()}
+                      </span>
+                      <Badge variant={
+                        run.status === "success" ? "default" :
+                        run.status === "partial" ? "secondary" : "destructive"
+                      }>
+                        {run.status}
+                      </Badge>
+                    </div>
+                    <div className="text-xs text-muted-foreground grid grid-cols-3 gap-2">
+                      <span>Total: {run.totalChanges}</span>
+                      <span>Synced: {run.syncedCount}</span>
+                      <span>Failed: {run.failedCount}</span>
+                    </div>
+                    {run.changes && run.changes.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-xs font-medium">Changes:</p>
+                        <div className="text-xs space-y-1 max-h-40 overflow-y-auto">
+                          {run.changes.map((c, i) => (
+                            <div key={i} className="py-1 border-b border-dashed last:border-0">
+                              <span className="font-medium">{c.projectName}</span>
+                              <span className="text-muted-foreground"> — {c.previousStage} → {c.newStage}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {run.errors && run.errors.length > 0 && (
+                      <div className="mt-2">
+                        <p className="text-xs font-medium text-red-600">Errors:</p>
+                        <ul className="text-xs text-red-600 list-disc list-inside">
+                          {run.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}
+                          {run.errors.length > 5 && <li>...and {run.errors.length - 5} more</li>}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
