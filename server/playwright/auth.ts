@@ -39,7 +39,7 @@
  */
 
 import { Page } from "playwright";
-import { getPage, saveSession, clearSession, withRetry, randomDelay, takeScreenshot } from "./browser";
+import { getPage, saveSession, clearSession, closeBrowser, withRetry, randomDelay, takeScreenshot } from "./browser";
 import { PROCORE_SELECTORS, PROCORE_URLS } from "./selectors";
 import { log } from "../index";
 import { storage } from "../storage";
@@ -321,15 +321,45 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
   };
 }
 
-export async function ensureLoggedIn(): Promise<{ page: Page; success: boolean; error?: string }> {
-  const page = await getPage();
-  
+export async function ensureLoggedIn(options?: { targetUrl?: string }): Promise<{ page: Page; success: boolean; error?: string }> {
+  let page = await getPage();
+
+  // If targetUrl provided, try navigating there first — we may already be logged in
+  if (options?.targetUrl) {
+    try {
+      await page.goto(options.targetUrl, { waitUntil: "load", timeout: 60000 });
+      await page.waitForTimeout(2000);
+      const url = page.url();
+      if (url.includes("/tools/bid-board") || url.includes("/webclients") && !url.includes("login")) {
+        log("Already on Bid Board dashboard, skipping login", "playwright");
+        return { page, success: true };
+      }
+      if (url.includes("login.procore.com") || url.includes("login-sandbox.procore.com")) {
+        log("Redirected to login (stale session), clearing session for fresh login", "playwright");
+        await clearSession();
+        await closeBrowser();
+        page = await getPage();
+      }
+    } catch (e) {
+      log(`Target URL check failed: ${(e as Error).message}`, "playwright");
+    }
+  }
+
   // Check if already logged in
   if (await isLoggedIn(page)) {
     log("Already logged into Procore", "playwright");
     return { page, success: true };
   }
-  
+
+  // On login page with stale session — clear and get fresh context
+  const url = page.url();
+  if (url.includes("login.procore.com") || url.includes("login-sandbox.procore.com")) {
+    log("On login page, clearing stale session for fresh login", "playwright");
+    await clearSession();
+    await closeBrowser();
+    page = await getPage();
+  }
+
   // Get credentials
   const credentials = await getProcoreCredentials();
   if (!credentials) {
@@ -339,14 +369,14 @@ export async function ensureLoggedIn(): Promise<{ page: Page; success: boolean; 
       error: "Procore browser credentials not configured. Please save credentials in Settings.",
     };
   }
-  
+
   // Perform login with retry
   const result = await withRetry(
     () => performLogin(page, credentials),
     3,
     2000
   );
-  
+
   return {
     page,
     success: result.success,

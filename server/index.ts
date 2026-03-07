@@ -149,6 +149,14 @@ httpServer.listen(
     console.error("[startup] HubSpot owner tables migration failed:", e);
   }
 
+  // Ensure bidboard_stage_sync_runs exists (avoids db:push blocking on other prompts)
+  try {
+    const { ensureBidboardStageSyncRunsTable } = await import("./migrate-bidboard-stage-sync-runs");
+    await ensureBidboardStageSyncRunsTable();
+  } catch (e) {
+    console.error("[startup] BidBoard stage sync runs table migration failed:", e);
+  }
+
   // Seed default email templates if they don't exist
   try {
     await storage.seedEmailTemplates();

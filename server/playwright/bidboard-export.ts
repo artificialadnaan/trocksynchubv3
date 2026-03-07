@@ -51,12 +51,6 @@ function getBidBoardExportUrl(companyId: string, sandbox: boolean): string {
  * @returns File path of saved export, or null on failure
  */
 export async function exportBidBoardProjectList(): Promise<string | null> {
-  const { page, success, error } = await ensureLoggedIn();
-  if (!success || !page) {
-    log(`BidBoard export failed: ${error || "Not logged in"}`, "playwright");
-    return null;
-  }
-
   const companyId = await getCompanyId();
   if (!companyId) {
     log("Procore company ID not configured", "playwright");
@@ -66,6 +60,12 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
   const sandbox = await isSandbox();
   const bidBoardUrl = getBidBoardExportUrl(companyId, sandbox);
 
+  const { page, success, error } = await ensureLoggedIn({ targetUrl: bidBoardUrl });
+  if (!success || !page) {
+    log(`BidBoard export failed: ${error || "Not logged in"}`, "playwright");
+    return null;
+  }
+
   try {
     await fs.mkdir(EXPORTS_DIR, { recursive: true });
   } catch {
@@ -73,8 +73,10 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
   }
 
   try {
-    log("Navigating to Bid Board for export...", "playwright");
-    await page.goto(bidBoardUrl, { waitUntil: "load", timeout: 60000 });
+    if (!page.url().includes("/tools/bid-board")) {
+      log("Navigating to Bid Board for export...", "playwright");
+      await page.goto(bidBoardUrl, { waitUntil: "load", timeout: 60000 });
+    }
     await randomDelay(3000, 5000);
 
     // Press Escape in case Procore StyledPortal overlay is blocking pointer events
@@ -115,23 +117,40 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       throw new Error("Export menu button not found. Procore UI may have changed.");
     }
 
-    await randomDelay(1500, 2500);
+    await randomDelay(2000, 3500);
 
     // Step 2: Click "Export Project List To Excel"
-    // Primary: text-based (most reliable)
-    const exportLink = page.getByRole("link", { name: /Export project/i }).or(
-      page.getByRole("menuitem", { name: /Export project/i })
-    ).or(
-      page.getByText("Export project", { exact: false })
-    );
+    // Primary: full text (most reliable). Fallback: MuiPopover menu item. Timeout 30s for popover render.
+    const exportTimeout = 30000;
+    const exportSelectors = [
+      page.getByRole("link", { name: "Export Project List To Excel" }),
+      page.getByRole("menuitem", { name: "Export Project List To Excel" }),
+      page.getByText("Export Project List To Excel", { exact: true }),
+      page.locator('div.MuiPopover-root div:nth-of-type(2) a'),
+      page.getByRole("link", { name: /Export project/i }),
+      page.getByText("Export project", { exact: false }),
+    ];
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const destPath = path.join(EXPORTS_DIR, `bidboard-export-${timestamp}.xlsx`);
 
     // Procore may trigger a download event or navigation-based download.
     const downloadPromise = page.waitForEvent("download", { timeout: EXPORT_TIMEOUT_MS });
+    let exportClicked = false;
+    for (const loc of exportSelectors) {
+      try {
+        if ((await loc.count()) > 0) {
+          await loc.first().click({ timeout: exportTimeout });
+          exportClicked = true;
+          log(`Clicked export via selector`, "playwright");
+          break;
+        }
+      } catch {
+        /* try next */
+      }
+    }
     try {
-      await exportLink.first().click({ timeout: 10000 });
+      if (!exportClicked) throw new Error("Export link not found");
     } catch (clickErr) {
       log(`Export click failed: ${clickErr}`, "playwright");
       await takeScreenshot(page, "bidboard-export-link-not-found");

@@ -3871,6 +3871,14 @@ export async function registerRoutes(
   let bidboardStageSyncRunning = false;
   let lastBidboardStageSyncAt: Date | null = null;
 
+  async function safeCreateBidboardStageSyncRun(data: Parameters<typeof storage.createBidboardStageSyncRun>[0]): Promise<void> {
+    try {
+      await storage.createBidboardStageSyncRun(data);
+    } catch (e: any) {
+      console.warn("[BidBoardStageSync] Could not persist run to bidboard_stage_sync_runs (table may not exist):", e.message);
+    }
+  }
+
   async function runBidBoardStageSyncCycle() {
     if (bidboardStageSyncRunning) {
       console.log("[BidBoardStageSync] Already running, skipping");
@@ -3881,7 +3889,7 @@ export async function registerRoutes(
     try {
       const result = await runBidBoardStageSync({});
       lastBidboardStageSyncAt = new Date();
-      await storage.createBidboardStageSyncRun({
+      await safeCreateBidboardStageSyncRun({
         status: result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success",
         totalChanges: result.total,
         syncedCount: result.changed,
@@ -3893,10 +3901,7 @@ export async function registerRoutes(
       console.log(`[BidBoardStageSync] Complete — ${result.changed} synced, ${result.failed} failed`);
     } catch (e: any) {
       lastBidboardStageSyncAt = new Date();
-      await storage.createBidboardStageSyncRun({
-        status: "failed",
-        errors: [e.message],
-      });
+      await safeCreateBidboardStageSyncRun({ status: "failed", errors: [e.message] });
       console.error("[BidBoardStageSync] Failed:", e.message);
     } finally {
       bidboardStageSyncRunning = false;
@@ -3951,6 +3956,10 @@ export async function registerRoutes(
       const runs = await storage.getBidboardStageSyncRuns(limit);
       res.json(runs);
     } catch (e: any) {
+      if (e?.code === "42P01" || e?.message?.includes("does not exist") || e?.message?.includes("relation")) {
+        res.json([]);
+        return;
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -3976,7 +3985,7 @@ export async function registerRoutes(
         initialize: !!initialize,
       });
       if (!dryRun && !initialize) {
-        await storage.createBidboardStageSyncRun({
+        await safeCreateBidboardStageSyncRun({
           status: result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success",
           totalChanges: result.total,
           syncedCount: result.changed,
