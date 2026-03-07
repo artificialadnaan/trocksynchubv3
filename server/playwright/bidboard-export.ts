@@ -15,7 +15,6 @@
  * @module playwright/bidboard-export
  */
 
-import { Page } from "playwright";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { ensureLoggedIn } from "./auth";
@@ -79,56 +78,49 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     }
     await randomDelay(3000, 5000);
 
-    // Press Escape in case Procore StyledPortal overlay is blocking pointer events
-    await page.keyboard.press("Escape");
+    // Close any open modals (Company Settings, etc.) before interacting with the page
+    for (let i = 0; i < 3; i++) {
+      await page.keyboard.press("Escape");
+      await randomDelay(300, 600);
+    }
     await randomDelay(500, 1000);
 
-    // Step 1: Find and click three-dot overflow menu
-    // Prefer text/role selectors; avoid versioned class names like StyledPageTitle-core-12_35_0__sc-*
+    // Step 1: Click three-dot overflow menu (data-qa and svg name are Procore test hooks)
     const menuSelectors = [
-      // Text-based: look for a button with more/options icon (common patterns)
-      'button[aria-label*="more" i]',
-      'button[aria-label*="menu" i]',
-      'button[aria-haspopup="menu"]',
-      // XPath structural fallback (more stable than versioned classes)
-      '//*[@id="spaContent"]//div[contains(@class,"StyledBox") or contains(@class,"StyledPageTitle")]//button[.//span]',
-      // Generic overflow button in header area
-      '[role="button"]:has(svg), [role="button"]:has(span)',
+      () => page.locator('[data-qa="ci-EllipsisVertical"]'),
+      () => page.locator('button:has([data-qa="ci-EllipsisVertical"])'),
+      () => page.locator('svg[name="EllipsisVertical"]'),
     ];
-
     let menuClicked = false;
     for (const sel of menuSelectors) {
       try {
-        const btn = page.locator(sel).first();
-        if ((await btn.count()) > 0) {
-          await btn.click({ timeout: 8000 });
-          menuClicked = true;
-          log(`Clicked overflow menu via: ${sel}`, "playwright");
-          break;
+        const loc = sel();
+        if ((await loc.count()) > 0) {
+          await loc.first().click({ timeout: 8000 });
+          await randomDelay(1500, 2500);
+          if (await page.locator("text=Export").first().isVisible().catch(() => false)) {
+            menuClicked = true;
+            break;
+          }
         }
       } catch {
         /* try next */
       }
     }
-
     if (!menuClicked) {
       log("Could not find three-dot overflow menu", "playwright");
       await takeScreenshot(page, "bidboard-export-menu-not-found");
       throw new Error("Export menu button not found. Procore UI may have changed.");
     }
+    await randomDelay(1000, 2000);
 
-    await randomDelay(2000, 3500);
-
-    // Step 2: Click "Export Project List To Excel"
-    // Primary: full text (most reliable). Fallback: MuiPopover menu item. Timeout 30s for popover render.
+    // Step 2: Click "Export project list to Excel" menu item
+    // DOM: <li class="aid-exportProjectList" role="menuitem"> with <a> child "Export project list to Excel"
     const exportTimeout = 30000;
     const exportSelectors = [
-      page.getByRole("link", { name: "Export Project List To Excel" }),
-      page.getByRole("menuitem", { name: "Export Project List To Excel" }),
-      page.getByText("Export Project List To Excel", { exact: true }),
-      page.locator('div.MuiPopover-root div:nth-of-type(2) a'),
-      page.getByRole("link", { name: /Export project/i }),
-      page.getByText("Export project", { exact: false }),
+      page.locator(".aid-exportProjectList"),
+      page.locator('li[role="menuitem"]').filter({ hasText: /export.*excel/i }),
+      page.getByRole("menuitem", { name: /export.*excel/i }),
     ];
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
