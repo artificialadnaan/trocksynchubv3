@@ -122,6 +122,8 @@ export interface IStorage {
   getSyncMappingByBidboardProjectId(bidboardProjectId: string): Promise<SyncMapping | undefined>;
   /** Find mapping by Portfolio project ID (post-award projects) */
   getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by Procore project number (e.g. DFW-1-06426-ah) */
+  getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
   /** Create a new sync mapping linking entities */
   createSyncMapping(mapping: InsertSyncMapping): Promise<SyncMapping>;
   /** Update an existing sync mapping */
@@ -331,6 +333,14 @@ export class DatabaseStorage implements IStorage {
 
   async getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined> {
     const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.portfolioProjectId, portfolioProjectId));
+    return mapping;
+  }
+
+  async getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined> {
+    if (!projectNumber?.trim()) return undefined;
+    const [mapping] = await db.select().from(syncMappings).where(
+      eq(syncMappings.procoreProjectNumber, projectNumber.trim())
+    );
     return mapping;
   }
 

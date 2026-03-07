@@ -15,7 +15,8 @@
     "db:migrate-approved-attachments": "tsx scripts/migrate-approved-attachments.ts",
     "db:migrate-hubspot-owner-tables": "tsx scripts/migrate-hubspot-owner-tables.ts",
     "import:owner-mappings": "tsx scripts/import-hubspot-owner-mappings.ts",
-    "import:procore-users": "tsx scripts/import-procore-users.ts"
+    "import:procore-users": "tsx scripts/import-procore-users.ts",
+    "bidboard:stage-sync": "tsx scripts/run-bidboard-stage-sync.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

@@ -147,6 +147,7 @@ export async function getContext(config: BrowserConfig = {}): Promise<BrowserCon
         userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         locale: "en-US",
         timezoneId: "America/New_York",
+        acceptDownloads: true,
       });
       
       contextInstance.setDefaultTimeout(config.timeout || defaultConfig.timeout || 30000);

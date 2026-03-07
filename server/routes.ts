@@ -79,6 +79,7 @@ import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manu
 import { testLogin as testProcoreLogin, saveProcoreCredentials, logout as logoutProcore } from "./playwright/auth";
 import { runPortfolioTransition, runFullPortfolioWorkflow } from "./playwright/portfolio";
 import { syncHubSpotClientToBidBoard, runBidBoardScrape } from "./playwright/bidboard";
+import { runBidBoardStageSync } from "./sync";
 import { syncHubSpotAttachmentsToBidBoard, syncBidBoardDocumentsToPortfolio } from "./playwright/documents";
 import { closeBrowser } from "./playwright/browser";
 
@@ -3862,6 +3863,21 @@ export async function registerRoutes(
       res.json({ message: "BidBoard polling triggered", running: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Bid Board → HubSpot stage sync via Excel export RPA
+  app.post("/api/bidboard/stage-sync", requireAuth, async (req, res) => {
+    try {
+      const { dryRun, forceExport, initialize } = req.body || {};
+      const result = await runBidBoardStageSync({
+        dryRun: !!dryRun,
+        forceExport: typeof forceExport === "string" ? forceExport : undefined,
+        initialize: !!initialize,
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message, errors: [e.message] });
     }
   });
 
