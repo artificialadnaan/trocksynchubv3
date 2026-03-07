@@ -18,7 +18,7 @@ import * as XLSX from "xlsx";
 import { storage } from "../storage";
 import { updateHubSpotDealStage } from "../hubspot";
 import { resolveHubspotStageId } from "../procore-hubspot-sync";
-import { BIDBOARD_TO_HUBSPOT_STAGE } from "./stage-mapping";
+import { BIDBOARD_TO_HUBSPOT_STAGE, normalizeStageLabel } from "./stage-mapping";
 import { log } from "../index";
 
 // Excel columns from Bid Board export
@@ -224,8 +224,9 @@ export async function syncStagesToHubSpot(
   const result = { success: 0, failed: 0, errors: [] as string[] };
 
   for (const change of changes) {
-    const hubspotLabel = BIDBOARD_TO_HUBSPOT_STAGE[change.newStage];
-    const label = hubspotLabel || change.newStage;
+    const normalizedStage = normalizeStageLabel(change.newStage);
+    const hubspotLabel = BIDBOARD_TO_HUBSPOT_STAGE[normalizedStage];
+    const label = hubspotLabel || normalizedStage;
 
     const resolved = await resolveHubspotStageId(label);
     if (!resolved) {
@@ -239,7 +240,7 @@ export async function syncStagesToHubSpot(
 
     if (options?.dryRun) {
       log(
-        `[DRY-RUN] Would update ${change.projectName} (${change.hubspotDealId}) to ${resolved.stageName}`,
+        `[DRY RUN] Would update Deal ${change.hubspotDealId}: ${change.previousStage} → ${change.newStage}`,
         "sync"
       );
       result.success++;

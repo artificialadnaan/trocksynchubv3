@@ -1594,6 +1594,21 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(bidboardStageSyncRuns).orderBy(desc(bidboardStageSyncRuns.startedAt)).limit(limit);
   }
 
+  async hasSuccessfulBidboardStageSyncRun(): Promise<boolean> {
+    try {
+      const runs = await db.select().from(bidboardStageSyncRuns).where(
+        or(
+          eq(bidboardStageSyncRuns.status, "success"),
+          eq(bidboardStageSyncRuns.status, "partial"),
+          eq(bidboardStageSyncRuns.status, "initialized")
+        )
+      ).limit(1);
+      return runs.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   async createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey> {
     const [result] = await db.insert(closeoutSurveys).values(data).returning();
     return result;

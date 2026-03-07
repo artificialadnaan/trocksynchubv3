@@ -2061,6 +2061,7 @@ function BidBoardStageSyncCard() {
   const { data: config, isLoading } = useQuery<{
     enabled: boolean;
     intervalMinutes: number;
+    dryRun: boolean;
     lastSyncAt: string | null;
     currentlySyncing: boolean;
   }>({
@@ -2075,16 +2076,18 @@ function BidBoardStageSyncCard() {
 
   const [enabled, setEnabled] = useState(false);
   const [interval, setIntervalVal] = useState(15);
+  const [dryRun, setDryRun] = useState(true);
 
   useEffect(() => {
     if (config) {
       setEnabled(config.enabled);
       setIntervalVal(config.intervalMinutes || 15);
+      setDryRun(config.dryRun !== false);
     }
   }, [config]);
 
   const saveConfig = useMutation({
-    mutationFn: async (vars: { enabled: boolean; intervalMinutes: number }) => {
+    mutationFn: async (vars: { enabled: boolean; intervalMinutes: number; dryRun?: boolean }) => {
       const res = await apiRequest("POST", "/api/bidboard/stage-sync/config", vars);
       return res.json();
     },
@@ -2108,15 +2111,20 @@ function BidBoardStageSyncCard() {
 
   const handleToggle = (val: boolean) => {
     setEnabled(val);
-    saveConfig.mutate({ enabled: val, intervalMinutes: interval });
+    saveConfig.mutate({ enabled: val, intervalMinutes: interval, dryRun });
   };
 
   const handleIntervalChange = (val: string) => {
     const mins = parseInt(val);
     setIntervalVal(mins);
     if (enabled) {
-      saveConfig.mutate({ enabled: true, intervalMinutes: mins });
+      saveConfig.mutate({ enabled: true, intervalMinutes: mins, dryRun });
     }
+  };
+
+  const handleDryRunToggle = (val: boolean) => {
+    setDryRun(val);
+    saveConfig.mutate({ enabled, intervalMinutes: interval, dryRun: val });
   };
 
   if (isLoading) return <Skeleton className="h-40" />;
@@ -2182,6 +2190,19 @@ function BidBoardStageSyncCard() {
             >
               <FileText className="w-3 h-3 mr-1" /> View Report
             </Button>
+          </div>
+
+          <div className="flex items-center justify-between rounded-md border p-3">
+            <div>
+              <Label className="text-sm font-medium">Mode</Label>
+              <p className="text-xs text-muted-foreground">
+                {dryRun ? "Dry Run — logs changes only, no HubSpot updates" : "Live — pushes changes to HubSpot"}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">{dryRun ? "Dry Run" : "Live"}</span>
+              <Switch checked={!dryRun} onCheckedChange={(v) => handleDryRunToggle(!v)} />
+            </div>
           </div>
 
           {lastSyncTime && (

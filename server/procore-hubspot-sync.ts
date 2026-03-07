@@ -116,27 +116,32 @@ export function mapProcoreStageToHubspot(procoreStage: string | null): string {
   return PROCORE_TO_HUBSPOT_STAGE[trimmed] || trimmed; // Pass through if no mapping
 }
 
+/** Normalize Unicode dashes (em dash, en dash, etc.) to ASCII hyphen for stage label comparison */
+function normalizeStageDashes(s: string): string {
+  return s
+    .replace(/[\u2013\u2014\u2212\uFE58\uFE63\uFF0D]/g, "-")  // en dash, em dash, minus, etc. → hyphen
+    .trim();
+}
+
 // Resolve stage label to actual HubSpot stage ID
 // mapProcoreStageToHubspot returns labels, but HubSpot API requires stage IDs
 export async function resolveHubspotStageId(stageLabel: string): Promise<{ stageId: string; stageName: string } | null> {
   const pipelines = await storage.getHubspotPipelines();
-  const trimmedLabel = stageLabel.trim();
+  const trimmedLabel = normalizeStageDashes(stageLabel);
 
   for (const pipeline of pipelines) {
     const stages = (pipeline.stages as any[]) || [];
     for (const stage of stages) {
-      // Match by label (case-insensitive, trimmed) or by stageId
-      const label = (stage.label || stage.stageName || '').trim();
+      const label = normalizeStageDashes(stage.label || stage.stageName || "");
       if (label.toLowerCase() === trimmedLabel.toLowerCase() || stage.stageId === trimmedLabel) {
         return {
           stageId: stage.stageId,
-          stageName: label,
+          stageName: stage.label || stage.stageName || label,
         };
       }
     }
   }
-  
-  // If no match found, return null (caller should handle gracefully)
+
   console.warn(`[procore-hubspot-sync] No HubSpot stage found matching label: "${stageLabel}"`);
   return null;
 }

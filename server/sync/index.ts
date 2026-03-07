@@ -19,6 +19,7 @@ import * as path from "path";
 import { exportBidBoardProjectList } from "../playwright/bidboard-export";
 import { diffBidBoardStages, syncStagesToHubSpot, type StageChange } from "./bidboard-stage-sync";
 import { log } from "../index";
+import { storage } from "../storage";
 
 const EXPORTS_DIR = path.join(process.cwd(), "data", "exports");
 const KEEP_LAST_N = 5;
@@ -30,6 +31,7 @@ export interface BidBoardStageSyncResult {
   changes: StageChange[];
   exportPath?: string;
   errors: string[];
+  initialized?: boolean;
 }
 
 export interface RunOptions {
@@ -66,7 +68,7 @@ async function cleanupOldExports(): Promise<void> {
 export async function runBidBoardStageSync(
   options: RunOptions = {}
 ): Promise<BidBoardStageSyncResult> {
-  const { dryRun = false, forceExport, initialize = false } = options;
+  const { dryRun = true, forceExport, initialize = false } = options;
   const result: BidBoardStageSyncResult = {
     total: 0,
     changed: 0,
@@ -105,6 +107,16 @@ export async function runBidBoardStageSync(
       return result;
     }
 
+    const hasSuccessfulRun = await storage.hasSuccessfulBidboardStageSyncRun();
+    if (!hasSuccessfulRun) {
+      await diffBidBoardStages(exportPath, { initializeOnly: true });
+      log("First run: seeded bidboard_status baseline only (no HubSpot calls)", "sync");
+      result.total = 0;
+      result.changed = 0;
+      result.initialized = true;
+      return result;
+    }
+
     const changes = await diffBidBoardStages(exportPath);
     result.changes = changes;
     result.total = changes.length;
@@ -121,7 +133,7 @@ export async function runBidBoardStageSync(
     result.errors.push(...syncResult.errors);
 
     if (dryRun) {
-      log(`[DRY-RUN] Would have synced ${changes.length} stage changes to HubSpot`, "sync");
+      log(`[DRY RUN] Would have synced ${changes.length} stage changes to HubSpot`, "sync");
     } else {
       log(`Synced ${syncResult.success} stage changes, ${syncResult.failed} failed`, "sync");
     }

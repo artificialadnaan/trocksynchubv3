@@ -3887,10 +3887,18 @@ export async function registerRoutes(
     bidboardStageSyncRunning = true;
     console.log("[BidBoardStageSync] Starting sync cycle");
     try {
-      const result = await runBidBoardStageSync({});
+      const config = await storage.getAutomationConfig("bidboard_stage_sync");
+      const val = (config?.value as any) || {};
+      const dryRun = val.dryRun !== false;
+      const result = await runBidBoardStageSync({ dryRun });
       lastBidboardStageSyncAt = new Date();
+      const runStatus = result.initialized
+        ? "initialized"
+        : dryRun
+          ? "dry_run"
+          : (result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success");
       await safeCreateBidboardStageSyncRun({
-        status: result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success",
+        status: runStatus,
         totalChanges: result.total,
         syncedCount: result.changed,
         failedCount: result.failed,
@@ -3898,7 +3906,7 @@ export async function registerRoutes(
         errors: result.errors,
         exportPath: result.exportPath,
       });
-      console.log(`[BidBoardStageSync] Complete — ${result.changed} synced, ${result.failed} failed`);
+      console.log(`[BidBoardStageSync] Complete — ${dryRun ? "[DRY RUN] " : ""}${result.changed} synced, ${result.failed} failed`);
     } catch (e: any) {
       lastBidboardStageSyncAt = new Date();
       await safeCreateBidboardStageSyncRun({ status: "failed", errors: [e.message] });
@@ -3915,6 +3923,7 @@ export async function registerRoutes(
       res.json({
         enabled: val.enabled || false,
         intervalMinutes: val.intervalMinutes || 15,
+        dryRun: val.dryRun !== false,
         isRunning: bidboardStageSyncTimer !== null,
         lastSyncAt: lastBidboardStageSyncAt?.toISOString() || null,
         currentlySyncing: bidboardStageSyncRunning,
@@ -3926,16 +3935,17 @@ export async function registerRoutes(
 
   app.post("/api/bidboard/stage-sync/config", requireAuth, async (req, res) => {
     try {
-      const { enabled, intervalMinutes } = req.body;
+      const { enabled, intervalMinutes, dryRun } = req.body;
       const interval = Math.min(60, Math.max(5, parseInt(String(intervalMinutes)) || 15));
-      await storage.upsertAutomationConfig({
-        key: "bidboard_stage_sync",
-        value: { enabled: !!enabled, intervalMinutes: interval },
-        description: "BidBoard Excel → HubSpot stage sync schedule",
-      });
       const config = await storage.getAutomationConfig("bidboard_stage_sync");
       const val = (config?.value as any) || {};
-      if (val.enabled) {
+      const nextDryRun = dryRun !== undefined ? dryRun !== false : (val.dryRun !== false);
+      await storage.upsertAutomationConfig({
+        key: "bidboard_stage_sync",
+        value: { enabled: !!enabled, intervalMinutes: interval, dryRun: nextDryRun },
+        description: "BidBoard Excel → HubSpot stage sync schedule",
+      });
+      if (enabled) {
         bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, interval * 60 * 1000);
         setTimeout(runBidBoardStageSyncCycle, 10000);
       } else {
@@ -3980,13 +3990,15 @@ export async function registerRoutes(
     try {
       const { dryRun, forceExport, initialize } = req.body || {};
       const result = await runBidBoardStageSync({
-        dryRun: !!dryRun,
+        dryRun: dryRun === undefined ? true : !!dryRun,
         forceExport: typeof forceExport === "string" ? forceExport : undefined,
         initialize: !!initialize,
       });
-      if (!dryRun && !initialize) {
+      const usedDryRun = dryRun === undefined ? true : !!dryRun;
+      if (!initialize) {
+        const runStatus = usedDryRun ? "dry_run" : (result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success");
         await safeCreateBidboardStageSyncRun({
-          status: result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success",
+          status: runStatus,
           totalChanges: result.total,
           syncedCount: result.changed,
           failedCount: result.failed,
