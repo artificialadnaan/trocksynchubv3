@@ -131,6 +131,14 @@ httpServer.listen(
 );
 
 (async () => {
+  // Run procore_projects migration FIRST so last_role_check_at exists before role polling starts
+  try {
+    const { ensureProcoreLastRoleCheckColumn } = await import("./migrate-procore-last-role-check");
+    await ensureProcoreLastRoleCheckColumn();
+  } catch (e) {
+    console.error("[startup] Procore last_role_check_at migration failed:", e);
+  }
+
   await registerRoutes(httpServer, app);
 
   // Ensure closeout_surveys has google_review_* columns (schema drift fix)
@@ -155,14 +163,6 @@ httpServer.listen(
     await ensureBidboardStageSyncRunsTable();
   } catch (e) {
     console.error("[startup] BidBoard stage sync runs table migration failed:", e);
-  }
-
-  // Ensure procore_projects has last_role_check_at (schema drift fix)
-  try {
-    const { ensureProcoreLastRoleCheckColumn } = await import("./migrate-procore-last-role-check");
-    await ensureProcoreLastRoleCheckColumn();
-  } catch (e) {
-    console.error("[startup] Procore last_role_check_at migration failed:", e);
   }
 
   // Seed default email templates if they don't exist
