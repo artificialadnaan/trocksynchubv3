@@ -14,6 +14,7 @@
     "db:push": "drizzle-kit push --force",
     "db:migrate-approved-attachments": "tsx scripts/migrate-approved-attachments.ts",
     "db:migrate-audit-log-category": "tsx scripts/migrate-audit-log-category.ts",
+    "db:seed-dashboard": "npx tsx scripts/seed-dashboard-data.ts",
     "db:migrate-reconciliation": "tsx scripts/migrate-reconciliation-tables.ts",
     "db:seed-reconciliation": "tsx scripts/seed-reconciliation.ts",
     "db:migrate-rfp-reporting": "tsx scripts/migrate-rfp-reporting.ts",

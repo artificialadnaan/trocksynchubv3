@@ -58,14 +58,16 @@ export default function DashboardPage() {
     queryKey: ["/api/dashboard/connections"],
   });
 
+  const syncTotal = stats?.syncs?.total ?? 0;
   const successRate = stats?.syncs?.successRate ?? 0;
   const successRateColor = successRate >= 95 ? "text-green-500" : successRate >= 80 ? "text-yellow-500" : "text-destructive";
+  const successRateDisplay = syncTotal === 0 ? "—" : `${successRate}%`;
 
   const primaryCards = [
-    { label: "Sync Operations (24h)", value: stats?.syncs?.total ?? 0, icon: ArrowLeftRight, color: "text-primary", tooltip: "End-to-end sync operations between HubSpot, Procore, and other integrated systems in the last 24 hours." },
+    { label: "Sync Operations (24h)", value: syncTotal, icon: ArrowLeftRight, color: "text-primary", tooltip: "End-to-end sync operations between HubSpot, Procore, and other integrated systems in the last 24 hours." },
     { label: "Successful", value: stats?.syncs?.successful ?? 0, icon: CheckCircle2, color: "text-green-500", tooltip: "Sync operations that completed without errors and data was successfully written to the target system." },
     { label: "Failed", value: stats?.syncs?.failed ?? 0, icon: XCircle, color: "text-destructive", tooltip: "Sync operations that encountered an error. Check the activity log for details." },
-    { label: "Success Rate", value: `${successRate}%`, icon: TrendingUp, color: successRateColor, tooltip: "Percentage of sync operations that completed successfully in the last 24 hours.", isRate: true },
+    { label: "Success Rate", value: successRateDisplay, icon: TrendingUp, color: successRateColor, tooltip: "Percentage of sync operations that completed successfully in the last 24 hours.", isRate: true },
   ];
 
   const secondaryCards = [
@@ -88,9 +90,9 @@ export default function DashboardPage() {
               {statsLoading ? (
                 <Skeleton className="h-14 md:h-16 w-full" />
               ) : (
-                <div className="flex items-start justify-between">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs md:text-sm text-muted-foreground truncate flex items-center gap-1">
+                <div className="flex items-start justify-between overflow-visible">
+                  <div className="min-w-0 flex-1 overflow-visible">
+                    <p className="text-xs md:text-sm text-muted-foreground flex items-center gap-1.5 shrink-0">
                       {card.label}
                       <InfoTooltip text={card.tooltip} />
                     </p>
@@ -114,9 +116,9 @@ export default function DashboardPage() {
               {statsLoading ? (
                 <Skeleton className="h-12 w-full" />
               ) : (
-                <div className="flex items-center justify-between">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <div className="flex items-center justify-between overflow-visible">
+                  <div className="min-w-0 flex-1 overflow-visible">
+                    <p className="text-xs text-muted-foreground flex items-center gap-1.5 shrink-0">
                       {card.label}
                       <InfoTooltip text={card.tooltip} />
                     </p>
