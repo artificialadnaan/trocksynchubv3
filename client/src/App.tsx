@@ -12,6 +12,7 @@ import ProjectsPage from "@/pages/projects";
 import AuditLogsPage from "@/pages/audit-logs";
 import SettingsPage from "@/pages/settings";
 import DataBrowserPage from "@/pages/data-browser";
+import DataHealthPage from "@/pages/data-health";
 import BidDetailPage from "@/pages/bid-detail";
 import EmailNotificationsPage from "@/pages/email-notifications";
 import ProjectSyncPage from "@/pages/project-sync";
@@ -36,6 +37,7 @@ function AuthenticatedLayout() {
           <Route path="/projects" component={ProjectsPage} />
           <Route path="/audit-logs" component={AuditLogsPage} />
           <Route path="/data-browser" component={DataBrowserPage} />
+          <Route path="/data-health" component={DataHealthPage} />
           <Route path="/procore-data/bids/:bidId" component={BidDetailPage} />
           <Route path="/project-sync" component={ProjectSyncPage} />
           <Route path="/email-notifications" component={EmailNotificationsPage} />

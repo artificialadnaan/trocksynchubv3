@@ -91,6 +91,8 @@ import {
   computeNextRun,
 } from "./rfp-reports";
 import { startRfpReportScheduler } from "./cron/reportScheduler";
+import { startReconciliationScheduler } from "./cron/reconciliationScheduler";
+import reconciliationRouter from "./routes/reconciliation";
 
 const PgSession = connectPgSimple(session);
 
@@ -120,6 +122,8 @@ export async function registerRoutes(
     }
     res.status(401).json({ message: "Unauthorized" });
   }
+
+  app.use("/api/reconciliation", requireAuth, reconciliationRouter);
 
   app.post("/api/auth/login", async (req, res) => {
     try {
@@ -1052,6 +1056,30 @@ export async function registerRoutes(
             console.error(`[hubspot] Company sync error for ${objectId}:`, companyErr.message);
           }
         }
+
+        // Non-blocking drift detection for deals — don't fail the webhook if this errors
+        if (objectType === "deal" && objectId) {
+          const dealId = objectId;
+          setImmediate(async () => {
+            try {
+              const { detectFieldDrift } = await import("./services/reconciliation/guardrails");
+              const { reconciliationProjects } = await import("@shared/reconciliation-schema");
+              const { db } = await import("./db");
+              const { eq } = await import("drizzle-orm");
+
+              const [recon] = await db
+                .select()
+                .from(reconciliationProjects)
+                .where(eq(reconciliationProjects.hubspotDealId, String(dealId)))
+                .limit(1);
+              if (recon) {
+                await detectFieldDrift(recon.id);
+              }
+            } catch (e) {
+              console.error("[reconciliation] Drift detection on HubSpot webhook failed:", e);
+            }
+          });
+        }
       }
       res.status(200).json({ received: true });
     } catch (e: any) {
@@ -1369,6 +1397,27 @@ export async function registerRoutes(
                   console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);
                 }
               }
+
+              // Non-blocking drift detection — don't fail the webhook if this errors
+              setImmediate(async () => {
+                try {
+                  const { detectFieldDrift } = await import("./services/reconciliation/guardrails");
+                  const { reconciliationProjects } = await import("@shared/reconciliation-schema");
+                  const { db } = await import("./db");
+                  const { eq } = await import("drizzle-orm");
+
+                  const [recon] = await db
+                    .select()
+                    .from(reconciliationProjects)
+                    .where(eq(reconciliationProjects.procoreProjectId, String(projectId)))
+                    .limit(1);
+                  if (recon) {
+                    await detectFieldDrift(recon.id);
+                  }
+                } catch (e) {
+                  console.error("[reconciliation] Drift detection on Procore webhook failed:", e);
+                }
+              });
             }
           }
         } catch (err: any) {
@@ -6284,6 +6333,7 @@ main().catch(console.error);
 
   // RFP Report Scheduler (checks every 15 min; sends when config matches)
   startRfpReportScheduler();
+  startReconciliationScheduler();
 
   return httpServer;
 }

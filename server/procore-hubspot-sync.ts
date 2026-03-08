@@ -84,6 +84,21 @@ function normalizeNameForMatch(name: string | null): string {
   return name.toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
+async function logProjectNumberValidation(projectNumber: string | null): Promise<void> {
+  if (!projectNumber) return;
+  try {
+    const { validateProjectNumber } = await import("./services/reconciliation/guardrails");
+    const validation = validateProjectNumber(projectNumber);
+    if (validation.errors.length > 0) {
+      console.warn(`[reconciliation] Invalid project number: ${projectNumber} — ${validation.errors.join(", ")}`);
+    } else if (validation.warnings.length > 0) {
+      console.log(`[reconciliation] Project number note: ${projectNumber} (${validation.era}) — ${validation.warnings.join(", ")}`);
+    }
+  } catch {
+    // Non-blocking — don't fail sync
+  }
+}
+
 // Procore Portfolio/BidBoard Stage → HubSpot Deal Stage mapping
 // These should match your HubSpot pipeline stage labels or internal IDs
 const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
@@ -338,9 +353,11 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
       if (existingMapping) {
         await storage.updateSyncMapping(existingMapping.id, mappingData);
         updatedMappings++;
+        logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
       } else {
         await storage.createSyncMapping(mappingData);
         newMappings++;
+        logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
       }
     } else {
       // In dry-run, count what would happen
@@ -461,6 +478,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
                 },
               });
               newMappings++;
+              logProjectNumberValidation(project.projectNumber);
 
               details.push({
                 procoreProjectId: project.procoreId,
@@ -511,6 +529,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
                   },
                 });
                 newMappings++;
+                logProjectNumberValidation(project.projectNumber);
                 details.push({
                   procoreProjectId: project.procoreId,
                   procoreProjectName: project.name || '',
@@ -674,6 +693,7 @@ export async function createManualMapping(
       lastSyncTimestamp: new Date().toISOString(),
     },
   });
+  logProjectNumberValidation(project[0].projectNumber);
 
   return { success: true, message: 'Mapping created successfully', mapping };
 }
@@ -744,6 +764,7 @@ export async function findOrCreateMappingByProjectNumber(params: {
       lastSyncTimestamp: new Date().toISOString(),
     },
   });
+  logProjectNumberValidation(projectNumber.trim());
 
   console.log(`[procore-hubspot-sync] Auto-linked project ${procoreProjectId} to deal ${deal.hubspotId} by project number ${projectNumber}`);
   return mapping;

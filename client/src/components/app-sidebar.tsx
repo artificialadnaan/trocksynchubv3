@@ -17,6 +17,7 @@ import {
   Menu,
   X,
   FlaskConical,
+  Activity,
 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -29,6 +30,7 @@ const navItems = [
   { path: "/webhooks", label: "Webhooks", icon: Webhook },
   { path: "/projects", label: "Projects", icon: FolderSync },
   { path: "/data-browser", label: "Data Browser", icon: Database },
+  { path: "/data-health", label: "Data Health", icon: Activity },
   { path: "/project-sync", label: "Project Sync", icon: Link2 },
   { path: "/email-notifications", label: "Emails", icon: Mail },
   { path: "/project-archive", label: "Archive", icon: Archive },

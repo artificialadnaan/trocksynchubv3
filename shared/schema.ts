@@ -947,3 +947,8 @@ export const reportScheduleConfig = pgTable("report_schedule_config", {
 });
 export type ReportScheduleConfig = typeof reportScheduleConfig.$inferSelect;
 export type InsertReportScheduleConfig = typeof reportScheduleConfig.$inferInsert;
+
+// ============================================================
+// RECONCILIATION (Data Health)
+// ============================================================
+export * from "./reconciliation-schema";
