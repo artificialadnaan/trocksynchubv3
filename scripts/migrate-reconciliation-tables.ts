@@ -19,48 +19,72 @@ async function runReconciliationMigration(): Promise<void> {
   }
 
   const client = await pool.connect();
+
+  const enumExists = async (name: string) =>
+    (await client.query("SELECT 1 FROM pg_type WHERE typname = $1", [name])).rows.length > 0;
+  const tableExists = async (name: string) =>
+    (await client.query(
+      "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
+      [name]
+    )).rows.length > 0;
+
   try {
     // Create enums (idempotent — skip if already exists)
-    await client.query(`
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'reconciliation_bucket') THEN
-          CREATE TYPE reconciliation_bucket AS ENUM (
-            'exact_match', 'fuzzy_match', 'orphan_procore', 'orphan_hubspot',
-            'orphan_bidboard', 'conflict', 'resolved', 'ignored'
-          );
-        END IF;
-      END $$;
-    `);
-
-    await client.query(`
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conflict_severity') THEN
-          CREATE TYPE conflict_severity AS ENUM ('critical', 'warning', 'info');
-        END IF;
-      END $$;
-    `);
-
-    await client.query(`
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'resolution_action') THEN
-          CREATE TYPE resolution_action AS ENUM (
-            'accept_procore', 'accept_hubspot', 'manual_override', 'create_counterpart',
-            'link_existing', 'mark_ignored', 'merge_records', 'assign_canonical_number'
-          );
-        END IF;
-      END $$;
-    `);
-
-    await client.query(`
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'project_number_era') THEN
-          CREATE TYPE project_number_era AS ENUM ('legacy', 'zapier', 'synchub');
-        END IF;
-      END $$;
-    `);
+    {
+      const exists = await enumExists("reconciliation_bucket");
+      await client.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'reconciliation_bucket') THEN
+            CREATE TYPE reconciliation_bucket AS ENUM (
+              'exact_match', 'fuzzy_match', 'orphan_procore', 'orphan_hubspot',
+              'orphan_bidboard', 'conflict', 'resolved', 'ignored'
+            );
+          END IF;
+        END $$;
+      `);
+      console.log(exists ? "[migrate] Enum reconciliation_bucket already existed" : "[migrate] Created enum reconciliation_bucket");
+    }
+    {
+      const exists = await enumExists("conflict_severity");
+      await client.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conflict_severity') THEN
+            CREATE TYPE conflict_severity AS ENUM ('critical', 'warning', 'info');
+          END IF;
+        END $$;
+      `);
+      console.log(exists ? "[migrate] Enum conflict_severity already existed" : "[migrate] Created enum conflict_severity");
+    }
+    {
+      const exists = await enumExists("resolution_action");
+      await client.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'resolution_action') THEN
+            CREATE TYPE resolution_action AS ENUM (
+              'accept_procore', 'accept_hubspot', 'manual_override', 'create_counterpart',
+              'link_existing', 'mark_ignored', 'merge_records', 'assign_canonical_number'
+            );
+          END IF;
+        END $$;
+      `);
+      console.log(exists ? "[migrate] Enum resolution_action already existed" : "[migrate] Created enum resolution_action");
+    }
+    {
+      const exists = await enumExists("project_number_era");
+      await client.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'project_number_era') THEN
+            CREATE TYPE project_number_era AS ENUM ('legacy', 'zapier', 'synchub');
+          END IF;
+        END $$;
+      `);
+      console.log(exists ? "[migrate] Enum project_number_era already existed" : "[migrate] Created enum project_number_era");
+    }
 
     // Create tables (idempotent — IF NOT EXISTS on each)
-    await client.query(`
+    {
+      const exists = await tableExists("reconciliation_projects");
+      await client.query(`
       CREATE TABLE IF NOT EXISTS reconciliation_projects (
         id SERIAL PRIMARY KEY,
         procore_project_id TEXT,
@@ -87,8 +111,11 @@ async function runReconciliationMigration(): Promise<void> {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-
-    await client.query(`
+      console.log(exists ? "[migrate] Table reconciliation_projects already existed" : "[migrate] Created table reconciliation_projects");
+    }
+    {
+      const exists = await tableExists("reconciliation_conflicts");
+      await client.query(`
       CREATE TABLE IF NOT EXISTS reconciliation_conflicts (
         id SERIAL PRIMARY KEY,
         reconciliation_project_id INTEGER NOT NULL REFERENCES reconciliation_projects(id) ON DELETE CASCADE,
@@ -105,8 +132,11 @@ async function runReconciliationMigration(): Promise<void> {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-
-    await client.query(`
+      console.log(exists ? "[migrate] Table reconciliation_conflicts already existed" : "[migrate] Created table reconciliation_conflicts");
+    }
+    {
+      const exists = await tableExists("reconciliation_audit_log");
+      await client.query(`
       CREATE TABLE IF NOT EXISTS reconciliation_audit_log (
         id SERIAL PRIMARY KEY,
         reconciliation_project_id INTEGER NOT NULL REFERENCES reconciliation_projects(id) ON DELETE CASCADE,
@@ -122,8 +152,11 @@ async function runReconciliationMigration(): Promise<void> {
         snapshot_after JSONB
       );
     `);
-
-    await client.query(`
+      console.log(exists ? "[migrate] Table reconciliation_audit_log already existed" : "[migrate] Created table reconciliation_audit_log");
+    }
+    {
+      const exists = await tableExists("legacy_number_mappings");
+      await client.query(`
       CREATE TABLE IF NOT EXISTS legacy_number_mappings (
         id SERIAL PRIMARY KEY,
         legacy_number TEXT NOT NULL UNIQUE,
@@ -137,8 +170,11 @@ async function runReconciliationMigration(): Promise<void> {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-
-    await client.query(`
+      console.log(exists ? "[migrate] Table legacy_number_mappings already existed" : "[migrate] Created table legacy_number_mappings");
+    }
+    {
+      const exists = await tableExists("reconciliation_scan_runs");
+      await client.query(`
       CREATE TABLE IF NOT EXISTS reconciliation_scan_runs (
         id SERIAL PRIMARY KEY,
         started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -156,6 +192,8 @@ async function runReconciliationMigration(): Promise<void> {
         error TEXT
       );
     `);
+      console.log(exists ? "[migrate] Table reconciliation_scan_runs already existed" : "[migrate] Created table reconciliation_scan_runs");
+    }
 
     console.log("[migrate] Reconciliation tables and enums ensured successfully");
   } catch (e) {
