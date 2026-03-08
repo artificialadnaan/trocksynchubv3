@@ -53,6 +53,7 @@ COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/drizzle.config.ts ./
 COPY --from=builder /app/shared ./shared
 COPY --from=builder /app/scripts ./scripts
+COPY --from=builder /app/migrations ./migrations
 
 # Install Playwright browsers in production image
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
@@ -65,5 +66,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8080/_health || exit 1
 
-# Start the application (db:push + approved_attachments migration + start)
-CMD ["sh", "-c", "npm run db:push && npm run db:migrate-approved-attachments && npm run start"]
+# Start the application (db:push + migrations + start)
+CMD ["sh", "-c", "npm run db:push && npm run db:migrate-approved-attachments && npm run db:migrate-rfp-reporting && npm run start"]

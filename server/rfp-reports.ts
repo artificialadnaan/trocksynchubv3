@@ -57,7 +57,12 @@ export async function getRfpReportList(
     conditions.push(lte(rfpApprovalRequests.createdAt, end));
   }
   if (filters.status) {
-    conditions.push(eq(rfpApprovalRequests.status, filters.status));
+    // Treat "rejected" filter as including both rejected and declined (legacy naming)
+    if (filters.status === "rejected") {
+      conditions.push(inArray(rfpApprovalRequests.status, ["rejected", "declined"]));
+    } else {
+      conditions.push(eq(rfpApprovalRequests.status, filters.status));
+    }
   }
   if (filters.projectNumber?.trim()) {
     const pnPattern = `%${filters.projectNumber.trim()}%`;
@@ -133,6 +138,9 @@ export async function getRfpReportList(
 
     const changeCount = changeMap.get(rfp.id) ?? 0;
 
+    // Normalize "declined" → "rejected" for report display, filters, and approval summary
+    const approvalStatus = rfp.status === "declined" ? "rejected" : rfp.status;
+
     return {
       id: rfp.id,
       hubspotDealId: rfp.hubspotDealId,
@@ -141,7 +149,7 @@ export async function getRfpReportList(
       recipient,
       dateSent: rfp.createdAt ? new Date(rfp.createdAt).toISOString() : "",
       bidboardStage,
-      approvalStatus: rfp.status,
+      approvalStatus,
       changeCount,
     };
   });
