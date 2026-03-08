@@ -85,42 +85,53 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     }
     await randomDelay(500, 1000);
 
-    // Step 1: Click three-dot overflow menu (data-qa and svg name are Procore test hooks)
-    const menuSelectors = [
-      () => page.locator('[data-qa="ci-EllipsisVertical"]'),
-      () => page.locator('button:has([data-qa="ci-EllipsisVertical"])'),
-      () => page.locator('svg[name="EllipsisVertical"]'),
+    // Step 1: Click three-dot overflow menu
+    // DOM: <span class="StyledContent-..."><svg data-qa="ci-EllipsisVertical" name="EllipsisVertical" ...></span>
+    const menuSelectors: { name: string; fn: () => ReturnType<typeof page.locator> }[] = [
+      { name: '[data-qa="ci-EllipsisVertical"]', fn: () => page.locator('[data-qa="ci-EllipsisVertical"]') },
+      { name: 'span:has([data-qa="ci-EllipsisVertical"])', fn: () => page.locator('span:has([data-qa="ci-EllipsisVertical"])') },
+      { name: 'button:has([data-qa="ci-EllipsisVertical"])', fn: () => page.locator('button:has([data-qa="ci-EllipsisVertical"])') },
+      { name: 'svg[name="EllipsisVertical"]', fn: () => page.locator('svg[name="EllipsisVertical"]') },
     ];
     let menuClicked = false;
-    for (const sel of menuSelectors) {
+    for (const { name, fn } of menuSelectors) {
       try {
-        const loc = sel();
-        if ((await loc.count()) > 0) {
-          await loc.first().click({ timeout: 8000 });
-          await randomDelay(1500, 2500);
-          if (await page.locator("text=Export").first().isVisible().catch(() => false)) {
-            menuClicked = true;
-            break;
+        const loc = fn();
+        const count = await loc.count();
+        log(`Trying three-dot menu selector: ${name} (found ${count} elements)`, "playwright");
+        if (count > 0) {
+          const first = loc.first();
+          const isVisible = await first.isVisible().catch(() => false);
+          log(`Selector ${name}: first element visible=${isVisible}`, "playwright");
+          if (isVisible) {
+            await first.click({ timeout: 8000 });
+            await randomDelay(1500, 2500);
+            if (await page.locator("text=Export").first().isVisible().catch(() => false)) {
+              log(`Three-dot menu opened successfully with selector: ${name}`, "playwright");
+              menuClicked = true;
+              break;
+            }
+            log(`Selector ${name}: clicked but Export text not visible`, "playwright");
           }
         }
-      } catch {
-        /* try next */
+      } catch (err: any) {
+        log(`Selector ${name} failed: ${err?.message || String(err)}`, "playwright");
       }
     }
     if (!menuClicked) {
-      log("Could not find three-dot overflow menu", "playwright");
+      log("Could not find three-dot overflow menu; all selectors exhausted", "playwright");
       await takeScreenshot(page, "bidboard-export-menu-not-found");
       throw new Error("Export menu button not found. Procore UI may have changed.");
     }
     await randomDelay(1000, 2000);
 
     // Step 2: Click "Export project list to Excel" menu item
-    // DOM: <li class="aid-exportProjectList" role="menuitem"> with <a> child "Export project list to Excel"
+    // DOM: <li class="aid-exportProjectList" role="menuitem"><a>Export project list to Excel</a></li>
     const exportTimeout = 30000;
-    const exportSelectors = [
-      page.locator(".aid-exportProjectList"),
-      page.locator('li[role="menuitem"]').filter({ hasText: /export.*excel/i }),
-      page.getByRole("menuitem", { name: /export.*excel/i }),
+    const exportSelectors: { name: string; loc: ReturnType<typeof page.locator> }[] = [
+      { name: ".aid-exportProjectList", loc: page.locator(".aid-exportProjectList") },
+      { name: 'li[role="menuitem"]:has-text("Export")', loc: page.locator('li[role="menuitem"]').filter({ hasText: /export.*excel/i }) },
+      { name: "getByRole(menuitem, export excel)", loc: page.getByRole("menuitem", { name: /export.*excel/i }) },
     ];
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -129,16 +140,18 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     // Procore may trigger a download event or navigation-based download.
     const downloadPromise = page.waitForEvent("download", { timeout: EXPORT_TIMEOUT_MS });
     let exportClicked = false;
-    for (const loc of exportSelectors) {
+    for (const { name, loc } of exportSelectors) {
       try {
-        if ((await loc.count()) > 0) {
+        const count = await loc.count();
+        log(`Trying export menu selector: ${name} (found ${count} elements)`, "playwright");
+        if (count > 0) {
           await loc.first().click({ timeout: exportTimeout });
           exportClicked = true;
-          log(`Clicked export via selector`, "playwright");
+          log(`Clicked export via selector: ${name}`, "playwright");
           break;
         }
-      } catch {
-        /* try next */
+      } catch (err: any) {
+        log(`Export selector ${name} failed: ${err?.message || String(err)}`, "playwright");
       }
     }
     try {

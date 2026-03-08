@@ -71,6 +71,16 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -99,6 +109,7 @@ import {
   Users,
   Upload,
   FileText,
+  RotateCcw,
 } from "lucide-react";
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
@@ -2057,6 +2068,7 @@ interface StageSyncRun {
 function BidBoardStageSyncCard() {
   const { toast } = useToast();
   const [reportOpen, setReportOpen] = useState(false);
+  const [resetBaselineOpen, setResetBaselineOpen] = useState(false);
 
   const { data: config, isLoading } = useQuery<{
     enabled: boolean;
@@ -2106,6 +2118,24 @@ function BidBoardStageSyncCard() {
       toast({ title: "Stage sync triggered" });
       queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/config"] });
       queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/history"] });
+    },
+  });
+
+  const resetBaseline = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/bidboard/stage-sync/reset-baseline", {});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Reset failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      setResetBaselineOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/history"] });
+      toast({ title: "Baseline reset", description: data.message });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Reset failed", description: e.message, variant: "destructive" });
     },
   });
 
@@ -2190,6 +2220,37 @@ function BidBoardStageSyncCard() {
             >
               <FileText className="w-3 h-3 mr-1" /> View Report
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-amber-600 border-amber-200 hover:bg-amber-50 hover:text-amber-700"
+              onClick={() => setResetBaselineOpen(true)}
+            >
+              <RotateCcw className="w-3 h-3 mr-1" /> Reset Baseline
+            </Button>
+            <AlertDialog open={resetBaselineOpen} onOpenChange={setResetBaselineOpen}>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Reset Baseline</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will delete all sync run history. The next stage sync will re-initialize
+                    the baseline (seed bidboard_status for all projects without pushing to HubSpot).
+                    Use this if a previous sync pushed incorrect changes without a proper baseline.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={(e) => { e.preventDefault(); resetBaseline.mutate(); }}
+                    className="bg-amber-600 hover:bg-amber-700"
+                    disabled={resetBaseline.isPending}
+                  >
+                    {resetBaseline.isPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+                    Reset
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
 
           <div className="flex items-center justify-between rounded-md border p-3">

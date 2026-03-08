@@ -3986,6 +3986,16 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/bidboard/stage-sync/reset-baseline", requireAuth, async (_req, res) => {
+    try {
+      const deleted = await storage.deleteAllBidboardStageSyncRuns();
+      console.log(`[BidBoardStageSync] Reset baseline: deleted ${deleted} sync run(s)`);
+      res.json({ success: true, deleted, message: `Cleared ${deleted} sync run(s). Next trigger will re-initialize baseline.` });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
   app.post("/api/bidboard/stage-sync", requireAuth, async (req, res) => {
     try {
       const { dryRun, forceExport, initialize } = req.body || {};

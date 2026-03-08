@@ -1596,10 +1596,11 @@ export class DatabaseStorage implements IStorage {
 
   async hasSuccessfulBidboardStageSyncRun(): Promise<boolean> {
     try {
+      // Only "success" and "initialized" count as valid baseline. "partial" (e.g. broken
+      // sync that pushed changes without a baseline) must not skip re-initialization.
       const runs = await db.select().from(bidboardStageSyncRuns).where(
         or(
           eq(bidboardStageSyncRuns.status, "success"),
-          eq(bidboardStageSyncRuns.status, "partial"),
           eq(bidboardStageSyncRuns.status, "initialized")
         )
       ).limit(1);
@@ -1607,6 +1608,11 @@ export class DatabaseStorage implements IStorage {
     } catch {
       return false;
     }
+  }
+
+  async deleteAllBidboardStageSyncRuns(): Promise<number> {
+    const deleted = await db.delete(bidboardStageSyncRuns).returning();
+    return deleted.length;
   }
 
   async createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey> {
