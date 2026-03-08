@@ -49,7 +49,13 @@ async function uploadFileToHubSpotAndAttachToDeal(
     );
     log(`[rfp-approval] Associated file ${fileId} with deal ${dealId}`, 'rfp');
   } catch (assocErr: any) {
-    log(`[rfp-approval] HubSpot file-deal association failed: ${assocErr.message}`, 'rfp');
+    const msg = assocErr?.message || String(assocErr);
+    // Downgrade to warning when HubSpot returns invalid contact (e.g. deal has stale contact ref); file-deal link still works
+    if (/CONTACT.*not valid|not valid.*CONTACT/i.test(msg)) {
+      console.warn(`[rfp-approval] File-deal association skipped (invalid contact): ${msg}`);
+    } else {
+      log(`[rfp-approval] HubSpot file-deal association failed: ${msg}`, 'rfp');
+    }
     // Non-fatal — file was uploaded successfully, association is best-effort
   }
 }

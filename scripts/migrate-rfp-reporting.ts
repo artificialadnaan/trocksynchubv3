@@ -30,6 +30,8 @@ async function main() {
   console.log("Running RFP Reporting migrations...");
   await runSqlFile("0002_rfp_reporting_tables.sql");
   await runSqlFile("0003_rfp_change_log_trigger.sql");
+  await runSqlFile("0004_add_last_sent_at.sql");
+  await runSqlFile("0005_ensure_rfp_change_log.sql");
   await pool.end();
   console.log("Migration complete.");
   process.exit(0);

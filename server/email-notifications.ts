@@ -365,13 +365,9 @@ export async function sendStageChangeEmail(params: {
     return { sent: false, ownerEmail: null, error: skipReason };
   }
 
-  const dedupeKey = `stage_change:${params.hubspotDealId}:${params.newStage}`;
-
-  const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
-  if (alreadySent) {
-    console.log(`[email] Skipping duplicate stage change: ${dedupeKey}`);
-    return { sent: false, ownerEmail: ownerInfo.ownerEmail, error: 'duplicate' };
-  }
+  // Include oldStage + timestamp so same deal can revisit a stage (RFP→Pipe Line→RFP) and each transition is logged.
+  // Old format stage_change:{dealId}:{stageName} caused duplicate key on revisit — each insert needs a unique key.
+  const dedupeKey = `stage_change:${params.hubspotDealId}:${params.oldStage}:${params.newStage}:${Date.now()}`;
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.procoreProjectId);
 

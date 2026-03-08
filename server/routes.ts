@@ -974,6 +974,9 @@ export async function registerRoutes(
           const newValue = event.propertyValue || "";
           
           if (changedProperty === "dealstage") {
+            // Skip stage change email when change was triggered by SyncHub itself (e.g. RFP approval handler)
+            const changeSource = (event as any).changeSource;
+            const skipStageChangeEmail = changeSource === "INTEGRATION";
             const resolvedNewStage = await resolveHubspotStageId(newValue);
             const stageName = (resolvedNewStage?.stageName || newValue).toLowerCase();
             const stageId = newValue.toLowerCase();
@@ -996,24 +999,27 @@ export async function registerRoutes(
               }
             }
             // Send deal stage change email to assigned deal members (deal owner)
-            try {
-              const mapping = await storage.getSyncMappingByHubspotDealId(objectId);
-              const deal = await storage.getHubspotDealByHubspotId(objectId);
-              const resolvedStage = await resolveHubspotStageId(newValue);
-              const newStageName = resolvedStage?.stageName || newValue;
-              const oldStageName = previousStageForEmail ?? "Previous stage";
+            // Skip when changeSource is INTEGRATION — SyncHub triggered the change (e.g. RFP approval), so we already know about it
+            if (!skipStageChangeEmail) {
+              try {
+                const mapping = await storage.getSyncMappingByHubspotDealId(objectId);
+                const deal = await storage.getHubspotDealByHubspotId(objectId);
+                const resolvedStage = await resolveHubspotStageId(newValue);
+                const newStageName = resolvedStage?.stageName || newValue;
+                const oldStageName = previousStageForEmail ?? "Previous stage";
 
-              await sendStageChangeEmail({
-                hubspotDealId: objectId,
-                dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
-                procoreProjectId: mapping?.procoreProjectId || "",
-                procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
-                oldStage: oldStageName,
-                newStage: newStageName,
-                hubspotStageName: newStageName,
-              });
-            } catch (emailErr: any) {
-              console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
+                await sendStageChangeEmail({
+                  hubspotDealId: objectId,
+                  dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
+                  procoreProjectId: mapping?.procoreProjectId || "",
+                  procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
+                  oldStage: oldStageName,
+                  newStage: newStageName,
+                  hubspotStageName: newStageName,
+                });
+              } catch (emailErr: any) {
+                console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
+              }
             }
             // Closeout survey is only triggered by Procore project stage → Closed, not by HubSpot deal stage changes
           }
