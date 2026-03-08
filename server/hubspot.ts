@@ -858,7 +858,7 @@ export async function syncSingleHubSpotDeal(dealId: string): Promise<{ success: 
         stageMap.set(s.stageId, { stageName: s.label, pipelineName: p.label });
       }
     }
-    const stageInfo = stageMap.get(props.dealstage);
+    const stageInfo = props.dealstage ? stageMap.get(props.dealstage) : undefined;
     const ownerName = props.hubspot_owner_id ? (ownerMap.get(props.hubspot_owner_id) || null) : null;
 
     const data = {
@@ -943,7 +943,7 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
     const hubspotId = deal.id;
     const props = deal.properties || {};
     const existing = await storage.getHubspotDealByHubspotId(hubspotId);
-    const stageInfo = stageMap.get(props.dealstage);
+    const stageInfo = props.dealstage ? stageMap.get(props.dealstage) : undefined;
 
     const associatedCompanyId = dealCompanyMap.get(hubspotId) || null;
 
@@ -1075,7 +1075,7 @@ export async function syncHubSpotPipelines(): Promise<any[]> {
 export async function runFullHubSpotSync(): Promise<{
   companies: { synced: number; created: number; updated: number; changes: number };
   contacts: { synced: number; created: number; updated: number; changes: number };
-  deals: { synced: number; created: number; updated: number; changes: number };
+  deals: { synced: number; created: number; updated: number; changes: number; newDealIds: string[] };
   owners: { synced: number; created: number; updated: number };
   pipelines: number;
   purgedHistory: number;

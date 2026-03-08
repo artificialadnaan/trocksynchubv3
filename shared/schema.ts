@@ -58,7 +58,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique, uuid, time } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -904,3 +904,45 @@ export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
 export const insertRfpApprovalRequestSchema = createInsertSchema(rfpApprovalRequests).omit({ id: true, createdAt: true });
 export type InsertRfpApprovalRequest = z.infer<typeof insertRfpApprovalRequestSchema>;
 export type RfpApprovalRequest = typeof rfpApprovalRequests.$inferSelect;
+
+// RFP Reporting & Scheduled Email
+export const rfpChangeLog = pgTable("rfp_change_log", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  rfpId: integer("rfp_id").notNull().references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
+  fieldChanged: varchar("field_changed", { length: 255 }).notNull(),
+  oldValue: text("old_value"),
+  newValue: text("new_value").notNull(),
+  changedBy: varchar("changed_by", { length: 255 }),
+  changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type RfpChangeLog = typeof rfpChangeLog.$inferSelect;
+export type InsertRfpChangeLog = typeof rfpChangeLog.$inferInsert;
+
+export const rfpApprovals = pgTable("rfp_approvals", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  rfpId: integer("rfp_id").notNull().references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
+  approverEmail: varchar("approver_email", { length: 255 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending | approved | rejected
+  comments: text("comments"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type RfpApproval = typeof rfpApprovals.$inferSelect;
+export type InsertRfpApproval = typeof rfpApprovals.$inferInsert;
+
+export const reportScheduleConfig = pgTable("report_schedule_config", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  enabled: boolean("enabled").notNull().default(false),
+  frequency: varchar("frequency", { length: 20 }).notNull().default("weekly"), // daily | weekly | biweekly | monthly
+  dayOfWeek: integer("day_of_week"), // 0=Sunday..6=Saturday
+  timeOfDay: time("time_of_day").notNull().default("08:00"),
+  timezone: varchar("timezone", { length: 64 }).notNull().default("America/Chicago"),
+  recipients: text("recipients").array().notNull().default([]),
+  includeRfpLog: boolean("include_rfp_log").notNull().default(true),
+  includeChangeHistory: boolean("include_change_history").notNull().default(true),
+  includeApprovalSummary: boolean("include_approval_summary").notNull().default(true),
+  lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type ReportScheduleConfig = typeof reportScheduleConfig.$inferSelect;
+export type InsertReportScheduleConfig = typeof reportScheduleConfig.$inferInsert;

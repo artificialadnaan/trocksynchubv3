@@ -676,7 +676,7 @@ export async function triggerPostSyncProcoreUpdates(
       }
     }
 
-    for (const hubspotId of recentIds) {
+    for (const hubspotId of Array.from(recentIds)) {
       try {
         const result = await syncHubspotCompanyToProcore(hubspotId);
         results.push({ type: 'company', hubspotId, ...result });
@@ -703,7 +703,7 @@ export async function triggerPostSyncProcoreUpdates(
       }
     }
 
-    for (const hubspotId of recentIds) {
+    for (const hubspotId of Array.from(recentIds)) {
       try {
         const result = await syncHubspotContactToProcore(hubspotId);
         results.push({ type: 'contact', hubspotId, ...result });

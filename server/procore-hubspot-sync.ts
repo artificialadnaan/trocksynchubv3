@@ -704,7 +704,7 @@ export async function getUnmatchedProjects(): Promise<{
   }).from(hubspotDeals);
 
   return {
-    unmatchedProcore: allProcore.filter(p => !mappedProcoreIds.has(p.procoreId)),
+    unmatchedProcore: allProcore.filter(p => !mappedProcoreIds.has(p.procoreId)).map(p => ({ ...p, name: p.name ?? '' })),
     unmatchedHubspot: allHubspot.filter(d => !mappedHubspotIds.has(d.hubspotId)),
   };
 }

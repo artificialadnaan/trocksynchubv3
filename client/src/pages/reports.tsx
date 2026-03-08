@@ -512,15 +512,15 @@ export default function ReportsPage() {
                   <>
                     <SyncTimeRow
                       name="HubSpot"
-                      timestamp={health?.lastHubSpotSync}
+                      timestamp={health?.lastHubSpotSync ?? null}
                     />
                     <SyncTimeRow
                       name="Procore"
-                      timestamp={health?.lastProcoreSync}
+                      timestamp={health?.lastProcoreSync ?? null}
                     />
                     <SyncTimeRow
                       name="CompanyCam"
-                      timestamp={health?.lastCompanyCamSync}
+                      timestamp={health?.lastCompanyCamSync ?? null}
                     />
                   </>
                 )}

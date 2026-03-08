@@ -99,7 +99,7 @@ export async function sendRoleAssignmentEmails(
       companyId: '598134325683880',
       procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${assignment.procoreProjectId}/tools/projecthome`,
       hubspotUrl: mapping?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${mapping.hubspotDealId}` : 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
-      companycamUrl: mapping?.companycamProjectId ? `https://app.companycam.com/projects/${mapping.companycamProjectId}` : 'https://app.companycam.com/projects',
+      companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
     };
 
     const subject = renderTemplate(template.subject, variables);
@@ -268,7 +268,7 @@ export async function triggerKickoffForNewPmOnPortfolio(
 
       const result = await sendKickoffEmails({
         projectId: kickoffProjectId,
-        hubspotDealId: mapping.hubspotDealId || undefined,
+        hubspotDealId: mapping?.hubspotDealId || undefined,
         projectName: projectDetail?.name || projectDetail?.display_name || assignment.projectName || 'Unknown Project',
         clientName: projectDetail?.company?.name || 'Unknown Client',
         projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
@@ -395,7 +395,7 @@ export async function sendStageChangeEmail(params: {
     timestamp: new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }),
     procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.procoreProjectId}/tools/projecthome`,
     hubspotUrl: `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${params.hubspotDealId}`,
-    companycamUrl: mapping?.companycamProjectId ? `https://app.companycam.com/projects/${mapping.companycamProjectId}` : 'https://app.companycam.com/projects',
+    companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
   };
 
   const subject = renderTemplate(template.subject, variables);
@@ -571,7 +571,7 @@ export async function sendKickoffEmails(params: {
       nextStep: params.nextStep || 'scheduling the project kickoff meeting',
       procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.projectId}/tools/projecthome`,
       hubspotUrl: hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${hubspotDealId}` : 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
-      companycamUrl: mapping?.companycamProjectId ? `https://app.companycam.com/projects/${mapping.companycamProjectId}` : 'https://app.companycam.com/projects',
+      companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
     };
 
     const subject = renderTemplate(template.subject, variables);

@@ -88,6 +88,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { RfpAutomationCard } from "@/components/rfp-automation-card";
 import {
   Link2,
   Clock,
@@ -301,6 +302,8 @@ export default function SettingsPage() {
       <StageMappingCard />
 
       <BidBoardStageSyncCard />
+
+      <RfpAutomationCard />
 
       <HubspotProcoreSyncCard />
 
@@ -1006,10 +1009,13 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
 
   // Initialize form values when config loads
   React.useEffect(() => {
-    if (spConfig?.config) {
-      setSiteUrl(spConfig.config.siteUrl || "");
-      setSiteName(spConfig.config.siteName || "");
-      setDocumentLibrary(spConfig.config.documentLibrary || "Documents");
+    const cfg = spConfig && typeof spConfig === 'object' && 'config' in spConfig
+      ? (spConfig as { config?: { siteUrl?: string; siteName?: string; documentLibrary?: string } }).config
+      : undefined;
+    if (cfg) {
+      setSiteUrl(cfg.siteUrl || "");
+      setSiteName(cfg.siteName || "");
+      setDocumentLibrary(cfg.documentLibrary || "Documents");
     }
   }, [spConfig]);
 
@@ -1145,9 +1151,9 @@ function MicrosoftConfigDialog({ open, onOpenChange, status }: {
                     <span className="text-green-600 font-bold text-xs">SP</span>
                   </div>
                   <h4 className="font-medium text-sm">SharePoint Configuration</h4>
-                  {spConfig?.connected && (
+                  {Boolean((spConfig as { connected?: boolean } | undefined)?.connected) ? (
                     <span className="ml-auto text-xs text-green-600 bg-green-600/10 px-2 py-0.5 rounded">Connected</span>
-                  )}
+                  ) : null}
                 </div>
                 
                 <p className="text-xs text-muted-foreground">

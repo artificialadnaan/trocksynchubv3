@@ -320,7 +320,7 @@ export default function WebhooksPage() {
                   </pre>
                 </ScrollArea>
               </div>
-              {selectedLog.response && (
+              {selectedLog.response != null && (
                 <div>
                   <p className="text-sm font-medium mb-2">Response</p>
                   <ScrollArea className="h-32 rounded-lg border bg-muted/30 p-3">
@@ -333,7 +333,7 @@ export default function WebhooksPage() {
               {selectedLog.errorMessage && (
                 <div>
                   <p className="text-sm font-medium mb-2 text-destructive">Error</p>
-                  <p className="text-sm text-destructive bg-destructive/5 rounded-lg p-3">{selectedLog.errorMessage}</p>
+                  <p className="text-sm text-destructive bg-destructive/5 rounded-lg p-3">{String(selectedLog.errorMessage ?? '')}</p>
                 </div>
               )}
             </div>

@@ -201,7 +201,7 @@ export async function getRecentActivity(limit: number = 20): Promise<ActivityIte
       timestamp: createdAt.toISOString(),
       status: log.status || 'unknown',
       entityType: log.entityType,
-      entityId: log.entityId,
+      entityId: log.entityId ?? undefined,
     };
   });
 }
@@ -300,7 +300,7 @@ export async function getPipelineReport(): Promise<PipelineReport[]> {
   const reports: PipelineReport[] = [];
 
   for (const pipeline of pipelines) {
-    const pipelineDeals = deals.filter(d => d.pipelineId === pipeline.pipelineId);
+    const pipelineDeals = deals.filter(d => d.pipeline === pipeline.hubspotId);
     const stages = (pipeline.stages as any[]) || [];
     
     const stageReports = stages.map(stage => {
@@ -316,7 +316,7 @@ export async function getPipelineReport(): Promise<PipelineReport[]> {
     });
 
     reports.push({
-      pipelineName: pipeline.pipelineName || pipeline.pipelineId,
+      pipelineName: pipeline.label || pipeline.hubspotId,
       stages: stageReports,
       totalDeals: pipelineDeals.length,
       totalValue: pipelineDeals.reduce((sum, d) => sum + parseFloat(d.amount || '0'), 0),

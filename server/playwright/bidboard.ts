@@ -1263,7 +1263,7 @@ export async function createBidBoardProject(
             const dialogStillOpen = await page.locator('text=Edit Address').isVisible().catch(() => false);
             if (dialogStillOpen) {
               await page.evaluate(() => {
-                const buttons = [...document.querySelectorAll('button')];
+                const buttons = Array.from(document.querySelectorAll('button'));
                 const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save');
                 if (saveBtn) (saveBtn as HTMLButtonElement).click();
               });
@@ -1513,12 +1513,12 @@ export async function createBidBoardProjectFromDeal(
 
   const projectNumber = options.projectNumberOverride ?? ed.project_number ?? properties.project_number ?? undefined;
   const projectData: NewBidBoardProjectData = {
-    name: get(deal.dealName, "dealname") || deal.dealName || `Deal ${dealId}`,
-    projectNumber: projectNumber || undefined,
+    name: get(deal.dealName ?? undefined, "dealname") || deal.dealName || `Deal ${dealId}`,
+    projectNumber: projectNumber ?? undefined,
     stage: initialStage,
-    projectTypes: ed.project_types ?? properties.project_types,
+    projectTypes: (ed.project_types ?? properties.project_types) ?? undefined,
     estimator: get(undefined, "estimator"),
-    clientName: get(deal.associatedCompanyName, "company_name") || deal.associatedCompanyName || properties.company_name || undefined,
+    clientName: get(deal.associatedCompanyName ?? undefined, "company_name") || deal.associatedCompanyName || properties.company_name || undefined,
     clientEmail: get(undefined, "client_email") || properties.client_email || properties.contact_email || undefined,
     clientPhone: get(undefined, "client_phone") || properties.client_phone || properties.contact_phone || undefined,
     address: get(undefined, "address") || properties.address || properties.street_address || undefined,

@@ -338,7 +338,7 @@ export async function runProjectCloseout(
           includeDocuments: true,
           includeDrawings: true,
           includeSubmittals: true,
-          includeRfis: true,
+          includeRFIs: true,
           includePhotos: true,
           includeBudget: true,
         });
@@ -516,12 +516,11 @@ export async function deactivateProjectAfterArchive(
   archiveId: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const progress = await getArchiveProgress(archiveId);
-    
-    if (progress.status !== 'completed') {
+    const progress = getArchiveProgress(archiveId);
+    if (!progress || progress.status !== 'completed') {
       return { 
         success: false, 
-        error: `Archive not complete. Current status: ${progress.status}` 
+        error: `Archive not complete. Current status: ${progress?.status ?? 'unknown'}` 
       };
     }
 

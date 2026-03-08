@@ -85,6 +85,9 @@ import {
   bidboardAutomationLogs, type BidboardAutomationLog,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
   rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
+  rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
+  rfpApprovals, type RfpApproval, type InsertRfpApproval,
+  reportScheduleConfig, type ReportScheduleConfig, type InsertReportScheduleConfig,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
@@ -288,6 +291,13 @@ export interface IStorage {
   getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined>;
   updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
+
+  // RFP Reporting
+  getRfpChangeLog(rfpId: number): Promise<RfpChangeLog[]>;
+  getRfpApprovals(rfpId: number): Promise<RfpApproval[]>;
+  getReportScheduleConfig(): Promise<ReportScheduleConfig | undefined>;
+  upsertReportScheduleConfig(data: Partial<InsertReportScheduleConfig>): Promise<ReportScheduleConfig>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1661,6 +1671,35 @@ export class DatabaseStorage implements IStorage {
   async updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined> {
     const [result] = await db.update(rfpApprovalRequests).set(data).where(eq(rfpApprovalRequests.id, id)).returning();
     return result;
+  }
+
+  async getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests).where(eq(rfpApprovalRequests.id, id));
+    return result;
+  }
+
+  async getRfpChangeLog(rfpId: number): Promise<RfpChangeLog[]> {
+    return db.select().from(rfpChangeLog).where(eq(rfpChangeLog.rfpId, rfpId)).orderBy(desc(rfpChangeLog.changedAt));
+  }
+
+  async getRfpApprovals(rfpId: number): Promise<RfpApproval[]> {
+    return db.select().from(rfpApprovals).where(eq(rfpApprovals.rfpId, rfpId)).orderBy(rfpApprovals.createdAt);
+  }
+
+  async getReportScheduleConfig(): Promise<ReportScheduleConfig | undefined> {
+    const [result] = await db.select().from(reportScheduleConfig).limit(1);
+    return result;
+  }
+
+  async upsertReportScheduleConfig(data: Partial<InsertReportScheduleConfig>): Promise<ReportScheduleConfig> {
+    const existing = await this.getReportScheduleConfig();
+    const updateData = { ...data, updatedAt: new Date() };
+    if (existing) {
+      const [result] = await db.update(reportScheduleConfig).set(updateData).where(eq(reportScheduleConfig.id, existing.id)).returning();
+      return result!;
+    }
+    const [result] = await db.insert(reportScheduleConfig).values(updateData as InsertReportScheduleConfig).returning();
+    return result!;
   }
 
   async seedEmailTemplates(): Promise<void> {

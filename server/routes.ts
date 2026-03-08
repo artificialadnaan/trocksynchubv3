@@ -82,6 +82,15 @@ import { syncHubSpotClientToBidBoard, runBidBoardScrape } from "./playwright/bid
 import { runBidBoardStageSync } from "./sync";
 import { syncHubSpotAttachmentsToBidBoard, syncBidBoardDocumentsToPortfolio } from "./playwright/documents";
 import { closeBrowser } from "./playwright/browser";
+import {
+  getRfpReportList,
+  getRfpApprovalChain,
+  exportRfpsToCsv,
+  exportRfpsToPdfHtml,
+  sendTestRfpReportEmail,
+  computeNextRun,
+} from "./rfp-reports";
+import { startRfpReportScheduler } from "./cron/reportScheduler";
 
 const PgSession = connectPgSimple(session);
 
@@ -330,6 +339,150 @@ export async function registerRoutes(
       };
       const result = await storage.getAuditLogs(filters);
       res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ==================== RFP REPORTS ====================
+  app.get("/api/reports/rfps", requireAuth, async (req, res) => {
+    try {
+      const filters = {
+        dateFrom: req.query.dateFrom as string,
+        dateTo: req.query.dateTo as string,
+        projectNumber: req.query.projectNumber as string,
+        status: req.query.status as string,
+        recipient: req.query.recipient as string,
+        page: parseInt(req.query.page as string) || 1,
+        limit: parseInt(req.query.limit as string) || 50,
+      };
+      const result = await getRfpReportList(filters);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/reports/rfps/:id/changes", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid RFP ID" });
+      const logs = await storage.getRfpChangeLog(id);
+      res.json(logs);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/reports/rfps/:id/approvals", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid RFP ID" });
+      const chain = await getRfpApprovalChain(id);
+      res.json(chain);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/reports/export", requireAuth, async (req, res) => {
+    try {
+      const filters = {
+        dateFrom: req.query.dateFrom as string,
+        dateTo: req.query.dateTo as string,
+        projectNumber: req.query.projectNumber as string,
+        status: req.query.status as string,
+        recipient: req.query.recipient as string,
+        limit: 1000,
+        page: 1,
+      };
+      const { data } = await getRfpReportList(filters);
+      const format = (req.query.format as string) || "csv";
+
+      if (format === "csv") {
+        const csv = exportRfpsToCsv(data);
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", `attachment; filename="rfp-report-${new Date().toISOString().slice(0, 10)}.csv"`);
+        res.send(csv);
+      } else if (format === "pdf") {
+        const html = exportRfpsToPdfHtml(data);
+        res.setHeader("Content-Type", "text/html");
+        res.setHeader("Content-Disposition", `attachment; filename="rfp-report-${new Date().toISOString().slice(0, 10)}.html"`);
+        res.send(html);
+      } else {
+        res.status(400).json({ message: "Invalid format. Use format=csv or format=pdf" });
+      }
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/reports/schedule", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getReportScheduleConfig();
+      const nextRun = config ? computeNextRun(config) : "Not scheduled";
+      res.json(config ? { ...config, nextRun } : null);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/reports/schedule/next-run", requireAuth, async (req, res) => {
+    try {
+      const enabled = req.query.enabled !== "false";
+      const config = {
+        enabled,
+        frequency: (req.query.frequency as string) || "weekly",
+        dayOfWeek: req.query.dayOfWeek != null ? parseInt(String(req.query.dayOfWeek), 10) : 1,
+        timeOfDay: (req.query.timeOfDay as string) || "08:00",
+        timezone: (req.query.timezone as string) || "America/Chicago",
+        recipients: (req.query.recipients as string)?.split(",").filter(Boolean) ?? [],
+      };
+      const nextRun = computeNextRun(config);
+      res.json({ nextRun });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.put("/api/reports/schedule", requireAuth, async (req, res) => {
+    try {
+      const body = req.body;
+      const timeOfDay = body.timeOfDay ?? body.time_of_day ?? "08:00";
+      const timeStr = typeof timeOfDay === "string" ? timeOfDay : `${String(timeOfDay).padStart(2, "0")}:00`;
+      const config = await storage.upsertReportScheduleConfig({
+        enabled: body.enabled,
+        frequency: body.frequency || "weekly",
+        dayOfWeek: body.dayOfWeek ?? body.day_of_week,
+        timeOfDay: timeStr as any,
+        timezone: body.timezone || "America/Chicago",
+        recipients: Array.isArray(body.recipients) ? body.recipients : [],
+        includeRfpLog: body.includeRfpLog ?? body.include_rfp_log ?? true,
+        includeChangeHistory: body.includeChangeHistory ?? body.include_change_history ?? true,
+        includeApprovalSummary: body.includeApprovalSummary ?? body.include_approval_summary ?? true,
+      });
+      res.json(config);
+    } catch (e: any) {
+      res.status(400).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/reports/schedule/test", requireAuth, async (req, res) => {
+    try {
+      let userEmail = req.body?.email;
+      if (!userEmail && (req.session as any)?.userId) {
+        const user = await storage.getUser((req.session as any).userId);
+        if (user?.username && user.username.includes("@")) userEmail = user.username;
+      }
+      if (!userEmail || typeof userEmail !== "string") {
+        return res.status(400).json({ message: "Pass { email: \"your@email.com\" } in the request body to receive the test email." });
+      }
+      const result = await sendTestRfpReportEmail(userEmail);
+      if (result.success) {
+        res.json({ success: true, message: "Test email sent to your address" });
+      } else {
+        res.status(500).json({ message: result.error || "Failed to send test email" });
+      }
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
@@ -994,12 +1147,12 @@ export async function registerRoutes(
                   const projectName = freshProject?.name || freshProject?.display_name || null;
                   const companyId = freshProject?.company?.id ? String(freshProject.company.id) : null;
                   if (projectNumber) {
-                    mapping = await findOrCreateMappingByProjectNumber({
+                    mapping = (await findOrCreateMappingByProjectNumber({
                       procoreProjectId: projectId,
                       projectNumber,
                       projectName,
                       companyId,
-                    });
+                    })) ?? undefined;
                   }
                 } catch (err: any) {
                   console.error(`[webhook] Error auto-linking project ${projectId} by project number:`, err.message);
@@ -1052,6 +1205,7 @@ export async function registerRoutes(
                   ...project,
                   active: false,
                   lastSyncedAt: new Date(),
+                  properties: project.properties as Record<string, unknown> | undefined,
                 });
                 
                 // Trigger archive and data extraction
@@ -1106,6 +1260,7 @@ export async function registerRoutes(
                   stage: newStage,
                   projectStageName: newStage,
                   lastSyncedAt: new Date(),
+                  properties: project.properties as Record<string, unknown> | undefined,
                 });
 
                 let mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
@@ -2072,6 +2227,7 @@ export async function registerRoutes(
         stage: newStage,
         projectStageName: newStage,
         lastSyncedAt: new Date(),
+        properties: localProject.properties as Record<string, unknown> | undefined,
       });
 
       let hubspotUpdate = null;
@@ -2214,8 +2370,8 @@ export async function registerRoutes(
         showBidInEstimating: bid.showBidInEstimating,
         companyId: bid.companyId,
         properties: result,
-        procoreCreatedAt: bid.procoreCreatedAt,
-        procoreUpdatedAt: result.updated_at ? new Date(result.updated_at) : bid.procoreUpdatedAt,
+        procoreCreatedAt: bid.procoreCreatedAt != null ? (typeof bid.procoreCreatedAt === 'string' ? bid.procoreCreatedAt : (bid.procoreCreatedAt as Date).toISOString()) : undefined,
+        procoreUpdatedAt: result.updated_at ? new Date(result.updated_at).toISOString() : (bid.procoreUpdatedAt != null ? (typeof bid.procoreUpdatedAt === 'string' ? bid.procoreUpdatedAt : (bid.procoreUpdatedAt as Date).toISOString()) : undefined),
         lastSyncedAt: new Date(),
       });
       await storage.createAuditLog({
@@ -2267,8 +2423,8 @@ export async function registerRoutes(
         showBidInEstimating: bid.showBidInEstimating,
         companyId: bid.companyId,
         properties: detail,
-        procoreCreatedAt: bid.procoreCreatedAt,
-        procoreUpdatedAt: detail.updated_at ? new Date(detail.updated_at) : bid.procoreUpdatedAt,
+        procoreCreatedAt: bid.procoreCreatedAt != null ? (typeof bid.procoreCreatedAt === 'string' ? bid.procoreCreatedAt : (bid.procoreCreatedAt as Date).toISOString()) : undefined,
+        procoreUpdatedAt: detail.updated_at ? new Date(detail.updated_at).toISOString() : (bid.procoreUpdatedAt != null ? (typeof bid.procoreUpdatedAt === 'string' ? bid.procoreUpdatedAt : (bid.procoreUpdatedAt as Date).toISOString()) : undefined),
         lastSyncedAt: new Date(),
       });
       res.json(detail);
@@ -3358,7 +3514,9 @@ export async function registerRoutes(
             value: { enabled: false, intervalMinutes: 10, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
             description: "Automatic HubSpot polling sync configuration",
           });
-        } catch (_) {}
+        } catch (err) {
+          console.warn('[Polling] Failed to disable HubSpot polling config on auth expiry:', err);
+        }
       }
       console.error('[Polling] HubSpot sync failed:', e.message);
       lastPollAt = new Date();
@@ -3497,7 +3655,9 @@ export async function registerRoutes(
             value: { enabled: false, intervalMinutes: 15, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
             description: "Automatic Procore data polling sync configuration",
           });
-        } catch (_) {}
+        } catch (err) {
+          console.warn('[ProcorePolling] Failed to disable Procore polling config on auth expiry:', err);
+        }
       }
       console.error('[ProcorePolling] Procore sync failed:', e.message);
       lastProcorePollAt = new Date();
@@ -4129,11 +4289,19 @@ export async function registerRoutes(
       const { enabled, triggerStages } = req.body;
       
       if (typeof enabled === "boolean") {
-        await storage.upsertAutomationConfig("hubspot_bidboard_auto_create", { enabled });
+        await storage.upsertAutomationConfig({
+          key: "hubspot_bidboard_auto_create",
+          value: { enabled },
+          description: "HubSpot BidBoard auto-create configuration",
+        });
       }
       
       if (Array.isArray(triggerStages)) {
-        await storage.upsertAutomationConfig("hubspot_bidboard_trigger_stages", { stages: triggerStages });
+        await storage.upsertAutomationConfig({
+          key: "hubspot_bidboard_trigger_stages",
+          value: { stages: triggerStages },
+          description: "HubSpot BidBoard trigger stages",
+        });
       }
       
       res.json({ success: true });
@@ -5502,6 +5670,7 @@ export async function registerRoutes(
     context: any;
     page: any;
     isRecording: boolean;
+    isHeadless?: boolean;
     recordedActions: string[];
     startTime: Date;
   } | null = null;
@@ -6084,6 +6253,9 @@ main().catch(console.error);
       console.log('[BidBoardStageSync] No saved config, stage sync disabled by default');
     }
   })();
+
+  // RFP Report Scheduler (checks every 15 min; sends when config matches)
+  startRfpReportScheduler();
 
   return httpServer;
 }

@@ -190,7 +190,7 @@ export async function sendToPortfolio(
           result.success = false;
           result.error = "Portfolio project created but ID could not be extracted from URL";
           result.screenshotPath = await takeScreenshot(page, `portfolio-no-id-${bidboardProjectId}`);
-          await logPortfolioAction(bidboardProjectId, "send_to_portfolio", "partial", { message: toastText }, result.error, result.screenshotPath);
+          await logPortfolioAction(bidboardProjectId, "send_to_portfolio", "failed", { message: toastText, partial: true }, result.error, result.screenshotPath);
           log(`Project ${bidboardProjectId} sent to Portfolio but ID extraction failed`, "playwright");
         }
       } else {
@@ -468,7 +468,7 @@ export async function importEstimateToBudget(
       result.success = false;
       result.error = "Import completed without confirmation. Manual verification required.";
       result.screenshotPath = await takeScreenshot(page, `budget-no-confirmation-${portfolioProjectId}`);
-      await logPortfolioAction(portfolioProjectId, "import_to_budget", "uncertain", { message: "No confirmation toast received" });
+      await logPortfolioAction(portfolioProjectId, "import_to_budget", "failed", { message: "No confirmation toast received", uncertain: true });
       log(`Budget import uncertain for project ${portfolioProjectId}: no confirmation received`, "playwright");
     }
     

@@ -45,7 +45,7 @@ async function uploadFileToHubSpotAndAttachToDeal(
       dealId,
       'files',
       fileId,
-      [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }]
+      [{ associationCategory: 'HUBSPOT_DEFINED' as any, associationTypeId: 3 }]
     );
     log(`[rfp-approval] Associated file ${fileId} with deal ${dealId}`, 'rfp');
   } catch (assocErr: any) {

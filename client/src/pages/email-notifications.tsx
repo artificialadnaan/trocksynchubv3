@@ -94,7 +94,7 @@ export default function EmailNotificationsPage() {
               </Badge>
               {(stats?.failed || 0) > 0 && (
                 <Badge variant="destructive" data-testid="badge-emails-failed">
-                  {stats.failed} Failed
+                  {stats?.failed ?? 0} Failed
                 </Badge>
               )}
             </>
