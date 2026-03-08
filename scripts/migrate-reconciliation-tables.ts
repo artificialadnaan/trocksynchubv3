@@ -4,66 +4,169 @@
  * Run: npx tsx scripts/migrate-reconciliation-tables.ts
  * Or: npm run db:migrate-reconciliation
  *
- * Idempotent: skips if tables already exist.
+ * Idempotent: each statement uses IF NOT EXISTS / DO $$ so safe to re-run.
+ * No early exit — runs every statement so partial failures can be repaired on next deploy.
  */
 import pg from "pg";
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-async function main() {
+async function runReconciliationMigration(): Promise<void> {
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL must be set");
   }
 
-  // Check if reconciliation_projects already exists
-  const check = await pool.query(`
-    SELECT EXISTS (
-      SELECT FROM information_schema.tables
-      WHERE table_schema = 'public'
-      AND table_name = 'reconciliation_projects'
-    );
-  `);
+  const client = await pool.connect();
+  try {
+    // Create enums (idempotent — skip if already exists)
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'reconciliation_bucket') THEN
+          CREATE TYPE reconciliation_bucket AS ENUM (
+            'exact_match', 'fuzzy_match', 'orphan_procore', 'orphan_hubspot',
+            'orphan_bidboard', 'conflict', 'resolved', 'ignored'
+          );
+        END IF;
+      END $$;
+    `);
 
-  if (check.rows[0]?.exists) {
-    console.log("Reconciliation tables already exist, skipping migration.");
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'conflict_severity') THEN
+          CREATE TYPE conflict_severity AS ENUM ('critical', 'warning', 'info');
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'resolution_action') THEN
+          CREATE TYPE resolution_action AS ENUM (
+            'accept_procore', 'accept_hubspot', 'manual_override', 'create_counterpart',
+            'link_existing', 'mark_ignored', 'merge_records', 'assign_canonical_number'
+          );
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'project_number_era') THEN
+          CREATE TYPE project_number_era AS ENUM ('legacy', 'zapier', 'synchub');
+        END IF;
+      END $$;
+    `);
+
+    // Create tables (idempotent — IF NOT EXISTS on each)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS reconciliation_projects (
+        id SERIAL PRIMARY KEY,
+        procore_project_id TEXT,
+        hubspot_deal_id TEXT,
+        bidboard_item_id TEXT,
+        companycam_project_id TEXT,
+        procore_data JSONB,
+        hubspot_data JSONB,
+        bidboard_data JSONB,
+        bucket reconciliation_bucket NOT NULL DEFAULT 'fuzzy_match',
+        match_confidence REAL,
+        match_method TEXT,
+        canonical_name TEXT,
+        canonical_project_number TEXT,
+        canonical_location TEXT,
+        canonical_amount REAL,
+        canonical_stage TEXT,
+        is_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+        resolved_by TEXT,
+        resolved_at TIMESTAMPTZ,
+        admin_notes TEXT,
+        last_scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS reconciliation_conflicts (
+        id SERIAL PRIMARY KEY,
+        reconciliation_project_id INTEGER NOT NULL REFERENCES reconciliation_projects(id) ON DELETE CASCADE,
+        field_name TEXT NOT NULL,
+        procore_value TEXT,
+        hubspot_value TEXT,
+        bidboard_value TEXT,
+        severity conflict_severity NOT NULL DEFAULT 'warning',
+        is_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+        resolved_value TEXT,
+        resolved_source TEXT,
+        resolved_by TEXT,
+        resolved_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS reconciliation_audit_log (
+        id SERIAL PRIMARY KEY,
+        reconciliation_project_id INTEGER NOT NULL REFERENCES reconciliation_projects(id) ON DELETE CASCADE,
+        action resolution_action NOT NULL,
+        field_name TEXT,
+        previous_value TEXT,
+        new_value TEXT,
+        source TEXT,
+        performed_by TEXT NOT NULL,
+        performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        notes TEXT,
+        snapshot_before JSONB,
+        snapshot_after JSONB
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS legacy_number_mappings (
+        id SERIAL PRIMARY KEY,
+        legacy_number TEXT NOT NULL UNIQUE,
+        canonical_number TEXT,
+        era project_number_era NOT NULL,
+        project_name TEXT,
+        procore_project_id TEXT,
+        hubspot_deal_id TEXT,
+        mapped_by TEXT,
+        mapped_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS reconciliation_scan_runs (
+        id SERIAL PRIMARY KEY,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        total_projects INTEGER,
+        exact_matches INTEGER,
+        fuzzy_matches INTEGER,
+        orphans_procore INTEGER,
+        orphans_hubspot INTEGER,
+        conflicts INTEGER,
+        resolved INTEGER,
+        new_conflicts INTEGER,
+        new_resolutions INTEGER,
+        triggered_by TEXT,
+        error TEXT
+      );
+    `);
+
+    console.log("[migrate] Reconciliation tables and enums ensured successfully");
+  } catch (e) {
+    console.error("[migrate] Reconciliation migration failed:", e);
+    throw e;
+  } finally {
+    client.release();
     await pool.end();
-    process.exit(0);
-    return;
   }
-
-  const migrationPath = join(
-    __dirname,
-    "..",
-    "migrations",
-    "0006_add_reconciliation_tables.sql"
-  );
-  const sql = readFileSync(migrationPath, "utf-8");
-
-  // Split by statement-breakpoint and execute each statement
-  const statements = sql
-    .split("--> statement-breakpoint")
-    .map((s) => s.trim())
-    .filter((s) => s && !s.startsWith("--"));
-
-  for (const stmt of statements) {
-    if (stmt) {
-      await pool.query(stmt);
-    }
-  }
-
-  await pool.end();
-  console.log("Migration complete: reconciliation tables created.");
-  process.exit(0);
 }
 
-main().catch(async (err) => {
-  await pool.end().catch(() => {});
-  console.error("Migration failed:", err.message);
-  process.exit(1);
-});
+runReconciliationMigration()
+  .then(() => process.exit(0))
+  .catch(() => process.exit(1));
