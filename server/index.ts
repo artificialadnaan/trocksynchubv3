@@ -157,6 +157,14 @@ httpServer.listen(
     console.error("[startup] BidBoard stage sync runs table migration failed:", e);
   }
 
+  // Ensure procore_projects has last_role_check_at (schema drift fix)
+  try {
+    const { ensureProcoreLastRoleCheckColumn } = await import("./migrate-procore-last-role-check");
+    await ensureProcoreLastRoleCheckColumn();
+  } catch (e) {
+    console.error("[startup] Procore last_role_check_at migration failed:", e);
+  }
+
   // Seed default email templates if they don't exist
   try {
     await storage.seedEmailTemplates();
