@@ -91,6 +91,22 @@ import {
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
+/** Classify audit log action as "sync" (meaningful end-to-end sync) or "system" (polling, acks, health, etc.) */
+function inferAuditCategory(action: string): "sync" | "system" {
+  const a = (action || "").toLowerCase();
+  // System: webhook acks, OAuth, polling skips, health, token
+  if (a === "webhook_received" || a === "oauth_connect" || a.includes("_skipped") ||
+      a.includes("poll") || a.includes("health") || a === "received") return "system";
+  // Sync: data created/updated in target system
+  if (a.includes("vendor_created") || a.includes("vendor_updated") || a.includes("project_created") ||
+      a.includes("deal_project") || a.includes("stage_change_processed") || a.includes("role_assignment_processed") ||
+      a.includes("deactivation_closeout") || a.includes("document") || a.includes("rfp_") ||
+      a.includes("change_order") || a.includes("closeout") || a.includes("procore_hubspot") ||
+      a.includes("mapping_created") || a.includes("deal_project_number") || a.includes("companycam") ||
+      a.includes("project_deactivation") || a.includes("email_sent") || a.includes("bidboard")) return "sync";
+  return "system";
+}
+
 /**
  * Storage Interface - Defines all database operations available in the application.
  * 
@@ -167,9 +183,8 @@ export interface IStorage {
   updatePollJob(jobName: string, data: Partial<InsertPollJob>): Promise<PollJob | undefined>;
 
   getDashboardStats(): Promise<{
-    totalSyncs: number;
-    successfulSyncs: number;
-    failedSyncs: number;
+    syncs: { total: number; successful: number; failed: number; successRate: number };
+    system: { total: number; successful: number; failed: number };
     pendingWebhooks: number;
     recentActivity: AuditLog[];
     syncsByDay: { date: string; count: number; success: number; failed: number }[];
@@ -473,8 +488,10 @@ export class DatabaseStorage implements IStorage {
     return { logs, total: countResult[0]?.count || 0 };
   }
 
-  async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
-    const [result] = await db.insert(auditLogs).values(log).returning();
+  async createAuditLog(log: InsertAuditLog & { category?: "sync" | "system" }): Promise<AuditLog> {
+    const category = log.category ?? inferAuditCategory(log.action);
+    const { category: _c, ...logData } = log as InsertAuditLog & { category?: "sync" | "system" };
+    const [result] = await db.insert(auditLogs).values({ ...logData, category }).returning();
     return result;
   }
 
@@ -590,25 +607,45 @@ export class DatabaseStorage implements IStorage {
     const now = new Date();
     const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const isSuccess = eq(auditLogs.status, "success");
+    const isError = eq(auditLogs.status, "error");
+    const isSync = eq(auditLogs.category, "sync");
+    const isSystem = eq(auditLogs.category, "system");
+    const in24h = gte(auditLogs.createdAt, twentyFourHoursAgo);
 
-    const [totalRes, successRes, failedRes, pendingRes, recentActivity, dailyStats] = await Promise.all([
-      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(gte(auditLogs.createdAt, twentyFourHoursAgo)),
-      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(gte(auditLogs.createdAt, twentyFourHoursAgo), eq(auditLogs.status, "success"))),
-      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(gte(auditLogs.createdAt, twentyFourHoursAgo), eq(auditLogs.status, "error"))),
+    const [
+      syncTotal, syncSuccess, syncFailed,
+      systemTotal, systemSuccess, systemFailed,
+      pendingRes, recentActivity, dailyStats
+    ] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSync)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSync, isSuccess)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSync, isError)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSystem)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSystem, isSuccess)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSystem, isError)),
       db.select({ count: sql<number>`count(*)::int` }).from(webhookLogs).where(eq(webhookLogs.status, "received")),
       db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(20),
       db.select({
         date: sql<string>`to_char(${auditLogs.createdAt}, 'YYYY-MM-DD')`,
-        count: sql<number>`count(*)::int`,
-        success: sql<number>`count(*) filter (where ${auditLogs.status} = 'success')::int`,
-        failed: sql<number>`count(*) filter (where ${auditLogs.status} = 'error')::int`,
+        count: sql<number>`count(*) filter (where ${auditLogs.category} = 'sync')::int`,
+        success: sql<number>`count(*) filter (where ${auditLogs.category} = 'sync' and ${auditLogs.status} = 'success')::int`,
+        failed: sql<number>`count(*) filter (where ${auditLogs.category} = 'sync' and ${auditLogs.status} = 'error')::int`,
       }).from(auditLogs).where(gte(auditLogs.createdAt, sevenDaysAgo)).groupBy(sql`to_char(${auditLogs.createdAt}, 'YYYY-MM-DD')`).orderBy(sql`to_char(${auditLogs.createdAt}, 'YYYY-MM-DD')`),
     ]);
 
+    const syncTotalVal = syncTotal[0]?.count || 0;
+    const syncSuccessVal = syncSuccess[0]?.count || 0;
+    const syncFailedVal = syncFailed[0]?.count || 0;
+    const successRate = syncTotalVal > 0 ? Math.round((syncSuccessVal / syncTotalVal) * 100) : 0;
+
     return {
-      totalSyncs: totalRes[0]?.count || 0,
-      successfulSyncs: successRes[0]?.count || 0,
-      failedSyncs: failedRes[0]?.count || 0,
+      syncs: { total: syncTotalVal, successful: syncSuccessVal, failed: syncFailedVal, successRate },
+      system: {
+        total: systemTotal[0]?.count || 0,
+        successful: systemSuccess[0]?.count || 0,
+        failed: systemFailed[0]?.count || 0,
+      },
       pendingWebhooks: pendingRes[0]?.count || 0,
       recentActivity,
       syncsByDay: dailyStats,

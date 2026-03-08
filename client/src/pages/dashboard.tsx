@@ -37,12 +37,12 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { InfoTooltip } from "@/components/ui/info-tooltip";
 import {
   Activity,
   CheckCircle2,
   XCircle,
-  Clock,
-  ArrowUpDown,
+  ArrowLeftRight,
   TrendingUp,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
@@ -58,11 +58,19 @@ export default function DashboardPage() {
     queryKey: ["/api/dashboard/connections"],
   });
 
-  const statCards = [
-    { label: "Total Syncs (24h)", value: stats?.totalSyncs || 0, icon: ArrowUpDown, color: "text-primary" },
-    { label: "Successful", value: stats?.successfulSyncs || 0, icon: CheckCircle2, color: "text-green-500" },
-    { label: "Failed", value: stats?.failedSyncs || 0, icon: XCircle, color: "text-destructive" },
-    { label: "Pending Webhooks", value: stats?.pendingWebhooks || 0, icon: Clock, color: "text-yellow-500" },
+  const successRate = stats?.syncs?.successRate ?? 0;
+  const successRateColor = successRate >= 95 ? "text-green-500" : successRate >= 80 ? "text-yellow-500" : "text-destructive";
+
+  const primaryCards = [
+    { label: "Sync Operations (24h)", value: stats?.syncs?.total ?? 0, icon: ArrowLeftRight, color: "text-primary", tooltip: "End-to-end sync operations between HubSpot, Procore, and other integrated systems in the last 24 hours." },
+    { label: "Successful", value: stats?.syncs?.successful ?? 0, icon: CheckCircle2, color: "text-green-500", tooltip: "Sync operations that completed without errors and data was successfully written to the target system." },
+    { label: "Failed", value: stats?.syncs?.failed ?? 0, icon: XCircle, color: "text-destructive", tooltip: "Sync operations that encountered an error. Check the activity log for details." },
+    { label: "Success Rate", value: `${successRate}%`, icon: TrendingUp, color: successRateColor, tooltip: "Percentage of sync operations that completed successfully in the last 24 hours.", isRate: true },
+  ];
+
+  const secondaryCards = [
+    { label: "System Events (24h)", value: stats?.system?.total ?? 0, tooltip: "Background system activity including polling, health checks, token refreshes, and webhook acknowledgments." },
+    { label: "Pending Webhooks", value: stats?.pendingWebhooks ?? 0, tooltip: "Incoming webhook events that are queued but not yet processed." },
   ];
 
   return (
@@ -72,8 +80,9 @@ export default function DashboardPage() {
         <p className="text-muted-foreground text-xs md:text-sm mt-1">System health and recent sync activity</p>
       </div>
 
+      {/* Primary row: Sync metrics */}
       <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
-        {statCards.map((card) => (
+        {primaryCards.map((card) => (
           <Card key={card.label}>
             <CardContent className="pt-3 pb-3 px-3 md:pt-5 md:pb-4 md:px-5">
               {statsLoading ? (
@@ -81,12 +90,40 @@ export default function DashboardPage() {
               ) : (
                 <div className="flex items-start justify-between">
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs md:text-sm text-muted-foreground truncate">{card.label}</p>
+                    <p className="text-xs md:text-sm text-muted-foreground truncate flex items-center gap-1">
+                      {card.label}
+                      <InfoTooltip text={card.tooltip} />
+                    </p>
                     <p className="text-2xl md:text-3xl font-bold mt-0.5 md:mt-1" data-testid={`stat-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
                       {card.value}
                     </p>
                   </div>
                   <card.icon className={`w-4 h-4 md:w-5 md:h-5 ${card.color} mt-1 flex-shrink-0`} />
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {/* Secondary row: System events (muted) */}
+      <div className="grid grid-cols-2 gap-3 md:gap-4">
+        {secondaryCards.map((card) => (
+          <Card key={card.label} className="border-muted/50 bg-muted/20">
+            <CardContent className="pt-3 pb-3 px-3 md:pt-4 md:pb-3 md:px-4">
+              {statsLoading ? (
+                <Skeleton className="h-12 w-full" />
+              ) : (
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      {card.label}
+                      <InfoTooltip text={card.tooltip} />
+                    </p>
+                    <p className="text-lg font-medium text-muted-foreground mt-0.5" data-testid={`stat-${card.label.toLowerCase().replace(/\s+/g, "-")}`}>
+                      {card.value}
+                    </p>
+                  </div>
                 </div>
               )}
             </CardContent>

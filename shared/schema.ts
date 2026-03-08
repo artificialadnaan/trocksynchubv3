@@ -215,6 +215,7 @@ export const insertWebhookLogSchema = createInsertSchema(webhookLogs).omit({
 export type InsertWebhookLog = z.infer<typeof insertWebhookLogSchema>;
 export type WebhookLog = typeof webhookLogs.$inferSelect;
 
+/** Audit log category: "sync" = meaningful end-to-end sync; "system" = background events (polling, health, webhook acks) */
 export const auditLogs = pgTable("audit_logs", {
   id: serial("id").primaryKey(),
   action: text("action").notNull(),
@@ -228,6 +229,8 @@ export const auditLogs = pgTable("audit_logs", {
   durationMs: integer("duration_ms"),
   userId: varchar("user_id"),
   idempotencyKey: text("idempotency_key"),
+  /** "sync" = end-to-end sync (data created/updated); "system" = polling, health, webhook acks, token refresh */
+  category: text("category").notNull().default("system"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
