@@ -84,7 +84,7 @@ export default function DataHealthPage() {
   const { toast } = useToast();
 
   const [bucket, setBucket] = useState("all");
-  const [severity, setSeverity] = useState("");
+  const [severity, setSeverity] = useState("all");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -101,7 +101,7 @@ export default function DataHealthPage() {
   const [editingCanonical, setEditingCanonical] = useState("");
 
   const [auditPage, setAuditPage] = useState(1);
-  const [auditAction, setAuditAction] = useState("");
+  const [auditAction, setAuditAction] = useState("all");
   const [rollbackId, setRollbackId] = useState<number | null>(null);
   const [rollbackEntry, setRollbackEntry] = useState<any>(null);
 
@@ -116,7 +116,7 @@ export default function DataHealthPage() {
 
   const queryParams = new URLSearchParams();
   if (bucket && bucket !== "all") queryParams.set("bucket", bucket);
-  if (severity) queryParams.set("severity", severity);
+  if (severity && severity !== "all") queryParams.set("severity", severity);
   if (debouncedSearch) queryParams.set("search", debouncedSearch);
   queryParams.set("page", String(page));
   queryParams.set("limit", "50");
@@ -136,7 +136,7 @@ export default function DataHealthPage() {
   });
 
   const auditParams = new URLSearchParams();
-  if (auditAction) auditParams.set("action", auditAction);
+  if (auditAction && auditAction !== "all") auditParams.set("action", auditAction);
   auditParams.set("page", String(auditPage));
   auditParams.set("limit", "25");
 
@@ -449,7 +449,7 @@ export default function DataHealthPage() {
                     <SelectValue placeholder="Severity" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">All</SelectItem>
+                    <SelectItem value="all">All</SelectItem>
                     <SelectItem value="critical">Critical</SelectItem>
                     <SelectItem value="warning">Warning</SelectItem>
                     <SelectItem value="info">Info</SelectItem>
@@ -727,7 +727,7 @@ export default function DataHealthPage() {
                     <SelectValue placeholder="Filter by action" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">All</SelectItem>
+                    <SelectItem value="all">All</SelectItem>
                     <SelectItem value="accept_procore">Accept Procore</SelectItem>
                     <SelectItem value="accept_hubspot">Accept HubSpot</SelectItem>
                     <SelectItem value="manual_override">Manual Override</SelectItem>
