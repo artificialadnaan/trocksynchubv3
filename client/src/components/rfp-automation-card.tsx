@@ -678,7 +678,8 @@ function ScheduledEmailsTab() {
 
   const testMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/reports/schedule/test", {});
+      const email = recipients[0] || (recipientInput.trim().includes("@") ? recipientInput.trim() : undefined);
+      const res = await apiRequest("POST", "/api/reports/schedule/test", email ? { email } : {});
       return res.json();
     },
     onSuccess: () => {

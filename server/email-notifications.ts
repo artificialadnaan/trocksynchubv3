@@ -270,7 +270,7 @@ export async function triggerKickoffForNewPmOnPortfolio(
         projectId: kickoffProjectId,
         hubspotDealId: mapping?.hubspotDealId || undefined,
         projectName: projectDetail?.name || projectDetail?.display_name || assignment.projectName || 'Unknown Project',
-        clientName: projectDetail?.company?.name || 'Unknown Client',
+        clientName: projectDetail?.client_name || projectDetail?.company?.name || 'Team',
         projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
         scopeSummary: projectDetail?.work_scope || projectDetail?.description || 'See project details in Procore',
         startDate: formatDate(projectDetail?.start_date),

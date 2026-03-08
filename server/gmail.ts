@@ -297,12 +297,18 @@ export async function getGmailConnectionStatus(): Promise<{ connected: boolean; 
   }
 }
 
+/** MIME-encode subject for UTF-8 (emoji, em dash, etc.) to prevent Gmail garbling */
+function encodeSubject(subject: string): string {
+  if (!/[^\x00-\x7F]/.test(subject)) return subject;
+  return `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`;
+}
+
 function buildRawEmail(to: string, subject: string, htmlBody: string, fromName?: string): string {
   const boundary = `boundary_${Date.now()}`;
   const lines = [
     `From: ${fromName ? `${fromName} <me>` : 'me'}`,
     `To: ${to}`,
-    `Subject: ${subject}`,
+    `Subject: ${encodeSubject(subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     ``,

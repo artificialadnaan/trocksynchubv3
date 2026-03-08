@@ -1774,7 +1774,7 @@ export class DatabaseStorage implements IStorage {
         templateKey: "project_role_assignment",
         name: "Project Role Assignment",
         description: "Sent when a user is assigned a role on a Procore project",
-        subject: "🏗️ You've been assigned to {{projectName}} | T-Rock Construction",
+        subject: "You've been assigned to {{projectName}} | T-Rock Construction",
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
               <div style="text-align: center; margin-bottom: 24px;">
@@ -1961,7 +1961,7 @@ export class DatabaseStorage implements IStorage {
         templateKey: "project_kickoff",
         name: "Project Kickoff",
         description: "Client kickoff email sent to the Project Manager when assigned – ready to forward to client",
-        subject: "{{projectName}} – Project Kickoff & Team Introduction",
+        subject: "{{projectName}} - Project Kickoff & Team Introduction",
         bodyHtml: emailWrapper(`
               <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
                 Hello <strong style="color: #1a1a2e;">{{clientName}}</strong>,
@@ -2020,7 +2020,7 @@ export class DatabaseStorage implements IStorage {
         templateKey: "closeout_survey",
         name: "Project Closeout Survey",
         description: "Client satisfaction survey sent when project reaches closeout stage",
-        subject: "🎉 How did we do? {{projectName}} | T-Rock Construction",
+        subject: "How did we do? {{projectName}} | T-Rock Construction",
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
               <div style="text-align: center; margin-bottom: 24px;">
