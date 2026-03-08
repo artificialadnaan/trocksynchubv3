@@ -1723,7 +1723,7 @@ export class DatabaseStorage implements IStorage {
           <!-- Header with Logo -->
           <tr>
             <td style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 30px 40px; border-radius: 12px 12px 0 0; text-align: center;">
-              <img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction" width="180" style="max-width: 180px; height: auto;">
+              <img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction" width="180" style="max-width: 180px; height: auto; display: block; margin: 0 auto;" referrerpolicy="no-referrer">
             </td>
           </tr>
           
@@ -1866,7 +1866,7 @@ export class DatabaseStorage implements IStorage {
         templateKey: "stage_change_notification",
         name: "Deal Stage Change",
         description: "Sent when a deal/project stage changes",
-        subject: "📊 Stage Update: {{projectName}} → {{newStage}}",
+        subject: "Stage Update: {{projectName}} - {{newStage}}",
         bodyHtml: emailWrapper(`
               <!-- Icon Badge -->
               <div style="text-align: center; margin-bottom: 24px;">

@@ -295,7 +295,7 @@ export async function createRfpApprovalRequest(
     const hubspotConfig = await storage.getAutomationConfig('hubspot_config');
     const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
     const portalId = (hubspotConfig?.value as any)?.portalId?.trim() || DEFAULT_HUBSPOT_PORTAL_ID;
-    const hubspotDealUrl = `https://app-na2.hubspot.com/contacts/${portalId}/record/0-3/${hubspotDealId}`;
+    const hubspotDealUrl = `https://app-na2.hubspot.com/contacts/${portalId}/record/0-3/${hubspotDealId}?eschref=%2Fcontacts%2F${portalId}%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp`;
 
     const appUrl = process.env.APP_URL || 'http://localhost:5000';
     const reviewUrl = `${appUrl}/rfp-review/${token}`;

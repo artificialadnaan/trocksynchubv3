@@ -98,7 +98,7 @@ export async function sendRoleAssignmentEmails(
       projectId: assignment.procoreProjectId,
       companyId: '598134325683880',
       procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${assignment.procoreProjectId}/tools/projecthome`,
-      hubspotUrl: mapping?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${mapping.hubspotDealId}` : 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
+      hubspotUrl: mapping?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${mapping.hubspotDealId}?eschref=%2Fcontacts%2F45644695%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp` : 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3',
       companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
     };
 
@@ -380,6 +380,17 @@ export async function sendStageChangeEmail(params: {
     ? (params.procoreProjectName || params.dealName || 'Unknown Project')
     : (params.dealName || 'Unknown Deal');
 
+  // Procore: Before RFP approval, project doesn't exist in Procore/BidBoard yet - use portfolio link
+  const PROCORE_COMPANY_ID = '598134325683880';
+  const PROCORE_PORTFOLIO_URL = `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/tools/hubs/company-hub/views/portfolio`;
+  const procoreUrl = params.procoreProjectId?.trim()
+    ? `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${params.procoreProjectId}/tools/projecthome`
+    : PROCORE_PORTFOLIO_URL;
+
+  // HubSpot: Use correct portal ID 45644695 with eschref for RFP deals list
+  const HUBSPOT_PORTAL_ID = '45644695';
+  const hubspotUrl = `https://app-na2.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/record/0-3/${params.hubspotDealId}?eschref=%2Fcontacts%2F${HUBSPOT_PORTAL_ID}%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp`;
+
   const variables: Record<string, string> = {
     ownerName: ownerInfo.ownerName || ownerInfo.ownerEmail,
     dealName: params.dealName || 'Unknown Deal',
@@ -393,8 +404,8 @@ export async function sendStageChangeEmail(params: {
     procoreProjectId: params.procoreProjectId,
     hubspotDealId: params.hubspotDealId,
     timestamp: new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }),
-    procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.procoreProjectId}/tools/projecthome`,
-    hubspotUrl: `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${params.hubspotDealId}`,
+    procoreUrl,
+    hubspotUrl,
     companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
   };
 
@@ -570,7 +581,7 @@ export async function sendKickoffEmails(params: {
       statusFrequency: params.statusFrequency || 'Weekly',
       nextStep: params.nextStep || 'scheduling the project kickoff meeting',
       procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.projectId}/tools/projecthome`,
-      hubspotUrl: hubspotDealId ? `https://app-na2.hubspot.com/contacts/245227962/record/0-3/${hubspotDealId}` : 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3',
+      hubspotUrl: hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${hubspotDealId}?eschref=%2Fcontacts%2F45644695%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp` : 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3',
       companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
     };
 
@@ -692,7 +703,7 @@ export async function sendBidBoardSyncSummary(params: {
       hubspotUpdates: String(params.hubspotUpdates),
       changedProjects: changedProjectsHtml,
       bidboardUrl: 'https://us02.procore.com/webclients/host/companies/598134325683880/projects',
-      hubspotDealsUrl: 'https://app-na2.hubspot.com/contacts/245227962/objects/0-3/views/all/list',
+      hubspotDealsUrl: 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3/views/all/list',
       syncHubUrl: appUrl,
       nextSyncTime: '1 hour',
     };
