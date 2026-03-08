@@ -3755,16 +3755,33 @@ export async function registerRoutes(
 
   let rolePollingTimer: ReturnType<typeof setInterval> | null = null;
   let rolePollingRunning = false;
+  let lastPollStartedAt: number | null = null;
+  const ROLE_SYNC_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max
 
   async function runRolePollingCycle() {
+    // Stale lock cleanup: if stuck longer than timeout, force-clear
+    if (rolePollingRunning && lastPollStartedAt) {
+      const staleLockMs = Date.now() - lastPollStartedAt;
+      if (staleLockMs > ROLE_SYNC_TIMEOUT_MS) {
+        console.warn(`[RolePolling] Clearing stale lock (stuck for ${Math.round(staleLockMs / 1000)}s)`);
+        rolePollingRunning = false;
+      }
+    }
     if (rolePollingRunning) {
       console.log('[RolePolling] Skipping — previous cycle still running');
       return;
     }
     rolePollingRunning = true;
+    lastPollStartedAt = Date.now();
     const startTime = Date.now();
     try {
-      const result = await syncProcoreRoleAssignments();
+      const syncWithTimeout = Promise.race([
+        syncProcoreRoleAssignments(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Role sync timed out after 5 minutes')), ROLE_SYNC_TIMEOUT_MS)
+        ),
+      ]);
+      const result = await syncWithTimeout;
       if (result.skipped) {
         console.log('[RolePolling] Skipped — Procore sync in progress, keeping previous result');
         return;
@@ -3806,6 +3823,7 @@ export async function registerRoutes(
       lastRolePollResult = { error: e.message };
     } finally {
       rolePollingRunning = false;
+      lastPollStartedAt = null;
     }
   }
 

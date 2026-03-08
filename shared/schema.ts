@@ -510,6 +510,7 @@ export const procoreProjects = pgTable("procore_projects", {
   properties: jsonb("properties"),
   lastSyncedAt: timestamp("last_synced_at").defaultNow(),
   procoreUpdatedAt: timestamp("procore_updated_at"),
+  lastRoleCheckAt: timestamp("last_role_check_at"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

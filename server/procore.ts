@@ -596,12 +596,13 @@ export async function syncSingleProcoreUser(userId: string): Promise<{ success: 
   }
 }
 
-async function fetchProcoreJson(endpoint: string, companyId: string): Promise<any> {
+async function fetchProcoreJson(endpoint: string, companyId: string, options?: { signal?: AbortSignal }): Promise<any> {
   const accessToken = await getAccessToken();
   const config = await getProcoreConfig();
   const baseUrl = getBaseUrl(config.environment);
   const url = `${baseUrl}${endpoint}`;
   const response = await fetch(url, {
+    signal: options?.signal,
     headers: {
       'Authorization': `Bearer ${accessToken}`,
       'Accept': 'application/json',
@@ -614,6 +615,28 @@ async function fetchProcoreJson(endpoint: string, companyId: string): Promise<an
     throw new Error(`Procore API error ${response.status}: ${errText}`);
   }
   return response.json();
+}
+
+/** Run async tasks in parallel with a concurrency limit. */
+async function parallelWithLimit<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  concurrency: number
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let index = 0;
+  async function worker(): Promise<void> {
+    while (index < items.length) {
+      const i = index++;
+      try {
+        results[i] = await fn(items[i]);
+      } catch (err) {
+        throw err;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) || 1 }, () => worker()));
+  return results;
 }
 
 export async function fetchProcoreProjectStages(): Promise<any[]> {
@@ -962,11 +985,16 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
   }
 }
 
+const ROLE_SYNC_CONCURRENCY = 5; // Stay within 3600 req/hr (~1 req/sec sustained)
+const ROLE_SYNC_PER_REQUEST_TIMEOUT_MS = 10000; // 10s per API call
+
 async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 
-  let projectsToSync: Array<{ procoreId: string; name: string }> = [];
+  type ProjectEntry = { procoreId: string; name: string };
+  let projectsToSync: ProjectEntry[] = [];
+  let projectsWithMeta: Array<{ procoreId: string; name: string; lastRoleCheckAt?: Date | null; procoreUpdatedAt?: Date | null }> = [];
 
   if (projectIds && projectIds.length > 0) {
     for (const pid of projectIds) {
@@ -975,51 +1003,80 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
     }
   } else {
     const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
-    const fromDb = allProjects
+    const activeWithMeta = allProjects
       .filter(p => p.active !== false)
-      .map(p => ({ procoreId: p.procoreId, name: p.name || '' }));
-    const byId = new Map(fromDb.map(p => [p.procoreId, p]));
+      .map(p => ({
+        procoreId: p.procoreId,
+        name: p.name || '',
+        lastRoleCheckAt: p.lastRoleCheckAt,
+        procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+      }));
+    const byId = new Map(activeWithMeta.map(p => [p.procoreId, p]));
     const mappings = await storage.getSyncMappings();
     for (const m of mappings) {
       for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
         if (pid && !byId.has(pid)) {
           const p = await storage.getProcoreProjectByProcoreId(pid);
-          byId.set(pid, { procoreId: pid, name: p?.name || '' });
+          if (p) {
+            byId.set(pid, {
+              procoreId: pid,
+              name: p.name || '',
+              lastRoleCheckAt: p.lastRoleCheckAt,
+              procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+            });
+          }
         }
       }
     }
-    projectsToSync = Array.from(byId.values());
+    projectsWithMeta = Array.from(byId.values());
+    // Skip projects where Procore updated_at hasn't changed since last check
+    projectsToSync = projectsWithMeta.filter(p => {
+      if (!p.lastRoleCheckAt) return true;
+      if (!p.procoreUpdatedAt) return true;
+      return p.procoreUpdatedAt > p.lastRoleCheckAt;
+    });
   }
 
-  const ROLE_SYNC_DELAY_MS = 1500; // Throttle to avoid Procore 429 rate limit (default ~60 req/min)
-  console.log(`[procore] Syncing role assignments for ${projectsToSync.length} active projects...`);
+  const skippedCount = projectsWithMeta.length - projectsToSync.length;
+  if (skippedCount > 0) {
+    console.log(`[procore] Skipping ${skippedCount} projects (no changes since last check)`);
+  }
+  console.log(`[procore] Syncing role assignments for ${projectsToSync.length} projects (${ROLE_SYNC_CONCURRENCY} concurrent)...`);
   let synced = 0;
   const newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> = [];
 
-  for (let i = 0; i < projectsToSync.length; i++) {
-    const project = projectsToSync[i];
-    if (i > 0) {
-      await new Promise(r => setTimeout(r, ROLE_SYNC_DELAY_MS));
-    }
+  async function processProject(project: ProjectEntry): Promise<void> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
     try {
       let raw: any;
       try {
         raw = await fetchProcoreJson(
           `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
-          companyId
+          companyId,
+          { signal: controller.signal }
         );
       } catch (rateErr: any) {
+        clearTimeout(timeout);
         if (rateErr.message?.includes('429')) {
           console.log('[procore] Rate limited (429), waiting 60s before retrying project', project.procoreId);
           await new Promise(r => setTimeout(r, 60000));
+          const c2 = new AbortController();
+          const t2 = setTimeout(() => c2.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
           raw = await fetchProcoreJson(
             `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
-            companyId
+            companyId,
+            { signal: c2.signal }
           );
+          clearTimeout(t2);
+        } else if (rateErr.name === 'AbortError') {
+          console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+          return;
         } else {
           throw rateErr;
         }
       }
+      clearTimeout(timeout);
       const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
 
       const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
@@ -1067,13 +1124,27 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
 
         synced++;
       }
+      await storage.updateProcoreProjectLastRoleCheck(project.procoreId);
     } catch (err: any) {
-      if (err.message?.includes('403') || err.message?.includes('404')) {
-        continue;
+      clearTimeout(timeout);
+      if (err.name === 'AbortError') {
+        console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+        return;
       }
-      console.error(`[procore] Error fetching role assignments for project ${project.procoreId}:`, err.message);
+      if (err.message?.includes('403') || err.message?.includes('404')) {
+        return;
+      }
+      throw err;
     }
   }
+
+  await parallelWithLimit(projectsToSync, async (project) => {
+    try {
+      await processProject(project);
+    } catch (err: any) {
+      console.error(`[procore] Error fetching role assignments for project ${project.procoreId}:`, err.message);
+    }
+  }, ROLE_SYNC_CONCURRENCY);
 
   console.log(`[procore] Synced ${synced} role assignments, ${newAssignments.length} new assignments`);
   return { synced, newAssignments };

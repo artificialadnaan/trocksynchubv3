@@ -212,6 +212,7 @@ export interface IStorage {
   upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
   getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
   getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }>;
+  updateProcoreProjectLastRoleCheck(procoreId: string): Promise<void>;
 
   upsertProcoreVendor(data: InsertProcoreVendor): Promise<ProcoreVendor>;
   getProcoreVendorByProcoreId(procoreId: string): Promise<ProcoreVendor | undefined>;
@@ -889,6 +890,12 @@ export class DatabaseStorage implements IStorage {
   async getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined> {
     const [result] = await db.select().from(procoreProjects).where(eq(procoreProjects.procoreId, procoreId));
     return result;
+  }
+
+  async updateProcoreProjectLastRoleCheck(procoreId: string): Promise<void> {
+    await db.update(procoreProjects)
+      .set({ lastRoleCheckAt: new Date(), updatedAt: new Date() })
+      .where(eq(procoreProjects.procoreId, procoreId));
   }
 
   async getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }> {
