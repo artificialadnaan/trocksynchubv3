@@ -383,8 +383,9 @@ export async function sendStageChangeEmail(params: {
   // Procore: Before RFP approval, project doesn't exist in Procore/BidBoard yet - use portfolio link
   const PROCORE_COMPANY_ID = '598134325683880';
   const PROCORE_PORTFOLIO_URL = `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/tools/hubs/company-hub/views/portfolio`;
-  const procoreUrl = params.procoreProjectId?.trim()
-    ? `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${params.procoreProjectId}/tools/projecthome`
+  const trimmedProcoreId = params.procoreProjectId?.trim();
+  const procoreUrl = trimmedProcoreId
+    ? `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${trimmedProcoreId}/tools/projecthome`
     : PROCORE_PORTFOLIO_URL;
 
   // HubSpot: Use correct portal ID 45644695 with eschref for RFP deals list
