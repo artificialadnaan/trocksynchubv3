@@ -1,6 +1,7 @@
 #!/usr/bin/env npx tsx
 /**
  * Deduplicate procore_role_assignments before adding unique constraint.
+ * Required for Railway deploy: avoids interactive truncate prompt when db:push adds unique.
  * Keeps one row per (procore_project_id, role_name, assignee_id) — the one with highest id.
  * Run before db:push to avoid interactive "truncate table?" prompt when adding unique.
  * Run: npx tsx scripts/migrate-procore-role-dedupe.ts
