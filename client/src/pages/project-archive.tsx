@@ -48,6 +48,20 @@ import {
   RefreshCw,
   Info,
   Search,
+  Mail,
+  AlertTriangle,
+  ClipboardCheck,
+  Users,
+  Calendar,
+  BookOpen,
+  FileSignature,
+  Handshake,
+  FileDiff,
+  Zap,
+  DollarSign,
+  Receipt,
+  Contact,
+  Calculator,
 } from "lucide-react";
 import { format, formatDistanceToNow, formatDistance } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -92,6 +106,21 @@ interface ArchivePreview {
     bidPackages: number;
     photos: number;
     budget: number;
+    emails: number;
+    incidents: number;
+    punchList: number;
+    meetings: number;
+    schedule: number;
+    dailyLogs: number;
+    specifications: number;
+    primeContracts: number;
+    commitments: number;
+    changeOrders: number;
+    changeEvents: number;
+    directCosts: number;
+    invoicing: number;
+    directory: number;
+    estimating: number;
     total: number;
   };
 }
@@ -431,6 +460,21 @@ function ArchiveDialog({
     includeBidPackages: true,
     includePhotos: true,
     includeBudget: true,
+    includeEmails: true,
+    includeIncidents: true,
+    includePunchList: true,
+    includeMeetings: true,
+    includeSchedule: true,
+    includeDailyLogs: true,
+    includeSpecifications: true,
+    includePrimeContracts: true,
+    includeCommitments: true,
+    includeChangeOrders: true,
+    includeChangeEvents: true,
+    includeDirectCosts: true,
+    includeInvoicing: true,
+    includeDirectory: true,
+    includeEstimating: true,
     baseFolderPath: baseFolderName,
   });
 
@@ -440,13 +484,15 @@ function ArchiveDialog({
 
   const previewParams = useMemo(() => {
     const p = new URLSearchParams();
-    p.set("includeDocuments", String(options.includeDocuments));
-    p.set("includeDrawings", String(options.includeDrawings));
-    p.set("includeSubmittals", String(options.includeSubmittals));
-    p.set("includeRFIs", String(options.includeRFIs));
-    p.set("includeBidPackages", String(options.includeBidPackages));
-    p.set("includePhotos", String(options.includePhotos));
-    p.set("includeBudget", String(options.includeBudget));
+    [
+      "includeDocuments", "includeDrawings", "includeSubmittals", "includeRFIs",
+      "includeBidPackages", "includePhotos", "includeBudget",
+      "includeEmails", "includeIncidents", "includePunchList", "includeMeetings",
+      "includeSchedule", "includeDailyLogs", "includeSpecifications",
+      "includePrimeContracts", "includeCommitments", "includeChangeOrders",
+      "includeChangeEvents", "includeDirectCosts", "includeInvoicing",
+      "includeDirectory", "includeEstimating",
+    ].forEach((k) => p.set(k, String(options[k as keyof typeof options] ?? true)));
     return p.toString();
   }, [options]);
 
@@ -465,13 +511,7 @@ function ArchiveDialog({
       const res = await apiRequest("POST", "/api/archive/start", {
         projectId: project?.id,
         options: {
-          includeDocuments: options.includeDocuments,
-          includeDrawings: options.includeDrawings,
-          includeSubmittals: options.includeSubmittals,
-          includeRFIs: options.includeRFIs,
-          includeBidPackages: options.includeBidPackages,
-          includePhotos: options.includePhotos,
-          includeBudget: options.includeBudget,
+          ...options,
           baseFolderPath: options.baseFolderPath,
         },
       });
@@ -489,20 +529,17 @@ function ArchiveDialog({
 
   if (!project) return null;
 
-  const breakdown = preview?.fileCounts ?? {
-    documents: 0,
-    drawings: 0,
-    submittals: 0,
-    rfis: 0,
-    bidPackages: 0,
-    photos: 0,
-    budget: 0,
-    total: 0,
+  const emptyCounts = {
+    documents: 0, drawings: 0, submittals: 0, rfis: 0, bidPackages: 0, photos: 0, budget: 0,
+    emails: 0, incidents: 0, punchList: 0, meetings: 0, schedule: 0, dailyLogs: 0,
+    specifications: 0, primeContracts: 0, commitments: 0, changeOrders: 0, changeEvents: 0,
+    directCosts: 0, invoicing: 0, directory: 0, estimating: 0, total: 0,
   };
+  const breakdown = preview?.fileCounts ?? emptyCounts;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Archive className="w-5 h-5" />
@@ -526,71 +563,130 @@ function ArchiveDialog({
               <p className="text-sm font-medium">
                 {breakdown.total} files total
               </p>
-              <div className="grid grid-cols-3 gap-2 text-xs">
-                <div className="p-2 rounded bg-muted/30 text-center">
-                  <FolderOpen className="w-4 h-4 mx-auto mb-1 text-muted-foreground" />
-                  <p className="font-medium">{breakdown.documents}</p>
-                  <p className="text-muted-foreground">Documents</p>
-                </div>
-                <div className="p-2 rounded bg-muted/30 text-center">
-                  <FileText className="w-4 h-4 mx-auto mb-1 text-muted-foreground" />
-                  <p className="font-medium">{breakdown.drawings}</p>
-                  <p className="text-muted-foreground">Drawings</p>
-                </div>
-                <div className="p-2 rounded bg-muted/30 text-center">
-                  <FileText className="w-4 h-4 mx-auto mb-1 text-muted-foreground" />
-                  <p className="font-medium">{breakdown.submittals}</p>
-                  <p className="text-muted-foreground">Submittals</p>
-                </div>
-                <div className="p-2 rounded bg-muted/30 text-center">
-                  <FileText className="w-4 h-4 mx-auto mb-1 text-muted-foreground" />
-                  <p className="font-medium">{breakdown.rfis}</p>
-                  <p className="text-muted-foreground">RFIs</p>
-                </div>
-                <div className="p-2 rounded bg-muted/30 text-center">
-                  <FileText className="w-4 h-4 mx-auto mb-1 text-muted-foreground" />
-                  <p className="font-medium">{breakdown.bidPackages}</p>
-                  <p className="text-muted-foreground">Bid Packages</p>
-                </div>
-                <div className="p-2 rounded bg-muted/30 text-center">
-                  <Image className="w-4 h-4 mx-auto mb-1 text-muted-foreground" />
-                  <p className="font-medium">{breakdown.photos}</p>
-                  <p className="text-muted-foreground">Photos</p>
-                </div>
-                <div className="p-2 rounded bg-muted/30 text-center">
-                  <FileSpreadsheet className="w-4 h-4 mx-auto mb-1 text-muted-foreground" />
-                  <p className="font-medium">{breakdown.budget}</p>
-                  <p className="text-muted-foreground">Budget</p>
-                </div>
+              <div className="grid grid-cols-4 gap-1.5 text-xs max-h-48 overflow-y-auto">
+                {[
+                  { k: "documents", Icon: FolderOpen, label: "Documents" },
+                  { k: "drawings", Icon: FileText, label: "Drawings" },
+                  { k: "submittals", Icon: FileText, label: "Submittals" },
+                  { k: "rfis", Icon: FileText, label: "RFIs" },
+                  { k: "bidPackages", Icon: FileText, label: "Bid Packages" },
+                  { k: "photos", Icon: Image, label: "Photos" },
+                  { k: "budget", Icon: FileSpreadsheet, label: "Budget" },
+                  { k: "emails", Icon: Mail, label: "Emails" },
+                  { k: "incidents", Icon: AlertTriangle, label: "Incidents" },
+                  { k: "punchList", Icon: ClipboardCheck, label: "Punch List" },
+                  { k: "meetings", Icon: Users, label: "Meetings" },
+                  { k: "schedule", Icon: Calendar, label: "Schedule" },
+                  { k: "dailyLogs", Icon: BookOpen, label: "Daily Logs" },
+                  { k: "specifications", Icon: FileText, label: "Specs" },
+                  { k: "primeContracts", Icon: FileSignature, label: "Prime Contracts" },
+                  { k: "commitments", Icon: Handshake, label: "Commitments" },
+                  { k: "changeOrders", Icon: FileDiff, label: "Change Orders" },
+                  { k: "changeEvents", Icon: Zap, label: "Change Events" },
+                  { k: "directCosts", Icon: DollarSign, label: "Direct Costs" },
+                  { k: "invoicing", Icon: Receipt, label: "Invoicing" },
+                  { k: "directory", Icon: Contact, label: "Directory" },
+                  { k: "estimating", Icon: Calculator, label: "Estimating" },
+                ].map(({ k, Icon, label }) => (
+                  <div key={k} className="p-1.5 rounded bg-muted/30 text-center">
+                    <Icon className="w-3.5 h-3.5 mx-auto mb-0.5 text-muted-foreground" />
+                    <p className="font-medium">{breakdown[k as keyof typeof breakdown] ?? 0}</p>
+                    <p className="text-muted-foreground truncate text-[10px]">{label}</p>
+                  </div>
+                ))}
               </div>
             </div>
           ) : null}
 
           <div className="space-y-3">
             <Label className="text-xs font-medium">Include in Archive:</Label>
-            <div className="grid grid-cols-2 gap-2">
-              {[
-                { key: "includeDocuments", label: "Documents" },
-                { key: "includeDrawings", label: "Drawings" },
-                { key: "includeSubmittals", label: "Submittals" },
-                { key: "includeRFIs", label: "RFIs" },
-                { key: "includeBidPackages", label: "Bid Packages" },
-                { key: "includePhotos", label: "Photos" },
-                { key: "includeBudget", label: "Budget Data" },
-              ].map(({ key, label }) => (
-                <div key={key} className="flex items-center gap-2">
-                  <Checkbox
-                    id={key}
-                    checked={options[key as keyof typeof options] as boolean}
-                    onCheckedChange={(checked) =>
-                      setOptions((prev) => ({ ...prev, [key]: !!checked }))
-                    }
-                  />
-                  <Label htmlFor={key} className="text-xs cursor-pointer">
-                    {label}
-                  </Label>
-                </div>
-              ))}
+            <div className="space-y-2 max-h-40 overflow-y-auto">
+              <p className="text-[10px] font-medium text-muted-foreground uppercase">Core</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { key: "includeDocuments", label: "Documents" },
+                  { key: "includeDrawings", label: "Drawings" },
+                  { key: "includeSubmittals", label: "Submittals" },
+                  { key: "includeRFIs", label: "RFIs" },
+                  { key: "includeBidPackages", label: "Bid Packages" },
+                  { key: "includePhotos", label: "Photos" },
+                  { key: "includeBudget", label: "Budget Data" },
+                  { key: "includeDirectory", label: "Directory" },
+                ].map(({ key, label }) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <Checkbox
+                      id={key}
+                      checked={options[key as keyof typeof options] as boolean}
+                      onCheckedChange={(checked) =>
+                        setOptions((prev) => ({ ...prev, [key]: !!checked }))
+                      }
+                    />
+                    <Label htmlFor={key} className="text-xs cursor-pointer">{label}</Label>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] font-medium text-muted-foreground uppercase">Project Management</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { key: "includeEmails", label: "Emails" },
+                  { key: "includeIncidents", label: "Incidents" },
+                  { key: "includePunchList", label: "Punch List" },
+                  { key: "includeMeetings", label: "Meetings" },
+                  { key: "includeSchedule", label: "Schedule" },
+                  { key: "includeDailyLogs", label: "Daily Logs" },
+                  { key: "includeSpecifications", label: "Specifications" },
+                ].map(({ key, label }) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <Checkbox
+                      id={key}
+                      checked={options[key as keyof typeof options] as boolean}
+                      onCheckedChange={(checked) =>
+                        setOptions((prev) => ({ ...prev, [key]: !!checked }))
+                      }
+                    />
+                    <Label htmlFor={key} className="text-xs cursor-pointer">{label}</Label>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] font-medium text-muted-foreground uppercase">Financial</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { key: "includePrimeContracts", label: "Prime Contracts" },
+                  { key: "includeCommitments", label: "Commitments" },
+                  { key: "includeChangeOrders", label: "Change Orders" },
+                  { key: "includeChangeEvents", label: "Change Events" },
+                  { key: "includeDirectCosts", label: "Direct Costs" },
+                  { key: "includeInvoicing", label: "Invoicing" },
+                ].map(({ key, label }) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <Checkbox
+                      id={key}
+                      checked={options[key as keyof typeof options] as boolean}
+                      onCheckedChange={(checked) =>
+                        setOptions((prev) => ({ ...prev, [key]: !!checked }))
+                      }
+                    />
+                    <Label htmlFor={key} className="text-xs cursor-pointer">{label}</Label>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] font-medium text-muted-foreground uppercase">Preconstruction</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { key: "includeEstimating", label: "Estimating" },
+                ].map(({ key, label }) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <Checkbox
+                      id={key}
+                      checked={options[key as keyof typeof options] as boolean}
+                      onCheckedChange={(checked) =>
+                        setOptions((prev) => ({ ...prev, [key]: !!checked }))
+                      }
+                    />
+                    <Label htmlFor={key} className="text-xs cursor-pointer">{label}</Label>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
 

@@ -100,19 +100,39 @@ router.get('/api/archive/projects', requireAuth, async (_req: Request, res: Resp
   }
 });
 
+function parseOptions(query: Record<string, any>) {
+  const opt = (k: string) => parseBool(query[k]);
+  return {
+    includeDrawings: opt('includeDrawings'),
+    includeSubmittals: opt('includeSubmittals'),
+    includeRFIs: opt('includeRFIs'),
+    includeBidPackages: opt('includeBidPackages'),
+    includePhotos: opt('includePhotos'),
+    includeBudget: opt('includeBudget'),
+    includeDocuments: opt('includeDocuments'),
+    includeEmails: opt('includeEmails'),
+    includeIncidents: opt('includeIncidents'),
+    includePunchList: opt('includePunchList'),
+    includeMeetings: opt('includeMeetings'),
+    includeSchedule: opt('includeSchedule'),
+    includeDailyLogs: opt('includeDailyLogs'),
+    includeSpecifications: opt('includeSpecifications'),
+    includePrimeContracts: opt('includePrimeContracts'),
+    includeCommitments: opt('includeCommitments'),
+    includeChangeOrders: opt('includeChangeOrders'),
+    includeChangeEvents: opt('includeChangeEvents'),
+    includeDirectCosts: opt('includeDirectCosts'),
+    includeInvoicing: opt('includeInvoicing'),
+    includeDirectory: opt('includeDirectory'),
+    includeEstimating: opt('includeEstimating'),
+  };
+}
+
 router.get('/api/archive/projects/:projectId/preview', requireAuth, async (req: Request, res: Response) => {
   try {
     const projectId = String(req.params.projectId ?? '');
-    const options = (req.query as any) || {};
-    const preview = await previewArchive(projectId, {
-      includeDrawings: parseBool(options.includeDrawings),
-      includeSubmittals: parseBool(options.includeSubmittals),
-      includeRFIs: parseBool(options.includeRFIs),
-      includeBidPackages: parseBool(options.includeBidPackages),
-      includePhotos: parseBool(options.includePhotos),
-      includeBudget: parseBool(options.includeBudget),
-      includeDocuments: parseBool(options.includeDocuments),
-    });
+    const options = parseOptions((req.query as any) || {});
+    const preview = await previewArchive(projectId, options);
     res.json(preview);
   } catch (e: any) {
     res.status(500).json({ message: e.message });

@@ -110,6 +110,8 @@ const archiveProgress: Map<string, ArchiveProgress> = new Map();
 // Public API
 // ---------------------------------------------------------------------------
 
+const DEFAULT_INCLUDE = true;
+
 export async function startProjectArchive(
   projectId: string,
   options: {
@@ -120,6 +122,21 @@ export async function startProjectArchive(
     includePhotos?: boolean;
     includeBudget?: boolean;
     includeDocuments?: boolean;
+    includeEmails?: boolean;
+    includeIncidents?: boolean;
+    includePunchList?: boolean;
+    includeMeetings?: boolean;
+    includeSchedule?: boolean;
+    includeDailyLogs?: boolean;
+    includeSpecifications?: boolean;
+    includePrimeContracts?: boolean;
+    includeCommitments?: boolean;
+    includeChangeOrders?: boolean;
+    includeChangeEvents?: boolean;
+    includeDirectCosts?: boolean;
+    includeInvoicing?: boolean;
+    includeDirectory?: boolean;
+    includeEstimating?: boolean;
     baseFolderPath?: string;
   } = {}
 ): Promise<{ archiveId: string }> {
@@ -129,13 +146,28 @@ export async function startProjectArchive(
   const baseFolderPath = options.baseFolderPath ?? cfg.archiveBaseFolderName;
 
   const opts = {
-    includeDrawings: options.includeDrawings ?? true,
-    includeSubmittals: options.includeSubmittals ?? true,
-    includeRFIs: options.includeRFIs ?? true,
-    includeBidPackages: options.includeBidPackages ?? true,
-    includePhotos: options.includePhotos ?? true,
-    includeBudget: options.includeBudget ?? true,
-    includeDocuments: options.includeDocuments ?? true,
+    includeDrawings: options.includeDrawings ?? DEFAULT_INCLUDE,
+    includeSubmittals: options.includeSubmittals ?? DEFAULT_INCLUDE,
+    includeRFIs: options.includeRFIs ?? DEFAULT_INCLUDE,
+    includeBidPackages: options.includeBidPackages ?? DEFAULT_INCLUDE,
+    includePhotos: options.includePhotos ?? DEFAULT_INCLUDE,
+    includeBudget: options.includeBudget ?? DEFAULT_INCLUDE,
+    includeDocuments: options.includeDocuments ?? DEFAULT_INCLUDE,
+    includeEmails: options.includeEmails ?? DEFAULT_INCLUDE,
+    includeIncidents: options.includeIncidents ?? DEFAULT_INCLUDE,
+    includePunchList: options.includePunchList ?? DEFAULT_INCLUDE,
+    includeMeetings: options.includeMeetings ?? DEFAULT_INCLUDE,
+    includeSchedule: options.includeSchedule ?? DEFAULT_INCLUDE,
+    includeDailyLogs: options.includeDailyLogs ?? DEFAULT_INCLUDE,
+    includeSpecifications: options.includeSpecifications ?? DEFAULT_INCLUDE,
+    includePrimeContracts: options.includePrimeContracts ?? DEFAULT_INCLUDE,
+    includeCommitments: options.includeCommitments ?? DEFAULT_INCLUDE,
+    includeChangeOrders: options.includeChangeOrders ?? DEFAULT_INCLUDE,
+    includeChangeEvents: options.includeChangeEvents ?? DEFAULT_INCLUDE,
+    includeDirectCosts: options.includeDirectCosts ?? DEFAULT_INCLUDE,
+    includeInvoicing: options.includeInvoicing ?? DEFAULT_INCLUDE,
+    includeDirectory: options.includeDirectory ?? DEFAULT_INCLUDE,
+    includeEstimating: options.includeEstimating ?? DEFAULT_INCLUDE,
     baseFolderPath,
   };
 
@@ -174,6 +206,21 @@ export interface ArchivePreviewOptions {
   includePhotos?: boolean;
   includeBudget?: boolean;
   includeDocuments?: boolean;
+  includeEmails?: boolean;
+  includeIncidents?: boolean;
+  includePunchList?: boolean;
+  includeMeetings?: boolean;
+  includeSchedule?: boolean;
+  includeDailyLogs?: boolean;
+  includeSpecifications?: boolean;
+  includePrimeContracts?: boolean;
+  includeCommitments?: boolean;
+  includeChangeOrders?: boolean;
+  includeChangeEvents?: boolean;
+  includeDirectCosts?: boolean;
+  includeInvoicing?: boolean;
+  includeDirectory?: boolean;
+  includeEstimating?: boolean;
 }
 
 export interface ArchivePreviewResult {
@@ -188,8 +235,27 @@ export interface ArchivePreviewResult {
     bidPackages: number;
     photos: number;
     budget: number;
+    emails: number;
+    incidents: number;
+    punchList: number;
+    meetings: number;
+    schedule: number;
+    dailyLogs: number;
+    specifications: number;
+    primeContracts: number;
+    commitments: number;
+    changeOrders: number;
+    changeEvents: number;
+    directCosts: number;
+    invoicing: number;
+    directory: number;
+    estimating: number;
     total: number;
   };
+}
+
+function countDocWithUrl(docs: any[]): number {
+  return docs.filter((d) => d.downloadUrl || (d as any).contentBuffer).length;
 }
 
 export async function previewArchive(
@@ -197,28 +263,64 @@ export async function previewArchive(
   options: ArchivePreviewOptions = {}
 ): Promise<ArchivePreviewResult> {
   const opts = {
-    includeDrawings: options.includeDrawings ?? true,
-    includeSubmittals: options.includeSubmittals ?? true,
-    includeRFIs: options.includeRFIs ?? true,
-    includeBidPackages: options.includeBidPackages ?? true,
-    includePhotos: options.includePhotos ?? true,
-    includeBudget: options.includeBudget ?? true,
-    includeDocuments: options.includeDocuments ?? true,
+    includeDrawings: options.includeDrawings ?? DEFAULT_INCLUDE,
+    includeSubmittals: options.includeSubmittals ?? DEFAULT_INCLUDE,
+    includeRFIs: options.includeRFIs ?? DEFAULT_INCLUDE,
+    includeBidPackages: options.includeBidPackages ?? DEFAULT_INCLUDE,
+    includePhotos: options.includePhotos ?? DEFAULT_INCLUDE,
+    includeBudget: options.includeBudget ?? DEFAULT_INCLUDE,
+    includeDocuments: options.includeDocuments ?? DEFAULT_INCLUDE,
+    includeEmails: options.includeEmails ?? DEFAULT_INCLUDE,
+    includeIncidents: options.includeIncidents ?? DEFAULT_INCLUDE,
+    includePunchList: options.includePunchList ?? DEFAULT_INCLUDE,
+    includeMeetings: options.includeMeetings ?? DEFAULT_INCLUDE,
+    includeSchedule: options.includeSchedule ?? DEFAULT_INCLUDE,
+    includeDailyLogs: options.includeDailyLogs ?? DEFAULT_INCLUDE,
+    includeSpecifications: options.includeSpecifications ?? DEFAULT_INCLUDE,
+    includePrimeContracts: options.includePrimeContracts ?? DEFAULT_INCLUDE,
+    includeCommitments: options.includeCommitments ?? DEFAULT_INCLUDE,
+    includeChangeOrders: options.includeChangeOrders ?? DEFAULT_INCLUDE,
+    includeChangeEvents: options.includeChangeEvents ?? DEFAULT_INCLUDE,
+    includeDirectCosts: options.includeDirectCosts ?? DEFAULT_INCLUDE,
+    includeInvoicing: options.includeInvoicing ?? DEFAULT_INCLUDE,
+    includeDirectory: options.includeDirectory ?? DEFAULT_INCLUDE,
+    includeEstimating: options.includeEstimating ?? DEFAULT_INCLUDE,
   };
 
   const docs = await extractProjectDocuments(projectId);
 
-  let docCount = 0;
-  if (opts.includeDocuments) docCount = countFolderFiles(docs.folders);
-
-  const drawingsCount = opts.includeDrawings ? docs.drawings.filter((d) => d.downloadUrl).length : 0;
-  const submittalsCount = opts.includeSubmittals ? docs.submittals.filter((s) => s.downloadUrl).length : 0;
-  const rfisCount = opts.includeRFIs ? docs.rfis.filter((r) => r.downloadUrl).length : 0;
-  const bidPackagesCount = opts.includeBidPackages ? docs.bidPackages.filter((b) => b.downloadUrl).length : 0;
-  const photosCount = opts.includePhotos ? docs.photos.filter((p) => p.downloadUrl).length : 0;
+  const docCount = opts.includeDocuments ? countFolderFiles(docs.folders) : 0;
+  const drawingsCount = opts.includeDrawings ? countDocWithUrl(docs.drawings) : 0;
+  const submittalsCount = opts.includeSubmittals ? countDocWithUrl(docs.submittals) : 0;
+  const rfisCount = opts.includeRFIs ? countDocWithUrl(docs.rfis) : 0;
+  const bidPackagesCount = opts.includeBidPackages ? countDocWithUrl(docs.bidPackages) : 0;
+  const photosCount = opts.includePhotos ? countDocWithUrl(docs.photos) : 0;
   const budgetCount = opts.includeBudget && docs.budget.summary ? 1 : 0;
+  const emailsCount = opts.includeEmails ? docs.emails.length : 0;
+  const incidentsCount = opts.includeIncidents ? docs.incidents.length : 0;
+  const punchListCount = opts.includePunchList ? docs.punchList.length : 0;
+  const meetingsCount = opts.includeMeetings ? docs.meetings.length : 0;
+  const scheduleCount = opts.includeSchedule ? docs.schedule.length : 0;
+  const dailyLogsCount = opts.includeDailyLogs
+    ? docs.dailyLogs.attachments.length + (docs.dailyLogs.items.length > 0 ? 1 : 0)
+    : 0;
+  const specCount = opts.includeSpecifications ? docs.specifications.length : 0;
+  const primeCount = opts.includePrimeContracts ? docs.primeContracts.length : 0;
+  const commitCount = opts.includeCommitments
+    ? docs.commitments.subcontracts.length + docs.commitments.purchaseOrders.length
+    : 0;
+  const changeOrdersCount = opts.includeChangeOrders ? docs.changeOrders.length : 0;
+  const changeEventsCount = opts.includeChangeEvents ? docs.changeEvents.length : 0;
+  const directCostsCount = opts.includeDirectCosts ? docs.directCosts.length : 0;
+  const invoicingCount = opts.includeInvoicing ? docs.invoicing.length : 0;
+  const directoryCount = opts.includeDirectory && docs.directory.length > 0 ? 1 : 0;
+  const estimatingCount = opts.includeEstimating && docs.estimating.length > 0 ? 1 : 0;
 
-  const total = docCount + drawingsCount + submittalsCount + rfisCount + bidPackagesCount + photosCount + budgetCount;
+  const total =
+    docCount + drawingsCount + submittalsCount + rfisCount + bidPackagesCount + photosCount +
+    budgetCount + emailsCount + incidentsCount + punchListCount + meetingsCount + scheduleCount +
+    dailyLogsCount + specCount + primeCount + commitCount + changeOrdersCount + changeEventsCount +
+    directCostsCount + invoicingCount + directoryCount + estimatingCount;
 
   const projectFolderName = sanitizeFolderName(`${docs.projectName} (${projectId})`);
   const cfg = await getStorageConfig();
@@ -233,6 +335,23 @@ export async function previewArchive(
   if (opts.includeBidPackages && docs.bidPackages.length > 0) folderStructure.push(`${basePath}/Bid Packages`);
   if (opts.includePhotos && docs.photos.length > 0) folderStructure.push(`${basePath}/Photos`);
   if (opts.includeBudget && docs.budget.summary) folderStructure.push(`${basePath}/Budget`);
+  if (opts.includeEmails && docs.emails.length > 0) folderStructure.push(`${basePath}/Emails`);
+  if (opts.includeIncidents && docs.incidents.length > 0) folderStructure.push(`${basePath}/Incidents`);
+  if (opts.includePunchList && docs.punchList.length > 0) folderStructure.push(`${basePath}/Punch List`);
+  if (opts.includeMeetings && docs.meetings.length > 0) folderStructure.push(`${basePath}/Meetings`);
+  if (opts.includeSchedule && docs.schedule.length > 0) folderStructure.push(`${basePath}/Schedule`);
+  if (opts.includeDailyLogs && (docs.dailyLogs.items.length > 0 || docs.dailyLogs.attachments.length > 0))
+    folderStructure.push(`${basePath}/Daily Logs`);
+  if (opts.includeSpecifications && docs.specifications.length > 0) folderStructure.push(`${basePath}/Specifications`);
+  if (opts.includePrimeContracts && docs.primeContracts.length > 0) folderStructure.push(`${basePath}/Prime Contracts`);
+  if (opts.includeCommitments && (docs.commitments.subcontracts.length > 0 || docs.commitments.purchaseOrders.length > 0))
+    folderStructure.push(`${basePath}/Commitments/Subcontracts`, `${basePath}/Commitments/Purchase Orders`);
+  if (opts.includeChangeOrders && docs.changeOrders.length > 0) folderStructure.push(`${basePath}/Change Orders`);
+  if (opts.includeChangeEvents && docs.changeEvents.length > 0) folderStructure.push(`${basePath}/Change Events`);
+  if (opts.includeDirectCosts && docs.directCosts.length > 0) folderStructure.push(`${basePath}/Direct Costs`);
+  if (opts.includeInvoicing && docs.invoicing.length > 0) folderStructure.push(`${basePath}/Invoicing`);
+  if (opts.includeDirectory && docs.directory.length > 0) folderStructure.push(`${basePath}/Directory`);
+  if (opts.includeEstimating && docs.estimating.length > 0) folderStructure.push(`${basePath}/Estimating`);
 
   return {
     projectId,
@@ -246,6 +365,21 @@ export async function previewArchive(
       bidPackages: bidPackagesCount,
       photos: photosCount,
       budget: budgetCount,
+      emails: emailsCount,
+      incidents: incidentsCount,
+      punchList: punchListCount,
+      meetings: meetingsCount,
+      schedule: scheduleCount,
+      dailyLogs: dailyLogsCount,
+      specifications: specCount,
+      primeContracts: primeCount,
+      commitments: commitCount,
+      changeOrders: changeOrdersCount,
+      changeEvents: changeEventsCount,
+      directCosts: directCostsCount,
+      invoicing: invoicingCount,
+      directory: directoryCount,
+      estimating: estimatingCount,
       total,
     },
   };
@@ -289,20 +423,33 @@ export async function handleProjectStageChange(
 // Archive runner
 // ---------------------------------------------------------------------------
 
-async function runArchive(
-  archiveId: string,
-  projectId: string,
-  options: {
-    includeDrawings: boolean;
-    includeSubmittals: boolean;
-    includeRFIs: boolean;
-    includeBidPackages: boolean;
-    includePhotos: boolean;
-    includeBudget: boolean;
-    includeDocuments: boolean;
-    baseFolderPath: string;
-  }
-): Promise<void> {
+type ArchiveOptions = {
+  includeDrawings: boolean;
+  includeSubmittals: boolean;
+  includeRFIs: boolean;
+  includeBidPackages: boolean;
+  includePhotos: boolean;
+  includeBudget: boolean;
+  includeDocuments: boolean;
+  includeEmails: boolean;
+  includeIncidents: boolean;
+  includePunchList: boolean;
+  includeMeetings: boolean;
+  includeSchedule: boolean;
+  includeDailyLogs: boolean;
+  includeSpecifications: boolean;
+  includePrimeContracts: boolean;
+  includeCommitments: boolean;
+  includeChangeOrders: boolean;
+  includeChangeEvents: boolean;
+  includeDirectCosts: boolean;
+  includeInvoicing: boolean;
+  includeDirectory: boolean;
+  includeEstimating: boolean;
+  baseFolderPath: string;
+};
+
+async function runArchive(archiveId: string, projectId: string, options: ArchiveOptions): Promise<void> {
   const progress = archiveProgress.get(archiveId)!;
   const startTime = Date.now();
 
@@ -328,15 +475,32 @@ async function runArchive(
 
     let totalFiles = 0;
     if (options.includeDocuments) totalFiles += countFolderFiles(docs.folders);
-    if (options.includeDrawings) totalFiles += docs.drawings.filter((d) => d.downloadUrl).length;
-    if (options.includeSubmittals) totalFiles += docs.submittals.filter((s) => s.downloadUrl).length;
-    if (options.includeRFIs) totalFiles += docs.rfis.filter((r) => r.downloadUrl).length;
-    if (options.includeBidPackages) totalFiles += docs.bidPackages.filter((b) => b.downloadUrl).length;
-    if (options.includePhotos) totalFiles += docs.photos.filter((p) => p.downloadUrl).length;
+    if (options.includeDrawings) totalFiles += countDocWithUrl(docs.drawings);
+    if (options.includeSubmittals) totalFiles += countDocWithUrl(docs.submittals);
+    if (options.includeRFIs) totalFiles += countDocWithUrl(docs.rfis);
+    if (options.includeBidPackages) totalFiles += countDocWithUrl(docs.bidPackages);
+    if (options.includePhotos) totalFiles += countDocWithUrl(docs.photos);
     if (options.includeBudget && docs.budget.summary) totalFiles += 1;
+    if (options.includeEmails) totalFiles += docs.emails.length;
+    if (options.includeIncidents) totalFiles += docs.incidents.length;
+    if (options.includePunchList) totalFiles += docs.punchList.length;
+    if (options.includeMeetings) totalFiles += docs.meetings.length;
+    if (options.includeSchedule) totalFiles += docs.schedule.length;
+    if (options.includeDailyLogs)
+      totalFiles += docs.dailyLogs.attachments.length + (docs.dailyLogs.items.length > 0 ? 1 : 0);
+    if (options.includeSpecifications) totalFiles += docs.specifications.length;
+    if (options.includePrimeContracts) totalFiles += docs.primeContracts.length;
+    if (options.includeCommitments)
+      totalFiles += docs.commitments.subcontracts.length + docs.commitments.purchaseOrders.length;
+    if (options.includeChangeOrders) totalFiles += docs.changeOrders.length;
+    if (options.includeChangeEvents) totalFiles += docs.changeEvents.length;
+    if (options.includeDirectCosts) totalFiles += docs.directCosts.length;
+    if (options.includeInvoicing) totalFiles += docs.invoicing.length;
+    if (options.includeDirectory && docs.directory.length > 0) totalFiles += 1;
+    if (options.includeEstimating && docs.estimating.length > 0) totalFiles += 1;
 
     progress.totalFiles = totalFiles;
-    progress.progress = 10;
+    progress.progress = 5;
 
     const projectFolderName = sanitizeFolderName(`${docs.projectName} (${projectId})`);
     const basePath = `${options.baseFolderPath}/${projectFolderName}`;
@@ -445,6 +609,105 @@ async function runArchive(
       }
     }
 
+    const uploadDocList = async (
+      list: any[],
+      folder: string,
+      stepLabel: string
+    ) => {
+      if (list.length === 0) return;
+      progress.currentStep = stepLabel;
+      await provider.createFolder(folder);
+      for (const doc of list) {
+        if (doc.downloadUrl || (doc as any).contentBuffer) {
+          const res = await uploadDocument(provider, folder, doc, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
+        }
+      }
+    };
+
+    if (options.includeEmails) await uploadDocList(docs.emails, `${basePath}/Emails`, 'Uploading emails...');
+    if (options.includeIncidents) await uploadDocList(docs.incidents, `${basePath}/Incidents`, 'Uploading incidents...');
+    if (options.includePunchList) await uploadDocList(docs.punchList, `${basePath}/Punch List`, 'Uploading punch list...');
+    if (options.includeMeetings) await uploadDocList(docs.meetings, `${basePath}/Meetings`, 'Uploading meetings...');
+    if (options.includeSchedule) await uploadDocList(docs.schedule, `${basePath}/Schedule`, 'Uploading schedule...');
+
+    if (options.includeDailyLogs && (docs.dailyLogs.items.length > 0 || docs.dailyLogs.attachments.length > 0)) {
+      progress.currentStep = 'Uploading daily logs...';
+      await provider.createFolder(`${basePath}/Daily Logs`);
+      if (docs.dailyLogs.items.length > 0) {
+        try {
+          const json = JSON.stringify(docs.dailyLogs.items, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Daily Logs`, 'daily_logs.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e: any) {
+          errors.push(`Daily logs export: ${e.message}`);
+        }
+      }
+      for (const att of docs.dailyLogs.attachments) {
+        if (att.downloadUrl || (att as any).contentBuffer) {
+          const res = await uploadDocument(provider, `${basePath}/Daily Logs`, att, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
+        }
+      }
+    }
+
+    if (options.includeSpecifications) await uploadDocList(docs.specifications, `${basePath}/Specifications`, 'Uploading specifications...');
+    if (options.includePrimeContracts) await uploadDocList(docs.primeContracts, `${basePath}/Prime Contracts`, 'Uploading prime contracts...');
+
+    if (options.includeCommitments) {
+      if (docs.commitments.subcontracts.length > 0) {
+        await provider.createFolder(`${basePath}/Commitments/Subcontracts`);
+        for (const doc of docs.commitments.subcontracts) {
+          if (doc.downloadUrl || (doc as any).contentBuffer) {
+            const res = await uploadDocument(provider, `${basePath}/Commitments/Subcontracts`, doc, progress);
+            if (res.success) filesUploaded++;
+            else errors.push(res.error!);
+          }
+        }
+      }
+      if (docs.commitments.purchaseOrders.length > 0) {
+        await provider.createFolder(`${basePath}/Commitments/Purchase Orders`);
+        for (const doc of docs.commitments.purchaseOrders) {
+          if (doc.downloadUrl || (doc as any).contentBuffer) {
+            const res = await uploadDocument(provider, `${basePath}/Commitments/Purchase Orders`, doc, progress);
+            if (res.success) filesUploaded++;
+            else errors.push(res.error!);
+          }
+        }
+      }
+    }
+
+    if (options.includeChangeOrders) await uploadDocList(docs.changeOrders, `${basePath}/Change Orders`, 'Uploading change orders...');
+    if (options.includeChangeEvents) await uploadDocList(docs.changeEvents, `${basePath}/Change Events`, 'Uploading change events...');
+    if (options.includeDirectCosts) await uploadDocList(docs.directCosts, `${basePath}/Direct Costs`, 'Uploading direct costs...');
+    if (options.includeInvoicing) await uploadDocList(docs.invoicing, `${basePath}/Invoicing`, 'Uploading invoicing...');
+
+    if (options.includeDirectory && docs.directory.length > 0) {
+      progress.currentStep = 'Exporting directory...';
+      await provider.createFolder(`${basePath}/Directory`);
+      try {
+        const json = JSON.stringify(docs.directory, null, 2);
+        await uploadDocumentWithRetry(provider, `${basePath}/Directory`, 'directory.json', Buffer.from(json), 'application/json');
+        filesUploaded++;
+      } catch (e: any) {
+        errors.push(`Directory export: ${e.message}`);
+      }
+    }
+
+    if (options.includeEstimating && docs.estimating.length > 0) {
+      progress.currentStep = 'Exporting estimating data...';
+      await provider.createFolder(`${basePath}/Estimating`);
+      try {
+        const json = JSON.stringify(docs.estimating, null, 2);
+        await uploadDocumentWithRetry(provider, `${basePath}/Estimating`, 'estimating.json', Buffer.from(json), 'application/json');
+        filesUploaded++;
+      } catch (e: any) {
+        errors.push(`Estimating export: ${e.message}`);
+      }
+    }
+
     progress.currentStep = 'Creating archive summary...';
     const summary = {
       projectId,
@@ -460,6 +723,21 @@ async function runArchive(
         bidPackages: docs.bidPackages.length,
         photos: docs.photos.length,
         hasBudget: !!docs.budget.summary,
+        emails: docs.emails.length,
+        incidents: docs.incidents.length,
+        punchList: docs.punchList.length,
+        meetings: docs.meetings.length,
+        schedule: docs.schedule.length,
+        dailyLogs: docs.dailyLogs.attachments.length + docs.dailyLogs.items.length,
+        specifications: docs.specifications.length,
+        primeContracts: docs.primeContracts.length,
+        commitments: docs.commitments.subcontracts.length + docs.commitments.purchaseOrders.length,
+        changeOrders: docs.changeOrders.length,
+        changeEvents: docs.changeEvents.length,
+        directCosts: docs.directCosts.length,
+        invoicing: docs.invoicing.length,
+        directory: docs.directory.length,
+        estimating: docs.estimating.length,
       },
       filesUploaded,
       errors: errors.length,
@@ -550,9 +828,12 @@ async function uploadDocument(
   try {
     progress.currentStep = `Uploading: ${doc.name}`;
 
-    const fileBuffer = await downloadProcoreFile(doc.downloadUrl);
+    let fileBuffer: Buffer | null = (doc as any).contentBuffer ?? null;
+    if (!fileBuffer && doc.downloadUrl) {
+      fileBuffer = await downloadProcoreFile(doc.downloadUrl);
+    }
     if (!fileBuffer) {
-      return { success: false, error: `${doc.name}: Failed to download from Procore` };
+      return { success: false, error: `${doc.name}: No content (missing downloadUrl or contentBuffer)` };
     }
 
     const fileName = sanitizeFileName(doc.name);
