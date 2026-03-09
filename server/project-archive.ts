@@ -604,8 +604,8 @@ export function getArchiveProgress(archiveId: string): ArchiveProgress | null {
   return archiveProgress.get(archiveId) || null;
 }
 
-export function getAllArchiveProgress(): ArchiveProgress[] {
-  return Array.from(archiveProgress.values());
+export function getAllArchiveProgress(): Array<ArchiveProgress & { archiveId: string }> {
+  return Array.from(archiveProgress.entries()).map(([archiveId, p]) => ({ ...p, archiveId }));
 }
 
 export async function getArchivableProjects(): Promise<
