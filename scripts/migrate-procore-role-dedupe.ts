@@ -52,6 +52,7 @@ async function main() {
     return;
   }
 
+  // Keep row with highest id per (procore_project_id, role_name, assignee_id); delete rest
   await pool.query(`
     DELETE FROM procore_role_assignments a
     USING procore_role_assignments b
