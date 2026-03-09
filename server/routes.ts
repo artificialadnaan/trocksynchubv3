@@ -126,6 +126,66 @@ export async function registerRoutes(
 
   app.use("/api/reconciliation", requireAuth, reconciliationRouter);
 
+  // Debug: Procore extraction field mapping (bypasses auth, requires ?debug_key=synchub_debug)
+  app.get("/api/debug/procore-extraction/:projectId", async (req, res) => {
+    if (req.query.debug_key !== "synchub_debug") {
+      return res.status(403).json({ message: "Invalid or missing debug_key" });
+    }
+    try {
+      const projectId = String(req.params.projectId ?? "");
+      if (!projectId) return res.status(400).json({ message: "projectId required" });
+      const { extractProjectDocuments } = await import("./procore-documents");
+      const { getProcoreClient } = await import("./procore");
+      const client = await getProcoreClient();
+      const [extracted, rawFoldersResponse] = await Promise.all([
+        extractProjectDocuments(projectId),
+        client.get("/rest/v1.0/folders", { params: { project_id: projectId } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
+      ]);
+      function fileCount(folder: any): number {
+        const files = folder.files?.length ?? 0;
+        const sub = folder.subfolders?.reduce((s: number, f: any) => s + fileCount(f), 0) ?? 0;
+        return files + sub;
+      }
+      const folderSummary = extracted.folders.map((f: any) => ({
+        id: f.id,
+        name: f.name,
+        path: f.path,
+        fileCount: fileCount(f),
+        files: (f.files ?? []).slice(0, 5).map((file: any) => ({ name: file.name, downloadUrl: file.downloadUrl, size: file.size, mimeType: file.mimeType })),
+      }));
+      const totalFolderFiles = extracted.folders.reduce((sum: number, f: any) => sum + fileCount(f), 0);
+      res.json({
+        projectId: extracted.projectId,
+        projectName: extracted.projectName,
+        extractedAt: extracted.extractedAt,
+        counts: {
+          folders: extracted.folders.length,
+          totalFolderFiles,
+          drawings: extracted.drawings.length,
+          submittals: extracted.submittals.length,
+          rfis: extracted.rfis.length,
+          bidPackages: extracted.bidPackages.length,
+          photos: extracted.photos.length,
+          hasBudget: !!extracted.budget.summary,
+        },
+        folderSummary,
+        sampleFirst3: {
+          folders: extracted.folders.slice(0, 3),
+          drawings: extracted.drawings.slice(0, 3),
+          submittals: extracted.submittals.slice(0, 3),
+          rfis: extracted.rfis.slice(0, 3),
+          photos: extracted.photos.slice(0, 3),
+          bidPackages: extracted.bidPackages.slice(0, 3),
+        },
+        budgetSummary: extracted.budget.summary,
+        budgetLineItemsCount: extracted.budget.lineItems?.length ?? 0,
+        rawFoldersFromProcore: Array.isArray(rawFoldersResponse) ? rawFoldersResponse.slice(0, 3) : rawFoldersResponse,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   registerArchiveRoutes(app as any);
 
   app.post("/api/auth/login", async (req, res) => {
