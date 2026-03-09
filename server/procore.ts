@@ -65,6 +65,9 @@ function getLoginUrl(environment: string): string {
   return environment === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
 }
 
+// Mutex: only one Procore token refresh at a time (refresh tokens are single-use)
+let refreshPromise: Promise<string> | null = null;
+
 async function getAccessToken(): Promise<string> {
   const token = await storage.getOAuthToken("procore");
   if (!token?.accessToken) {
@@ -82,38 +85,52 @@ async function getAccessToken(): Promise<string> {
 }
 
 async function refreshAccessToken(refreshToken: string): Promise<string> {
-  const config = await getProcoreConfig();
-  const loginUrl = getLoginUrl(config.environment);
-
-  const response = await fetch(`${loginUrl}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      grant_type: 'refresh_token',
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      refresh_token: refreshToken,
-    }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to refresh Procore token: ${response.status} ${errText}`);
+  if (refreshPromise) {
+    return refreshPromise;
   }
 
-  const data = await response.json();
-  const expiresAt = new Date(Date.now() + (data.expires_in || 7200) * 1000);
+  const doRefresh = async (): Promise<string> => {
+    const config = await getProcoreConfig();
+    const loginUrl = getLoginUrl(config.environment);
 
-  await storage.upsertOAuthToken({
-    provider: "procore",
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || refreshToken,
-    tokenType: "Bearer",
-    expiresAt,
-  });
+    const response = await fetch(`${loginUrl}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        refresh_token: refreshToken,
+      }),
+    });
 
-  console.log("Procore token refreshed successfully");
-  return data.access_token;
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Failed to refresh Procore token: ${response.status} ${errText}`);
+    }
+
+    const data = await response.json();
+    const expiresAt = new Date(Date.now() + (data.expires_in || 7200) * 1000);
+
+    await storage.upsertOAuthToken({
+      provider: "procore",
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || refreshToken,
+      tokenType: "Bearer",
+      expiresAt,
+    });
+
+    console.log("Procore token refreshed successfully");
+    return data.access_token;
+  };
+
+  const promise = doRefresh();
+  refreshPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    refreshPromise = null;
+  }
 }
 
 async function fetchProcorePages<T>(endpoint: string, companyId: string): Promise<T[]> {
