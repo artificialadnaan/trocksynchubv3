@@ -19,6 +19,7 @@
     "db:seed-reconciliation": "tsx scripts/seed-reconciliation.ts",
     "db:migrate-rfp-reporting": "tsx scripts/migrate-rfp-reporting.ts",
     "db:migrate-hubspot-owner-tables": "tsx scripts/migrate-hubspot-owner-tables.ts",
+    "db:migrate-procore-role-dedupe": "tsx scripts/migrate-procore-role-dedupe.ts",
     "import:owner-mappings": "tsx scripts/import-hubspot-owner-mappings.ts",
     "import:procore-users": "tsx scripts/import-procore-users.ts",
     "bidboard:stage-sync": "tsx scripts/run-bidboard-stage-sync.ts",

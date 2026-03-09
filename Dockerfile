@@ -66,5 +66,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8080/_health || exit 1
 
-# Start the application (reconciliation migration first so db:push won't prompt for new enums, then db:push + migrations + start)
-CMD ["sh", "-c", "npm run db:migrate-reconciliation && npm run db:push && npm run db:migrate-approved-attachments && npm run db:migrate-audit-log-category && npm run db:migrate-rfp-reporting && npm run start"]
+# Start the application (dedupe procore_role_assignments before db:push to avoid truncate prompt on unique constraint)
+CMD ["sh", "-c", "CI=1 npm run db:migrate-reconciliation && npm run db:migrate-procore-role-dedupe && CI=1 npm run db:push && npm run db:migrate-approved-attachments && npm run db:migrate-audit-log-category && npm run db:migrate-rfp-reporting && npm run start"]
