@@ -135,11 +135,14 @@ export async function registerRoutes(
       const projectId = String(req.params.projectId ?? "");
       if (!projectId) return res.status(400).json({ message: "projectId required" });
       const { extractProjectDocuments } = await import("./procore-documents");
-      const { getProcoreClient } = await import("./procore");
+      const { getProcoreClient, getCompanyId } = await import("./procore");
       const client = await getProcoreClient();
-      const [extracted, rawFoldersResponse] = await Promise.all([
+      const companyId = await getCompanyId();
+      const [extracted, rawFoldersResponse, rawPrimeContractsRes, rawCommitmentsRes] = await Promise.all([
         extractProjectDocuments(projectId),
         client.get("/rest/v1.0/folders", { params: { project_id: projectId } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
+        client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, { params: { company_id: companyId, per_page: 100 } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
+        client.get(`/rest/v1.0/projects/${projectId}/work_order_contracts`, { params: { company_id: companyId, per_page: 100 } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
       ]);
 
       // Sample recursive fetch: first folder with has_children_files to verify files are returned
@@ -220,6 +223,9 @@ export async function registerRoutes(
         budgetLineItemsCount: extracted.budget.lineItems?.length ?? 0,
         rawFoldersFromProcore: Array.isArray(rawFoldersResponse) ? rawFoldersResponse.slice(0, 3) : rawFoldersResponse,
         rawRecursiveFolderFetch,
+        extractionErrors: extracted.extractionErrors ?? null,
+        rawPrimeContracts: rawPrimeContractsRes,
+        rawCommitments: rawCommitmentsRes,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
