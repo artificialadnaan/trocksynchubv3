@@ -1046,18 +1046,10 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
       }
     }
     projectsWithMeta = Array.from(byId.values());
-    // Skip projects where Procore updated_at hasn't changed since last check
-    projectsToSync = projectsWithMeta.filter(p => {
-      if (!p.lastRoleCheckAt) return true;
-      if (!p.procoreUpdatedAt) return true;
-      return p.procoreUpdatedAt > p.lastRoleCheckAt;
-    });
+    // Check all active projects every cycle; role assignments can change without project-level updates
+    projectsToSync = projectsWithMeta.map(p => ({ procoreId: p.procoreId, name: p.name }));
   }
 
-  const skippedCount = projectsWithMeta.length - projectsToSync.length;
-  if (skippedCount > 0) {
-    console.log(`[procore] Skipping ${skippedCount} projects (no changes since last check)`);
-  }
   console.log(`[procore] Syncing role assignments for ${projectsToSync.length} projects (${ROLE_SYNC_CONCURRENCY} concurrent)...`);
   let synced = 0;
   const newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> = [];
