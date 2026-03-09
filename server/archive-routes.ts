@@ -23,6 +23,8 @@ import {
   getAllArchiveProgress,
   handleProjectStageChange,
 } from './project-archive';
+import { extractProjectDocuments } from './procore-documents';
+import { getProcoreClient } from './procore';
 import type { StorageProviderConfig } from './storage-config';
 
 const router = Router();
@@ -179,6 +181,95 @@ router.post('/api/webhooks/procore/project-stage', async (req: Request, res: Res
 
     const result = await handleProjectStageChange(projectId, projectName, newStage);
     res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Debug: Procore extraction field mapping verification (temporary)
+// ---------------------------------------------------------------------------
+
+const DEBUG_KEY = 'synchub_debug';
+
+router.get('/api/debug/procore-extraction/:projectId', async (req: Request, res: Response) => {
+  if (req.query.debug_key !== DEBUG_KEY) {
+    return res.status(404).json({ message: 'Not found' });
+  }
+
+  try {
+    const projectId = String(req.params.projectId ?? '');
+    if (!projectId) {
+      return res.status(400).json({ message: 'projectId required' });
+    }
+
+    const client = await getProcoreClient();
+
+    const [extracted, rawFoldersResponse] = await Promise.all([
+      extractProjectDocuments(projectId),
+      client.get('/rest/v1.0/folders', { params: { project_id: projectId } }).then((r) => r.data).catch((e: any) => ({ error: e.message })),
+    ]);
+
+    function fileCount(folder: any): number {
+      const files = folder.files?.length ?? 0;
+      const sub = folder.subfolders?.reduce((s: number, f: any) => s + fileCount(f), 0) ?? 0;
+      return files + sub;
+    }
+
+    const folderSummary = extracted.folders.map((f) => ({
+      id: f.id,
+      name: f.name,
+      path: f.path,
+      fileCount: fileCount(f),
+      files: (f.files ?? []).slice(0, 5).map((file) => ({
+        name: file.name,
+        downloadUrl: file.downloadUrl,
+        size: file.size,
+        mimeType: file.mimeType,
+      })),
+    }));
+
+    const totalFolderFiles = extracted.folders.reduce((sum, f) => sum + fileCount(f), 0);
+
+    const debug = {
+      projectId: extracted.projectId,
+      projectName: extracted.projectName,
+      extractedAt: extracted.extractedAt,
+      counts: {
+        folders: extracted.folders.length,
+        totalFolderFiles,
+        drawings: extracted.drawings.length,
+        submittals: extracted.submittals.length,
+        rfis: extracted.rfis.length,
+        bidPackages: extracted.bidPackages.length,
+        photos: extracted.photos.length,
+        hasBudget: !!extracted.budget.summary,
+      },
+      folderSummary,
+      sampleFirst3: {
+        folders: extracted.folders.slice(0, 3).map((f) => ({
+          ...f,
+          files: f.files?.slice(0, 3),
+          subfolders: f.subfolders?.slice(0, 2).map((s) => ({
+            ...s,
+            files: s.files?.slice(0, 2),
+            subfolders: [],
+          })),
+        })),
+        drawings: extracted.drawings.slice(0, 3),
+        submittals: extracted.submittals.slice(0, 3),
+        rfis: extracted.rfis.slice(0, 3),
+        photos: extracted.photos.slice(0, 3),
+        bidPackages: extracted.bidPackages.slice(0, 3),
+      },
+      budgetSummary: extracted.budget.summary,
+      budgetLineItemsCount: extracted.budget.lineItems?.length ?? 0,
+      rawFoldersFromProcore: Array.isArray(rawFoldersResponse)
+        ? rawFoldersResponse.slice(0, 3)
+        : rawFoldersResponse,
+    };
+
+    res.json(debug);
   } catch (e: any) {
     res.status(500).json({ message: e.message });
   }

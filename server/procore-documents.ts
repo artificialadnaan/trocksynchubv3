@@ -100,18 +100,21 @@ async function extractFolders(client: any, companyId: string, projectId: string)
 async function extractFolderRecursive(client: any, companyId: string, projectId: string, folder: any, parentPath: string = ''): Promise<FolderInfo> {
   const currentPath = parentPath ? `${parentPath}/${folder.name}` : folder.name;
 
-  const files: DocumentInfo[] = (folder.files || []).map((file: any) => ({
+  const files: DocumentInfo[] = (folder.files || []).map((file: any) => {
+    const url = file.url ?? file.file_versions?.[0]?.url;
+    return {
     id: String(file.id),
-    name: file.name,
+    name: file.name ?? file.filename ?? file.file_name,
     type: 'document' as const,
-    url: file.file_versions?.[0]?.url,
-    downloadUrl: file.file_versions?.[0]?.url,
-    size: file.file_versions?.[0]?.file_size,
-    mimeType: file.file_versions?.[0]?.content_type,
+    url,
+    downloadUrl: url,
+    size: file.size ?? file.file_versions?.[0]?.file_size,
+    mimeType: file.content_type ?? file.mime_type ?? file.file_versions?.[0]?.content_type,
     createdAt: file.created_at,
     updatedAt: file.updated_at,
     metadata: { versionCount: file.file_versions?.length || 0 },
-  }));
+  };
+  });
 
   const subfolders: FolderInfo[] = [];
   if (folder.folders && folder.folders.length > 0) {
@@ -151,12 +154,17 @@ async function extractDrawings(client: any, companyId: string, projectId: string
       params: { project_id: projectId },
     });
 
-    return (response.data || []).map((drawing: any) => ({
+    return (response.data || []).map((drawing: any) => {
+      const rev = drawing.current_revision;
+      const pdfUrl = rev?.flattened_url ?? rev?.pdf_url ?? drawing.pdf_url ?? drawing.image_url;
+      const imgUrl = drawing.image_url ?? rev?.image_url;
+      const downloadUrl = pdfUrl || imgUrl;
+      return {
       id: String(drawing.id),
-      name: drawing.name || drawing.number,
+      name: drawing.name ?? drawing.number ?? drawing.title,
       type: 'drawing' as const,
-      url: drawing.image_url,
-      downloadUrl: drawing.pdf_url || drawing.image_url,
+      url: imgUrl ?? downloadUrl,
+      downloadUrl,
       createdAt: drawing.created_at,
       updatedAt: drawing.updated_at,
       metadata: {
@@ -165,7 +173,8 @@ async function extractDrawings(client: any, companyId: string, projectId: string
         revision: drawing.current_revision,
         setId: drawing.drawing_set_id,
       },
-    }));
+    };
+    });
   } catch (e: any) {
     console.log(`[ProcoreDocs] Could not extract drawings: ${e.message}`);
     return [];
@@ -183,13 +192,14 @@ async function extractSubmittals(client: any, companyId: string, projectId: stri
       // Get submittal attachments
       const attachments = submittal.attachments || [];
       for (const attachment of attachments) {
+        const url = attachment.url ?? attachment.download_url;
         submittals.push({
           id: String(attachment.id || submittal.id),
-          name: attachment.name || `${submittal.title || submittal.number}.pdf`,
+          name: attachment.name ?? attachment.filename ?? `${submittal.title || submittal.number}.pdf`,
           type: 'submittal',
-          url: attachment.url,
-          downloadUrl: attachment.url,
-          size: attachment.file_size,
+          url,
+          downloadUrl: url,
+          size: attachment.file_size ?? attachment.size,
           createdAt: submittal.created_at,
           metadata: {
             submittalId: submittal.id,
@@ -235,13 +245,14 @@ async function extractRFIs(client: any, companyId: string, projectId: string): P
     for (const rfi of response.data || []) {
       const attachments = rfi.attachments || [];
       for (const attachment of attachments) {
+        const url = attachment.url ?? attachment.download_url;
         rfis.push({
           id: String(attachment.id || rfi.id),
-          name: attachment.name || `RFI-${rfi.number}.pdf`,
+          name: attachment.name ?? attachment.filename ?? `RFI-${rfi.number}.pdf`,
           type: 'rfi',
-          url: attachment.url,
-          downloadUrl: attachment.url,
-          size: attachment.file_size,
+          url,
+          downloadUrl: url,
+          size: attachment.file_size ?? attachment.size,
           createdAt: rfi.created_at,
           metadata: {
             rfiId: rfi.id,
@@ -300,13 +311,14 @@ async function extractBidPackages(client: any, companyId: string, projectId: str
         });
 
         for (const doc of docsResponse.data || []) {
+          const url = doc.url ?? doc.download_url;
           bidPackages.push({
             id: String(doc.id),
-            name: doc.name,
+            name: doc.name ?? doc.filename ?? doc.file_name,
             type: 'bid_package',
-            url: doc.url,
-            downloadUrl: doc.url,
-            size: doc.file_size,
+            url,
+            downloadUrl: url,
+            size: doc.file_size ?? doc.size,
             createdAt: bp.created_at,
             metadata: {
               bidPackageId: bp.id,
@@ -343,19 +355,22 @@ async function extractPhotos(client: any, companyId: string, projectId: string):
       params: { company_id: companyId, per_page: 500 },
     });
 
-    return (response.data || []).map((photo: any) => ({
+    return (response.data || []).map((photo: any) => {
+      const url = photo.full_url ?? photo.image_url ?? photo.url;
+      return {
       id: String(photo.id),
-      name: photo.title || photo.name || `Photo_${photo.id}.jpg`,
+      name: photo.title ?? photo.name ?? photo.filename ?? `Photo_${photo.id}.jpg`,
       type: 'photo' as const,
-      url: photo.url,
-      downloadUrl: photo.url,
+      url,
+      downloadUrl: url,
       createdAt: photo.created_at,
       metadata: {
         categoryId: photo.image_category_id,
         location: photo.location,
         description: photo.description,
       },
-    }));
+    };
+    });
   } catch (e: any) {
     console.log(`[ProcoreDocs] Could not extract photos: ${e.message}`);
     return [];
@@ -409,7 +424,7 @@ export async function getProjectsList(): Promise<Array<{ id: string; name: strin
       id: String(p.id),
       name: p.name,
       status: p.active ? 'active' : 'inactive',
-      stage: p.stage?.name,
+      stage: p.stage?.name ?? p.project_stage?.name ?? (typeof p.stage === 'string' ? p.stage : undefined),
     }));
   } catch (e: any) {
     console.error(`[ProcoreDocs] Failed to get projects list: ${e.message}`);
