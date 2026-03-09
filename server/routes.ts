@@ -141,6 +141,19 @@ export async function registerRoutes(
         extractProjectDocuments(projectId),
         client.get("/rest/v1.0/folders", { params: { project_id: projectId } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
       ]);
+
+      // Sample recursive fetch: first folder with has_children_files to verify files are returned
+      let rawRecursiveFolderFetch: any = null;
+      const rootList = Array.isArray(rawFoldersResponse) ? rawFoldersResponse : rawFoldersResponse?.folders ?? [];
+      const firstWithFiles = rootList.find((f: any) => f?.has_children_files === true);
+      if (firstWithFiles?.id) {
+        try {
+          const rec = await client.get(`/rest/v1.0/folders/${firstWithFiles.id}`, { params: { project_id: projectId } });
+          rawRecursiveFolderFetch = { folderId: firstWithFiles.id, folderName: firstWithFiles.name, response: rec.data };
+        } catch (e: any) {
+          rawRecursiveFolderFetch = { folderId: firstWithFiles.id, error: e.message };
+        }
+      }
       function fileCount(folder: any): number {
         const files = folder.files?.length ?? 0;
         const sub = folder.subfolders?.reduce((s: number, f: any) => s + fileCount(f), 0) ?? 0;
@@ -180,6 +193,7 @@ export async function registerRoutes(
         budgetSummary: extracted.budget.summary,
         budgetLineItemsCount: extracted.budget.lineItems?.length ?? 0,
         rawFoldersFromProcore: Array.isArray(rawFoldersResponse) ? rawFoldersResponse.slice(0, 3) : rawFoldersResponse,
+        rawRecursiveFolderFetch,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message });

@@ -1,6 +1,10 @@
 import { getProcoreClient, getCompanyId } from './procore';
 import { storage } from './storage';
 
+/** Small delay between Procore API calls to stay under 3,600 req/hour (avoid bursting) */
+const RATE_LIMIT_DELAY_MS = 150;
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 interface DocumentInfo {
   id: string;
   name: string;
@@ -85,10 +89,15 @@ async function extractFolders(client: any, companyId: string, projectId: string)
       params: { project_id: projectId },
     });
 
+    // Procore returns { folders: [...] } or sometimes array directly
+    const raw = response.data;
+    const folderList = Array.isArray(raw) ? raw : (raw?.folders ?? []);
+
     const folders: FolderInfo[] = [];
-    for (const folder of response.data || []) {
-      const folderInfo = await extractFolderRecursive(client, companyId, projectId, folder);
+    for (const folder of folderList) {
+      const folderInfo = await extractFolderRecursive(client, companyId, projectId, folder, '');
       folders.push(folderInfo);
+      await delay(RATE_LIMIT_DELAY_MS);
     }
     return folders;
   } catch (e: any) {
@@ -98,6 +107,23 @@ async function extractFolders(client: any, companyId: string, projectId: string)
 }
 
 async function extractFolderRecursive(client: any, companyId: string, projectId: string, folder: any, parentPath: string = ''): Promise<FolderInfo> {
+  // Procore root/list returns folder stubs with files: [] even when has_children_files. Fetch full folder when needed.
+  const isStub =
+    (folder.has_children_files === true || folder.has_children_folders === true) &&
+    (folder.files?.length ?? 0) === 0 &&
+    (folder.folders?.length ?? 0) === 0;
+  if (isStub && folder.id) {
+    await delay(RATE_LIMIT_DELAY_MS);
+    try {
+      const full = await client.get(`/rest/v1.0/folders/${folder.id}`, {
+        params: { project_id: projectId },
+      });
+      folder = full.data;
+    } catch (e: any) {
+      console.log(`[ProcoreDocs] Could not fetch folder ${folder.id}: ${e.message}`);
+    }
+  }
+
   const currentPath = parentPath ? `${parentPath}/${folder.name}` : folder.name;
 
   const files: DocumentInfo[] = (folder.files || []).map((file: any) => {
@@ -119,12 +145,10 @@ async function extractFolderRecursive(client: any, companyId: string, projectId:
   const subfolders: FolderInfo[] = [];
   if (folder.folders && folder.folders.length > 0) {
     for (const subfolder of folder.folders) {
+      await delay(RATE_LIMIT_DELAY_MS);
       try {
-        // Fetch full subfolder details
-        const subfolderResponse = await client.get(`/rest/v1.0/folders/${subfolder.id}`, {
-          params: { project_id: projectId },
-        });
-        const subfolderInfo = await extractFolderRecursive(client, companyId, projectId, subfolderResponse.data, currentPath);
+        // Fetch full subfolder details (or extractFolderRecursive will fetch if stub)
+        const subfolderInfo = await extractFolderRecursive(client, companyId, projectId, subfolder, currentPath);
         subfolders.push(subfolderInfo);
       } catch (e) {
         // Add basic info if can't fetch details
@@ -465,7 +489,8 @@ export async function getProjectDocumentSummary(projectId: string): Promise<{
       client.get(`/rest/v1.0/projects/${projectId}/budget`, { params: { company_id: companyId } }).catch(() => ({ data: null })),
     ]);
 
-    counts.folders = foldersRes.data?.length || 0;
+    const rawFolders = foldersRes.data;
+    counts.folders = Array.isArray(rawFolders) ? rawFolders.length : (rawFolders?.folders?.length ?? 0);
     counts.drawings = drawingsRes.data?.length || 0;
     counts.submittals = submittalsRes.data?.length || 0;
     counts.rfis = rfisRes.data?.length || 0;
