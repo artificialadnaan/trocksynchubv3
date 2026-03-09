@@ -2,7 +2,7 @@
  * Resolver Panel — Conflict resolution slide-over for conflict/fuzzy_match projects
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Sheet,
   SheetContent,
@@ -53,19 +53,29 @@ export function ResolverPanel({
   const projectNumber = project?.canonicalProjectNumber ?? pc?.projectNumber ?? hs?.projectNumber ?? null;
   const isLegacy = projectNumber && !DFW_REGEX.test(projectNumber);
   const unresolvedConflicts = (project?.conflicts ?? []).filter((c: any) => !c.isResolved);
+  const prevOpenRef = useRef(false);
 
+  // Initialize selections only when panel opens (transition closed→open)
+  // #region agent log
   useEffect(() => {
-    if (open && unresolvedConflicts.length) {
-      const init: Record<string, { value: string; source: "procore" | "hubspot" | "manual" }> = {};
-      unresolvedConflicts.forEach((c: any) => {
-        const pv = c.procoreValue ?? "";
-        const hv = c.hubspotValue ?? "";
-        init[c.fieldName] = { value: pv || hv, source: pv ? "procore" : "hubspot" };
-      });
-      setSelections(init);
-      setAdminNotes(project?.adminNotes ?? "");
+    const justOpened = open && !prevOpenRef.current;
+    prevOpenRef.current = open;
+    if (justOpened) {
+      const unresolved = (project?.conflicts ?? []).filter((c: any) => !c.isResolved);
+      if (unresolved.length) {
+        const init: Record<string, { value: string; source: "procore" | "hubspot" | "manual" }> = {};
+        unresolved.forEach((c: any) => {
+          const pv = c.procoreValue ?? "";
+          const hv = c.hubspotValue ?? "";
+          init[c.fieldName] = { value: pv || hv, source: pv ? "procore" : "hubspot" };
+        });
+        fetch('http://127.0.0.1:7661/ingest/61f6258c-19fa-4982-aa07-700f3fd86181',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe82c1'},body:JSON.stringify({sessionId:'fe82c1',location:'ResolverPanel.tsx:useEffect',message:'useEffect init (justOpened)',data:{conflictsLen:unresolved.length},hypothesisId:'A',timestamp:Date.now()})}).catch(()=>{});
+        setSelections(init);
+        setAdminNotes(project?.adminNotes ?? "");
+      }
     }
-  }, [open, project?.conflicts, project?.adminNotes, unresolvedConflicts]);
+  }, [open, project?.conflicts, project?.adminNotes]);
+  // #endregion
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -205,24 +215,36 @@ export function ResolverPanel({
                     <RadioGroup
                       value={sel.source === "manual" ? "manual" : sel.source}
                       onValueChange={(v) => {
+                        // #region agent log
+                        fetch('http://127.0.0.1:7661/ingest/61f6258c-19fa-4982-aa07-700f3fd86181',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe82c1'},body:JSON.stringify({sessionId:'fe82c1',location:'ResolverPanel.tsx:onValueChange',message:'Radio onValueChange fired',data:{fieldName:c.fieldName,value:v},hypothesisId:'B',timestamp:Date.now()})}).catch(()=>{});
+                        // #endregion
                         const src = v as "procore" | "hubspot" | "manual";
                         const val = src === "procore" ? pv : src === "hubspot" ? hv : sel.value;
                         setSelections((s) => ({ ...s, [c.fieldName]: { value: val, source: src } }));
                       }}
                       className="flex flex-col gap-2"
                     >
-                      <div className="flex items-center gap-2">
+                      <label
+                        className="flex items-center gap-2 cursor-pointer font-normal"
+                        onClick={() => setSelections((s) => ({ ...s, [c.fieldName]: { value: pv, source: "procore" } }))}
+                      >
                         <RadioGroupItem value="procore" id={`${c.fieldName}-pc`} />
-                        <Label htmlFor={`${c.fieldName}-pc`} className="font-normal">Use Procore</Label>
-                      </div>
-                      <div className="flex items-center gap-2">
+                        <span>Use Procore</span>
+                      </label>
+                      <label
+                        className="flex items-center gap-2 cursor-pointer font-normal"
+                        onClick={() => setSelections((s) => ({ ...s, [c.fieldName]: { value: hv, source: "hubspot" } }))}
+                      >
                         <RadioGroupItem value="hubspot" id={`${c.fieldName}-hs`} />
-                        <Label htmlFor={`${c.fieldName}-hs`} className="font-normal">Use HubSpot</Label>
-                      </div>
-                      <div className="flex items-center gap-2">
+                        <span>Use HubSpot</span>
+                      </label>
+                      <label
+                        className="flex items-center gap-2 cursor-pointer font-normal"
+                        onClick={() => setSelections((s) => ({ ...s, [c.fieldName]: { value: sel.value, source: "manual" } }))}
+                      >
                         <RadioGroupItem value="manual" id={`${c.fieldName}-manual`} />
-                        <Label htmlFor={`${c.fieldName}-manual`} className="font-normal">Manual Override</Label>
-                      </div>
+                        <span>Manual Override</span>
+                      </label>
                     </RadioGroup>
                     {sel.source === "manual" && (
                       <Input
