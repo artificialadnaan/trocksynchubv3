@@ -89,6 +89,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { RfpAutomationCard } from "@/components/rfp-automation-card";
+import StorageSettings from "@/components/settings/StorageSettings";
 import {
   Link2,
   Clock,
@@ -236,6 +237,8 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      <StorageSettings />
 
       <Card>
         <CardHeader className="pb-3">

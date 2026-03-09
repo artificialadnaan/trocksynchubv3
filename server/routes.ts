@@ -93,6 +93,7 @@ import {
 import { startRfpReportScheduler } from "./cron/reportScheduler";
 import { startReconciliationScheduler } from "./cron/reconciliationScheduler";
 import reconciliationRouter from "./routes/reconciliation";
+import { registerArchiveRoutes } from "./archive-routes";
 
 const PgSession = connectPgSimple(session);
 
@@ -124,6 +125,8 @@ export async function registerRoutes(
   }
 
   app.use("/api/reconciliation", requireAuth, reconciliationRouter);
+
+  registerArchiveRoutes(app as any);
 
   app.post("/api/auth/login", async (req, res) => {
     try {

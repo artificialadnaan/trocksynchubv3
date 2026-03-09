@@ -1,58 +1,37 @@
 /**
  * Project Archive Module
  * ======================
- * 
- * This module handles archiving completed projects to SharePoint.
- * When a project reaches closeout, all documents are extracted from
- * Procore and uploaded to a SharePoint folder for permanent storage.
- * 
+ *
+ * Handles archiving completed projects to configurable storage (Google Drive,
+ * SharePoint, or local). When a project reaches closeout, documents are
+ * extracted from Procore and uploaded to the configured provider.
+ *
  * Archive Process:
- * 1. Create SharePoint folder for project
- * 2. Enumerate all Procore documents (drawings, submittals, RFIs, etc.)
- * 3. Download each document from Procore
- * 4. Upload to SharePoint with folder organization
- * 5. Track progress and handle errors
- * 
- * Document Types Archived:
- * - Project drawings (CAD, PDF)
- * - Submittals and approvals
- * - RFIs (Requests for Information)
- * - Bid packages and proposals
- * - Change order documentation
- * - Project photos
- * 
- * SharePoint Organization:
- * /Projects/{ProjectNumber} - {ProjectName}/
- *   ├── Drawings/
- *   ├── Submittals/
- *   ├── RFIs/
- *   ├── Bid Packages/
- *   └── Photos/
- * 
- * Key Functions:
- * - startProjectArchive(): Begin archive process (async)
- * - getArchiveProgress(): Check progress by project ID
- * - getAllArchiveProgress(): List all archive jobs
- * - getProjectDocumentSummary(): Preview what will be archived
- * 
- * Progress Tracking:
- * Archive jobs are tracked in memory with status updates.
- * Progress includes: file counts, current step, errors.
- * 
+ * 1. Resolve storage provider (from storage-config)
+ * 2. Create project folder structure
+ * 3. Enumerate and download Procore documents
+ * 4. Upload with retry for transient errors
+ * 5. Track progress
+ *
  * @module project-archive
  */
 
 import { storage } from './storage';
-import { extractProjectDocuments, downloadProcoreFile, getProjectDocumentSummary, getProjectsList } from './procore-documents';
-import { 
-  createSharePointFolder, 
-  uploadFileToSharePoint, 
-  isSharePointConnected,
-  getSharePointConfig 
-} from './microsoft';
+import {
+  extractProjectDocuments,
+  downloadProcoreFile,
+  getProjectDocumentSummary,
+  getProjectsList,
+} from './procore-documents';
+import { getStorageProvider, getStorageConfig, getAutoArchiveConfig } from './storage-config';
+import type { StorageProvider } from './storage-provider';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 /** Archive progress tracking object */
-interface ArchiveProgress {
+export interface ArchiveProgress {
   projectId: string;
   projectName: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
@@ -63,34 +42,92 @@ interface ArchiveProgress {
   errors: string[];
   startedAt: string;
   completedAt?: string;
-  sharePointUrl?: string;
+  storageUrl?: string;
+  providerType?: string;
 }
 
 interface ArchiveResult {
   success: boolean;
   projectId: string;
   projectName: string;
-  sharePointUrl?: string;
+  storageUrl?: string;
   filesArchived: number;
   errors: string[];
   duration: number;
 }
 
+const TRANSIENT_STATUS_CODES = new Set([429, 502, 503]);
+const TRANSIENT_ERROR_PATTERNS = ['ECONNRESET', 'ETIMEDOUT', 'timeout', 'ENOTFOUND', 'ECONNRESET'];
+
+function isTransientError(e: any): boolean {
+  const msg = String(e?.message || e || '');
+  const code = e?.code || e?.response?.status;
+  if (TRANSIENT_STATUS_CODES.has(Number(code))) return true;
+  return TRANSIENT_ERROR_PATTERNS.some((p) => msg.includes(p));
+}
+
+// ---------------------------------------------------------------------------
+// Retry helper
+// ---------------------------------------------------------------------------
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function uploadDocumentWithRetry(
+  provider: StorageProvider,
+  folderPath: string,
+  fileName: string,
+  content: Buffer,
+  mimeType: string,
+  maxAttempts = 3
+): Promise<void> {
+  let lastError: any;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await provider.uploadFile(folderPath, fileName, content, mimeType);
+      return;
+    } catch (e: any) {
+      lastError = e;
+      if (attempt < maxAttempts && isTransientError(e)) {
+        const delay = 2 * 1000 * attempt; // 2s * attempt
+        await sleep(delay);
+      } else {
+        throw e;
+      }
+    }
+  }
+  throw lastError;
+}
+
+// ---------------------------------------------------------------------------
+// Archive state
+// ---------------------------------------------------------------------------
+
 const archiveProgress: Map<string, ArchiveProgress> = new Map();
 
-export async function startProjectArchive(projectId: string, options: {
-  includeDrawings?: boolean;
-  includeSubmittals?: boolean;
-  includeRFIs?: boolean;
-  includeBidPackages?: boolean;
-  includePhotos?: boolean;
-  includeBudget?: boolean;
-  includeDocuments?: boolean;
-  baseFolderPath?: string;
-} = {}): Promise<{ archiveId: string }> {
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+export async function startProjectArchive(
+  projectId: string,
+  options: {
+    includeDrawings?: boolean;
+    includeSubmittals?: boolean;
+    includeRFIs?: boolean;
+    includeBidPackages?: boolean;
+    includePhotos?: boolean;
+    includeBudget?: boolean;
+    includeDocuments?: boolean;
+    baseFolderPath?: string;
+  } = {}
+): Promise<{ archiveId: string }> {
   const archiveId = `archive_${projectId}_${Date.now()}`;
 
-  // Default all options to true
+  const cfg = await getStorageConfig();
+  const baseFolderPath = options.baseFolderPath ?? cfg.archiveBaseFolderName;
+
   const opts = {
     includeDrawings: options.includeDrawings ?? true,
     includeSubmittals: options.includeSubmittals ?? true,
@@ -99,10 +136,9 @@ export async function startProjectArchive(projectId: string, options: {
     includePhotos: options.includePhotos ?? true,
     includeBudget: options.includeBudget ?? true,
     includeDocuments: options.includeDocuments ?? true,
-    baseFolderPath: options.baseFolderPath || 'T-Rock Projects',
+    baseFolderPath,
   };
 
-  // Initialize progress
   archiveProgress.set(archiveId, {
     projectId,
     projectName: '',
@@ -115,7 +151,6 @@ export async function startProjectArchive(projectId: string, options: {
     startedAt: new Date().toISOString(),
   });
 
-  // Start archive process asynchronously
   runArchive(archiveId, projectId, opts).catch((e) => {
     const progress = archiveProgress.get(archiveId);
     if (progress) {
@@ -127,177 +162,296 @@ export async function startProjectArchive(projectId: string, options: {
   return { archiveId };
 }
 
-async function runArchive(archiveId: string, projectId: string, options: {
-  includeDrawings: boolean;
-  includeSubmittals: boolean;
-  includeRFIs: boolean;
-  includeBidPackages: boolean;
-  includePhotos: boolean;
-  includeBudget: boolean;
-  includeDocuments: boolean;
-  baseFolderPath: string;
-}): Promise<void> {
+// ---------------------------------------------------------------------------
+// Preview (dry-run)
+// ---------------------------------------------------------------------------
+
+export interface ArchivePreviewOptions {
+  includeDrawings?: boolean;
+  includeSubmittals?: boolean;
+  includeRFIs?: boolean;
+  includeBidPackages?: boolean;
+  includePhotos?: boolean;
+  includeBudget?: boolean;
+  includeDocuments?: boolean;
+}
+
+export interface ArchivePreviewResult {
+  projectId: string;
+  projectName: string;
+  folderStructure: string[];
+  fileCounts: {
+    documents: number;
+    drawings: number;
+    submittals: number;
+    rfis: number;
+    bidPackages: number;
+    photos: number;
+    budget: number;
+    total: number;
+  };
+}
+
+export async function previewArchive(
+  projectId: string,
+  options: ArchivePreviewOptions = {}
+): Promise<ArchivePreviewResult> {
+  const opts = {
+    includeDrawings: options.includeDrawings ?? true,
+    includeSubmittals: options.includeSubmittals ?? true,
+    includeRFIs: options.includeRFIs ?? true,
+    includeBidPackages: options.includeBidPackages ?? true,
+    includePhotos: options.includePhotos ?? true,
+    includeBudget: options.includeBudget ?? true,
+    includeDocuments: options.includeDocuments ?? true,
+  };
+
+  const docs = await extractProjectDocuments(projectId);
+
+  let docCount = 0;
+  if (opts.includeDocuments) docCount = countFolderFiles(docs.folders);
+
+  const drawingsCount = opts.includeDrawings ? docs.drawings.filter((d) => d.downloadUrl).length : 0;
+  const submittalsCount = opts.includeSubmittals ? docs.submittals.filter((s) => s.downloadUrl).length : 0;
+  const rfisCount = opts.includeRFIs ? docs.rfis.filter((r) => r.downloadUrl).length : 0;
+  const bidPackagesCount = opts.includeBidPackages ? docs.bidPackages.filter((b) => b.downloadUrl).length : 0;
+  const photosCount = opts.includePhotos ? docs.photos.filter((p) => p.downloadUrl).length : 0;
+  const budgetCount = opts.includeBudget && docs.budget.summary ? 1 : 0;
+
+  const total = docCount + drawingsCount + submittalsCount + rfisCount + bidPackagesCount + photosCount + budgetCount;
+
+  const projectFolderName = sanitizeFolderName(`${docs.projectName} (${projectId})`);
+  const cfg = await getStorageConfig();
+  const baseFolderName = cfg.archiveBaseFolderName;
+  const basePath = `${baseFolderName}/${projectFolderName}`;
+
+  const folderStructure: string[] = [basePath];
+  if (opts.includeDocuments && docs.folders.length > 0) folderStructure.push(`${basePath}/Documents`);
+  if (opts.includeDrawings && docs.drawings.length > 0) folderStructure.push(`${basePath}/Drawings`);
+  if (opts.includeSubmittals && docs.submittals.length > 0) folderStructure.push(`${basePath}/Submittals`);
+  if (opts.includeRFIs && docs.rfis.length > 0) folderStructure.push(`${basePath}/RFIs`);
+  if (opts.includeBidPackages && docs.bidPackages.length > 0) folderStructure.push(`${basePath}/Bid Packages`);
+  if (opts.includePhotos && docs.photos.length > 0) folderStructure.push(`${basePath}/Photos`);
+  if (opts.includeBudget && docs.budget.summary) folderStructure.push(`${basePath}/Budget`);
+
+  return {
+    projectId,
+    projectName: docs.projectName,
+    folderStructure,
+    fileCounts: {
+      documents: docCount,
+      drawings: drawingsCount,
+      submittals: submittalsCount,
+      rfis: rfisCount,
+      bidPackages: bidPackagesCount,
+      photos: photosCount,
+      budget: budgetCount,
+      total,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Procore stage change handler (webhook)
+// ---------------------------------------------------------------------------
+
+export async function handleProjectStageChange(
+  projectId: string,
+  projectName: string,
+  newStage: string
+): Promise<{ triggered: boolean; archiveId?: string; reason?: string }> {
+  const autoConfig = await getAutoArchiveConfig();
+  if (!autoConfig || !autoConfig.enabled) {
+    return { triggered: false, reason: 'Auto-archive disabled' };
+  }
+
+  const triggerStage = (autoConfig.triggerStage || 'Closeout').trim();
+  if (!triggerStage) return { triggered: false, reason: 'No trigger stage configured' };
+
+  if (newStage.toLowerCase() !== triggerStage.toLowerCase()) {
+    return { triggered: false, reason: `Stage "${newStage}" does not match trigger "${triggerStage}"` };
+  }
+
+  const result = await startProjectArchive(projectId, {
+    includeDrawings: autoConfig.includeDrawings,
+    includeSubmittals: autoConfig.includeSubmittals,
+    includeRFIs: autoConfig.includeRFIs,
+    includeBidPackages: autoConfig.includeBidPackages,
+    includePhotos: autoConfig.includePhotos,
+    includeBudget: autoConfig.includeBudget,
+    includeDocuments: autoConfig.includeDocuments,
+  });
+
+  return { triggered: true, archiveId: result.archiveId };
+}
+
+// ---------------------------------------------------------------------------
+// Archive runner
+// ---------------------------------------------------------------------------
+
+async function runArchive(
+  archiveId: string,
+  projectId: string,
+  options: {
+    includeDrawings: boolean;
+    includeSubmittals: boolean;
+    includeRFIs: boolean;
+    includeBidPackages: boolean;
+    includePhotos: boolean;
+    includeBudget: boolean;
+    includeDocuments: boolean;
+    baseFolderPath: string;
+  }
+): Promise<void> {
   const progress = archiveProgress.get(archiveId)!;
   const startTime = Date.now();
 
   try {
     progress.status = 'in_progress';
-    progress.currentStep = 'Checking SharePoint connection...';
+    progress.currentStep = 'Resolving storage provider...';
 
-    // Check SharePoint connection
-    if (!await isSharePointConnected()) {
-      throw new Error('SharePoint not configured. Please configure SharePoint in Settings first.');
+    const provider = await getStorageProvider();
+    progress.providerType = provider.providerType;
+
+    progress.currentStep = 'Checking storage connection...';
+    if (!(await provider.isConnected())) {
+      throw new Error(
+        `${provider.providerType} not connected. Please configure storage in Settings.`
+      );
     }
 
     progress.currentStep = 'Extracting project documents from Procore...';
     progress.progress = 5;
 
-    // Extract documents from Procore
     const docs = await extractProjectDocuments(projectId);
     progress.projectName = docs.projectName;
 
-    // Count total files to upload
     let totalFiles = 0;
-    if (options.includeDocuments) {
-      totalFiles += countFolderFiles(docs.folders);
-    }
-    if (options.includeDrawings) totalFiles += docs.drawings.filter(d => d.downloadUrl).length;
-    if (options.includeSubmittals) totalFiles += docs.submittals.filter(s => s.downloadUrl).length;
-    if (options.includeRFIs) totalFiles += docs.rfis.filter(r => r.downloadUrl).length;
-    if (options.includeBidPackages) totalFiles += docs.bidPackages.filter(b => b.downloadUrl).length;
-    if (options.includePhotos) totalFiles += docs.photos.filter(p => p.downloadUrl).length;
+    if (options.includeDocuments) totalFiles += countFolderFiles(docs.folders);
+    if (options.includeDrawings) totalFiles += docs.drawings.filter((d) => d.downloadUrl).length;
+    if (options.includeSubmittals) totalFiles += docs.submittals.filter((s) => s.downloadUrl).length;
+    if (options.includeRFIs) totalFiles += docs.rfis.filter((r) => r.downloadUrl).length;
+    if (options.includeBidPackages) totalFiles += docs.bidPackages.filter((b) => b.downloadUrl).length;
+    if (options.includePhotos) totalFiles += docs.photos.filter((p) => p.downloadUrl).length;
     if (options.includeBudget && docs.budget.summary) totalFiles += 1;
 
     progress.totalFiles = totalFiles;
     progress.progress = 10;
 
-    // Create base folder structure in SharePoint
     const projectFolderName = sanitizeFolderName(`${docs.projectName} (${projectId})`);
     const basePath = `${options.baseFolderPath}/${projectFolderName}`;
 
     progress.currentStep = `Creating folder structure: ${basePath}`;
-    const baseFolder = await createSharePointFolder(basePath);
-
-    if (!baseFolder) {
-      throw new Error('Failed to create SharePoint folder');
-    }
-
-    progress.sharePointUrl = baseFolder.webUrl;
+    const baseFolder = await provider.createFolder(basePath);
+    progress.storageUrl = baseFolder.webUrl;
     progress.progress = 15;
 
     let filesUploaded = 0;
     const errors: string[] = [];
 
-    // Upload documents from folders
     if (options.includeDocuments && docs.folders.length > 0) {
       progress.currentStep = 'Uploading project documents...';
-      await createSharePointFolder(`${basePath}/Documents`);
+      await provider.createFolder(`${basePath}/Documents`);
 
       for (const folder of docs.folders) {
-        const result = await uploadFolderRecursive(`${basePath}/Documents`, folder, progress);
+        const result = await uploadFolderRecursive(provider, `${basePath}/Documents`, folder, progress);
         filesUploaded += result.uploaded;
         errors.push(...result.errors);
       }
     }
     progress.progress = 30;
 
-    // Upload drawings
     if (options.includeDrawings && docs.drawings.length > 0) {
       progress.currentStep = 'Uploading drawings...';
-      await createSharePointFolder(`${basePath}/Drawings`);
-
+      await provider.createFolder(`${basePath}/Drawings`);
       for (const drawing of docs.drawings) {
         if (drawing.downloadUrl) {
-          const result = await uploadDocument(`${basePath}/Drawings`, drawing, progress);
-          if (result.success) filesUploaded++;
-          else errors.push(result.error!);
+          const res = await uploadDocument(provider, `${basePath}/Drawings`, drawing, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
         }
       }
     }
     progress.progress = 45;
 
-    // Upload submittals
     if (options.includeSubmittals && docs.submittals.length > 0) {
       progress.currentStep = 'Uploading submittals...';
-      await createSharePointFolder(`${basePath}/Submittals`);
-
+      await provider.createFolder(`${basePath}/Submittals`);
       for (const submittal of docs.submittals) {
         if (submittal.downloadUrl) {
-          const result = await uploadDocument(`${basePath}/Submittals`, submittal, progress);
-          if (result.success) filesUploaded++;
-          else errors.push(result.error!);
+          const res = await uploadDocument(provider, `${basePath}/Submittals`, submittal, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
         }
       }
     }
     progress.progress = 60;
 
-    // Upload RFIs
     if (options.includeRFIs && docs.rfis.length > 0) {
       progress.currentStep = 'Uploading RFIs...';
-      await createSharePointFolder(`${basePath}/RFIs`);
-
+      await provider.createFolder(`${basePath}/RFIs`);
       for (const rfi of docs.rfis) {
         if (rfi.downloadUrl) {
-          const result = await uploadDocument(`${basePath}/RFIs`, rfi, progress);
-          if (result.success) filesUploaded++;
-          else errors.push(result.error!);
+          const res = await uploadDocument(provider, `${basePath}/RFIs`, rfi, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
         }
       }
     }
     progress.progress = 75;
 
-    // Upload bid packages
     if (options.includeBidPackages && docs.bidPackages.length > 0) {
       progress.currentStep = 'Uploading bid packages...';
-      await createSharePointFolder(`${basePath}/Bid Packages`);
-
+      await provider.createFolder(`${basePath}/Bid Packages`);
       for (const bp of docs.bidPackages) {
         if (bp.downloadUrl) {
-          const result = await uploadDocument(`${basePath}/Bid Packages`, bp, progress);
-          if (result.success) filesUploaded++;
-          else errors.push(result.error!);
+          const res = await uploadDocument(provider, `${basePath}/Bid Packages`, bp, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
         }
       }
     }
     progress.progress = 85;
 
-    // Upload photos
     if (options.includePhotos && docs.photos.length > 0) {
       progress.currentStep = 'Uploading photos...';
-      await createSharePointFolder(`${basePath}/Photos`);
-
+      await provider.createFolder(`${basePath}/Photos`);
       for (const photo of docs.photos) {
         if (photo.downloadUrl) {
-          const result = await uploadDocument(`${basePath}/Photos`, photo, progress);
-          if (result.success) filesUploaded++;
-          else errors.push(result.error!);
+          const res = await uploadDocument(provider, `${basePath}/Photos`, photo, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
         }
       }
     }
     progress.progress = 95;
 
-    // Export budget as JSON
     if (options.includeBudget && docs.budget.summary) {
       progress.currentStep = 'Exporting budget data...';
-      await createSharePointFolder(`${basePath}/Budget`);
-
+      await provider.createFolder(`${basePath}/Budget`);
       try {
         const budgetJson = JSON.stringify(docs.budget, null, 2);
         const budgetBuffer = Buffer.from(budgetJson, 'utf-8');
-        await uploadFileToSharePoint(`${basePath}/Budget`, 'budget_export.json', budgetBuffer, 'application/json');
+        await uploadDocumentWithRetry(
+          provider,
+          `${basePath}/Budget`,
+          'budget_export.json',
+          budgetBuffer,
+          'application/json'
+        );
         filesUploaded++;
       } catch (e: any) {
         errors.push(`Budget export: ${e.message}`);
       }
     }
 
-    // Create summary file
     progress.currentStep = 'Creating archive summary...';
     const summary = {
       projectId,
       projectName: docs.projectName,
       archivedAt: new Date().toISOString(),
       extractedAt: docs.extractedAt,
+      providerType: provider.providerType,
       statistics: {
         folders: docs.folders.length,
         drawings: docs.drawings.length,
@@ -312,9 +466,14 @@ async function runArchive(archiveId: string, projectId: string, options: {
     };
 
     const summaryJson = JSON.stringify(summary, null, 2);
-    await uploadFileToSharePoint(basePath, '_archive_summary.json', Buffer.from(summaryJson, 'utf-8'), 'application/json');
+    await uploadDocumentWithRetry(
+      provider,
+      basePath,
+      '_archive_summary.json',
+      Buffer.from(summaryJson, 'utf-8'),
+      'application/json'
+    );
 
-    // Complete
     progress.status = 'completed';
     progress.progress = 100;
     progress.filesUploaded = filesUploaded;
@@ -322,7 +481,6 @@ async function runArchive(archiveId: string, projectId: string, options: {
     progress.completedAt = new Date().toISOString();
     progress.currentStep = 'Archive complete';
 
-    // Log the archive
     await storage.createAuditLog({
       action: 'project_archived',
       entityType: 'project',
@@ -331,15 +489,17 @@ async function runArchive(archiveId: string, projectId: string, options: {
       status: 'success',
       details: {
         projectName: docs.projectName,
+        providerType: provider.providerType,
         filesUploaded,
         errors: errors.length,
         duration: Date.now() - startTime,
-        sharePointUrl: baseFolder.webUrl,
+        storageUrl: baseFolder.webUrl,
       },
     });
 
-    console.log(`[Archive] Project ${docs.projectName} archived successfully: ${filesUploaded} files, ${errors.length} errors`);
-
+    console.log(
+      `[Archive] Project ${docs.projectName} archived to ${provider.providerType}: ${filesUploaded} files, ${errors.length} errors`
+    );
   } catch (e: any) {
     progress.status = 'failed';
     progress.errors.push(e.message);
@@ -348,27 +508,29 @@ async function runArchive(archiveId: string, projectId: string, options: {
   }
 }
 
-async function uploadFolderRecursive(basePath: string, folder: any, progress: ArchiveProgress): Promise<{ uploaded: number; errors: string[] }> {
+async function uploadFolderRecursive(
+  provider: StorageProvider,
+  basePath: string,
+  folder: any,
+  progress: ArchiveProgress
+): Promise<{ uploaded: number; errors: string[] }> {
   let uploaded = 0;
   const errors: string[] = [];
-
   const folderPath = `${basePath}/${sanitizeFolderName(folder.name)}`;
 
   try {
-    await createSharePointFolder(folderPath);
+    await provider.createFolder(folderPath);
 
-    // Upload files in this folder
     for (const file of folder.files || []) {
       if (file.downloadUrl) {
-        const result = await uploadDocument(folderPath, file, progress);
+        const result = await uploadDocument(provider, folderPath, file, progress);
         if (result.success) uploaded++;
         else errors.push(result.error!);
       }
     }
 
-    // Process subfolders
     for (const subfolder of folder.subfolders || []) {
-      const result = await uploadFolderRecursive(folderPath, subfolder, progress);
+      const result = await uploadFolderRecursive(provider, folderPath, subfolder, progress);
       uploaded += result.uploaded;
       errors.push(...result.errors);
     }
@@ -379,7 +541,12 @@ async function uploadFolderRecursive(basePath: string, folder: any, progress: Ar
   return { uploaded, errors };
 }
 
-async function uploadDocument(folderPath: string, doc: any, progress: ArchiveProgress): Promise<{ success: boolean; error?: string }> {
+async function uploadDocument(
+  provider: StorageProvider,
+  folderPath: string,
+  doc: any,
+  progress: ArchiveProgress
+): Promise<{ success: boolean; error?: string }> {
   try {
     progress.currentStep = `Uploading: ${doc.name}`;
 
@@ -389,7 +556,13 @@ async function uploadDocument(folderPath: string, doc: any, progress: ArchivePro
     }
 
     const fileName = sanitizeFileName(doc.name);
-    await uploadFileToSharePoint(folderPath, fileName, fileBuffer, doc.mimeType || 'application/octet-stream');
+    await uploadDocumentWithRetry(
+      provider,
+      folderPath,
+      fileName,
+      fileBuffer,
+      doc.mimeType || 'application/octet-stream'
+    );
 
     progress.filesUploaded++;
     return { success: true };
@@ -423,30 +596,36 @@ function sanitizeFileName(name: string): string {
     .substring(0, 200);
 }
 
+// ---------------------------------------------------------------------------
+// Progress & projects
+// ---------------------------------------------------------------------------
+
 export function getArchiveProgress(archiveId: string): ArchiveProgress | null {
   return archiveProgress.get(archiveId) || null;
 }
 
-export async function getArchivableProjects(): Promise<Array<{
-  id: string;
-  name: string;
-  status: string;
-  stage?: string;
-  documentSummary?: {
-    folders: number;
-    drawings: number;
-    submittals: number;
-    rfis: number;
-    bidPackages: number;
-    photos: number;
-    hasBudget: boolean;
-  };
-}>> {
-  const projects = await getProjectsList();
+export function getAllArchiveProgress(): ArchiveProgress[] {
+  return Array.from(archiveProgress.values());
+}
 
-  // Optionally get document counts for each project (can be slow for many projects)
-  // For now, return basic project list
-  return projects;
+export async function getArchivableProjects(): Promise<
+  Array<{
+    id: string;
+    name: string;
+    status: string;
+    stage?: string;
+    documentSummary?: {
+      folders: number;
+      drawings: number;
+      submittals: number;
+      rfis: number;
+      bidPackages: number;
+      photos: number;
+      hasBudget: boolean;
+    };
+  }>
+> {
+  return getProjectsList();
 }
 
 export { getProjectDocumentSummary };

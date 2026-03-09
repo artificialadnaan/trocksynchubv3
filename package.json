@@ -21,7 +21,8 @@
     "db:migrate-hubspot-owner-tables": "tsx scripts/migrate-hubspot-owner-tables.ts",
     "import:owner-mappings": "tsx scripts/import-hubspot-owner-mappings.ts",
     "import:procore-users": "tsx scripts/import-procore-users.ts",
-    "bidboard:stage-sync": "tsx scripts/run-bidboard-stage-sync.ts"
+    "bidboard:stage-sync": "tsx scripts/run-bidboard-stage-sync.ts",
+    "google-drive-setup": "tsx scripts/google-drive-oauth-setup.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -83,6 +84,7 @@
     "multer": "^2.0.2",
     "next-themes": "^0.4.6",
     "node-cron": "^4.2.1",
+    "open": "^11.0.0",
     "passport": "^0.7.0",
     "passport-local": "^1.0.0",
     "pg": "^8.16.3",
