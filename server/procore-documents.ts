@@ -6,6 +6,17 @@ const RATE_LIMIT_DELAY_MS = 150;
 const PER_PAGE = 100;
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Build full URL string for error logging */
+function buildProcoreUrl(path: string, params: Record<string, any>): string {
+  const merged = { ...params, per_page: params.per_page ?? PER_PAGE, page: params.page ?? 1 };
+  const qs = new URLSearchParams(
+    Object.fromEntries(
+      Object.entries(merged).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])
+    )
+  ).toString();
+  return `GET ${path}${qs ? '?' + qs : ''}`;
+}
+
 /** Paginate through a Procore list endpoint until empty response */
 async function paginateAll<T>(
   client: any,
@@ -286,36 +297,53 @@ async function extractFolderRecursive(client: any, companyId: string, projectId:
 }
 
 async function extractDrawings(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/drawing_areas`;
+  const params = { company_id: companyId };
   try {
-    const response = await client.get(`/rest/v1.0/drawings`, {
-      params: { project_id: projectId },
-    });
-
-    return (response.data || []).map((drawing: any) => {
-      const rev = drawing.current_revision;
-      const pdfUrl = rev?.flattened_url ?? rev?.pdf_url ?? drawing.pdf_url ?? drawing.image_url;
-      const imgUrl = drawing.image_url ?? rev?.image_url;
-      const downloadUrl = pdfUrl || imgUrl;
-      return {
-      id: String(drawing.id),
-      name: drawing.name ?? drawing.number ?? drawing.title,
-      type: 'drawing' as const,
-      url: imgUrl ?? downloadUrl,
-      downloadUrl,
-      createdAt: drawing.created_at,
-      updatedAt: drawing.updated_at,
-      metadata: {
-        number: drawing.number,
-        discipline: drawing.discipline,
-        revision: drawing.current_revision,
-        setId: drawing.drawing_set_id,
-      },
-    };
-    });
+    const areas = await paginateAll<any>(client, path, params);
+    const out: DocumentInfo[] = [];
+    for (const area of areas) {
+      await delay(RATE_LIMIT_DELAY_MS);
+      try {
+        const drawings = await paginateAll<any>(
+          client,
+          `/rest/v1.0/drawing_areas/${area.id}/drawings`,
+          { project_id: projectId, company_id: companyId },
+          (d) => (Array.isArray(d) ? d : d?.drawings ?? [])
+        );
+        for (const drawing of drawings) {
+          const rev = drawing.current_revision;
+          const pdfUrl = rev?.flattened_url ?? rev?.pdf_url ?? drawing.pdf_url ?? drawing.image_url;
+          const imgUrl = drawing.image_url ?? rev?.image_url;
+          const downloadUrl = pdfUrl || imgUrl;
+          out.push({
+            id: String(drawing.id),
+            name: drawing.name ?? drawing.number ?? drawing.title,
+            type: 'drawing' as const,
+            url: imgUrl ?? downloadUrl,
+            downloadUrl,
+            createdAt: drawing.created_at,
+            updatedAt: drawing.updated_at,
+            metadata: {
+              number: drawing.number,
+              discipline: drawing.discipline,
+              revision: drawing.current_revision,
+              setId: drawing.drawing_set_id,
+              areaId: area.id,
+              areaName: area.name,
+            },
+          });
+        }
+      } catch (areaErr: any) {
+        console.log(`[ProcoreDocs] Could not fetch drawings for area ${area.id}: ${areaErr?.message}`);
+      }
+    }
+    return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract drawings: ${msg}`);
-    opts?.errors && (opts.errors['drawings'] = msg);
+    opts?.errors && (opts.errors['drawings'] = `${msg} (${urlStr})`);
     return [];
   }
 }
@@ -587,8 +615,10 @@ function mapAttachment(doc: any, att: any, baseMeta: Record<string, any>): Docum
 }
 
 async function extractEmails(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/emails`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/emails`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const e of list) {
       for (const att of e.attachments ?? []) {
@@ -607,8 +637,9 @@ async function extractEmails(client: any, companyId: string, projectId: string, 
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract emails: ${msg}`);
-    opts?.errors && (opts.errors['emails'] = msg);
+    opts?.errors && (opts.errors['emails'] = `${msg} (${urlStr})`);
     return [];
   }
 }
@@ -641,8 +672,10 @@ async function extractIncidents(client: any, companyId: string, projectId: strin
 }
 
 async function extractPunchList(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/punch_items`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/punch_items`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const p of list) {
       for (const att of p.attachments ?? []) {
@@ -653,15 +686,18 @@ async function extractPunchList(client: any, companyId: string, projectId: strin
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract punch list: ${msg}`);
-    opts?.errors && (opts.errors['punchList'] = msg);
+    opts?.errors && (opts.errors['punchList'] = `${msg} (${urlStr})`);
     return [];
   }
 }
 
 async function extractMeetings(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/meetings`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/meetings`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const m of list) {
       for (const att of m.attachments ?? []) {
@@ -680,8 +716,9 @@ async function extractMeetings(client: any, companyId: string, projectId: string
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract meetings: ${msg}`);
-    opts?.errors && (opts.errors['meetings'] = msg);
+    opts?.errors && (opts.errors['meetings'] = `${msg} (${urlStr})`);
     return [];
   }
 }
@@ -713,9 +750,14 @@ async function extractSchedule(client: any, companyId: string, projectId: string
   }
 }
 
+const DAILY_LOGS_START = '2020-01-01';
+const DAILY_LOGS_END = '2030-12-31';
+
 async function extractDailyLogs(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<{ items: any[]; attachments: DocumentInfo[] }> {
+  const path = `/rest/v1.0/projects/${projectId}/daily_logs`;
+  const params = { company_id: companyId, start_date: DAILY_LOGS_START, end_date: DAILY_LOGS_END };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/daily_logs`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const attachments: DocumentInfo[] = [];
     for (const d of list) {
       for (const att of d.attachments ?? d.images ?? []) {
@@ -726,15 +768,18 @@ async function extractDailyLogs(client: any, companyId: string, projectId: strin
     return { items: list, attachments };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract daily logs: ${msg}`);
-    opts?.errors && (opts.errors['dailyLogs'] = msg);
+    opts?.errors && (opts.errors['dailyLogs'] = `${msg} (${urlStr})`);
     return { items: [], attachments: [] };
   }
 }
 
 async function extractSpecifications(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/specification_sections`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/specification_sections`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const s of list) {
       const atts = s.attachments ?? s.uploads ?? s.files ?? [];
@@ -746,15 +791,18 @@ async function extractSpecifications(client: any, companyId: string, projectId: 
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract specifications: ${msg}`);
-    opts?.errors && (opts.errors['specifications'] = msg);
+    opts?.errors && (opts.errors['specifications'] = `${msg} (${urlStr})`);
     return [];
   }
 }
 
 async function extractPrimeContracts(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/prime_contracts`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/prime_contracts`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const c of list) {
       for (const att of c.attachments ?? []) {
@@ -765,8 +813,9 @@ async function extractPrimeContracts(client: any, companyId: string, projectId: 
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract prime contracts: ${msg}`);
-    opts?.errors && (opts.errors['primeContracts'] = msg);
+    opts?.errors && (opts.errors['primeContracts'] = `${msg} (${urlStr})`);
     return [];
   }
 }
@@ -779,8 +828,11 @@ async function extractCommitments(
 ): Promise<{ subcontracts: DocumentInfo[]; purchaseOrders: DocumentInfo[] }> {
   const sub: DocumentInfo[] = [];
   const po: DocumentInfo[] = [];
+  const woPath = `/rest/v1.0/projects/${projectId}/work_order_contracts`;
+  const poPath = `/rest/v1.0/projects/${projectId}/purchase_order_contracts`;
+  const baseParams = { company_id: companyId };
   try {
-    const woList = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/work_order_contracts`, { company_id: companyId });
+    const woList = await paginateAll<any>(client, woPath, baseParams);
     for (const c of woList) {
       for (const att of c.attachments ?? []) {
         const url = getAttachmentUrl(att);
@@ -789,11 +841,12 @@ async function extractCommitments(
     }
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(woPath, baseParams);
     console.log(`[ProcoreDocs] Could not extract subcontracts: ${msg}`);
-    opts?.errors && (opts.errors['commitments.subcontracts'] = msg);
+    opts?.errors && (opts.errors['commitments.subcontracts'] = `${msg} (${urlStr})`);
   }
   try {
-    const poList = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/purchase_order_contracts`, { company_id: companyId });
+    const poList = await paginateAll<any>(client, poPath, baseParams);
     for (const c of poList) {
       for (const att of c.attachments ?? []) {
         const url = getAttachmentUrl(att);
@@ -802,15 +855,18 @@ async function extractCommitments(
     }
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(poPath, baseParams);
     console.log(`[ProcoreDocs] Could not extract purchase orders: ${msg}`);
-    opts?.errors && (opts.errors['commitments.purchaseOrders'] = msg);
+    opts?.errors && (opts.errors['commitments.purchaseOrders'] = `${msg} (${urlStr})`);
   }
   return { subcontracts: sub, purchaseOrders: po };
 }
 
 async function extractChangeOrders(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/change_orders`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/change_orders`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const c of list) {
       for (const att of c.attachments ?? []) {
@@ -821,15 +877,18 @@ async function extractChangeOrders(client: any, companyId: string, projectId: st
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract change orders: ${msg}`);
-    opts?.errors && (opts.errors['changeOrders'] = msg);
+    opts?.errors && (opts.errors['changeOrders'] = `${msg} (${urlStr})`);
     return [];
   }
 }
 
 async function extractChangeEvents(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/change_events`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/change_events`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const c of list) {
       for (const att of c.attachments ?? []) {
@@ -840,8 +899,9 @@ async function extractChangeEvents(client: any, companyId: string, projectId: st
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract change events: ${msg}`);
-    opts?.errors && (opts.errors['changeEvents'] = msg);
+    opts?.errors && (opts.errors['changeEvents'] = `${msg} (${urlStr})`);
     return [];
   }
 }
@@ -866,8 +926,10 @@ async function extractDirectCosts(client: any, companyId: string, projectId: str
 }
 
 async function extractInvoicing(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+  const path = `/rest/v1.0/projects/${projectId}/requisitions`;
+  const params = { company_id: companyId };
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/projects/${projectId}/requisitions`, { company_id: companyId });
+    const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
     for (const r of list) {
       for (const att of r.attachments ?? []) {
@@ -878,19 +940,23 @@ async function extractInvoicing(client: any, companyId: string, projectId: strin
     return out;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract invoicing/requisitions: ${msg}`);
-    opts?.errors && (opts.errors['invoicing'] = msg);
+    opts?.errors && (opts.errors['invoicing'] = `${msg} (${urlStr})`);
     return [];
   }
 }
 
 async function extractDirectory(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<any[]> {
+  const path = `/rest/v1.0/projects/${projectId}/directory`;
+  const params = { company_id: companyId };
   try {
-    return await paginateAll(client, `/rest/v1.0/projects/${projectId}/directory`, { company_id: companyId });
+    return await paginateAll(client, path, params);
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract directory: ${msg}`);
-    opts?.errors && (opts.errors['directory'] = msg);
+    opts?.errors && (opts.errors['directory'] = `${msg} (${urlStr})`);
     return [];
   }
 }
@@ -1000,7 +1066,7 @@ export async function getProjectDocumentSummary(projectId: string): Promise<{
   try {
     const results = await Promise.all([
       client.get(`/rest/v1.0/folders`, { params: { project_id: projectId } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/drawings`, { params: { project_id: projectId } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/projects/${projectId}/drawing_areas`, { params: { company_id: companyId, per_page: 100 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/submittals`, { params: { company_id: companyId } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/rfis`, { params: { company_id: companyId } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/images`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
@@ -1009,7 +1075,7 @@ export async function getProjectDocumentSummary(projectId: string): Promise<{
       client.get(`/rest/v1.0/projects/${projectId}/incidents`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/punch_items`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/meetings`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/projects/${projectId}/daily_logs`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/projects/${projectId}/daily_logs`, { params: { company_id: companyId, per_page: 1, start_date: DAILY_LOGS_START, end_date: DAILY_LOGS_END } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/specification_sections`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/work_order_contracts`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
@@ -1033,7 +1099,8 @@ export async function getProjectDocumentSummary(projectId: string): Promise<{
 
     const rawFolders = foldersRes.data;
     counts.folders = Array.isArray(rawFolders) ? rawFolders.length : (rawFolders?.folders?.length ?? 0);
-    counts.drawings = (drawingsRes.data?.length ?? 0);
+    const rawDrawingAreas = drawingsRes.data;
+    counts.drawings = Array.isArray(rawDrawingAreas) ? rawDrawingAreas.length : (rawDrawingAreas?.drawing_areas?.length ?? rawDrawingAreas?.length ?? 0);
     counts.submittals = (submittalsRes.data?.length ?? 0);
     counts.rfis = (rfisRes.data?.length ?? 0);
     counts.photos = photosList.length;
