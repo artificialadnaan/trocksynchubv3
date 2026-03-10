@@ -297,10 +297,15 @@ async function extractFolderRecursive(client: any, companyId: string, projectId:
 }
 
 async function extractDrawings(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
-  const path = `/rest/v1.0/drawing_areas`;
-  const params = { project_id: projectId, company_id: companyId };
+  const path = `/rest/v1.1/projects/${projectId}/drawing_areas`;
+  const params = { company_id: companyId };
   try {
-    const areas = await paginateAll<any>(client, path, params);
+    const areas = await paginateAll<any>(
+      client,
+      path,
+      params,
+      (d) => (Array.isArray(d) ? d : d?.drawing_areas ?? [])
+    );
     const out: DocumentInfo[] = [];
     for (const area of areas) {
       await delay(RATE_LIMIT_DELAY_MS);
@@ -308,7 +313,7 @@ async function extractDrawings(client: any, companyId: string, projectId: string
         const drawings = await paginateAll<any>(
           client,
           `/rest/v1.0/drawings`,
-          { project_id: projectId, company_id: companyId, drawing_area_id: area.id },
+          { drawing_area_id: area.id, project_id: projectId, company_id: companyId },
           (d) => (Array.isArray(d) ? d : d?.drawings ?? [])
         );
         for (const drawing of drawings) {
@@ -350,11 +355,14 @@ async function extractDrawings(client: any, companyId: string, projectId: string
 
 async function extractSubmittals(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/submittals`, { project_id: projectId, company_id: companyId });
-    const response = { data: list };
+    const list = await paginateAll<any>(
+      client,
+      `/rest/v1.0/projects/${projectId}/submittals`,
+      { company_id: companyId }
+    );
 
     const submittals: DocumentInfo[] = [];
-    for (const submittal of response.data || []) {
+    for (const submittal of list) {
       // Get submittal attachments
       const attachments = submittal.attachments || [];
       for (const attachment of attachments) {
@@ -405,11 +413,14 @@ async function extractSubmittals(client: any, companyId: string, projectId: stri
 
 async function extractRFIs(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
   try {
-    const list = await paginateAll<any>(client, `/rest/v1.0/rfis`, { project_id: projectId, company_id: companyId });
-    const response = { data: list };
+    const list = await paginateAll<any>(
+      client,
+      `/rest/v1.0/projects/${projectId}/rfis`,
+      { company_id: companyId }
+    );
 
     const rfis: DocumentInfo[] = [];
-    for (const rfi of response.data || []) {
+    for (const rfi of list) {
       const attachments = rfi.attachments || [];
       for (const attachment of attachments) {
         const url = attachment.url ?? attachment.download_url;
@@ -606,8 +617,8 @@ function mapAttachment(doc: any, att: any, baseMeta: Record<string, any>): Docum
 }
 
 async function extractEmails(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
-  const path = `/rest/v1.0/emails`;
-  const params = { project_id: projectId, company_id: companyId };
+  const path = `/rest/v1.0/project/${projectId}/email_communications`;
+  const params = { company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
@@ -636,8 +647,8 @@ async function extractEmails(client: any, companyId: string, projectId: string, 
 }
 
 async function extractIncidents(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
-  const path = `/rest/v1.0/incidents`;
-  const params = { project_id: projectId, company_id: companyId };
+  const path = `/rest/v1.0/projects/${projectId}/incidents`;
+  const params = { company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
@@ -748,8 +759,8 @@ const DAILY_LOGS_START = '2020-01-01';
 const DAILY_LOGS_END = '2030-12-31';
 
 async function extractDailyLogs(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<{ items: any[]; attachments: DocumentInfo[] }> {
-  const path = `/rest/v1.0/daily_logs`;
-  const params = { project_id: projectId, company_id: companyId, start_date: DAILY_LOGS_START, end_date: DAILY_LOGS_END };
+  const path = `/rest/v1.0/projects/${projectId}/daily_logs`;
+  const params = { company_id: companyId, start_date: DAILY_LOGS_START, end_date: DAILY_LOGS_END };
   try {
     const list = await paginateAll<any>(client, path, params);
     const attachments: DocumentInfo[] = [];
@@ -857,7 +868,7 @@ async function extractCommitments(
 }
 
 async function extractChangeOrders(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
-  const path = `/rest/v1.0/change_orders`;
+  const path = `/rest/v1.0/change_order_packages`;
   const params = { project_id: projectId, company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
@@ -901,8 +912,8 @@ async function extractChangeEvents(client: any, companyId: string, projectId: st
 }
 
 async function extractDirectCosts(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
-  const path = `/rest/v1.1/direct_costs`;
-  const params = { project_id: projectId, company_id: companyId };
+  const path = `/rest/v1.0/projects/${projectId}/direct_costs`;
+  const params = { company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
     const out: DocumentInfo[] = [];
@@ -945,7 +956,7 @@ async function extractInvoicing(client: any, companyId: string, projectId: strin
 }
 
 async function extractDirectory(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<any[]> {
-  const path = `/rest/v1.0/directory`;
+  const path = `/rest/v1.0/users`;
   const params = { project_id: projectId, company_id: companyId };
   try {
     return await paginateAll(client, path, params);
@@ -1063,25 +1074,25 @@ export async function getProjectDocumentSummary(projectId: string): Promise<{
   try {
     const results = await Promise.all([
       client.get(`/rest/v1.0/folders`, { params: { project_id: projectId } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/drawing_areas`, { params: { project_id: projectId, company_id: companyId, per_page: 100 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/submittals`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/rfis`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.1/projects/${projectId}/drawing_areas`, { params: { company_id: companyId, per_page: 100 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/projects/${projectId}/submittals`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/projects/${projectId}/rfis`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/images`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/projects/${projectId}/budget`, { params: { company_id: companyId } }).catch(() => ({ data: null })),
-      client.get(`/rest/v1.0/emails`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/incidents`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/project/${projectId}/email_communications`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/projects/${projectId}/incidents`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/punch_items`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/meetings`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/daily_logs`, { params: { project_id: projectId, company_id: companyId, per_page: 1, start_date: DAILY_LOGS_START, end_date: DAILY_LOGS_END } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/projects/${projectId}/daily_logs`, { params: { company_id: companyId, per_page: 1, start_date: DAILY_LOGS_START, end_date: DAILY_LOGS_END } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/specification_sections`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/prime_contracts`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/work_order_contracts`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/purchase_order_contracts`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/change_orders`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/change_order_packages`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/change_events`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.1/direct_costs`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/projects/${projectId}/direct_costs`, { params: { company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v1.0/requisitions`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
-      client.get(`/rest/v1.0/directory`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
+      client.get(`/rest/v1.0/users`, { params: { project_id: projectId, company_id: companyId, per_page: 1 } }).catch(() => ({ data: [] })),
       client.get(`/rest/v2.0/companies/${companyId}/estimating/bid_board_projects`, { params: { per_page: 1 } }).catch(() => ({ data: [] })),
     ]);
 
