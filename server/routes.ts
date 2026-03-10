@@ -262,7 +262,10 @@ export async function registerRoutes(
         `${baseUrl}/rest/v2.0/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
         // company scoped
         `${baseUrl}/rest/v1.0/companies/${companyId}/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
-        // Directory - might be "users" or "project_users" instead of "directory"
+        // Directory - project-level directory (project users only) vs full company
+        `${baseUrl}/rest/v1.0/projects/${projectId}/directory?company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/projects/${projectId}/users?company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/project_directory?project_id=${projectId}&company_id=${companyId}&per_page=5`,
         `${baseUrl}/rest/v1.0/project_users?project_id=${projectId}&company_id=${companyId}&per_page=5`,
         `${baseUrl}/rest/v1.0/users?project_id=${projectId}&company_id=${companyId}&per_page=5`,
         `${baseUrl}/rest/v2.0/directory?project_id=${projectId}&company_id=${companyId}&per_page=5`,

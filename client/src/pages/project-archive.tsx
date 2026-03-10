@@ -54,13 +54,12 @@ import {
   Users,
   Calendar,
   BookOpen,
-  FileSignature,
+  ScrollText,
   Handshake,
   FileDiff,
   Zap,
   DollarSign,
   Receipt,
-  Contact,
   Calculator,
 } from "lucide-react";
 import { format, formatDistanceToNow, formatDistance } from "date-fns";
@@ -563,37 +562,73 @@ function ArchiveDialog({
               <p className="text-sm font-medium">
                 {breakdown.total} files total
               </p>
-              <div className="grid grid-cols-4 gap-1.5 text-xs max-h-48 overflow-y-auto">
-                {[
-                  { k: "documents", Icon: FolderOpen, label: "Documents" },
-                  { k: "drawings", Icon: FileText, label: "Drawings" },
-                  { k: "submittals", Icon: FileText, label: "Submittals" },
-                  { k: "rfis", Icon: FileText, label: "RFIs" },
-                  { k: "bidPackages", Icon: FileText, label: "Bid Packages" },
-                  { k: "photos", Icon: Image, label: "Photos" },
-                  { k: "budget", Icon: FileSpreadsheet, label: "Budget" },
-                  { k: "emails", Icon: Mail, label: "Emails" },
-                  { k: "incidents", Icon: AlertTriangle, label: "Incidents" },
-                  { k: "punchList", Icon: ClipboardCheck, label: "Punch List" },
-                  { k: "meetings", Icon: Users, label: "Meetings" },
-                  { k: "schedule", Icon: Calendar, label: "Schedule" },
-                  { k: "dailyLogs", Icon: BookOpen, label: "Daily Logs" },
-                  { k: "specifications", Icon: FileText, label: "Specs" },
-                  { k: "primeContracts", Icon: FileSignature, label: "Prime Contracts" },
-                  { k: "commitments", Icon: Handshake, label: "Commitments" },
-                  { k: "changeOrders", Icon: FileDiff, label: "Change Orders" },
-                  { k: "changeEvents", Icon: Zap, label: "Change Events" },
-                  { k: "directCosts", Icon: DollarSign, label: "Direct Costs" },
-                  { k: "invoicing", Icon: Receipt, label: "Invoicing" },
-                  { k: "directory", Icon: Contact, label: "Directory" },
-                  { k: "estimating", Icon: Calculator, label: "Estimating" },
-                ].map(({ k, Icon, label }) => (
-                  <div key={k} className="p-1.5 rounded bg-muted/30 text-center">
-                    <Icon className="w-3.5 h-3.5 mx-auto mb-0.5 text-muted-foreground" />
-                    <p className="font-medium">{breakdown[k as keyof typeof breakdown] ?? 0}</p>
-                    <p className="text-muted-foreground truncate text-[10px]">{label}</p>
-                  </div>
-                ))}
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                <p className="text-[10px] font-medium text-muted-foreground uppercase">Core</p>
+                <div className="grid grid-cols-4 gap-1.5 text-xs">
+                  {[
+                    { k: "documents", Icon: FolderOpen, label: "Documents" },
+                    { k: "drawings", Icon: FileText, label: "Drawings" },
+                    { k: "submittals", Icon: FileText, label: "Submittals" },
+                    { k: "rfis", Icon: FileText, label: "RFIs" },
+                    { k: "bidPackages", Icon: FileText, label: "Bid Packages" },
+                    { k: "photos", Icon: Image, label: "Photos" },
+                    { k: "budget", Icon: FileSpreadsheet, label: "Budget" },
+                    { k: "directory", Icon: Users, label: "Directory" },
+                  ].map(({ k, Icon, label }) => (
+                    <div key={k} className="p-1.5 rounded bg-muted/30 text-center">
+                      <Icon className="w-3.5 h-3.5 mx-auto mb-0.5 text-muted-foreground" />
+                      <p className="font-medium">{breakdown[k as keyof typeof breakdown] ?? 0}</p>
+                      <p className="text-muted-foreground truncate text-[10px]">{label}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] font-medium text-muted-foreground uppercase">Project Management</p>
+                <div className="grid grid-cols-4 gap-1.5 text-xs">
+                  {[
+                    { k: "emails", Icon: Mail, label: "Emails" },
+                    { k: "incidents", Icon: AlertTriangle, label: "Incidents" },
+                    { k: "punchList", Icon: ClipboardCheck, label: "Punch List" },
+                    { k: "meetings", Icon: Users, label: "Meetings" },
+                    { k: "schedule", Icon: Calendar, label: "Schedule" },
+                    { k: "dailyLogs", Icon: BookOpen, label: "Daily Logs" },
+                    { k: "specifications", Icon: FileText, label: "Specifications" },
+                  ].map(({ k, Icon, label }) => (
+                    <div key={k} className="p-1.5 rounded bg-muted/30 text-center">
+                      <Icon className="w-3.5 h-3.5 mx-auto mb-0.5 text-muted-foreground" />
+                      <p className="font-medium">{breakdown[k as keyof typeof breakdown] ?? 0}</p>
+                      <p className="text-muted-foreground truncate text-[10px]">{label}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] font-medium text-muted-foreground uppercase">Financial</p>
+                <div className="grid grid-cols-4 gap-1.5 text-xs">
+                  {[
+                    { k: "primeContracts", Icon: ScrollText, label: "Prime Contracts" },
+                    { k: "commitments", Icon: Handshake, label: "Commitments" },
+                    { k: "changeOrders", Icon: FileDiff, label: "Change Orders" },
+                    { k: "changeEvents", Icon: Zap, label: "Change Events" },
+                    { k: "directCosts", Icon: DollarSign, label: "Direct Costs" },
+                    { k: "invoicing", Icon: Receipt, label: "Invoicing" },
+                  ].map(({ k, Icon, label }) => (
+                    <div key={k} className="p-1.5 rounded bg-muted/30 text-center">
+                      <Icon className="w-3.5 h-3.5 mx-auto mb-0.5 text-muted-foreground" />
+                      <p className="font-medium">{breakdown[k as keyof typeof breakdown] ?? 0}</p>
+                      <p className="text-muted-foreground truncate text-[10px]">{label}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] font-medium text-muted-foreground uppercase">Preconstruction</p>
+                <div className="grid grid-cols-4 gap-1.5 text-xs">
+                  {[
+                    { k: "estimating", Icon: Calculator, label: "Estimating" },
+                  ].map(({ k, Icon, label }) => (
+                    <div key={k} className="p-1.5 rounded bg-muted/30 text-center">
+                      <Icon className="w-3.5 h-3.5 mx-auto mb-0.5 text-muted-foreground" />
+                      <p className="font-medium">{breakdown[k as keyof typeof breakdown] ?? 0}</p>
+                      <p className="text-muted-foreground truncate text-[10px]">{label}</p>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           ) : null}

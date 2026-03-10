@@ -1034,14 +1034,40 @@ async function extractInvoicing(
   }
 }
 
+/**
+ * Extracts project directory (users assigned to the project).
+ * Tries project-specific endpoints first. The /rest/v1.0/users?project_id=...
+ * endpoint may return the full company directory (e.g. 496 users) rather than
+ * project-assigned users. If a project-scoped endpoint is identified, prefer it.
+ * See /api/debug/procore-raw-test for URL variations to verify.
+ */
 async function extractDirectory(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<any[]> {
-  const path = `/rest/v1.0/users`;
-  const params = { project_id: projectId, company_id: companyId };
+  const pathsToTry = [
+    { path: `/rest/v1.0/projects/${projectId}/users`, params: { company_id: companyId } },
+    { path: `/rest/v1.0/projects/${projectId}/directory`, params: { company_id: companyId } },
+    { path: `/rest/v1.0/project_directory`, params: { project_id: projectId, company_id: companyId } },
+    { path: `/rest/v1.0/users`, params: { project_id: projectId, company_id: companyId } },
+  ];
+  for (const { path, params } of pathsToTry) {
+    try {
+      const list = await paginateAll(client, path, params);
+      return list;
+    } catch (e: any) {
+      const status = e?.response?.status;
+      if (status === 404) continue;
+      const msg = e?.message ?? String(e);
+      const urlStr = buildProcoreUrl(path, params);
+      console.log(`[ProcoreDocs] Directory ${path}: ${msg}`);
+      opts?.errors && (opts.errors['directory'] = `${msg} (${urlStr})`);
+      return [];
+    }
+  }
+  // Fallback: /rest/v1.0/users with project_id — may return full company directory
   try {
-    return await paginateAll(client, path, params);
+    return await paginateAll(client, '/rest/v1.0/users', { project_id: projectId, company_id: companyId });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    const urlStr = buildProcoreUrl(path, params);
+    const urlStr = buildProcoreUrl('/rest/v1.0/users', { project_id: projectId, company_id: companyId });
     console.log(`[ProcoreDocs] Could not extract directory: ${msg}`);
     opts?.errors && (opts.errors['directory'] = `${msg} (${urlStr})`);
     return [];

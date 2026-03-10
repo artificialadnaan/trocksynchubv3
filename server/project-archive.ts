@@ -314,14 +314,14 @@ export async function previewArchive(
   const changeEventsCount = opts.includeChangeEvents ? (docs.changeEventsData?.length ?? docs.changeEvents.length) : 0;
   const directCostsCount = opts.includeDirectCosts ? (docs.directCostsData?.length ?? docs.directCosts.length) : 0;
   const invoicingCount = opts.includeInvoicing ? (docs.invoicingData?.length ?? docs.invoicing.length) : 0;
-  const directoryCount = opts.includeDirectory && docs.directory.length > 0 ? 1 : 0;
-  const estimatingCount = opts.includeEstimating && docs.estimating.length > 0 ? 1 : 0;
+  const directoryCountForTotal = opts.includeDirectory && docs.directory.length > 0 ? 1 : 0;
+  const estimatingCountForTotal = opts.includeEstimating && docs.estimating.length > 0 ? 1 : 0;
 
   const total =
     docCount + drawingsCount + submittalsCount + rfisCount + bidPackagesCount + photosCount +
     budgetCount + emailsCount + incidentsCount + punchListCount + meetingsCount + scheduleCount +
     dailyLogsCount + specCount + primeCount + commitCount + changeOrdersCount + changeEventsCount +
-    directCostsCount + invoicingCount + directoryCount + estimatingCount;
+    directCostsCount + invoicingCount + directoryCountForTotal + estimatingCountForTotal;
 
   const projectFolderName = sanitizeFolderName(`${docs.projectName} (${projectId})`);
   const cfg = await getStorageConfig();
@@ -384,8 +384,8 @@ export async function previewArchive(
       changeEvents: changeEventsCount,
       directCosts: directCostsCount,
       invoicing: invoicingCount,
-      directory: directoryCount,
-      estimating: estimatingCount,
+      directory: opts.includeDirectory ? docs.directory.length : 0,
+      estimating: opts.includeEstimating ? docs.estimating.length : 0,
       total,
     },
   };
