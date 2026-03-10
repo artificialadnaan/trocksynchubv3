@@ -141,8 +141,8 @@ export async function registerRoutes(
       const [extracted, rawFoldersResponse, rawPrimeContractsRes, rawCommitmentsRes] = await Promise.all([
         extractProjectDocuments(projectId),
         client.get("/rest/v1.0/folders", { params: { project_id: projectId } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
-        client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, { params: { company_id: companyId, per_page: 100 } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
-        client.get(`/rest/v1.0/projects/${projectId}/work_order_contracts`, { params: { company_id: companyId, per_page: 100 } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
+        client.get("/rest/v1.0/prime_contracts", { params: { project_id: projectId, company_id: companyId, per_page: 100 } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
+        client.get("/rest/v1.0/work_order_contracts", { params: { project_id: projectId, company_id: companyId, per_page: 100 } }).then((r: any) => r.data).catch((e: any) => ({ error: e.message })),
       ]);
 
       // Sample recursive fetch: first folder with has_children_files to verify files are returned
