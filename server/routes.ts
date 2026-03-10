@@ -262,6 +262,29 @@ export async function registerRoutes(
         `${baseUrl}/rest/v2.0/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
         // company scoped
         `${baseUrl}/rest/v1.0/companies/${companyId}/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
+        // Directory - might be "users" or "project_users" instead of "directory"
+        `${baseUrl}/rest/v1.0/project_users?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/users?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v2.0/directory?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Direct costs - try v1.0 instead of v1.1
+        `${baseUrl}/rest/v1.0/direct_costs?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Daily logs - might need different endpoint name
+        `${baseUrl}/rest/v1.0/daily_log/list?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/daily_logs/list?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Incidents
+        `${baseUrl}/rest/v1.0/incidents/list?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v2.0/incidents?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Drawing areas
+        `${baseUrl}/rest/v1.1/drawing_areas?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Change orders - might need different name
+        `${baseUrl}/rest/v1.0/change_order/packages?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/change_order_packages?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Emails - might be "correspondence" or "email_communications"
+        `${baseUrl}/rest/v1.0/email_communications?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Submittals and RFIs - verify query param style
+        `${baseUrl}/rest/v1.0/submittals?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.1/submittals?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/rfis?project_id=${projectId}&company_id=${companyId}&per_page=5`,
       ];
 
       const results: Array<{ url: string; status: number; statusText: string; bodyPreview: string }> = [];
