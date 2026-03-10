@@ -80,16 +80,22 @@ interface ProjectDocuments {
   schedule: DocumentInfo[];
   dailyLogs: { items: any[]; attachments: DocumentInfo[] };
   specifications: DocumentInfo[];
-  // Financial
+  // Financial (items = attachments + PDF exports; *Data = raw API for JSON export)
   primeContracts: DocumentInfo[];
+  primeContractsData: any[];
   commitments: {
     subcontracts: DocumentInfo[];
     purchaseOrders: DocumentInfo[];
   };
+  commitmentsData: { subcontracts: any[]; purchaseOrders: any[] };
   changeOrders: DocumentInfo[];
+  changeOrdersData: any[];
   changeEvents: DocumentInfo[];
+  changeEventsData: any[];
   directCosts: DocumentInfo[];
+  directCostsData: any[];
   invoicing: DocumentInfo[];
+  invoicingData: any[];
   // Core / Preconstruction
   directory: any[];
   estimating: any[];
@@ -128,12 +134,12 @@ export async function extractProjectDocuments(projectId: string): Promise<Projec
     schedule,
     dailyLogs,
     specifications,
-    primeContracts,
-    commitments,
-    changeOrders,
-    changeEvents,
-    directCosts,
-    invoicing,
+    primeResult,
+    commitmentsResult,
+    changeOrdersResult,
+    changeEventsResult,
+    directCostsResult,
+    invoicingResult,
     directory,
     estimating,
   ] = await Promise.all([
@@ -182,12 +188,18 @@ export async function extractProjectDocuments(projectId: string): Promise<Projec
     schedule,
     dailyLogs,
     specifications,
-    primeContracts,
-    commitments,
-    changeOrders,
-    changeEvents,
-    directCosts,
-    invoicing,
+    primeContracts: primeResult.items,
+    primeContractsData: primeResult.rawData,
+    commitments: commitmentsResult.commitments,
+    commitmentsData: commitmentsResult.data,
+    changeOrders: changeOrdersResult.items,
+    changeOrdersData: changeOrdersResult.rawData,
+    changeEvents: changeEventsResult.items,
+    changeEventsData: changeEventsResult.rawData,
+    directCosts: directCostsResult.items,
+    directCostsData: directCostsResult.rawData,
+    invoicing: invoicingResult.items,
+    invoicingData: invoicingResult.rawData,
     directory,
     estimating,
     extractedAt: new Date().toISOString(),
@@ -598,7 +610,15 @@ async function extractBudget(client: any, companyId: string, projectId: string, 
 }
 
 function getAttachmentUrl(a: any): string | undefined {
-  return a?.url ?? a?.download_url ?? a?.prostore_file?.url ?? a?.file_versions?.[0]?.url;
+  return a?.url ?? a?.download_url ?? a?.file?.url ?? a?.prostore_file?.url ?? a?.file_versions?.[0]?.url;
+}
+
+function sanitizeFileNameForExport(name: string): string {
+  return (name || 'untitled')
+    .replace(/[<>:"/\\|?*]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .substring(0, 180) || 'untitled';
 }
 
 function mapAttachment(doc: any, att: any, baseMeta: Record<string, any>): DocumentInfo {
@@ -803,25 +823,40 @@ async function extractSpecifications(client: any, companyId: string, projectId: 
   }
 }
 
-async function extractPrimeContracts(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+async function extractPrimeContracts(
+  client: any,
+  companyId: string,
+  projectId: string,
+  opts?: ExtractOpts
+): Promise<{ items: DocumentInfo[]; rawData: any[] }> {
   const path = `/rest/v1.0/prime_contracts`;
   const params = { project_id: projectId, company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
-    const out: DocumentInfo[] = [];
+    const items: DocumentInfo[] = [];
     for (const c of list) {
       for (const att of c.attachments ?? []) {
         const url = getAttachmentUrl(att);
-        if (url) out.push(mapAttachment(c, att, { primeContractId: c.id }));
+        if (url) items.push(mapAttachment(c, att, { primeContractId: c.id }));
       }
+      const title = c.title ?? c.number ?? String(c.id);
+      const pdfPath = `/rest/v1.0/prime_contracts/${c.id}.pdf?project_id=${projectId}&company_id=${companyId}`;
+      items.push({
+        id: `${c.id}_pdf`,
+        name: `${sanitizeFileNameForExport(title)}.pdf`,
+        type: 'document',
+        downloadUrl: pdfPath,
+        mimeType: 'application/pdf',
+        metadata: { type: 'pdf_export', contractId: c.id },
+      });
     }
-    return out;
+    return { items, rawData: list };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract prime contracts: ${msg}`);
     opts?.errors && (opts.errors['primeContracts'] = `${msg} (${urlStr})`);
-    return [];
+    return { items: [], rawData: [] };
   }
 }
 
@@ -830,19 +865,32 @@ async function extractCommitments(
   companyId: string,
   projectId: string,
   opts?: ExtractOpts
-): Promise<{ subcontracts: DocumentInfo[]; purchaseOrders: DocumentInfo[] }> {
+): Promise<{ commitments: { subcontracts: DocumentInfo[]; purchaseOrders: DocumentInfo[] }; data: { subcontracts: any[]; purchaseOrders: any[] } }> {
   const sub: DocumentInfo[] = [];
   const po: DocumentInfo[] = [];
+  const subData: any[] = [];
+  const poData: any[] = [];
   const woPath = `/rest/v1.0/work_order_contracts`;
   const poPath = `/rest/v1.0/purchase_order_contracts`;
   const baseParams = { project_id: projectId, company_id: companyId };
   try {
     const woList = await paginateAll<any>(client, woPath, baseParams);
+    subData.push(...woList);
     for (const c of woList) {
       for (const att of c.attachments ?? []) {
         const url = getAttachmentUrl(att);
         if (url) sub.push(mapAttachment(c, att, { contractId: c.id }));
       }
+      const title = c.title ?? c.number ?? String(c.id);
+      const pdfPath = `/rest/v1.0/work_order_contracts/${c.id}.pdf?project_id=${projectId}&company_id=${companyId}`;
+      sub.push({
+        id: `${c.id}_pdf`,
+        name: `${sanitizeFileNameForExport(title)}.pdf`,
+        type: 'document',
+        downloadUrl: pdfPath,
+        mimeType: 'application/pdf',
+        metadata: { type: 'pdf_export', contractId: c.id },
+      });
     }
   } catch (e: any) {
     const msg = e?.message ?? String(e);
@@ -852,11 +900,22 @@ async function extractCommitments(
   }
   try {
     const poList = await paginateAll<any>(client, poPath, baseParams);
+    poData.push(...poList);
     for (const c of poList) {
       for (const att of c.attachments ?? []) {
         const url = getAttachmentUrl(att);
         if (url) po.push(mapAttachment(c, att, { contractId: c.id }));
       }
+      const title = c.title ?? c.number ?? String(c.id);
+      const pdfPath = `/rest/v1.0/purchase_order_contracts/${c.id}.pdf?project_id=${projectId}&company_id=${companyId}`;
+      po.push({
+        id: `${c.id}_pdf`,
+        name: `${sanitizeFileNameForExport(title)}.pdf`,
+        type: 'document',
+        downloadUrl: pdfPath,
+        mimeType: 'application/pdf',
+        metadata: { type: 'pdf_export', contractId: c.id },
+      });
     }
   } catch (e: any) {
     const msg = e?.message ?? String(e);
@@ -864,94 +923,114 @@ async function extractCommitments(
     console.log(`[ProcoreDocs] Could not extract purchase orders: ${msg}`);
     opts?.errors && (opts.errors['commitments.purchaseOrders'] = `${msg} (${urlStr})`);
   }
-  return { subcontracts: sub, purchaseOrders: po };
+  return { commitments: { subcontracts: sub, purchaseOrders: po }, data: { subcontracts: subData, purchaseOrders: poData } };
 }
 
-async function extractChangeOrders(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+async function extractChangeOrders(
+  client: any,
+  companyId: string,
+  projectId: string,
+  opts?: ExtractOpts
+): Promise<{ items: DocumentInfo[]; rawData: any[] }> {
   const path = `/rest/v1.0/change_order_packages`;
   const params = { project_id: projectId, company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
-    const out: DocumentInfo[] = [];
+    const items: DocumentInfo[] = [];
     for (const c of list) {
       for (const att of c.attachments ?? []) {
         const url = getAttachmentUrl(att);
-        if (url) out.push(mapAttachment(c, att, { changeOrderId: c.id }));
+        if (url) items.push(mapAttachment(c, att, { changeOrderId: c.id }));
       }
     }
-    return out;
+    return { items, rawData: list };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract change orders: ${msg}`);
     opts?.errors && (opts.errors['changeOrders'] = `${msg} (${urlStr})`);
-    return [];
+    return { items: [], rawData: [] };
   }
 }
 
-async function extractChangeEvents(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+async function extractChangeEvents(
+  client: any,
+  companyId: string,
+  projectId: string,
+  opts?: ExtractOpts
+): Promise<{ items: DocumentInfo[]; rawData: any[] }> {
   const path = `/rest/v1.0/change_events`;
   const params = { project_id: projectId, company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
-    const out: DocumentInfo[] = [];
+    const items: DocumentInfo[] = [];
     for (const c of list) {
       for (const att of c.attachments ?? []) {
         const url = getAttachmentUrl(att);
-        if (url) out.push(mapAttachment(c, att, { changeEventId: c.id }));
+        if (url) items.push(mapAttachment(c, att, { changeEventId: c.id }));
       }
     }
-    return out;
+    return { items, rawData: list };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract change events: ${msg}`);
     opts?.errors && (opts.errors['changeEvents'] = `${msg} (${urlStr})`);
-    return [];
+    return { items: [], rawData: [] };
   }
 }
 
-async function extractDirectCosts(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+async function extractDirectCosts(
+  client: any,
+  companyId: string,
+  projectId: string,
+  opts?: ExtractOpts
+): Promise<{ items: DocumentInfo[]; rawData: any[] }> {
   const path = `/rest/v1.0/projects/${projectId}/direct_costs`;
   const params = { company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
-    const out: DocumentInfo[] = [];
+    const items: DocumentInfo[] = [];
     for (const d of list) {
       for (const att of d.attachments ?? []) {
         const url = getAttachmentUrl(att);
-        if (url) out.push(mapAttachment(d, att, { directCostId: d.id }));
+        if (url) items.push(mapAttachment(d, att, { directCostId: d.id }));
       }
     }
-    return out;
+    return { items, rawData: list };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract direct costs: ${msg}`);
     opts?.errors && (opts.errors['directCosts'] = `${msg} (${urlStr})`);
-    return [];
+    return { items: [], rawData: [] };
   }
 }
 
-async function extractInvoicing(client: any, companyId: string, projectId: string, opts?: ExtractOpts): Promise<DocumentInfo[]> {
+async function extractInvoicing(
+  client: any,
+  companyId: string,
+  projectId: string,
+  opts?: ExtractOpts
+): Promise<{ items: DocumentInfo[]; rawData: any[] }> {
   const path = `/rest/v1.0/requisitions`;
   const params = { project_id: projectId, company_id: companyId };
   try {
     const list = await paginateAll<any>(client, path, params);
-    const out: DocumentInfo[] = [];
+    const items: DocumentInfo[] = [];
     for (const r of list) {
       for (const att of r.attachments ?? []) {
         const url = getAttachmentUrl(att);
-        if (url) out.push(mapAttachment(r, att, { requisitionId: r.id }));
+        if (url) items.push(mapAttachment(r, att, { requisitionId: r.id }));
       }
     }
-    return out;
+    return { items, rawData: list };
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const urlStr = buildProcoreUrl(path, params);
     console.log(`[ProcoreDocs] Could not extract invoicing/requisitions: ${msg}`);
     opts?.errors && (opts.errors['invoicing'] = `${msg} (${urlStr})`);
-    return [];
+    return { items: [], rawData: [] };
   }
 }
 

@@ -190,12 +190,12 @@ export async function registerRoutes(
           schedule: extracted.schedule.length,
           dailyLogs: extracted.dailyLogs.items.length + extracted.dailyLogs.attachments.length,
           specifications: extracted.specifications.length,
-          primeContracts: extracted.primeContracts.length,
-          commitments: extracted.commitments.subcontracts.length + extracted.commitments.purchaseOrders.length,
-          changeOrders: extracted.changeOrders.length,
-          changeEvents: extracted.changeEvents.length,
-          directCosts: extracted.directCosts.length,
-          invoicing: extracted.invoicing.length,
+          primeContracts: extracted.primeContractsData?.length ?? extracted.primeContracts.length,
+          commitments: (extracted.commitmentsData?.subcontracts?.length ?? 0) + (extracted.commitmentsData?.purchaseOrders?.length ?? 0) || extracted.commitments.subcontracts.length + extracted.commitments.purchaseOrders.length,
+          changeOrders: extracted.changeOrdersData?.length ?? extracted.changeOrders.length,
+          changeEvents: extracted.changeEventsData?.length ?? extracted.changeEvents.length,
+          directCosts: extracted.directCostsData?.length ?? extracted.directCosts.length,
+          invoicing: extracted.invoicingData?.length ?? extracted.invoicing.length,
           directory: extracted.directory.length,
           estimating: extracted.estimating.length,
         },
@@ -281,10 +281,9 @@ export async function registerRoutes(
         `${baseUrl}/rest/v1.0/change_order_packages?project_id=${projectId}&company_id=${companyId}&per_page=5`,
         // Emails - might be "correspondence" or "email_communications"
         `${baseUrl}/rest/v1.0/email_communications?project_id=${projectId}&company_id=${companyId}&per_page=5`,
-        // Submittals and RFIs - verify query param style
-        `${baseUrl}/rest/v1.0/submittals?project_id=${projectId}&company_id=${companyId}&per_page=5`,
-        `${baseUrl}/rest/v1.1/submittals?project_id=${projectId}&company_id=${companyId}&per_page=5`,
-        `${baseUrl}/rest/v1.0/rfis?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // Submittals and RFIs - path param (were working before query switch)
+        `${baseUrl}/rest/v1.0/projects/${projectId}/submittals?company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/projects/${projectId}/rfis?company_id=${companyId}&per_page=5`,
       ];
 
       const results: Array<{ url: string; status: number; statusText: string; bodyPreview: string }> = [];

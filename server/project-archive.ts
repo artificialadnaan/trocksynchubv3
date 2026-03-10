@@ -305,14 +305,15 @@ export async function previewArchive(
     ? docs.dailyLogs.attachments.length + (docs.dailyLogs.items.length > 0 ? 1 : 0)
     : 0;
   const specCount = opts.includeSpecifications ? docs.specifications.length : 0;
-  const primeCount = opts.includePrimeContracts ? docs.primeContracts.length : 0;
+  const primeCount = opts.includePrimeContracts ? (docs.primeContractsData?.length ?? docs.primeContracts.length) : 0;
   const commitCount = opts.includeCommitments
-    ? docs.commitments.subcontracts.length + docs.commitments.purchaseOrders.length
+    ? (docs.commitmentsData?.subcontracts?.length ?? 0) + (docs.commitmentsData?.purchaseOrders?.length ?? 0) ||
+      docs.commitments.subcontracts.length + docs.commitments.purchaseOrders.length
     : 0;
-  const changeOrdersCount = opts.includeChangeOrders ? docs.changeOrders.length : 0;
-  const changeEventsCount = opts.includeChangeEvents ? docs.changeEvents.length : 0;
-  const directCostsCount = opts.includeDirectCosts ? docs.directCosts.length : 0;
-  const invoicingCount = opts.includeInvoicing ? docs.invoicing.length : 0;
+  const changeOrdersCount = opts.includeChangeOrders ? (docs.changeOrdersData?.length ?? docs.changeOrders.length) : 0;
+  const changeEventsCount = opts.includeChangeEvents ? (docs.changeEventsData?.length ?? docs.changeEvents.length) : 0;
+  const directCostsCount = opts.includeDirectCosts ? (docs.directCostsData?.length ?? docs.directCosts.length) : 0;
+  const invoicingCount = opts.includeInvoicing ? (docs.invoicingData?.length ?? docs.invoicing.length) : 0;
   const directoryCount = opts.includeDirectory && docs.directory.length > 0 ? 1 : 0;
   const estimatingCount = opts.includeEstimating && docs.estimating.length > 0 ? 1 : 0;
 
@@ -343,13 +344,18 @@ export async function previewArchive(
   if (opts.includeDailyLogs && (docs.dailyLogs.items.length > 0 || docs.dailyLogs.attachments.length > 0))
     folderStructure.push(`${basePath}/Daily Logs`);
   if (opts.includeSpecifications && docs.specifications.length > 0) folderStructure.push(`${basePath}/Specifications`);
-  if (opts.includePrimeContracts && docs.primeContracts.length > 0) folderStructure.push(`${basePath}/Prime Contracts`);
-  if (opts.includeCommitments && (docs.commitments.subcontracts.length > 0 || docs.commitments.purchaseOrders.length > 0))
+  if (opts.includePrimeContracts && (docs.primeContractsData?.length > 0 || docs.primeContracts.length > 0))
+    folderStructure.push(`${basePath}/Prime Contracts`);
+  if (opts.includeCommitments && ((docs.commitmentsData?.subcontracts?.length ?? 0) + (docs.commitmentsData?.purchaseOrders?.length ?? 0) > 0 || docs.commitments.subcontracts.length > 0 || docs.commitments.purchaseOrders.length > 0))
     folderStructure.push(`${basePath}/Commitments/Subcontracts`, `${basePath}/Commitments/Purchase Orders`);
-  if (opts.includeChangeOrders && docs.changeOrders.length > 0) folderStructure.push(`${basePath}/Change Orders`);
-  if (opts.includeChangeEvents && docs.changeEvents.length > 0) folderStructure.push(`${basePath}/Change Events`);
-  if (opts.includeDirectCosts && docs.directCosts.length > 0) folderStructure.push(`${basePath}/Direct Costs`);
-  if (opts.includeInvoicing && docs.invoicing.length > 0) folderStructure.push(`${basePath}/Invoicing`);
+  if (opts.includeChangeOrders && (docs.changeOrdersData?.length > 0 || docs.changeOrders.length > 0))
+    folderStructure.push(`${basePath}/Change Orders`);
+  if (opts.includeChangeEvents && (docs.changeEventsData?.length > 0 || docs.changeEvents.length > 0))
+    folderStructure.push(`${basePath}/Change Events`);
+  if (opts.includeDirectCosts && (docs.directCostsData?.length > 0 || docs.directCosts.length > 0))
+    folderStructure.push(`${basePath}/Direct Costs`);
+  if (opts.includeInvoicing && (docs.invoicingData?.length > 0 || docs.invoicing.length > 0))
+    folderStructure.push(`${basePath}/Invoicing`);
   if (opts.includeDirectory && docs.directory.length > 0) folderStructure.push(`${basePath}/Directory`);
   if (opts.includeEstimating && docs.estimating.length > 0) folderStructure.push(`${basePath}/Estimating`);
 
@@ -489,13 +495,31 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
     if (options.includeDailyLogs)
       totalFiles += docs.dailyLogs.attachments.length + (docs.dailyLogs.items.length > 0 ? 1 : 0);
     if (options.includeSpecifications) totalFiles += docs.specifications.length;
-    if (options.includePrimeContracts) totalFiles += docs.primeContracts.length;
-    if (options.includeCommitments)
-      totalFiles += docs.commitments.subcontracts.length + docs.commitments.purchaseOrders.length;
-    if (options.includeChangeOrders) totalFiles += docs.changeOrders.length;
-    if (options.includeChangeEvents) totalFiles += docs.changeEvents.length;
-    if (options.includeDirectCosts) totalFiles += docs.directCosts.length;
-    if (options.includeInvoicing) totalFiles += docs.invoicing.length;
+    if (options.includePrimeContracts) {
+      totalFiles += countDocWithUrl(docs.primeContracts);
+      if (docs.primeContractsData?.length) totalFiles += 1;
+    }
+    if (options.includeCommitments) {
+      totalFiles += countDocWithUrl(docs.commitments.subcontracts) + countDocWithUrl(docs.commitments.purchaseOrders);
+      if (docs.commitmentsData?.subcontracts?.length) totalFiles += 1;
+      if (docs.commitmentsData?.purchaseOrders?.length) totalFiles += 1;
+    }
+    if (options.includeChangeOrders) {
+      totalFiles += countDocWithUrl(docs.changeOrders);
+      if (docs.changeOrdersData?.length) totalFiles += 1;
+    }
+    if (options.includeChangeEvents) {
+      totalFiles += countDocWithUrl(docs.changeEvents);
+      if (docs.changeEventsData?.length) totalFiles += 1;
+    }
+    if (options.includeDirectCosts) {
+      totalFiles += countDocWithUrl(docs.directCosts);
+      if (docs.directCostsData?.length) totalFiles += 1;
+    }
+    if (options.includeInvoicing) {
+      totalFiles += countDocWithUrl(docs.invoicing);
+      if (docs.invoicingData?.length) totalFiles += 1;
+    }
     if (options.includeDirectory && docs.directory.length > 0) totalFiles += 1;
     if (options.includeEstimating && docs.estimating.length > 0) totalFiles += 1;
 
@@ -654,11 +678,41 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
     }
 
     if (options.includeSpecifications) await uploadDocList(docs.specifications, `${basePath}/Specifications`, 'Uploading specifications...');
-    if (options.includePrimeContracts) await uploadDocList(docs.primeContracts, `${basePath}/Prime Contracts`, 'Uploading prime contracts...');
+    if (options.includePrimeContracts && (docs.primeContractsData?.length > 0 || docs.primeContracts.length > 0)) {
+      progress.currentStep = 'Uploading prime contracts...';
+      await provider.createFolder(`${basePath}/Prime Contracts`);
+      if (docs.primeContractsData?.length > 0) {
+        try {
+          const json = JSON.stringify(docs.primeContractsData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Prime Contracts`, 'prime_contracts_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e: any) {
+          errors.push(`Prime contracts JSON: ${e.message}`);
+        }
+      }
+      for (const doc of docs.primeContracts) {
+        if (doc.downloadUrl || (doc as any).contentBuffer) {
+          const res = await uploadDocument(provider, `${basePath}/Prime Contracts`, doc, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
+        }
+      }
+    }
 
     if (options.includeCommitments) {
-      if (docs.commitments.subcontracts.length > 0) {
+      const hasSubs = (docs.commitmentsData?.subcontracts?.length ?? 0) > 0 || docs.commitments.subcontracts.length > 0;
+      const hasPOs = (docs.commitmentsData?.purchaseOrders?.length ?? 0) > 0 || docs.commitments.purchaseOrders.length > 0;
+      if (hasSubs) {
         await provider.createFolder(`${basePath}/Commitments/Subcontracts`);
+        if (docs.commitmentsData?.subcontracts?.length) {
+          try {
+            const json = JSON.stringify(docs.commitmentsData.subcontracts, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Subcontracts`, 'subcontracts_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e: any) {
+            errors.push(`Subcontracts JSON: ${e.message}`);
+          }
+        }
         for (const doc of docs.commitments.subcontracts) {
           if (doc.downloadUrl || (doc as any).contentBuffer) {
             const res = await uploadDocument(provider, `${basePath}/Commitments/Subcontracts`, doc, progress);
@@ -667,8 +721,17 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
           }
         }
       }
-      if (docs.commitments.purchaseOrders.length > 0) {
+      if (hasPOs) {
         await provider.createFolder(`${basePath}/Commitments/Purchase Orders`);
+        if (docs.commitmentsData?.purchaseOrders?.length) {
+          try {
+            const json = JSON.stringify(docs.commitmentsData.purchaseOrders, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Purchase Orders`, 'purchase_orders_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e: any) {
+            errors.push(`Purchase orders JSON: ${e.message}`);
+          }
+        }
         for (const doc of docs.commitments.purchaseOrders) {
           if (doc.downloadUrl || (doc as any).contentBuffer) {
             const res = await uploadDocument(provider, `${basePath}/Commitments/Purchase Orders`, doc, progress);
@@ -679,10 +742,86 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       }
     }
 
-    if (options.includeChangeOrders) await uploadDocList(docs.changeOrders, `${basePath}/Change Orders`, 'Uploading change orders...');
-    if (options.includeChangeEvents) await uploadDocList(docs.changeEvents, `${basePath}/Change Events`, 'Uploading change events...');
-    if (options.includeDirectCosts) await uploadDocList(docs.directCosts, `${basePath}/Direct Costs`, 'Uploading direct costs...');
-    if (options.includeInvoicing) await uploadDocList(docs.invoicing, `${basePath}/Invoicing`, 'Uploading invoicing...');
+    if (options.includeChangeOrders && (docs.changeOrdersData?.length > 0 || docs.changeOrders.length > 0)) {
+      progress.currentStep = 'Uploading change orders...';
+      await provider.createFolder(`${basePath}/Change Orders`);
+      if (docs.changeOrdersData?.length) {
+        try {
+          const json = JSON.stringify(docs.changeOrdersData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Change Orders`, 'change_orders_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e: any) {
+          errors.push(`Change orders JSON: ${e.message}`);
+        }
+      }
+      for (const doc of docs.changeOrders) {
+        if (doc.downloadUrl || (doc as any).contentBuffer) {
+          const res = await uploadDocument(provider, `${basePath}/Change Orders`, doc, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
+        }
+      }
+    }
+    if (options.includeChangeEvents && (docs.changeEventsData?.length > 0 || docs.changeEvents.length > 0)) {
+      progress.currentStep = 'Uploading change events...';
+      await provider.createFolder(`${basePath}/Change Events`);
+      if (docs.changeEventsData?.length) {
+        try {
+          const json = JSON.stringify(docs.changeEventsData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Change Events`, 'change_events_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e: any) {
+          errors.push(`Change events JSON: ${e.message}`);
+        }
+      }
+      for (const doc of docs.changeEvents) {
+        if (doc.downloadUrl || (doc as any).contentBuffer) {
+          const res = await uploadDocument(provider, `${basePath}/Change Events`, doc, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
+        }
+      }
+    }
+    if (options.includeDirectCosts && (docs.directCostsData?.length > 0 || docs.directCosts.length > 0)) {
+      progress.currentStep = 'Uploading direct costs...';
+      await provider.createFolder(`${basePath}/Direct Costs`);
+      if (docs.directCostsData?.length) {
+        try {
+          const json = JSON.stringify(docs.directCostsData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Direct Costs`, 'direct_costs_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e: any) {
+          errors.push(`Direct costs JSON: ${e.message}`);
+        }
+      }
+      for (const doc of docs.directCosts) {
+        if (doc.downloadUrl || (doc as any).contentBuffer) {
+          const res = await uploadDocument(provider, `${basePath}/Direct Costs`, doc, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
+        }
+      }
+    }
+    if (options.includeInvoicing && (docs.invoicingData?.length > 0 || docs.invoicing.length > 0)) {
+      progress.currentStep = 'Uploading invoicing...';
+      await provider.createFolder(`${basePath}/Invoicing`);
+      if (docs.invoicingData?.length) {
+        try {
+          const json = JSON.stringify(docs.invoicingData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Invoicing`, 'requisitions_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e: any) {
+          errors.push(`Invoicing JSON: ${e.message}`);
+        }
+      }
+      for (const doc of docs.invoicing) {
+        if (doc.downloadUrl || (doc as any).contentBuffer) {
+          const res = await uploadDocument(provider, `${basePath}/Invoicing`, doc, progress);
+          if (res.success) filesUploaded++;
+          else errors.push(res.error!);
+        }
+      }
+    }
 
     if (options.includeDirectory && docs.directory.length > 0) {
       progress.currentStep = 'Exporting directory...';
