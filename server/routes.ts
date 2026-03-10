@@ -232,6 +232,56 @@ export async function registerRoutes(
     }
   });
 
+  // Debug: raw Procore HTTP test (bypasses extraction; requires ?debug_key=synchub_debug)
+  app.get("/api/debug/procore-raw-test", async (req, res) => {
+    if (req.query.debug_key !== "synchub_debug") {
+      return res.status(403).json({ error: "Invalid debug_key" });
+    }
+    const projectId = "598134326238301";
+    try {
+      const { getProcoreAuthForDebug } = await import("./procore");
+      const { accessToken, companyId, baseUrl, environment } = await getProcoreAuthForDebug();
+
+      const testUrls = [
+        `${baseUrl}/rest/v1.0/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/projects/${projectId}/work_order_contracts?company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/projects/${projectId}/punch_items?company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/folders?project_id=${projectId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/images?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+      ];
+
+      const results: Array<{ url: string; status: number; statusText: string; bodyPreview: string }> = [];
+
+      for (const url of testUrls) {
+        const resp = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: "application/json",
+            "Procore-Company-Id": companyId,
+          },
+        });
+        const body = await resp.text();
+        results.push({
+          url,
+          status: resp.status,
+          statusText: resp.statusText,
+          bodyPreview: body.substring(0, 500),
+        });
+      }
+
+      res.json({
+        baseUrl,
+        companyId,
+        environment,
+        tokenPreview: accessToken ? `${accessToken.substring(0, 10)}...` : "MISSING",
+        projectId,
+        results,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   registerArchiveRoutes(app as any);
 
   app.post("/api/auth/login", async (req, res) => {

@@ -248,6 +248,24 @@ export async function getCompanyId(): Promise<string> {
   return config.companyId;
 }
 
+/** For debug endpoints: returns raw auth used by working Procore calls */
+export async function getProcoreAuthForDebug(): Promise<{
+  accessToken: string;
+  companyId: string;
+  baseUrl: string;
+  environment: string;
+}> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  return {
+    accessToken,
+    companyId: config.companyId,
+    baseUrl,
+    environment: config.environment,
+  };
+}
+
 export async function getProcoreClient(): Promise<{
   get: (endpoint: string, options?: { params?: Record<string, any>; responseType?: string }) => Promise<{ data: any; headers?: any }>;
 }> {
