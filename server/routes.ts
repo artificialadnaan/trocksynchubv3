@@ -243,11 +243,25 @@ export async function registerRoutes(
       const { accessToken, companyId, baseUrl, environment } = await getProcoreAuthForDebug();
 
       const testUrls = [
+        // Original v1.0 project-scoped
         `${baseUrl}/rest/v1.0/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
         `${baseUrl}/rest/v1.0/projects/${projectId}/work_order_contracts?company_id=${companyId}&per_page=5`,
         `${baseUrl}/rest/v1.0/projects/${projectId}/punch_items?company_id=${companyId}&per_page=5`,
         `${baseUrl}/rest/v1.0/folders?project_id=${projectId}&per_page=5`,
         `${baseUrl}/rest/v1.0/images?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // v1.1 path variants
+        `${baseUrl}/rest/v1.1/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.1/projects/${projectId}/work_order_contracts?company_id=${companyId}&per_page=5`,
+        // project_id as query param instead of path param
+        `${baseUrl}/rest/v1.0/prime_contracts?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/work_order_contracts?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        `${baseUrl}/rest/v1.0/punch_items?project_id=${projectId}&company_id=${companyId}&per_page=5`,
+        // singular instead of plural
+        `${baseUrl}/rest/v1.0/projects/${projectId}/prime_contract?company_id=${companyId}&per_page=5`,
+        // v2.0
+        `${baseUrl}/rest/v2.0/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
+        // company scoped
+        `${baseUrl}/rest/v1.0/companies/${companyId}/projects/${projectId}/prime_contracts?company_id=${companyId}&per_page=5`,
       ];
 
       const results: Array<{ url: string; status: number; statusText: string; bodyPreview: string }> = [];
