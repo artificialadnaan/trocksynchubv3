@@ -66,6 +66,45 @@ export function computeStringSimilarity(a: string, b: string): number {
   return (2 * intersection) / (bigramsA.size + bigramsB.size);
 }
 
+const STAGE_EQUIVALENCE: Record<string, string> = {
+  "closed": "closed_won",
+  "closedwon": "closed_won",
+  "closed won": "closed_won",
+  "closed-won": "closed_won",
+  "sent to production": "closed_won",
+
+  "closedlost": "closed_lost",
+  "closed lost": "closed_lost",
+  "closed-lost": "closed_lost",
+  "production – lost": "closed_lost",
+  "production - lost": "closed_lost",
+
+  "estimating": "estimating",
+  "estimate in progress": "estimating",
+  "estimating - under review": "estimating",
+
+  "service – won": "service_won",
+  "service - won": "service_won",
+  "service – sent to production": "service_won",
+  "service - sent to production": "service_won",
+
+  "service – lost": "service_lost",
+  "service - lost": "service_lost",
+
+  "service – estimating": "service_estimating",
+  "service - estimating": "service_estimating",
+
+  "estimate under review": "internal_review",
+  "internal review": "internal_review",
+  "estimate sent to client": "proposal_sent",
+  "proposal sent": "proposal_sent",
+};
+
+export function normalizeStageForComparison(stage: string): string {
+  const key = stage.toLowerCase().replace(/[\u2013\u2014\u2212\uFE58\uFE63\uFF0D]/g, "-").trim();
+  return STAGE_EQUIVALENCE[key] ?? key;
+}
+
 /**
  * Compute field-level conflicts between Procore and HubSpot.
  */
@@ -141,15 +180,19 @@ export function computeFieldConflicts(
     });
   }
 
-  // Stage — WARNING (basic comparison)
+  // Stage — WARNING (with equivalence normalization)
   if (procore.stage && hubspot.stage && procore.stage !== hubspot.stage) {
-    conflicts.push({
-      fieldName: "stage",
-      procoreValue: procore.stage,
-      hubspotValue: hubspot.stage,
-      bidboardValue: null,
-      severity: "warning",
-    });
+    const pcNorm = normalizeStageForComparison(procore.stage);
+    const hsNorm = normalizeStageForComparison(hubspot.stage);
+    if (pcNorm !== hsNorm) {
+      conflicts.push({
+        fieldName: "stage",
+        procoreValue: procore.stage,
+        hubspotValue: hubspot.stage,
+        bidboardValue: null,
+        severity: "warning",
+      });
+    }
   }
 
   // Name — INFO/WARNING

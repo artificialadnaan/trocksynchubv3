@@ -131,6 +131,7 @@ export async function fetchHubSpotDeals(): Promise<NormalizedProject[]> {
       dealName: d.dealName || "",
       projectNumber: projectNumber || null,
       dealStage: d.dealStage || null,
+      dealStageName: d.dealStageName || null,
       pipelineId: d.pipeline || null,
       amount,
       address: address || null,
@@ -152,7 +153,7 @@ export async function fetchHubSpotDeals(): Promise<NormalizedProject[]> {
       normalizedNumber: normalizeProjectNumber(projectNumber || null),
       location,
       amount,
-      stage: d.dealStage || null,
+      stage: d.dealStageName || d.dealStage || null,
       rawData: snapshot,
     };
   });

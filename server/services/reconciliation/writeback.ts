@@ -10,16 +10,17 @@ import {
   reconciliationAuditLog,
 } from "@shared/reconciliation-schema";
 import { updateHubSpotDeal } from "../../hubspot";
+import { updateProcoreProject } from "../../procore";
 
 const fieldMappings: Record<
   string,
-  { procore: string; hubspot: string }
+  { procore: string; hubspot: string; procoreApi: string }
 > = {
-  project_number: { procore: "project_number", hubspot: "project_number" },
-  name: { procore: "name", hubspot: "dealname" },
-  location: { procore: "address", hubspot: "address" },
-  amount: { procore: "estimated_value", hubspot: "amount" },
-  stage: { procore: "stage", hubspot: "dealstage" },
+  project_number: { procore: "project_number", hubspot: "project_number", procoreApi: "project_number" },
+  name: { procore: "name", hubspot: "dealname", procoreApi: "name" },
+  location: { procore: "address", hubspot: "address", procoreApi: "address" },
+  amount: { procore: "estimated_value", hubspot: "amount", procoreApi: "estimated_value" },
+  stage: { procore: "stage", hubspot: "dealstage", procoreApi: "stage" },
 };
 
 export interface WritebackResult {
@@ -58,6 +59,20 @@ export async function writebackResolution(
       const props: Record<string, string> = { [mapping.hubspot]: resolvedValue };
       const result = await updateHubSpotDeal(project.hubspotDealId, props);
       if (!result.success) {
+        writebackFailed = true;
+      }
+    }
+  }
+
+  // Writeback to Procore when HubSpot or manual is the resolved source
+  if (options.writeback !== false && project.procoreProjectId) {
+    if (resolvedSource === "hubspot" || resolvedSource === "manual") {
+      try {
+        await updateProcoreProject(project.procoreProjectId, {
+          [mapping.procoreApi]: resolvedValue,
+        });
+      } catch (err: any) {
+        console.error(`[reconciliation] Procore writeback failed for project ${project.procoreProjectId}:`, err.message);
         writebackFailed = true;
       }
     }

@@ -124,7 +124,19 @@ router.get("/projects", async (req, res) => {
     const offset = (page - 1) * limit;
 
     const conditions = [];
-    if (bucket) conditions.push(eq(reconciliationProjects.bucket, bucket as any));
+    if (bucket === "all") {
+      // No bucket filter — show everything
+    } else if (bucket && bucket !== "needs_attention") {
+      conditions.push(eq(reconciliationProjects.bucket, bucket as any));
+    } else {
+      // Default / needs_attention: exclude resolved and ignored
+      conditions.push(
+        and(
+          sql`${reconciliationProjects.bucket} != 'resolved'`,
+          sql`${reconciliationProjects.bucket} != 'ignored'`
+        )!
+      );
+    }
     if (search?.trim()) {
       const s = `%${search.trim()}%`;
       conditions.push(
@@ -290,7 +302,7 @@ router.post("/projects/:id/resolve-all", async (req, res) => {
       name: { procore: pc?.name ?? "", hubspot: hs?.dealName ?? "" },
       location: { procore: pc?.address ?? "", hubspot: hs?.address ?? "" },
       amount: { procore: String(pc?.estimatedValue ?? ""), hubspot: String(hs?.amount ?? "") },
-      stage: { procore: pc?.stage ?? "", hubspot: hs?.dealStage ?? "" },
+      stage: { procore: pc?.stage ?? "", hubspot: hs?.dealStageName ?? hs?.dealStage ?? "" },
     };
 
     for (const c of conflicts) {
@@ -488,7 +500,7 @@ router.post("/bulk/resolve", async (req, res) => {
           name: { procore: pc?.name ?? "", hubspot: hs?.dealName ?? "" },
           location: { procore: pc?.address ?? "", hubspot: hs?.address ?? "" },
           amount: { procore: String(pc?.estimatedValue ?? ""), hubspot: String(hs?.amount ?? "") },
-          stage: { procore: pc?.stage ?? "", hubspot: hs?.dealStage ?? "" },
+          stage: { procore: pc?.stage ?? "", hubspot: hs?.dealStageName ?? hs?.dealStage ?? "" },
         };
         for (const c of conflicts) {
           const vals = fieldToValue[c.fieldName];
@@ -645,6 +657,53 @@ router.post("/audit-log/:id/rollback", async (req, res) => {
     if (!entry) return res.status(404).json({ error: "Audit entry not found" });
     if (!entry.fieldName) return res.status(400).json({ error: "Cannot rollback project-level action" });
 
+    // Fetch project for external IDs
+    const [project] = await db
+      .select()
+      .from(reconciliationProjects)
+      .where(eq(reconciliationProjects.id, entry.reconciliationProjectId))
+      .limit(1);
+
+    // Writeback previous values to external systems
+    let writebackFailed = false;
+    if (project && entry.previousValue != null) {
+      const fieldApiMap: Record<string, { hubspot: string; procoreApi: string }> = {
+        project_number: { hubspot: "project_number", procoreApi: "project_number" },
+        name: { hubspot: "dealname", procoreApi: "name" },
+        location: { hubspot: "address", procoreApi: "address" },
+        amount: { hubspot: "amount", procoreApi: "estimated_value" },
+        stage: { hubspot: "dealstage", procoreApi: "stage" },
+      };
+
+      const apiMap = fieldApiMap[entry.fieldName];
+      if (apiMap) {
+        // Revert HubSpot
+        if (project.hubspotDealId) {
+          try {
+            const { updateHubSpotDeal } = await import("../hubspot");
+            await updateHubSpotDeal(project.hubspotDealId, {
+              [apiMap.hubspot]: entry.previousValue,
+            });
+          } catch (err: any) {
+            console.error(`[reconciliation] Rollback HubSpot writeback failed:`, err.message);
+            writebackFailed = true;
+          }
+        }
+        // Revert Procore
+        if (project.procoreProjectId) {
+          try {
+            const { updateProcoreProject } = await import("../procore");
+            await updateProcoreProject(project.procoreProjectId, {
+              [apiMap.procoreApi]: entry.previousValue,
+            });
+          } catch (err: any) {
+            console.error(`[reconciliation] Rollback Procore writeback failed:`, err.message);
+            writebackFailed = true;
+          }
+        }
+      }
+    }
+
     await db
       .update(reconciliationConflicts)
       .set({
@@ -683,7 +742,7 @@ router.post("/audit-log/:id/rollback", async (req, res) => {
       notes: "Rollback of audit entry " + id,
     });
 
-    res.json({ success: true });
+    res.json({ success: true, writebackFailed });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

@@ -68,6 +68,7 @@ import { ResolverPanel } from "@/components/reconciliation/ResolverPanel";
 import { OrphanResolver } from "@/components/reconciliation/OrphanResolver";
 
 const BUCKET_OPTIONS = [
+  { value: "needs_attention", label: "Needs Attention" },
   { value: "all", label: "All" },
   { value: "conflict", label: "Conflicts" },
   { value: "fuzzy_match", label: "Fuzzy Matches" },
@@ -83,7 +84,7 @@ export default function DataHealthPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const [bucket, setBucket] = useState("all");
+  const [bucket, setBucket] = useState("needs_attention");
   const [severity, setSeverity] = useState("all");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -115,7 +116,7 @@ export default function DataHealthPage() {
   });
 
   const queryParams = new URLSearchParams();
-  if (bucket && bucket !== "all") queryParams.set("bucket", bucket);
+  if (bucket) queryParams.set("bucket", bucket);
   if (severity && severity !== "all") queryParams.set("severity", severity);
   if (debouncedSearch) queryParams.set("search", debouncedSearch);
   queryParams.set("page", String(page));

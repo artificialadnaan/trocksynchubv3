@@ -159,7 +159,7 @@ export function ResolverPanel({
               <p><span className="text-muted-foreground">Name:</span> {hs?.dealName ?? "—"}</p>
               <p><span className="text-muted-foreground">Project #:</span> {hs?.projectNumber ?? "—"}</p>
               <p><span className="text-muted-foreground">Location:</span> {hs?.address ?? "—"}</p>
-              <p><span className="text-muted-foreground">Stage:</span> {hs?.dealStage ?? "—"}</p>
+              <p><span className="text-muted-foreground">Stage:</span> {hs?.dealStageName ?? hs?.dealStage ?? "—"}</p>
               <p><span className="text-muted-foreground">Amount:</span> {formatCurrency(hs?.amount)}</p>
             </div>
           </div>
@@ -295,7 +295,7 @@ export function ResolverPanel({
 
           <div className="flex items-center gap-2">
             <Checkbox id="writeback" checked={writeback} onCheckedChange={(v) => setWriteback(!!v)} />
-            <Label htmlFor="writeback" className="text-sm font-normal">Write changes back to HubSpot</Label>
+            <Label htmlFor="writeback" className="text-sm font-normal">Write changes back to HubSpot &amp; Procore</Label>
           </div>
         </div>
 

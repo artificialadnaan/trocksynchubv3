@@ -87,6 +87,7 @@ export interface HubSpotDealSnapshot {
   dealName: string;
   projectNumber: string | null;
   dealStage: string | null;
+  dealStageName: string | null;
   pipelineId: string | null;
   amount: number | null;
   address: string | null;
