@@ -76,18 +76,24 @@ export function computeFieldConflicts(
   const conflicts: FieldConflict[] = [];
 
   // Project Number — CRITICAL
-  if (
-    procore.projectNumber &&
-    hubspot.projectNumber &&
-    procore.normalizedNumber !== hubspot.normalizedNumber
-  ) {
-    conflicts.push({
-      fieldName: "project_number",
-      procoreValue: procore.projectNumber,
-      hubspotValue: hubspot.projectNumber,
-      bidboardValue: null,
-      severity: "critical",
-    });
+  // Flag conflict when numbers differ OR when one side has a number and the other doesn't
+  const pcHasNum = !!procore.projectNumber;
+  const hsHasNum = !!hubspot.projectNumber;
+  if (pcHasNum || hsHasNum) {
+    if (
+      // Both have numbers but they differ
+      (pcHasNum && hsHasNum && procore.normalizedNumber !== hubspot.normalizedNumber) ||
+      // One side missing entirely
+      (pcHasNum !== hsHasNum)
+    ) {
+      conflicts.push({
+        fieldName: "project_number",
+        procoreValue: procore.projectNumber ?? null,
+        hubspotValue: hubspot.projectNumber ?? null,
+        bidboardValue: null,
+        severity: "critical",
+      });
+    }
   }
 
   // Amount — CRITICAL if > 10%, WARNING if 1-10%
