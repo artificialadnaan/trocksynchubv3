@@ -1105,36 +1105,29 @@ export async function addCustomerToDirectory(
 
     // Dismiss "Adding Companies" promo modal if present
     try {
-      await randomDelay(2000, 2000);
+      await randomDelay(3000, 3000);
 
-      const modalSelectors = [
-        'button:has-text("Get Started")',
-        'a:has-text("Get Started")',
-        '[class*="modal"] button:has-text("Get Started")',
-        '[class*="dialog"] button:has-text("Get Started")',
-        '[role="dialog"] button:has-text("Get Started")',
-        ':has-text("Get Started")',
-      ];
-
-      let dismissed = false;
-      for (const sel of modalSelectors) {
-        const btn = page.locator(sel).first();
-        if ((await btn.count()) > 0 && (await btn.isVisible())) {
-          await btn.click({ timeout: 5000 });
-          dismissed = true;
-          log('[portfolio-auto] Dismissed "Adding Companies" promo modal', "playwright");
-          await randomDelay(1000, 2000);
-          break;
+      const dismissed = await page.evaluate(() => {
+        const elements = document.querySelectorAll('button, a, span, div[role="button"]');
+        for (const el of elements) {
+          if (el.textContent?.trim() === "Get Started" && (el as HTMLElement).offsetParent !== null) {
+            (el as HTMLElement).click();
+            return true;
+          }
         }
-      }
+        return false;
+      });
 
-      if (!dismissed) {
-        await page.keyboard.press("Escape");
-        await randomDelay(500, 1000);
-        log("[portfolio-auto] Pressed Escape to dismiss any modal", "playwright");
+      if (dismissed) {
+        log('[portfolio-auto] Dismissed "Adding Companies" promo modal via evaluate', "playwright");
+        await randomDelay(2000, 3000);
+      } else {
+        await page.click("body", { position: { x: 10, y: 10 }, timeout: 3000 }).catch(() => {});
+        log("[portfolio-auto] Clicked outside modal to try dismissing it", "playwright");
+        await randomDelay(1000, 2000);
       }
     } catch {
-      /* modal not present, continue */
+      /* continue */
     }
 
     await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
