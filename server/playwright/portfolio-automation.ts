@@ -927,6 +927,15 @@ export async function scrapeBidBoardData(
       /* optional */
     }
 
+    if (scrapedData.customerCompanyName) {
+      scrapedData.customerCompanyName = scrapedData.customerCompanyName
+        .replace(
+          /\s*(Owner\/Client|General Contractor|Subcontractor|Sub-contractor|Architect|Engineer|Developer|Vendor)\s*$/i,
+          ""
+        )
+        .trim();
+    }
+
     try {
       const projectNumInput = page.locator('input[name="projectNumber"]');
       if ((await projectNumInput.count()) > 0) {
@@ -1026,6 +1035,18 @@ export async function addCustomerToDirectory(
       '[data-qa="core-search-input"]',
     ];
     await waitForProcoreSpaLoaded(page, directorySpaSelectors, "Project Directory");
+
+    // Dismiss "Adding Companies" promo modal if present
+    try {
+      const getStartedBtn = page.locator('button:has-text("Get Started"), a:has-text("Get Started")').first();
+      if ((await getStartedBtn.count()) > 0) {
+        await getStartedBtn.click({ timeout: 5000 });
+        log("[portfolio-auto] Dismissed \"Adding Companies\" promo modal", "playwright");
+        await randomDelay(1000, 2000);
+      }
+    } catch {
+      /* modal not present, continue */
+    }
 
     await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
     await randomDelay(1500, 2500);
