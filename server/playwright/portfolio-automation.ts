@@ -1105,29 +1105,21 @@ export async function addCustomerToDirectory(
 
     // Dismiss "Adding Companies" promo modal if present
     try {
-      await randomDelay(3000, 3000);
+      await randomDelay(3000, 4000);
 
-      const dismissed = await page.evaluate(() => {
-        const elements = document.querySelectorAll('button, a, span, div[role="button"]');
-        for (const el of elements) {
-          if (el.textContent?.trim() === "Get Started" && (el as HTMLElement).offsetParent !== null) {
-            (el as HTMLElement).click();
-            return true;
-          }
-        }
-        return false;
-      });
-
-      if (dismissed) {
-        log('[portfolio-auto] Dismissed "Adding Companies" promo modal via evaluate', "playwright");
+      const getStartedLocator = page.getByText("Get Started", { exact: true });
+      if ((await getStartedLocator.count()) > 0) {
+        await getStartedLocator.first().click({ force: true, timeout: 5000 });
+        log('[portfolio-auto] Dismissed "Adding Companies" promo modal via force click', "playwright");
         await randomDelay(2000, 3000);
       } else {
-        await page.click("body", { position: { x: 10, y: 10 }, timeout: 3000 }).catch(() => {});
-        log("[portfolio-auto] Clicked outside modal to try dismissing it", "playwright");
-        await randomDelay(1000, 2000);
+        log('[portfolio-auto] No "Adding Companies" promo modal found', "playwright");
       }
-    } catch {
-      /* continue */
+    } catch (e: unknown) {
+      log(
+        "[portfolio-auto] Modal dismiss attempt failed: " + (e instanceof Error ? e.message : String(e)),
+        "playwright"
+      );
     }
 
     await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
