@@ -1105,11 +1105,33 @@ export async function addCustomerToDirectory(
 
     // Dismiss "Adding Companies" promo modal if present
     try {
-      const getStartedBtn = page.locator('button:has-text("Get Started"), a:has-text("Get Started")').first();
-      if ((await getStartedBtn.count()) > 0) {
-        await getStartedBtn.click({ timeout: 5000 });
-        log("[portfolio-auto] Dismissed \"Adding Companies\" promo modal", "playwright");
-        await randomDelay(1000, 2000);
+      await randomDelay(2000, 2000);
+
+      const modalSelectors = [
+        'button:has-text("Get Started")',
+        'a:has-text("Get Started")',
+        '[class*="modal"] button:has-text("Get Started")',
+        '[class*="dialog"] button:has-text("Get Started")',
+        '[role="dialog"] button:has-text("Get Started")',
+        ':has-text("Get Started")',
+      ];
+
+      let dismissed = false;
+      for (const sel of modalSelectors) {
+        const btn = page.locator(sel).first();
+        if ((await btn.count()) > 0 && (await btn.isVisible())) {
+          await btn.click({ timeout: 5000 });
+          dismissed = true;
+          log('[portfolio-auto] Dismissed "Adding Companies" promo modal', "playwright");
+          await randomDelay(1000, 2000);
+          break;
+        }
+      }
+
+      if (!dismissed) {
+        await page.keyboard.press("Escape");
+        await randomDelay(500, 1000);
+        log("[portfolio-auto] Pressed Escape to dismiss any modal", "playwright");
       }
     } catch {
       /* modal not present, continue */
@@ -1118,7 +1140,25 @@ export async function addCustomerToDirectory(
     await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
     await randomDelay(1500, 2500);
 
-    await page.fill(SEL.directory.searchInput, customerCompanyName);
+    const searchSelectors = [
+      '[data-qa="core-search-input"]',
+      'input[placeholder*="Search"]',
+      'input[type="search"]',
+      '.search input',
+      'input[aria-label*="Search"]',
+    ];
+    let searchFilled = false;
+    for (const sel of searchSelectors) {
+      const input = page.locator(sel).first();
+      if ((await input.count()) > 0 && (await input.isVisible())) {
+        await input.fill(customerCompanyName, { timeout: 5000 });
+        searchFilled = true;
+        break;
+      }
+    }
+    if (!searchFilled) {
+      await page.fill(SEL.directory.searchInput, customerCompanyName);
+    }
     await randomDelay(2000, 3000);
 
     const resultWithName = page.locator(`text="${customerCompanyName.replace(/"/g, '\\"')}"`).first();
