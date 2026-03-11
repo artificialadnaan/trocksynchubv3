@@ -614,24 +614,19 @@ export async function runPhase1BidBoardActions(
     }
 
     if (filesToUpload.length > 0) {
-      const fileInput = await page.$(SEL.documents.fileInput);
-      if (fileInput) {
-        await fileInput.setInputFiles(filesToUpload);
-      } else {
-        const uploadFilesButton = page.locator('button:has-text("Upload Files")');
-        if ((await uploadFilesButton.count()) > 0) {
-          const [fileChooser] = await Promise.all([
-            page.waitForEvent("filechooser", { timeout: 10000 }),
-            uploadFilesButton.click(),
-          ]);
-          await fileChooser.setFiles(filesToUpload);
-        } else {
-          throw new Error("Could not find file input or Upload Files button in dialog");
-        }
-      }
+      const [fileChooser] = await Promise.all([
+        page.waitForEvent("filechooser", { timeout: 10000 }),
+        page.click('button:has-text("Upload Files")'),
+      ]);
+      await fileChooser.setFiles(filesToUpload);
 
-      await randomDelay(3000, 5000);
-      await page.click(SEL.documents.attachButton, { timeout: 30000 });
+      const fileCount = filesToUpload.length;
+      const fileCountText = fileCount === 1 ? "1 file selected" : `${fileCount} files selected`;
+      await page.waitForSelector(`text="${fileCountText}"`, { timeout: 15000 }).catch(() => {});
+      await randomDelay(500, 1000);
+
+      await page.waitForSelector(`${SEL.documents.attachButton}:not([disabled])`, { timeout: 15000 });
+      await page.click(SEL.documents.attachButton, { timeout: 10000 });
       await randomDelay(3000, 5000);
       await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
       await randomDelay(2000, 3000);
@@ -656,6 +651,18 @@ export async function runPhase1BidBoardActions(
   // ── Step 12: Send Drawings folder to Documents Tool ───────
   const step12Start = Date.now();
   try {
+    // Dismiss Attach Files modal if still open from failed upload (avoids StyledModalScrim blocking clicks)
+    try {
+      const cancelBtn = page.locator('button:has-text("Cancel"), [role="dialog"] button:has([data-qa="ci-Close"])').first();
+      if ((await cancelBtn.count()) > 0) {
+        await cancelBtn.click({ timeout: 3000 });
+        await page.waitForSelector(SEL.modal.dialog, { state: "hidden", timeout: 5000 }).catch(() => {});
+        await randomDelay(500, 1000);
+      }
+    } catch {
+      /* modal may already be closed */
+    }
+
     const folderEllipsisButtons = page.locator('.aid-menuItem [data-qa="ci-EllipsisVertical"]');
     let clicked = false;
     if ((await folderEllipsisButtons.count()) > 0) {
