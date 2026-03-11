@@ -94,6 +94,7 @@ import { startRfpReportScheduler } from "./cron/reportScheduler";
 import { startReconciliationScheduler } from "./cron/reconciliationScheduler";
 import reconciliationRouter from "./routes/reconciliation";
 import { registerArchiveRoutes } from "./archive-routes";
+import { handleProcoreProjectWebhook } from "./webhooks/procore-webhook";
 
 const PgSession = connectPgSimple(session);
 
@@ -1284,6 +1285,9 @@ export async function registerRoutes(
       res.status(500).json({ message: e.message });
     }
   });
+
+  // Procore Projects webhook (Add to Portfolio → Phase 2)
+  app.post("/webhooks/procore/project-events", handleProcoreProjectWebhook);
 
   app.post("/webhooks/procore", async (req, res) => {
     try {

@@ -19,6 +19,7 @@ import { storage } from "../storage";
 import { updateHubSpotDealStage } from "../hubspot";
 import { resolveHubspotStageId } from "../procore-hubspot-sync";
 import { BIDBOARD_TO_HUBSPOT_STAGE, normalizeStageLabel } from "./stage-mapping";
+import { triggerPortfolioAutomationFromStageChange } from "../playwright/portfolio-automation";
 import { log } from "../index";
 
 // Excel columns from Bid Board export
@@ -278,6 +279,26 @@ export async function syncStagesToHubSpot(
           hubspotStage: resolved.stageName,
         },
       });
+
+      // Trigger portfolio automation when stage is "Sent to Production" or "Service - Sent to Production"
+      const normalizedNewStage = normalizeStageLabel(change.newStage);
+      if (
+        normalizedNewStage === "Sent to Production" ||
+        normalizedNewStage === "Service - Sent to Production"
+      ) {
+        try {
+          await triggerPortfolioAutomationFromStageChange(
+            change.projectName,
+            change.projectNumber,
+            change.customerName
+          );
+        } catch (err) {
+          log(
+            `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
+            "sync"
+          );
+        }
+      }
     } else {
       result.failed++;
       result.errors.push(
