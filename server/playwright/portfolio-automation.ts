@@ -663,26 +663,41 @@ export async function runPhase1BidBoardActions(
       /* modal may already be closed */
     }
 
-    const folderEllipsisButtons = page.locator('.aid-menuItem [data-qa="ci-EllipsisVertical"]');
+    // Target the ellipsis next to the "Folders" header in the left sidebar (not the page-level ellipsis)
+    const foldersHeader = page.locator('text="Folders"').first();
     let clicked = false;
-    if ((await folderEllipsisButtons.count()) > 0) {
-      await folderEllipsisButtons.first().click({ timeout: 8000 });
+
+    // Try 1: Sibling/adjacent ellipsis next to "Folders" text
+    const foldersEllipsis = foldersHeader
+      .locator("..")
+      .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
+      .first();
+    if ((await foldersEllipsis.count()) > 0) {
+      await foldersEllipsis.click({ timeout: 8000 });
       clicked = true;
-    } else {
-      const drawingsRow = page
-        .locator('text="Drawings"')
+      log("[portfolio-auto] Clicked Folders header ellipsis", "playwright");
+    }
+
+    // Try 2: Hover first in case it's hidden until hover
+    if (!clicked) {
+      await foldersHeader.hover();
+      await randomDelay(500, 500);
+      const hoverEllipsis = foldersHeader
         .locator("..")
-        .locator('[data-qa="ci-EllipsisVertical"]');
-      if ((await drawingsRow.count()) > 0) {
-        await drawingsRow.first().click({ timeout: 8000 });
+        .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
+        .first();
+      if ((await hoverEllipsis.count()) > 0) {
+        await hoverEllipsis.click({ timeout: 8000 });
         clicked = true;
-      } else {
-        const allEllipsis = page.locator('[data-qa="ci-EllipsisVertical"]');
-        if ((await allEllipsis.count()) > 1) {
-          await allEllipsis.first().click({ timeout: 8000 });
-          clicked = true;
-        }
+        log("[portfolio-auto] Clicked Folders header ellipsis (after hover)", "playwright");
       }
+    }
+
+    // Try 3: Right-click the Folders header
+    if (!clicked) {
+      await foldersHeader.click({ button: "right", timeout: 8000 });
+      clicked = true;
+      log("[portfolio-auto] Right-clicked Folders header for context menu", "playwright");
     }
 
     if (!clicked) {
