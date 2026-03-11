@@ -1107,19 +1107,45 @@ export async function addCustomerToDirectory(
     try {
       await randomDelay(3000, 4000);
 
-      const getStartedLocator = page.getByText("Get Started", { exact: true });
-      if ((await getStartedLocator.count()) > 0) {
-        await getStartedLocator.first().click({ force: true, timeout: 5000 });
-        log('[portfolio-auto] Dismissed "Adding Companies" promo modal via force click', "playwright");
-        await randomDelay(2000, 3000);
+      const modalText = await page.locator('text="Adding Companies"').first().isVisible().catch(() => false);
+
+      if (modalText) {
+        const allElements = await page.locator("*").evaluateAll((els) => {
+          for (const el of els) {
+            if (el.textContent?.trim() === "Get Started" && el.getBoundingClientRect().width > 0) {
+              const rect = el.getBoundingClientRect();
+              return {
+                x: rect.x + rect.width / 2,
+                y: rect.y + rect.height / 2,
+              };
+            }
+          }
+          return null;
+        });
+
+        if (allElements) {
+          await page.mouse.click(allElements.x, allElements.y);
+          log("[portfolio-auto] Dismissed promo modal via coordinate click", "playwright");
+          await randomDelay(2000, 3000);
+        } else {
+          log("[portfolio-auto] Could not find Get Started button coordinates", "playwright");
+        }
       } else {
-        log('[portfolio-auto] No "Adding Companies" promo modal found', "playwright");
+        log("[portfolio-auto] No promo modal detected", "playwright");
       }
     } catch (e: unknown) {
       log(
-        "[portfolio-auto] Modal dismiss attempt failed: " + (e instanceof Error ? e.message : String(e)),
+        "[portfolio-auto] Modal dismiss error: " + (e instanceof Error ? e.message : String(e)),
         "playwright"
       );
+    }
+
+    // Verify we're still on directory page; re-navigate if not
+    const currentUrl = page.url();
+    if (!currentUrl.includes("/project/directory")) {
+      await page.goto(dirUrl, { waitUntil: "load", timeout: 30000 });
+      log("[portfolio-auto] Re-navigated to directory after modal dismiss", "playwright");
+      await randomDelay(2000, 3000);
     }
 
     await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
