@@ -861,7 +861,8 @@ function deriveContractNumber(projectNumber: string | null): string | null {
 export async function scrapeBidBoardData(
   page: Page,
   bidboardProjectUrl: string,
-  result: PortfolioAutomationResult
+  result: PortfolioAutomationResult,
+  opts?: { companyId?: string; portfolioProjectId?: string }
 ): Promise<BidBoardScrapedData> {
   const scrapeStart = Date.now();
   const scrapedData: BidBoardScrapedData = {
@@ -970,6 +971,72 @@ export async function scrapeBidBoardData(
       if (contentFrame) {
         const bodyText = await contentFrame.locator("body#tinymce").textContent().catch(() => null);
         if (bodyText?.trim()) scrapedData.scopeOfWork = bodyText.trim();
+      }
+    }
+
+    // Step C: If inclusions/exclusions/scope still empty, try Portfolio Estimating page (Notes section)
+    const needsEstimatingScrape =
+      scrapedData.inclusions.length === 0 &&
+      scrapedData.exclusions.length === 0 &&
+      !scrapedData.scopeOfWork &&
+      opts?.companyId &&
+      opts?.portfolioProjectId;
+
+    if (needsEstimatingScrape) {
+      log("[portfolio-auto] Bid Board Proposal empty — scraping from Portfolio Estimating Notes", "playwright");
+      const estimatingUrl = `https://us02.procore.com/webclients/host/companies/${opts.companyId}/projects/${opts.portfolioProjectId}/tools/estimating/estimate`;
+      try {
+        await page.goto(estimatingUrl, { waitUntil: "load", timeout: 60000 });
+        const estimatingSpaSelectors = [
+          "button.aid-actions",
+          ".aid-tab-title",
+          ".aid-inclusions",
+          ".aid-exclusions",
+        ];
+        await waitForProcoreSpaLoaded(page, estimatingSpaSelectors, "Portfolio Estimating (scrape)");
+
+        // Expand Notes section if collapsed
+        try {
+          const notesToggle = page
+            .locator('button:has-text("Notes"), [role="button"]:has-text("Notes")')
+            .first();
+          if ((await notesToggle.count()) > 0) {
+            await notesToggle.click({ timeout: 5000 });
+            await randomDelay(1000, 2000);
+            log("[portfolio-auto] Expanded Notes section", "playwright");
+          }
+        } catch {
+          /* Notes may already be expanded */
+        }
+
+        const incTextareas = page.locator(".aid-inclusions .aid-item textarea");
+        const incCnt = await incTextareas.count();
+        for (let i = 0; i < incCnt; i++) {
+          const text = await incTextareas.nth(i).inputValue().catch(() => "");
+          if (text?.trim()) scrapedData.inclusions.push(text.trim());
+        }
+
+        const excTextareas = page.locator(".aid-exclusions .aid-item textarea");
+        const excCnt = await excTextareas.count();
+        for (let i = 0; i < excCnt; i++) {
+          const text = await excTextareas.nth(i).inputValue().catch(() => "");
+          if (text?.trim()) scrapedData.exclusions.push(text.trim());
+        }
+
+        const scopeFrames = page.locator("iframe.tox-edit-area__iframe");
+        if ((await scopeFrames.count()) > 0) {
+          const frame = await scopeFrames.first().elementHandle();
+          const contentFrame = await frame?.contentFrame();
+          if (contentFrame) {
+            const bodyText = await contentFrame.locator("body#tinymce").textContent().catch(() => null);
+            if (bodyText?.trim()) scrapedData.scopeOfWork = bodyText.trim();
+          }
+        }
+      } catch (err: unknown) {
+        log(
+          `[portfolio-auto] Estimating scrape fallback failed: ${err instanceof Error ? err.message : String(err)}`,
+          "playwright"
+        );
       }
     }
 
@@ -1285,7 +1352,10 @@ export async function runPhase3(
       page = reauth.page;
     }
 
-    const scrapedData = await scrapeBidBoardData(page, bidboardProjectUrl, result);
+    const scrapedData = await scrapeBidBoardData(page, bidboardProjectUrl, result, {
+      companyId,
+      portfolioProjectId,
+    });
 
     if (scrapedData.customerCompanyName) {
       await addCustomerToDirectory(
