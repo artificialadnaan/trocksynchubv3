@@ -1103,44 +1103,11 @@ export async function addCustomerToDirectory(
     ];
     await waitForProcoreSpaLoaded(page, directorySpaSelectors, "Project Directory");
 
-    // Dismiss "Adding Companies" promo modal if present
-    try {
-      await randomDelay(3000, 4000);
-
-      const modalText = await page.locator('text="Adding Companies"').first().isVisible().catch(() => false);
-
-      if (modalText) {
-        const allElements = await page.locator("*").evaluateAll((els) => {
-          for (const el of els) {
-            if (el.textContent?.trim() === "Get Started" && el.getBoundingClientRect().width > 0) {
-              const rect = el.getBoundingClientRect();
-              return {
-                x: rect.x + rect.width / 2,
-                y: rect.y + rect.height / 2,
-              };
-            }
-          }
-          return null;
-        });
-
-        if (allElements) {
-          await page.mouse.click(allElements.x, allElements.y);
-          log("[portfolio-auto] Dismissed promo modal via coordinate click", "playwright");
-          await randomDelay(2000, 3000);
-        } else {
-          log("[portfolio-auto] Could not find Get Started button coordinates", "playwright");
-        }
-      } else {
-        log("[portfolio-auto] No promo modal detected", "playwright");
-      }
-    } catch (e: unknown) {
-      log(
-        "[portfolio-auto] Modal dismiss error: " + (e instanceof Error ? e.message : String(e)),
-        "playwright"
-      );
-    }
-
-    // Verify we're still on directory page; re-navigate if not
+    // The "Adding Companies" promo modal appears on first directory visit per session
+    // Reload the page to clear it — the modal sets a flag after first render
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    await randomDelay(3000, 4000);
+    log("[portfolio-auto] Reloaded directory page to clear promo modal", "playwright");
     const currentUrl = page.url();
     if (!currentUrl.includes("/project/directory")) {
       await page.goto(dirUrl, { waitUntil: "load", timeout: 30000 });
