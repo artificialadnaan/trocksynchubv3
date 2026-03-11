@@ -884,17 +884,42 @@ export async function scrapeBidBoardData(
 
     // Step A: Overview tab — Customer Company, Project Number
     try {
-      const customerLabel = page.locator("text=Customer Company").first();
+      const customerLabel = page.locator('text="Customer Company"').first();
       if ((await customerLabel.count()) > 0) {
-        const container = customerLabel.locator("..").locator("..").first();
-        const divs = container.locator("div, span");
-        const count = await divs.count();
-        for (let i = 0; i < count; i++) {
-          const text = await divs.nth(i).textContent().catch(() => null);
-          const t = text?.trim();
-          if (t && t !== "Customer Company" && t !== "Customer Information" && t.length > 1) {
-            scrapedData.customerCompanyName = t;
-            break;
+        // Try 1: Next sibling element (most Procore field layouts)
+        const nextSibling = customerLabel.locator("xpath=following-sibling::*[1]");
+        if ((await nextSibling.count()) > 0) {
+          const text = await nextSibling.textContent().catch(() => null);
+          if (text?.trim()) scrapedData.customerCompanyName = text.trim();
+        }
+
+        // Try 2: Parent's next sibling (alternate layout)
+        if (!scrapedData.customerCompanyName) {
+          const parentNext = customerLabel.locator("..").locator("xpath=following-sibling::*[1]");
+          if ((await parentNext.count()) > 0) {
+            const text = await parentNext.textContent().catch(() => null);
+            if (text?.trim()) scrapedData.customerCompanyName = text.trim();
+          }
+        }
+
+        // Try 3: Fallback — go up one parent only, get direct child divs/spans
+        if (!scrapedData.customerCompanyName) {
+          const parent = customerLabel.locator("..");
+          const children = parent.locator(":scope > div, :scope > span");
+          const count = await children.count();
+          for (let i = 0; i < count; i++) {
+            const text = await children.nth(i).textContent().catch(() => null);
+            const t = text?.trim();
+            if (
+              t &&
+              t !== "Customer Company" &&
+              t !== "Customer Information" &&
+              t.length > 1 &&
+              t.length < 100
+            ) {
+              scrapedData.customerCompanyName = t;
+              break;
+            }
           }
         }
       }
@@ -991,7 +1016,7 @@ export async function addCustomerToDirectory(
   result: PortfolioAutomationResult
 ): Promise<void> {
   const stepStart = Date.now();
-  const dirUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${portfolioProjectId}/project/directory/groups/users?page=1&per_page=150&search=&group_by=vendor.id&sort=vendor_name%2Cname`;
+  const dirUrl = `https://us02.procore.com/${portfolioProjectId}/project/directory/groups/users?page=1&per_page=150&search=&group_by=vendor.id&sort=vendor_name%2Cname`;
 
   try {
     await page.goto(dirUrl, { waitUntil: "load", timeout: 60000 });
