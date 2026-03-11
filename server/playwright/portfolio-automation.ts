@@ -3,9 +3,9 @@
  * ===========================
  *
  * Complete Playwright automation for the Bid Board → Portfolio workflow.
- * Two phases:
- *   Phase 1 (Bid Board context): Add to Portfolio, export docs, upload docs
- *   Phase 2 (Portfolio context): Send to Budget, Create Prime Contract
+ * Phase 1 (Bid Board): Add to Portfolio, export docs, upload docs
+ * Phase 2 (Portfolio): Send to Budget, Create Prime Contract
+ * Phase 3 (Portfolio): Scrape Bid Board data, add customer to directory, edit prime contract
  *
  * All selectors are based on actual Procore DOM inspection (March 2026).
  * Key selector patterns used:
@@ -93,9 +93,36 @@ const SEL = {
     closeButton: '[role="dialog"] button:has([data-qa="ci-Close"])',
     loadingSpinner: '[role="img"][aria-label="Loading"]',
   },
+
+  // Phase 3 — Directory
+  directory: {
+    addCompanyBtn: "#new-add-company-btn button, [data-pendo='new-add-company-open-modal-button']",
+    searchInput: '[data-qa="core-search-input"]',
+    addToProjectBtn: '[data-pendo="new-add-company-save-from-company-directory"]',
+  },
+
+  // Phase 3 — Prime Contract edit
+  primeContract: {
+    firstRowLink: ".ag-row-first a[href*='prime_contracts/']",
+    fallbackLink: 'a[href*="prime_contracts/"]:not([href*="/edit"])',
+    editButton: '[data-qa="editButton"], a:has-text("Edit Contract"), button:has-text("Edit Contract")',
+    contractNumInput: '[data-qa="field_number"] input, input[name="number"]',
+    vendorField: '[data-qa="field_vendor"]',
+    contractorField: '[data-qa="field_contractor"]',
+    saveButton: '[data-qa="saveButton"], button:has-text("Save")',
+    tinyMceFrame: "iframe.tox-edit-area__iframe",
+  },
 };
 
 // ─── Types ──────────────────────────────────────────────────────
+
+export interface BidBoardScrapedData {
+  customerCompanyName: string | null;
+  projectNumber: string | null;
+  scopeOfWork: string | null;
+  inclusions: string[];
+  exclusions: string[];
+}
 
 export interface PortfolioAutomationResult {
   success: boolean;
@@ -116,15 +143,47 @@ interface StepResult {
   metadata?: Record<string, unknown>;
 }
 
+export interface AutomationJobState {
+  jobId: string;
+  bidboardProjectId: string;
+  portfolioProjectId?: string;
+  companyId: string;
+  startedAt: Date;
+  currentPhase: "phase1" | "phase2" | "phase3" | "completed" | "failed";
+  currentStep: string;
+  completedSteps: string[];
+  failedSteps: string[];
+  collectedData: {
+    estimateExcelPath?: string;
+    proposalPdfPath?: string;
+    scrapedData?: BidBoardScrapedData;
+    contractNumber?: string;
+  };
+  error?: string;
+}
+
 // ─── Step Logger ────────────────────────────────────────────────
 
 async function logStep(
+  page: Page | null,
   result: PortfolioAutomationResult,
   step: string,
   status: "success" | "failed" | "skipped",
   duration: number,
   opts?: { error?: string; screenshotPath?: string; metadata?: Record<string, unknown> }
 ): Promise<void> {
+  let pageContext: Record<string, string> = {};
+  if (page) {
+    try {
+      pageContext = {
+        url: page.url(),
+        title: await page.title().catch(() => "unknown"),
+      };
+    } catch {
+      /* page may be closed */
+    }
+  }
+
   const stepResult: StepResult = { step, status, duration, ...opts };
   result.steps.push(stepResult);
 
@@ -133,16 +192,109 @@ async function logStep(
     projectName: result.bidboardProjectId,
     action: `portfolio_automation:${step}`,
     status,
-    details: { duration, ...opts?.metadata },
+    details: {
+      duration,
+      pageUrl: pageContext.url,
+      pageTitle: pageContext.title,
+      ...opts?.metadata,
+    },
     errorMessage: opts?.error,
     screenshotPath: opts?.screenshotPath,
   });
 
-  if (status === "failed") {
-    log(`[portfolio-auto] FAILED step "${step}": ${opts?.error}`, "playwright");
-  } else {
-    log(`[portfolio-auto] ${status} step "${step}" (${duration}ms)`, "playwright");
+  const emoji = status === "success" ? "✓" : status === "failed" ? "✗" : "⊘";
+  log(
+    `[portfolio-auto] ${emoji} ${step} (${duration}ms) ${status === "failed" ? "— " + (opts?.error || "") : ""} [${pageContext.url || "no page"}]`,
+    "playwright"
+  );
+}
+
+// ─── Failure context capture ────────────────────────────────────
+
+async function captureFailureContext(
+  page: Page,
+  stepName: string
+): Promise<{ screenshotPath: string; diagnostics: Record<string, unknown> }> {
+  const screenshotPath = await takeScreenshot(page, `fail-${stepName}`);
+  const diagnostics: Record<string, unknown> = {
+    url: page.url(),
+    title: await page.title().catch(() => "unknown"),
+  };
+
+  try {
+    diagnostics.hasErrorToast =
+      (await page.locator('[class*="error"], [role="alert"], .toast-error').count()) > 0;
+    diagnostics.hasModal =
+      (await page.locator('[role="dialog"], [role="presentation"]').count()) > 0;
+    diagnostics.hasLoadingSpinner =
+      (await page.locator('[role="img"][aria-label="Loading"], .ajax-loader').count()) > 0;
+
+    const errorEl = await page.$('[class*="error"], [role="alert"]');
+    if (errorEl) {
+      diagnostics.errorText = await errorEl.textContent().catch(() => null);
+    }
+
+    const modalTitle = await page.$(
+      '[role="dialog"] h2, [role="dialog"] h3, [role="presentation"] h2'
+    );
+    if (modalTitle) {
+      diagnostics.modalTitle = await modalTitle.textContent().catch(() => null);
+    }
+
+    diagnostics.sessionExpired = page.url().includes("login");
+    diagnostics.hasProcoreNav =
+      (await page.locator('nav, [class*="navigation"], [class*="header"]').count()) > 0;
+  } catch {
+    /* some diagnostics may fail */
   }
+
+  return { screenshotPath, diagnostics };
+}
+
+// ─── Session expiry check ───────────────────────────────────────
+
+async function ensureStillLoggedIn(page: Page): Promise<boolean> {
+  const url = page.url();
+  if (url.includes("login")) {
+    log("[portfolio-auto] Session expired — detected login page redirect", "playwright");
+    return false;
+  }
+  const sessionExpired = await page
+    .locator('text="session expired"i, text="sign in"i, text="log in"i')
+    .count();
+  if (sessionExpired > 0 && url.includes("procore.com")) {
+    log("[portfolio-auto] Session expired — detected sign-in prompt", "playwright");
+    return false;
+  }
+  return true;
+}
+
+// ─── Automation summary ─────────────────────────────────────────
+
+function logAutomationSummary(result: PortfolioAutomationResult): void {
+  const totalDuration = result.completedAt
+    ? result.completedAt.getTime() - result.startedAt.getTime()
+    : Date.now() - result.startedAt.getTime();
+  const succeeded = result.steps.filter((s) => s.status === "success").length;
+  const failed = result.steps.filter((s) => s.status === "failed").length;
+  const skipped = result.steps.filter((s) => s.status === "skipped").length;
+
+  log(`\n${"═".repeat(60)}`, "playwright");
+  log(`PORTFOLIO AUTOMATION COMPLETE`, "playwright");
+  log(`${"═".repeat(60)}`, "playwright");
+  log(`  Bid Board Project: ${result.bidboardProjectId}`, "playwright");
+  log(`  Portfolio Project: ${result.portfolioProjectId || "N/A"}`, "playwright");
+  log(`  Overall: ${result.success ? "SUCCESS" : "FAILED"}`, "playwright");
+  log(`  Duration: ${(totalDuration / 1000).toFixed(1)}s`, "playwright");
+  log(`  Steps: ${succeeded} succeeded, ${failed} failed, ${skipped} skipped`, "playwright");
+  if (failed > 0) {
+    log(`  Failed steps:`, "playwright");
+    for (const step of result.steps.filter((s) => s.status === "failed")) {
+      log(`    ✗ ${step.step}: ${step.error}`, "playwright");
+      if (step.screenshotPath) log(`      Screenshot: ${step.screenshotPath}`, "playwright");
+    }
+  }
+  log(`${"═".repeat(60)}\n`, "playwright");
 }
 
 // ─── Helper: Wait for modal to close ────────────────────────────
@@ -237,12 +389,13 @@ export async function runPhase1BidBoardActions(
     );
     await randomDelay(1000, 2000);
 
-    await logStep(result, "click_add_to_portfolio", "success", Date.now() - step2Start);
+    await logStep(page, result, "click_add_to_portfolio", "success", Date.now() - step2Start);
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "step2-add-to-portfolio-failed");
-    await logStep(result, "click_add_to_portfolio", "failed", Date.now() - step2Start, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step2-add-to-portfolio");
+    await logStep(page, result, "click_add_to_portfolio", "failed", Date.now() - step2Start, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
     throw err;
   }
@@ -252,12 +405,13 @@ export async function runPhase1BidBoardActions(
   try {
     await waitForConfirmButtonEnabled(page, 30000);
     await page.click(SEL.confirmButton, { timeout: 10000 });
-    await logStep(result, "confirm_add_to_portfolio", "success", Date.now() - step3Start);
+    await logStep(page, result, "confirm_add_to_portfolio", "success", Date.now() - step3Start);
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "step3-confirm-portfolio-failed");
-    await logStep(result, "confirm_add_to_portfolio", "failed", Date.now() - step3Start, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step3-confirm-portfolio");
+    await logStep(page, result, "confirm_add_to_portfolio", "failed", Date.now() - step3Start, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
     throw err;
   }
@@ -271,14 +425,15 @@ export async function runPhase1BidBoardActions(
     const currentUrl = page.url();
     log(`[portfolio-auto] After Add to Portfolio, URL: ${currentUrl}`, "playwright");
 
-    await logStep(result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
+    await logStep(page, result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
       metadata: { url: currentUrl },
     });
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "step4-wait-portfolio-failed");
-    await logStep(result, "wait_portfolio_creation", "failed", Date.now() - step4Start, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step4-wait-portfolio");
+    await logStep(page, result, "wait_portfolio_creation", "failed", Date.now() - step4Start, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
   }
 
@@ -312,14 +467,15 @@ export async function runPhase1BidBoardActions(
     estimateExcelPath = path.join(DOWNLOADS_DIR, `estimate-${timestamp}.xlsx`);
     await download.saveAs(estimateExcelPath);
 
-    await logStep(result, "export_estimate_excel", "success", Date.now() - step6Start, {
+    await logStep(page, result, "export_estimate_excel", "success", Date.now() - step6Start, {
       metadata: { filePath: estimateExcelPath },
     });
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "step6-export-estimate-failed");
-    await logStep(result, "export_estimate_excel", "failed", Date.now() - step6Start, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step6-export-estimate");
+    await logStep(page, result, "export_estimate_excel", "failed", Date.now() - step6Start, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
   }
 
@@ -356,14 +512,15 @@ export async function runPhase1BidBoardActions(
     proposalPdfPath = path.join(DOWNLOADS_DIR, `proposal-${timestamp}.pdf`);
     await pdfDownload.saveAs(proposalPdfPath);
 
-    await logStep(result, "export_proposal_pdf", "success", Date.now() - step8Start, {
+    await logStep(page, result, "export_proposal_pdf", "success", Date.now() - step8Start, {
       metadata: { filePath: proposalPdfPath },
     });
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "step8-export-proposal-failed");
-    await logStep(result, "export_proposal_pdf", "failed", Date.now() - step8Start, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step8-export-proposal");
+    await logStep(page, result, "export_proposal_pdf", "failed", Date.now() - step8Start, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
   }
 
@@ -425,19 +582,20 @@ export async function runPhase1BidBoardActions(
       await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
       await randomDelay(2000, 3000);
 
-      await logStep(result, "upload_documents", "success", Date.now() - step11Start, {
+      await logStep(page, result, "upload_documents", "success", Date.now() - step11Start, {
         metadata: { filesUploaded: filesToUpload.length },
       });
     } else {
-      await logStep(result, "upload_documents", "skipped", Date.now() - step11Start, {
+      await logStep(page, result, "upload_documents", "skipped", Date.now() - step11Start, {
         metadata: { reason: "No files to upload" },
       });
     }
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "step11-upload-docs-failed");
-    await logStep(result, "upload_documents", "failed", Date.now() - step11Start, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step11-upload-docs");
+    await logStep(page, result, "upload_documents", "failed", Date.now() - step11Start, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
   }
 
@@ -483,12 +641,13 @@ export async function runPhase1BidBoardActions(
     await waitForModalToClose(page, 300000);
     await randomDelay(3000, 5000);
 
-    await logStep(result, "send_to_documents_tool", "success", Date.now() - step12Start);
+    await logStep(page, result, "send_to_documents_tool", "success", Date.now() - step12Start);
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "step12-send-docs-tool-failed");
-    await logStep(result, "send_to_documents_tool", "failed", Date.now() - step12Start, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step12-send-docs-tool");
+    await logStep(page, result, "send_to_documents_tool", "failed", Date.now() - step12Start, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
   }
 
@@ -528,14 +687,15 @@ export async function runPhase2PortfolioActions(
       /* May already be on the Estimating tab */
     }
 
-    await logStep(result, "navigate_portfolio_estimating", "success", Date.now() - navStart, {
+    await logStep(page, result, "navigate_portfolio_estimating", "success", Date.now() - navStart, {
       metadata: { url: estimatingUrl },
     });
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "phase2-navigate-failed");
-    await logStep(result, "navigate_portfolio_estimating", "failed", Date.now() - navStart, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "phase2-navigate");
+    await logStep(page, result, "navigate_portfolio_estimating", "failed", Date.now() - navStart, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
     throw err;
   }
@@ -559,12 +719,13 @@ export async function runPhase2PortfolioActions(
     await waitForModalToClose(page, 120000);
     await randomDelay(3000, 5000);
 
-    await logStep(result, "send_to_budget", "success", Date.now() - budgetStart);
+    await logStep(page, result, "send_to_budget", "success", Date.now() - budgetStart);
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "phase2-send-to-budget-failed");
-    await logStep(result, "send_to_budget", "failed", Date.now() - budgetStart, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "phase2-send-to-budget");
+    await logStep(page, result, "send_to_budget", "failed", Date.now() - budgetStart, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
     await page.keyboard.press("Escape");
     await randomDelay(1000, 2000);
@@ -589,19 +750,457 @@ export async function runPhase2PortfolioActions(
     await waitForModalToClose(page, 120000);
     await randomDelay(3000, 5000);
 
-    await logStep(result, "create_prime_contract", "success", Date.now() - primeStart);
+    await logStep(page, result, "create_prime_contract", "success", Date.now() - primeStart);
   } catch (err: unknown) {
-    const screenshot = await takeScreenshot(page, "phase2-create-prime-contract-failed");
-    await logStep(result, "create_prime_contract", "failed", Date.now() - primeStart, {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "phase2-create-prime-contract");
+    await logStep(page, result, "create_prime_contract", "failed", Date.now() - primeStart, {
       error: err instanceof Error ? err.message : String(err),
-      screenshotPath: screenshot,
+      screenshotPath,
+      metadata: { diagnostics },
     });
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PHASE 2.5: Scrape Bid Board Data
+// ═══════════════════════════════════════════════════════════════
+
+function deriveContractNumber(projectNumber: string | null): string | null {
+  if (!projectNumber) return null;
+  const parts = projectNumber.split("-");
+  if (parts.length >= 4) {
+    return `${parts[2]}-${parts[3]}-PO-01`;
+  } else if (parts.length >= 3) {
+    return `${parts[parts.length - 2]}-${parts[parts.length - 1]}-PO-01`;
+  }
+  return `${projectNumber}-PO-01`;
+}
+
+export async function scrapeBidBoardData(
+  page: Page,
+  bidboardProjectUrl: string,
+  result: PortfolioAutomationResult
+): Promise<BidBoardScrapedData> {
+  const scrapeStart = Date.now();
+  const scrapedData: BidBoardScrapedData = {
+    customerCompanyName: null,
+    projectNumber: null,
+    scopeOfWork: null,
+    inclusions: [],
+    exclusions: [],
+  };
+
+  try {
+    await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
+    await randomDelay(3000, 5000);
+
+    // Step A: Overview tab — Customer Company, Project Number
+    try {
+      const customerLabel = page.locator("text=Customer Company").first();
+      if ((await customerLabel.count()) > 0) {
+        const container = customerLabel.locator("..").locator("..").first();
+        const divs = container.locator("div, span");
+        const count = await divs.count();
+        for (let i = 0; i < count; i++) {
+          const text = await divs.nth(i).textContent().catch(() => null);
+          const t = text?.trim();
+          if (t && t !== "Customer Company" && t !== "Customer Information" && t.length > 1) {
+            scrapedData.customerCompanyName = t;
+            break;
+          }
+        }
+      }
+    } catch {
+      /* optional */
+    }
+
+    try {
+      const projectNumInput = page.locator('input[name="projectNumber"]');
+      if ((await projectNumInput.count()) > 0) {
+        scrapedData.projectNumber = await projectNumInput.inputValue().catch(() => null);
+      }
+    } catch {
+      /* optional */
+    }
+
+    // Step B: Proposal tab — Inclusions, Exclusions, Scope of Work
+    await page.click(SEL.tabs.proposal, { timeout: 10000 }).catch(() => {});
+    await randomDelay(2000, 4000);
+
+    const inclusionTextareas = page.locator(".aid-inclusions .aid-item textarea");
+    const incCount = await inclusionTextareas.count();
+    for (let i = 0; i < incCount; i++) {
+      const text = await inclusionTextareas.nth(i).inputValue().catch(() => "");
+      if (text?.trim()) scrapedData.inclusions.push(text.trim());
+    }
+
+    const exclusionTextareas = page.locator(".aid-exclusions .aid-item textarea");
+    const excCount = await exclusionTextareas.count();
+    for (let i = 0; i < excCount; i++) {
+      const text = await exclusionTextareas.nth(i).inputValue().catch(() => "");
+      if (text?.trim()) scrapedData.exclusions.push(text.trim());
+    }
+
+    const tinyFrames = page.locator("iframe.tox-edit-area__iframe");
+    if ((await tinyFrames.count()) > 0) {
+      const frame = await tinyFrames.first().elementHandle();
+      const contentFrame = await frame?.contentFrame();
+      if (contentFrame) {
+        const bodyText = await contentFrame.locator("body#tinymce").textContent().catch(() => null);
+        if (bodyText?.trim()) scrapedData.scopeOfWork = bodyText.trim();
+      }
+    }
+
+    log(`[portfolio-auto] Scraped Bid Board data summary:`, "playwright");
+    log(`  Customer Company: ${scrapedData.customerCompanyName || "NOT FOUND"}`, "playwright");
+    log(`  Project Number: ${scrapedData.projectNumber || "NOT FOUND"}`, "playwright");
+    log(
+      `  Scope of Work: ${scrapedData.scopeOfWork ? scrapedData.scopeOfWork.substring(0, 100) + "..." : "NOT FOUND"}`,
+      "playwright"
+    );
+    log(
+      `  Inclusions: ${scrapedData.inclusions.length} items${scrapedData.inclusions.length > 0 ? " (" + scrapedData.inclusions.map((i) => i.substring(0, 30)).join(", ") + ")" : ""}`,
+      "playwright"
+    );
+    log(
+      `  Exclusions: ${scrapedData.exclusions.length} items${scrapedData.exclusions.length > 0 ? " (" + scrapedData.exclusions.map((e) => e.substring(0, 30)).join(", ") + ")" : ""}`,
+      "playwright"
+    );
+
+    await logStep(page, result, "scrape_bidboard_data", "success", Date.now() - scrapeStart, {
+      metadata: {
+        customerCompanyName: scrapedData.customerCompanyName,
+        projectNumber: scrapedData.projectNumber,
+        scopeOfWorkLength: scrapedData.scopeOfWork?.length || 0,
+        inclusionsCount: scrapedData.inclusions.length,
+        exclusionsCount: scrapedData.exclusions.length,
+        scopeOfWorkPreview: scrapedData.scopeOfWork?.substring(0, 200),
+        inclusionsPreview: scrapedData.inclusions.map((i) => i.substring(0, 50)),
+        exclusionsPreview: scrapedData.exclusions.map((e) => e.substring(0, 50)),
+      },
+    });
+  } catch (err: unknown) {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "scrape-bidboard-data");
+    await logStep(page, result, "scrape_bidboard_data", "failed", Date.now() - scrapeStart, {
+      error: err instanceof Error ? err.message : String(err),
+      screenshotPath,
+      metadata: { diagnostics },
+    });
+  }
+
+  return scrapedData;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3A: Add Customer to Directory
+// ═══════════════════════════════════════════════════════════════
+
+export async function addCustomerToDirectory(
+  page: Page,
+  companyId: string,
+  portfolioProjectId: string,
+  customerCompanyName: string,
+  result: PortfolioAutomationResult
+): Promise<void> {
+  const stepStart = Date.now();
+  const dirUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${portfolioProjectId}/project/directory/groups/users?page=1&per_page=150&search=&group_by=vendor.id&sort=vendor_name%2Cname`;
+
+  try {
+    await page.goto(dirUrl, { waitUntil: "load", timeout: 60000 });
+    await randomDelay(3000, 5000);
+
+    await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
+    await randomDelay(1500, 2500);
+
+    await page.fill(SEL.directory.searchInput, customerCompanyName);
+    await randomDelay(2000, 3000);
+
+    const resultWithName = page.locator(`text="${customerCompanyName.replace(/"/g, '\\"')}"`).first();
+    const addToProjectBtn = resultWithName.locator("..").locator("..").locator('button:has-text("Add to Project")');
+    if ((await addToProjectBtn.count()) > 0) {
+      await addToProjectBtn.click({ timeout: 8000 });
+    } else {
+      await page.click(SEL.directory.addToProjectBtn, { timeout: 8000 });
+    }
+    await randomDelay(3000, 5000);
+
+    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+    await page
+      .click('button[type="submit"][value="Save"], button:has-text("Save")', { timeout: 10000 })
+      .catch(() => {});
+    await randomDelay(3000, 5000);
+
+    await logStep(page, result, "add_customer_to_directory", "success", Date.now() - stepStart);
+  } catch (err: unknown) {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "add-customer-to-directory");
+    await logStep(page, result, "add_customer_to_directory", "failed", Date.now() - stepStart, {
+      error: err instanceof Error ? err.message : String(err),
+      screenshotPath,
+      metadata: { diagnostics },
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3B: Edit Prime Contract
+// ═══════════════════════════════════════════════════════════════
+
+export async function editPrimeContract(
+  page: Page,
+  companyId: string,
+  portfolioProjectId: string,
+  scrapedData: BidBoardScrapedData,
+  proposalPdfPath: string | null,
+  result: PortfolioAutomationResult
+): Promise<void> {
+  const editStart = Date.now();
+  const pcUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${portfolioProjectId}/tools/contracts/prime_contracts`;
+
+  try {
+    await page.goto(pcUrl, { waitUntil: "load", timeout: 60000 });
+    await randomDelay(3000, 5000);
+
+    const firstLink = page.locator(SEL.primeContract.firstRowLink).first();
+    const fallback = page.locator(SEL.primeContract.fallbackLink).first();
+    if ((await firstLink.count()) > 0) {
+      await firstLink.click({ timeout: 10000 });
+    } else {
+      await fallback.click({ timeout: 10000 });
+    }
+    await randomDelay(3000, 5000);
+
+    await page.click(SEL.primeContract.editButton, { timeout: 10000 });
+    await randomDelay(3000, 5000);
+
+    const contractNumber = deriveContractNumber(scrapedData.projectNumber);
+    if (contractNumber) {
+      const contractNumInput = page.locator(SEL.primeContract.contractNumInput);
+      await contractNumInput.clear();
+      await contractNumInput.fill(contractNumber);
+      const actualValue = await contractNumInput.inputValue();
+      if (actualValue !== contractNumber) {
+        log(
+          `[portfolio-auto] WARNING: Contract # fill mismatch. Expected: "${contractNumber}", Got: "${actualValue}"`,
+          "playwright"
+        );
+      }
+      await randomDelay(500, 1000);
+    }
+
+    if (scrapedData.customerCompanyName) {
+      await page.click(SEL.primeContract.vendorField, { timeout: 8000 });
+      await randomDelay(1000, 2000);
+      const dropdownSearch = page.locator('input[placeholder="Search"]').last();
+      if ((await dropdownSearch.count()) > 0) {
+        await dropdownSearch.fill(scrapedData.customerCompanyName);
+        await randomDelay(1000, 2000);
+      }
+      const option = page
+        .locator('[role="option"]')
+        .filter({ hasText: scrapedData.customerCompanyName })
+        .first();
+      await option.click({ timeout: 8000 });
+      await randomDelay(500, 1000);
+      const selectedVendor = await page.locator(SEL.primeContract.vendorField).textContent();
+      log(`[portfolio-auto] Owner/Client set to: "${selectedVendor?.trim()}"`, "playwright");
+    }
+
+    await page.click(SEL.primeContract.contractorField, { timeout: 8000 });
+    await randomDelay(1000, 2000);
+    const contractorSearch = page.locator('input[placeholder="Search"]').last();
+    if ((await contractorSearch.count()) > 0) {
+      await contractorSearch.fill("T-Rock Construction");
+      await randomDelay(1000, 2000);
+    }
+    const trockOption = page.locator('[role="option"]:has-text("T-Rock Construction")').first();
+    await trockOption.click({ timeout: 8000 });
+    await randomDelay(500, 1000);
+    const selectedContractor = await page.locator(SEL.primeContract.contractorField).textContent();
+    log(`[portfolio-auto] Contractor set to: "${selectedContractor?.trim()}"`, "playwright");
+
+    if (scrapedData.scopeOfWork) {
+      const descFrames = page.locator(SEL.primeContract.tinyMceFrame);
+      const descFrame = descFrames.first();
+      const frameHandle = await descFrame.elementHandle();
+      const descContent = await frameHandle?.contentFrame();
+      if (descContent) {
+        await descContent.click("body#tinymce");
+        await descContent.fill("body#tinymce", scrapedData.scopeOfWork);
+      }
+      await randomDelay(500, 1000);
+    }
+
+    if (proposalPdfPath) {
+      try {
+        await page.click('button:has-text("Attach Files")', { timeout: 8000 });
+        await randomDelay(2000, 3000);
+        const fileInput = page.locator('input[type="file"]');
+        if ((await fileInput.count()) > 0) {
+          await fileInput.setInputFiles(proposalPdfPath);
+        } else {
+          const [fileChooser] = await Promise.all([
+            page.waitForEvent("filechooser", { timeout: 10000 }),
+            page.click('button:has-text("Upload Files")'),
+          ]);
+          await fileChooser.setFiles(proposalPdfPath);
+        }
+        await randomDelay(3000, 5000);
+        await page
+          .click('button:has-text("Attach"):not(:has-text("Attach Files"))', { timeout: 15000 })
+          .catch(() => {});
+        await randomDelay(3000, 5000);
+      } catch (err: unknown) {
+        log(
+          `[portfolio-auto] Failed to attach proposal PDF: ${err instanceof Error ? err.message : String(err)}`,
+          "playwright"
+        );
+      }
+    }
+
+    if (scrapedData.inclusions.length > 0) {
+      await page.locator("text=Inclusions & Exclusions").scrollIntoViewIfNeeded().catch(() => {});
+      await randomDelay(500, 1000);
+      const allFrames = page.locator(SEL.primeContract.tinyMceFrame);
+      const inclusionsFrame = allFrames.nth(1);
+      const inclHandle = await inclusionsFrame.elementHandle();
+      const inclContent = await inclHandle?.contentFrame();
+      if (inclContent) {
+        await inclContent.click("body#tinymce");
+        await inclContent.fill("body#tinymce", scrapedData.inclusions.join("\n"));
+      }
+      await randomDelay(500, 1000);
+    }
+
+    if (scrapedData.exclusions.length > 0) {
+      const allFrames = page.locator(SEL.primeContract.tinyMceFrame);
+      const exclusionsFrame = allFrames.nth(2);
+      const exclHandle = await exclusionsFrame.elementHandle();
+      const exclContent = await exclHandle?.contentFrame();
+      if (exclContent) {
+        await exclContent.click("body#tinymce");
+        await exclContent.fill("body#tinymce", scrapedData.exclusions.join("\n"));
+      }
+      await randomDelay(500, 1000);
+    }
+
+    await page.click(SEL.primeContract.saveButton, { timeout: 10000 });
+    await randomDelay(3000, 5000);
+    await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+
+    await logStep(page, result, "edit_prime_contract", "success", Date.now() - editStart);
+  } catch (err: unknown) {
+    const { screenshotPath, diagnostics } = await captureFailureContext(page, "edit-prime-contract");
+    await logStep(page, result, "edit_prime_contract", "failed", Date.now() - editStart, {
+      error: err instanceof Error ? err.message : String(err),
+      screenshotPath,
+      metadata: { diagnostics },
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3: Full orchestrator
+// ═══════════════════════════════════════════════════════════════
+
+export async function runPhase3(
+  companyId: string,
+  portfolioProjectId: string,
+  bidboardProjectUrl: string,
+  proposalPdfPath: string | null,
+  bidboardProjectId?: string,
+  existingPage?: Page
+): Promise<PortfolioAutomationResult> {
+  const result: PortfolioAutomationResult = {
+    success: false,
+    bidboardProjectId: bidboardProjectId || "unknown",
+    portfolioProjectId,
+    steps: [],
+    startedAt: new Date(),
+  };
+
+  let page = existingPage;
+  if (!page) {
+    const { page: p, success, error } = await ensureLoggedIn();
+    if (!success || !p) {
+      result.error = error || "Failed to log in";
+      result.completedAt = new Date();
+      logAutomationSummary(result);
+      return result;
+    }
+    page = p;
+  }
+
+  try {
+    if (!(await ensureStillLoggedIn(page))) {
+      const reauth = await ensureLoggedIn();
+      if (!reauth.success || !reauth.page) {
+        result.error = "Session expired and re-login failed";
+        result.completedAt = new Date();
+        logAutomationSummary(result);
+        return result;
+      }
+      page = reauth.page;
+    }
+
+    const scrapedData = await scrapeBidBoardData(page, bidboardProjectUrl, result);
+
+    if (scrapedData.customerCompanyName) {
+      await addCustomerToDirectory(
+        page,
+        companyId,
+        portfolioProjectId,
+        scrapedData.customerCompanyName,
+        result
+      );
+    } else {
+      await logStep(page, result, "add_customer_to_directory", "skipped", 0, {
+        metadata: { reason: "No customer company name scraped" },
+      });
+    }
+
+    await editPrimeContract(
+      page,
+      companyId,
+      portfolioProjectId,
+      scrapedData,
+      proposalPdfPath,
+      result
+    );
+
+    result.success = result.steps.every(
+      (s) => s.status === "success" || s.status === "skipped"
+    );
+  } catch (err: unknown) {
+    result.error = err instanceof Error ? err.message : String(err);
+  }
+
+  result.completedAt = new Date();
+
+  await storage.createAuditLog({
+    action: "portfolio_automation_phase3",
+    entityType: "portfolio_project",
+    entityId: portfolioProjectId,
+    source: "automation",
+    status: result.success ? "success" : "failed",
+    details: {
+      steps: result.steps.map((s) => ({ step: s.step, status: s.status, duration: s.duration })),
+      duration: result.completedAt.getTime() - result.startedAt.getTime(),
+    },
+  });
+
+  logAutomationSummary(result);
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // FULL ORCHESTRATOR
 // ═══════════════════════════════════════════════════════════════
+
+export interface Phase1Output {
+  result: PortfolioAutomationResult;
+  estimateExcelPath: string | null;
+  proposalPdfPath: string | null;
+}
 
 /**
  * Run the complete Phase 1 automation from a Bid Board project URL.
@@ -610,24 +1209,30 @@ export async function runPhase2PortfolioActions(
 export async function runPhase1(
   bidboardProjectUrl: string,
   bidboardProjectId: string
-): Promise<PortfolioAutomationResult> {
+): Promise<Phase1Output> {
   const result: PortfolioAutomationResult = {
     success: false,
     bidboardProjectId,
     steps: [],
     startedAt: new Date(),
   };
+  let estimateExcelPath: string | null = null;
+  let proposalPdfPath: string | null = null;
 
   try {
     const { page, success, error } = await ensureLoggedIn();
     if (!success || !page) {
       result.error = error || "Failed to log in";
-      await logStep(result, "login", "failed", 0, { error: result.error });
-      return result;
+      await logStep(page ?? null, result, "login", "failed", 0, { error: result.error });
+      result.completedAt = new Date();
+      logAutomationSummary(result);
+      return { result, estimateExcelPath, proposalPdfPath };
     }
-    await logStep(result, "login", "success", 0);
+    await logStep(page, result, "login", "success", 0);
 
-    await runPhase1BidBoardActions(page, bidboardProjectUrl, result);
+    const phase1Out = await runPhase1BidBoardActions(page, bidboardProjectUrl, result);
+    estimateExcelPath = phase1Out.estimateExcelPath;
+    proposalPdfPath = phase1Out.proposalPdfPath;
 
     result.success = result.steps.every(
       (s) => s.status === "success" || s.status === "skipped"
@@ -647,19 +1252,29 @@ export async function runPhase1(
     details: {
       steps: result.steps.map((s) => ({ step: s.step, status: s.status, duration: s.duration })),
       duration: result.completedAt.getTime() - result.startedAt.getTime(),
+      proposalPdfPath,
+      estimateExcelPath,
     },
   });
 
-  return result;
+  logAutomationSummary(result);
+  return { result, estimateExcelPath, proposalPdfPath };
+}
+
+export interface Phase2Input {
+  proposalPdfPath?: string | null;
+  bidboardProjectUrl?: string;
 }
 
 /**
  * Run Phase 2 from a webhook-provided portfolio project ID.
+ * Optionally runs Phase 3 after Phase 2 if proposalPdfPath and bidboardProjectUrl are provided.
  */
 export async function runPhase2(
   companyId: string,
   portfolioProjectId: string,
-  bidboardProjectId?: string
+  bidboardProjectId?: string,
+  phase2Input?: Phase2Input
 ): Promise<PortfolioAutomationResult> {
   const result: PortfolioAutomationResult = {
     success: false,
@@ -670,36 +1285,74 @@ export async function runPhase2(
   };
 
   try {
-    const { page, success, error } = await ensureLoggedIn();
+    let page: Page | null = null;
+    const { page: p, success, error } = await ensureLoggedIn();
+    page = p;
     if (!success || !page) {
       result.error = error || "Failed to log in";
-      await logStep(result, "login", "failed", 0, { error: result.error });
+      await logStep(page, result, "login", "failed", 0, { error: result.error });
+      result.completedAt = new Date();
+      logAutomationSummary(result);
       return result;
     }
-    await logStep(result, "login", "success", 0);
+    await logStep(page, result, "login", "success", 0);
+
+    if (!(await ensureStillLoggedIn(page))) {
+      const reauth = await ensureLoggedIn();
+      if (!reauth.success || !reauth.page) {
+        result.error = "Session expired and re-login failed";
+        result.completedAt = new Date();
+        logAutomationSummary(result);
+        return result;
+      }
+      page = reauth.page;
+    }
 
     await runPhase2PortfolioActions(page, companyId, portfolioProjectId, result);
 
     result.success = result.steps.every(
       (s) => s.status === "success" || s.status === "skipped"
     );
+    result.completedAt = new Date();
+
+    await storage.createAuditLog({
+      action: "portfolio_automation_phase2",
+      entityType: "portfolio_project",
+      entityId: portfolioProjectId,
+      source: "webhook",
+      status: result.success ? "success" : "failed",
+      details: {
+        steps: result.steps.map((s) => ({ step: s.step, status: s.status, duration: s.duration })),
+        duration: result.completedAt.getTime() - result.startedAt.getTime(),
+      },
+    });
+
+    logAutomationSummary(result);
+
+    // Phase 3: run if Phase 2 succeeded and we have required data
+    if (
+      result.success &&
+      phase2Input?.bidboardProjectUrl &&
+      phase2Input?.proposalPdfPath !== undefined
+    ) {
+      const phase3Result = await runPhase3(
+        companyId,
+        portfolioProjectId,
+        phase2Input.bidboardProjectUrl,
+        phase2Input.proposalPdfPath,
+        bidboardProjectId,
+        page
+      );
+      phase3Result.steps.forEach((s) => result.steps.push(s));
+      result.success = result.success && phase3Result.success;
+      result.completedAt = phase3Result.completedAt || result.completedAt;
+      if (phase3Result.error) result.error = phase3Result.error;
+    }
   } catch (err: unknown) {
     result.error = err instanceof Error ? err.message : String(err);
+    result.completedAt = new Date();
+    logAutomationSummary(result);
   }
-
-  result.completedAt = new Date();
-
-  await storage.createAuditLog({
-    action: "portfolio_automation_phase2",
-    entityType: "portfolio_project",
-    entityId: portfolioProjectId,
-    source: "webhook",
-    status: result.success ? "success" : "failed",
-    details: {
-      steps: result.steps.map((s) => ({ step: s.step, status: s.status, duration: s.duration })),
-      duration: result.completedAt.getTime() - result.startedAt.getTime(),
-    },
-  });
 
   return result;
 }
@@ -771,10 +1424,14 @@ export async function triggerPortfolioAutomationFromStageChange(
     "playwright"
   );
 
-  const result = await runPhase1(bidboardProjectUrl, bidboardProjectId);
+  const { result, proposalPdfPath, estimateExcelPath } = await runPhase1(bidboardProjectUrl, bidboardProjectId);
 
   if (result.completedAt) {
-    registerPendingPhase2(bidboardProjectId);
+    registerPendingPhase2(bidboardProjectId, {
+      bidboardProjectUrl,
+      proposalPdfPath,
+      estimateExcelPath,
+    });
   }
 
   return result;

@@ -89,6 +89,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { RfpAutomationCard } from "@/components/rfp-automation-card";
+import { PortfolioAutomationCard } from "@/components/portfolio-automation-card";
 import StorageSettings from "@/components/settings/StorageSettings";
 import {
   Link2,
@@ -305,6 +306,8 @@ export default function SettingsPage() {
       <StageMappingCard />
 
       <BidBoardStageSyncCard />
+
+      <PortfolioAutomationCard />
 
       <RfpAutomationCard />
 

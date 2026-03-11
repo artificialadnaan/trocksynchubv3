@@ -747,3 +747,76 @@ export async function sendBidBoardSyncSummary(params: {
 
   return { sent, failed };
 }
+
+/**
+ * Sends a portfolio automation report email.
+ * Includes project name, status, step summary, links to screenshots and documents.
+ */
+export async function sendPortfolioAutomationReport(params: {
+  projectName: string;
+  projectId: string;
+  status: 'success' | 'failed' | 'partial';
+  duration: number;
+  steps: Array<{ step: string; status: string; duration?: number; error?: string; screenshotPath?: string }>;
+  recipientEmails: string[];
+  documentLinks?: string[];
+  baseUrl?: string;
+}): Promise<{ sent: number; failed: number }> {
+  const config = await storage.getAutomationConfig('portfolio_automation_email_config');
+  const emailConfig = (config?.value as { enabled?: boolean; recipients?: string[] }) || {};
+  if (!emailConfig.enabled) {
+    console.log('[email] Portfolio automation report disabled, skipping');
+    return { sent: 0, failed: 0 };
+  }
+
+  const recipients = params.recipientEmails.length ? params.recipientEmails : (emailConfig.recipients || []);
+  if (recipients.length === 0) {
+    console.log('[email] No recipients for portfolio automation report');
+    return { sent: 0, failed: 0 };
+  }
+
+  const statusColor = params.status === 'success' ? '#22c55e' : params.status === 'failed' ? '#ef4444' : '#eab308';
+  const stepsRows = params.steps
+    .map(
+      (s) =>
+        `<tr><td class="step">${s.step}</td><td><span class="status-${s.status}">${s.status}</span></td><td>${(s.duration || 0) / 1000}s</td><td>${s.error || '—'}</td><td>${s.screenshotPath ? `<a href="${params.baseUrl || ''}/api/portfolio-automation/screenshots/${encodeURIComponent(s.screenshotPath.split(/[/\\]/).pop() || '')}">View</a>` : '—'}</td></tr>`
+    )
+    .join('');
+
+  const docLinksHtml = (params.documentLinks || []).length
+    ? `<p><strong>Exported Documents:</strong></p><ul>${(params.documentLinks || []).map((l) => `<li><a href="${l}">${l.split('/').pop() || l}</a></li>`).join('')}</ul>`
+    : '';
+
+  const htmlBody = `
+    <div style="font-family: sans-serif; max-width: 640px; margin: 0 auto;">
+      <h2>Portfolio Automation Report</h2>
+      <p><strong>Project:</strong> ${params.projectName || params.projectId}</p>
+      <p><strong>Status:</strong> <span style="color: ${statusColor}; font-weight: bold;">${params.status}</span></p>
+      <p><strong>Duration:</strong> ${(params.duration / 1000).toFixed(1)}s</p>
+      ${docLinksHtml}
+      <h3>Step Summary</h3>
+      <table style="border-collapse: collapse; width: 100%; font-size: 13px;">
+        <thead><tr style="background: #f1f5f9;"><th style="padding: 8px; text-align: left; border: 1px solid #e2e8f0;">Step</th><th style="padding: 8px; text-align: left; border: 1px solid #e2e8f0;">Status</th><th style="padding: 8px; text-align: left; border: 1px solid #e2e8f0;">Duration</th><th style="padding: 8px; text-align: left; border: 1px solid #e2e8f0;">Error</th><th style="padding: 8px; text-align: left; border: 1px solid #e2e8f0;">Screenshot</th></tr></thead>
+        <tbody>${stepsRows}</tbody>
+      </table>
+      <p style="margin-top: 24px; font-size: 12px; color: #64748b;">T-Rock Sync Hub · Portfolio Automation</p>
+    </div>
+  `;
+
+  let sent = 0;
+  let failed = 0;
+
+  for (const email of recipients) {
+    if (!email || !email.includes('@')) continue;
+    const result = await sendEmail({
+      to: email,
+      subject: `Portfolio Automation: ${params.status} — ${params.projectName || params.projectId}`,
+      htmlBody,
+      fromName: 'T-Rock Sync Hub',
+    });
+    if (result.success) sent++;
+    else failed++;
+  }
+
+  return { sent, failed };
+}

@@ -104,13 +104,39 @@ export async function handleProcoreProjectWebhook(
           "webhook"
         );
 
+        const webhookPayload = payload;
         setTimeout(async () => {
           try {
+            const phase2Input =
+              pending.bidboardProjectUrl || pending.proposalPdfPath != null
+                ? {
+                    bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
+                    proposalPdfPath: pending.proposalPdfPath ?? undefined,
+                  }
+                : undefined;
+
             const result = await runPhase2(
               companyId,
               portfolioProjectId,
-              pending.bidboardProjectId
+              pending.bidboardProjectId,
+              phase2Input
             );
+
+            await storage.createAuditLog({
+              action: "webhook_triggered_phase2",
+              entityType: "webhook",
+              entityId: String(webhookPayload.id || "unknown"),
+              source: "procore",
+              status: result.success ? "success" : "failed",
+              details: {
+                webhookEventId: webhookPayload.id,
+                webhookReason: webhookPayload.reason,
+                portfolioProjectId,
+                bidboardProjectId: pending.bidboardProjectId,
+                automationSteps: result.steps.map((s) => ({ step: s.step, status: s.status })),
+              },
+            });
+
             log(
               `[webhook] Phase 2 completed: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`,
               "webhook"

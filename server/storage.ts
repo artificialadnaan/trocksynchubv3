@@ -294,6 +294,7 @@ export interface IStorage {
   getBidboardSyncState(projectId: string): Promise<BidboardSyncState | undefined>;
   upsertBidboardSyncState(data: { projectId: string; projectName?: string; currentStage?: string; metadata?: any }): Promise<BidboardSyncState>;
   getBidboardAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
+  getPortfolioAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
   createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog>;
 
   createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey>;
@@ -1597,6 +1598,15 @@ export class DatabaseStorage implements IStorage {
 
   async getBidboardAutomationLogs(limit: number = 50): Promise<BidboardAutomationLog[]> {
     return db.select().from(bidboardAutomationLogs).orderBy(desc(bidboardAutomationLogs.createdAt)).limit(limit);
+  }
+
+  async getPortfolioAutomationLogs(limit: number = 300): Promise<BidboardAutomationLog[]> {
+    return db
+      .select()
+      .from(bidboardAutomationLogs)
+      .where(ilike(bidboardAutomationLogs.action, "portfolio_automation:%"))
+      .orderBy(desc(bidboardAutomationLogs.createdAt))
+      .limit(limit);
   }
 
   async createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog> {

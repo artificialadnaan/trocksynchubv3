@@ -14,6 +14,9 @@ import { log } from "../index";
 
 export interface PendingPhase2Job {
   bidboardProjectId: string;
+  bidboardProjectUrl: string;
+  proposalPdfPath?: string | null;
+  estimateExcelPath?: string | null;
   timestamp: number;
 }
 
@@ -23,12 +26,18 @@ const MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Register that Phase 1 has completed for a project.
- * When the Procore Projects webhook arrives, Phase 2 will be triggered
- * using the next pending job from the queue.
+ * When the Procore Projects webhook arrives, Phase 2 and Phase 3 will be triggered.
  */
-export function registerPendingPhase2(bidboardProjectId: string): void {
+export function registerPendingPhase2(
+  bidboardProjectId: string,
+  options?: { bidboardProjectUrl?: string; proposalPdfPath?: string | null; estimateExcelPath?: string | null }
+): void {
+  const bidboardProjectUrl = options?.bidboardProjectUrl || "";
   pendingPhase2Queue.push({
     bidboardProjectId,
+    bidboardProjectUrl,
+    proposalPdfPath: options?.proposalPdfPath ?? null,
+    estimateExcelPath: options?.estimateExcelPath ?? null,
     timestamp: Date.now(),
   });
   if (pendingPhase2Queue.length > MAX_QUEUE_SIZE) {
