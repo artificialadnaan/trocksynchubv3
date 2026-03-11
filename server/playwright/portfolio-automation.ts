@@ -410,13 +410,29 @@ export async function runPhase1BidBoardActions(
     await page.keyboard.press("Escape");
     await randomDelay(500, 1000);
 
+    let menuOpened = false;
     const ellipsisButtons = page.locator(SEL.ellipsisButton);
-    const count = await ellipsisButtons.count();
-    if (count > 0) {
-      await ellipsisButtons.nth(count - 1).click({ timeout: 8000 });
-    } else {
-      throw new Error("No ellipsis button found on page");
+    if ((await ellipsisButtons.count()) > 0) {
+      try {
+        await ellipsisButtons.first().click({ timeout: 8000 });
+        menuOpened = true;
+        log("[portfolio-auto] Clicked header ellipsis", "playwright");
+      } catch {
+        /* try stage caret fallback */
+      }
     }
+    if (!menuOpened) {
+      const stageCaret = page.locator('[data-qa="ci-ChevronDown"]').first();
+      if ((await stageCaret.count()) > 0) {
+        await stageCaret.click({ timeout: 8000 });
+        menuOpened = true;
+        log("[portfolio-auto] Clicked stage badge caret (ellipsis fallback)", "playwright");
+      }
+    }
+    if (!menuOpened) {
+      throw new Error("Could not open Global Actions menu (ellipsis or stage caret)");
+    }
+    await page.waitForSelector('[role="menuitem"]', { timeout: 5000 });
     await randomDelay(1000, 2000);
 
     await clickMenuItem(
