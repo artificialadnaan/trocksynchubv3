@@ -4784,50 +4784,50 @@ export async function registerRoutes(
   app.post("/api/portfolio-automation/trigger", requireAuth, async (req, res) => {
     try {
       const { bidboardProjectId, projectNumber } = req.body || {};
-      const { triggerPortfolioAutomationFromStageChange, runPhase1 } = await import("./playwright/portfolio-automation");
-      const { registerPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
-      const config = await storage.getAutomationConfig("procore_config");
-      const companyId = (config?.value as { companyId?: string })?.companyId;
-
-      let bidboardId = bidboardProjectId;
-      let projectName = "";
-      let customerName = "";
-
-      if (!bidboardId && projectNumber) {
-        const mapping = await storage.getSyncMappingByProcoreProjectNumber(String(projectNumber).trim());
-        if (mapping) {
-          bidboardId = mapping.bidboardProjectId || mapping.procoreProjectId;
-          projectName = mapping.bidboardProjectName || mapping.hubspotDealName || "";
-          customerName = mapping.hubspotDealName || "";
-        }
-      } else if (bidboardId) {
-        const mappings = await storage.getSyncMappings();
-        const mapping = mappings.find(
-          (m) => m.bidboardProjectId === bidboardId || m.procoreProjectId === bidboardId
-        );
-        projectName = mapping?.bidboardProjectName || mapping?.hubspotDealName || "";
-        customerName = mapping?.hubspotDealName || "";
+      const input = String(bidboardProjectId || projectNumber || "").trim();
+      if (!input) {
+        return res.status(400).json({ error: "bidboardProjectId or projectNumber required" });
       }
 
-      if (!bidboardId || !companyId) {
+      const config = await storage.getAutomationConfig("procore_config");
+      const companyId = (config?.value as { companyId?: string })?.companyId;
+      if (!companyId) {
+        return res.status(400).json({ error: "Procore company ID not configured" });
+      }
+
+      let bidboardId: string | null = null;
+
+      // 15+ digit numeric string → treat as Bid Board project ID directly
+      if (/^\d{15,}$/.test(input)) {
+        bidboardId = input;
+      } else {
+        // Contains letters/dashes → project number; look up in sync mappings (by projectNumber or bidboardProjectId)
+        let mapping = await storage.getSyncMappingByProcoreProjectNumber(input);
+        if (!mapping) {
+          mapping = (await storage.getSyncMappingByBidboardProjectId(input)) ?? undefined;
+        }
+        if (mapping) {
+          bidboardId = mapping.bidboardProjectId || mapping.procoreProjectId || null;
+        }
+      }
+
+      if (!bidboardId) {
         return res.status(400).json({
-          error: projectNumber ? "Project number not found in sync mappings" : "bidboardProjectId or projectNumber required",
+          error: "Project number not found in sync mappings. Use a 15+ digit Bid Board project ID for direct lookup.",
         });
       }
 
+      const url = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardId}`;
       const jobId = `portfolio-auto-${Date.now()}`;
       res.json({ jobId, message: "Automation started" });
 
       setImmediate(async () => {
         try {
-          if (projectNumber && !bidboardProjectId) {
-            await triggerPortfolioAutomationFromStageChange(projectName || "Manual", String(projectNumber), customerName);
-          } else {
-            const url = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardId}`;
-            const { result, proposalPdfPath, estimateExcelPath } = await runPhase1(url, bidboardId);
-            if (result.completedAt) {
-              registerPendingPhase2(bidboardId, { bidboardProjectUrl: url, proposalPdfPath, estimateExcelPath });
-            }
+          const { runPhase1 } = await import("./playwright/portfolio-automation");
+          const { registerPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
+          const { result, proposalPdfPath, estimateExcelPath } = await runPhase1(url, bidboardId!);
+          if (result.completedAt) {
+            registerPendingPhase2(bidboardId!, { bidboardProjectUrl: url, proposalPdfPath, estimateExcelPath });
           }
         } catch (err) {
           console.error("[portfolio-auto] Manual trigger failed:", (err as Error).message);

@@ -345,6 +345,38 @@ async function clickMenuItem(
   throw new Error(`Could not find menu item: ${description}`);
 }
 
+// ─── Helper: Wait for Procore SPA content to load ─────────────────
+// Procore pages load initial HTML then hydrate SPA content async.
+// page.goto waitUntil: "load" fires before SPA renders. Use this after
+// navigation to wait for meaningful UI elements before interacting.
+
+async function waitForProcoreSpaLoaded(
+  page: Page,
+  selectors: string[],
+  logContext: string,
+  fallbackDelay: [number, number] = [15000, 18000]
+): Promise<void> {
+  let spaLoaded = false;
+  for (const sel of selectors) {
+    try {
+      await page.waitForSelector(sel, { timeout: 30000 });
+      spaLoaded = true;
+      log(`[portfolio-auto] ${logContext} SPA loaded (found: ${sel})`, "playwright");
+      break;
+    } catch {
+      /* try next selector */
+    }
+  }
+  if (!spaLoaded) {
+    log(
+      `[portfolio-auto] WARNING: No SPA content indicators found for ${logContext}, waiting ${fallbackDelay[0] / 1000}s as fallback`,
+      "playwright"
+    );
+    await randomDelay(fallbackDelay[0], fallbackDelay[1]);
+  }
+  await randomDelay(2000, 3000);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // PHASE 1: Bid Board Actions
 // ═══════════════════════════════════════════════════════════════
@@ -367,7 +399,13 @@ export async function runPhase1BidBoardActions(
   const step2Start = Date.now();
   try {
     await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
-    await randomDelay(3000, 5000);
+    const bidboardSpaSelectors = [
+      ".aid-projBarOverview",
+      ".aid-projBarEstimation",
+      ".aid-tab",
+      '[data-qa="ci-EllipsisVertical"]',
+    ];
+    await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project");
 
     await page.keyboard.press("Escape");
     await randomDelay(500, 1000);
@@ -675,7 +713,13 @@ export async function runPhase2PortfolioActions(
   const navStart = Date.now();
   try {
     await page.goto(estimatingUrl, { waitUntil: "load", timeout: 60000 });
-    await randomDelay(5000, 8000);
+    const portfolioEstimatingSpaSelectors = [
+      "button.aid-actions",
+      ".aid-tab-title",
+      ".aid-send-to-budget",
+      ".aid-create-prime-contract",
+    ];
+    await waitForProcoreSpaLoaded(page, portfolioEstimatingSpaSelectors, "Portfolio Estimating");
 
     try {
       const estimatingTab = page.locator(SEL.portfolioEstimating.estimatingTab);
@@ -792,7 +836,13 @@ export async function scrapeBidBoardData(
 
   try {
     await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
-    await randomDelay(3000, 5000);
+    const bidboardSpaSelectors = [
+      ".aid-projBarOverview",
+      ".aid-projBarEstimation",
+      ".aid-tab",
+      '[data-qa="ci-EllipsisVertical"]',
+    ];
+    await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board (scrape)");
 
     // Step A: Overview tab — Customer Company, Project Number
     try {
@@ -907,7 +957,12 @@ export async function addCustomerToDirectory(
 
   try {
     await page.goto(dirUrl, { waitUntil: "load", timeout: 60000 });
-    await randomDelay(3000, 5000);
+    const directorySpaSelectors = [
+      "#new-add-company-btn button",
+      '[data-pendo="new-add-company-open-modal-button"]',
+      '[data-qa="core-search-input"]',
+    ];
+    await waitForProcoreSpaLoaded(page, directorySpaSelectors, "Project Directory");
 
     await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
     await randomDelay(1500, 2500);
@@ -958,7 +1013,11 @@ export async function editPrimeContract(
 
   try {
     await page.goto(pcUrl, { waitUntil: "load", timeout: 60000 });
-    await randomDelay(3000, 5000);
+    const primeContractSpaSelectors = [
+      ".ag-row-first a[href*='prime_contracts/']",
+      'a[href*="prime_contracts/"]:not([href*="/edit"])',
+    ];
+    await waitForProcoreSpaLoaded(page, primeContractSpaSelectors, "Prime Contracts");
 
     const firstLink = page.locator(SEL.primeContract.firstRowLink).first();
     const fallback = page.locator(SEL.primeContract.fallbackLink).first();
