@@ -885,56 +885,68 @@ export async function scrapeBidBoardData(
 
     // Step A: Overview tab — Customer Company, Project Number
     try {
-      const customerLabel = page.locator('text="Customer Company"').first();
-      if ((await customerLabel.count()) > 0) {
-        // Try 1: Next sibling element (most Procore field layouts)
-        const nextSibling = customerLabel.locator("xpath=following-sibling::*[1]");
-        if ((await nextSibling.count()) > 0) {
-          const text = await nextSibling.textContent().catch(() => null);
-          if (text?.trim()) scrapedData.customerCompanyName = text.trim();
+      // The customer company value div contains "Owner/Client" at the end — target it directly
+      const ownerClientDiv = page.locator('div:has-text("Owner/Client")').filter({ hasText: /Owner\/Client$/ });
+      if ((await ownerClientDiv.count()) > 0) {
+        const rawText = await ownerClientDiv.first().textContent().catch(() => null);
+        if (rawText) {
+          scrapedData.customerCompanyName = rawText
+            .replace(
+              /\s*(Owner\/Client|General Contractor|Subcontractor|Sub-contractor|Architect|Engineer|Developer|Vendor)\s*$/i,
+              ""
+            )
+            .trim();
         }
+      }
 
-        // Try 2: Parent's next sibling (alternate layout)
-        if (!scrapedData.customerCompanyName) {
-          const parentNext = customerLabel.locator("..").locator("xpath=following-sibling::*[1]");
-          if ((await parentNext.count()) > 0) {
-            const text = await parentNext.textContent().catch(() => null);
+      // Fallback: sibling-based extraction from "Customer Company" label
+      if (!scrapedData.customerCompanyName) {
+        const customerLabel = page.locator('text="Customer Company"').first();
+        if ((await customerLabel.count()) > 0) {
+          const nextSibling = customerLabel.locator("xpath=following-sibling::*[1]");
+          if ((await nextSibling.count()) > 0) {
+            const text = await nextSibling.textContent().catch(() => null);
             if (text?.trim()) scrapedData.customerCompanyName = text.trim();
           }
-        }
-
-        // Try 3: Fallback — go up one parent only, get direct child divs/spans
-        if (!scrapedData.customerCompanyName) {
-          const parent = customerLabel.locator("..");
-          const children = parent.locator(":scope > div, :scope > span");
-          const count = await children.count();
-          for (let i = 0; i < count; i++) {
-            const text = await children.nth(i).textContent().catch(() => null);
-            const t = text?.trim();
-            if (
-              t &&
-              t !== "Customer Company" &&
-              t !== "Customer Information" &&
-              t.length > 1 &&
-              t.length < 100
-            ) {
-              scrapedData.customerCompanyName = t;
-              break;
+          if (!scrapedData.customerCompanyName) {
+            const parentNext = customerLabel.locator("..").locator("xpath=following-sibling::*[1]");
+            if ((await parentNext.count()) > 0) {
+              const text = await parentNext.textContent().catch(() => null);
+              if (text?.trim()) scrapedData.customerCompanyName = text.trim();
+            }
+          }
+          if (!scrapedData.customerCompanyName) {
+            const parent = customerLabel.locator("..");
+            const children = parent.locator(":scope > div, :scope > span");
+            const count = await children.count();
+            for (let i = 0; i < count; i++) {
+              const text = await children.nth(i).textContent().catch(() => null);
+              const t = text?.trim();
+              if (
+                t &&
+                t !== "Customer Company" &&
+                t !== "Customer Information" &&
+                t.length > 1 &&
+                t.length < 100
+              ) {
+                scrapedData.customerCompanyName = t;
+                break;
+              }
             }
           }
         }
       }
+
+      if (scrapedData.customerCompanyName) {
+        scrapedData.customerCompanyName = scrapedData.customerCompanyName
+          .replace(
+            /\s*(Owner\/Client|General Contractor|Subcontractor|Sub-contractor|Architect|Engineer|Developer|Vendor)\s*$/i,
+            ""
+          )
+          .trim();
+      }
     } catch {
       /* optional */
-    }
-
-    if (scrapedData.customerCompanyName) {
-      scrapedData.customerCompanyName = scrapedData.customerCompanyName
-        .replace(
-          /\s*(Owner\/Client|General Contractor|Subcontractor|Sub-contractor|Architect|Engineer|Developer|Vendor)\s*$/i,
-          ""
-        )
-        .trim();
     }
 
     try {
