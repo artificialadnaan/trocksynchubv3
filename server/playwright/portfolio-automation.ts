@@ -1052,6 +1052,20 @@ export async function scrapeBidBoardData(
       }
     }
 
+    // Fix known issue: extraction sometimes prepends a duplicate of the first character
+    if (scrapedData.customerCompanyName && scrapedData.customerCompanyName.length > 2) {
+      const name = scrapedData.customerCompanyName;
+      if (name[0] === name[1] && name[0] !== " ") {
+        if (name[1] === name[1].toUpperCase() && name[2] === name[2].toLowerCase()) {
+          scrapedData.customerCompanyName = name.substring(1);
+          log(
+            `[portfolio-auto] Fixed duplicate leading char: "${name}" → "${scrapedData.customerCompanyName}"`,
+            "playwright"
+          );
+        }
+      }
+    }
+
     log(`[portfolio-auto] Scraped Bid Board data summary:`, "playwright");
     log(`  Customer Company: ${scrapedData.customerCompanyName || "NOT FOUND"}`, "playwright");
     log(`  Project Number: ${scrapedData.projectNumber || "NOT FOUND"}`, "playwright");
