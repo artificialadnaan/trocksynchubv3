@@ -1309,7 +1309,9 @@ export async function editPrimeContract(
       await randomDelay(500, 1000);
     }
 
-    await page.click(SEL.primeContract.saveButton, { timeout: 10000 });
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await randomDelay(2000, 3000);
+    await page.locator('button:has-text("Save"):not([disabled])').last().click({ timeout: 15000 });
     await randomDelay(3000, 5000);
     await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
 
