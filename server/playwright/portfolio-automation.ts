@@ -1079,104 +1079,79 @@ export async function addCustomerToDirectory(
     const directorySpaSelectors = [
       "#new-add-company-btn button",
       '[data-pendo="new-add-company-open-modal-button"]',
-      '[data-qa="core-search-input"]',
     ];
     await waitForProcoreSpaLoaded(page, directorySpaSelectors, "Project Directory");
     await randomDelay(3000, 4000);
 
-    // The "Adding Companies" promo modal may appear with its own search input.
-    // Strategy: Click "+ Add Company" button. If the promo modal is blocking it,
-    // use the modal's search input directly.
-    let addCompanyClicked = false;
-    try {
-      await page.click('#new-add-company-btn button, [data-pendo="new-add-company-open-modal-button"]', {
-        timeout: 5000,
-      });
-      addCompanyClicked = true;
-      log("[portfolio-auto] Clicked Add Company button directly", "playwright");
-    } catch {
-      log("[portfolio-auto] Add Company button blocked, looking for promo modal search", "playwright");
-    }
-
-    if (!addCompanyClicked) {
-      const modalSearchInput = page
-        .locator('input[type="search"], input[placeholder*="search" i], input[placeholder*="Search"]')
-        .first();
-      if ((await modalSearchInput.count()) > 0 && (await modalSearchInput.isVisible())) {
-        await modalSearchInput.fill(customerCompanyName);
-        log("[portfolio-auto] Typed company name into modal search input", "playwright");
-        await randomDelay(2000, 3000);
-      } else {
-        const getStarted = page
-          .locator("button, a, span")
-          .filter({ hasText: /^Get Started$/ })
-          .first();
-        if ((await getStarted.count()) > 0 && (await getStarted.isVisible())) {
-          await getStarted.click({ force: true });
-          log("[portfolio-auto] Clicked Get Started in promo modal", "playwright");
-          await randomDelay(2000, 3000);
-          await page.click('#new-add-company-btn button, [data-pendo="new-add-company-open-modal-button"]', {
-            timeout: 10000,
-          });
-        } else {
-          throw new Error("Could not find Add Company button or promo modal search input");
-        }
-      }
-    }
-
-    if (addCompanyClicked) {
-      await randomDelay(1500, 2500);
-      const searchSelectors = [
-        'input[type="search"]',
-        'input[placeholder*="search" i]',
-        'input[placeholder*="Search"]',
-        '[data-qa="core-search-input"]',
-        ".search input",
-        'input[aria-label*="Search"]',
-      ];
-      let searchFilled = false;
-      for (const sel of searchSelectors) {
-        const input = page.locator(sel).first();
-        if ((await input.count()) > 0 && (await input.isVisible())) {
-          await input.fill(customerCompanyName, { timeout: 5000 });
-          searchFilled = true;
-          log(`[portfolio-auto] Filled company search with: ${customerCompanyName}`, "playwright");
-          break;
-        }
-      }
-      if (!searchFilled) {
-        throw new Error("Could not find any search input in Add Company dialog");
-      }
-    }
-
+    // Step 1: Click Add Company button
+    await page.click('#new-add-company-btn button, [data-pendo="new-add-company-open-modal-button"]', {
+      force: true,
+      timeout: 10000,
+    });
+    log("[portfolio-auto] Clicked Add Company button", "playwright");
     await randomDelay(2000, 3000);
 
-    const addToProjectBtn = page
-      .locator(
-        'button:has-text("Add to Project"), button:has-text("Add"), [data-pendo="new-add-company-save-from-company-directory"]'
-      )
+    // Step 2: Promo modal may appear — click "Get Started" if present
+    try {
+      const getStartedBtn = page
+        .locator('button[data-a11y-skip="color-contrast"]:has(span:has-text("Get Started"))')
+        .first();
+      if ((await getStartedBtn.count()) > 0) {
+        await getStartedBtn.click({ force: true, timeout: 5000 });
+        log("[portfolio-auto] Clicked Get Started to dismiss promo modal", "playwright");
+        await randomDelay(2000, 3000);
+      }
+    } catch {
+      try {
+        await page
+          .locator('button:has(span:has-text("Get Started"))')
+          .first()
+          .click({ force: true, timeout: 3000 });
+        log("[portfolio-auto] Clicked Get Started via broad selector", "playwright");
+        await randomDelay(2000, 3000);
+      } catch {
+        log("[portfolio-auto] No Get Started button found — proceeding", "playwright");
+      }
+    }
+
+    // Step 3: The "Add Company to Project" modal should now be open
+    const modalSearchInput = page
+      .locator('input[placeholder="Enter company name"], input[placeholder*="company name" i]')
       .first();
+    await modalSearchInput.waitFor({ state: "visible", timeout: 15000 });
+    await modalSearchInput.fill(customerCompanyName, { timeout: 5000 });
+    log(`[portfolio-auto] Searched for company: ${customerCompanyName}`, "playwright");
+    await randomDelay(3000, 4000);
+
+    // Step 4: Click "Add to Project" next to the matching company result
+    const addToProjectBtn = page.locator('button:has-text("Add to Project")').first();
     if ((await addToProjectBtn.count()) > 0 && (await addToProjectBtn.isVisible())) {
       await addToProjectBtn.click({ timeout: 8000 });
       log("[portfolio-auto] Clicked Add to Project", "playwright");
     } else {
-      const createNewBtn = page
-        .locator('button:has-text("Create"), button:has-text("Add New"), a:has-text("manually add")')
-        .first();
-      if ((await createNewBtn.count()) > 0) {
+      const createNewBtn = page.locator('button:has-text("Create New Company")').first();
+      if ((await createNewBtn.count()) > 0 && (await createNewBtn.isVisible())) {
         await createNewBtn.click({ timeout: 8000 });
-        log("[portfolio-auto] Clicked Create/Add New Company", "playwright");
+        log("[portfolio-auto] Clicked Create New Company", "playwright");
+        await randomDelay(2000, 3000);
+        const companyNameInput = page
+          .locator('input[name="name"], input[placeholder*="Company Name" i]')
+          .first();
+        if ((await companyNameInput.count()) > 0) {
+          await companyNameInput.fill(customerCompanyName, { timeout: 5000 });
+        }
+        await page
+          .click('button:has-text("Save"), button:has-text("Create"), button[type="submit"]', {
+            timeout: 10000,
+          })
+          .catch(() => {});
       } else {
-        log("[portfolio-auto] No Add to Project or Create New button found — company may already exist", "playwright");
+        log("[portfolio-auto] No Add to Project or Create New Company button found", "playwright");
       }
     }
 
     await randomDelay(3000, 5000);
     await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-
-    await page.click('button[type="submit"][value="Save"], button:has-text("Save")', { timeout: 5000 }).catch(() => {});
-    await randomDelay(3000, 5000);
-
     await logStep(page, result, "add_customer_to_directory", "success", Date.now() - stepStart);
   } catch (err: unknown) {
     const { screenshotPath, diagnostics } = await captureFailureContext(page, "add-customer-to-directory");
