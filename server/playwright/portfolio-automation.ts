@@ -1102,56 +1102,99 @@ export async function addCustomerToDirectory(
       '[data-qa="core-search-input"]',
     ];
     await waitForProcoreSpaLoaded(page, directorySpaSelectors, "Project Directory");
-
-    // The "Adding Companies" promo modal appears on first directory visit per session
-    // Reload the page to clear it — the modal sets a flag after first render
-    await page.reload({ waitUntil: "load", timeout: 30000 });
     await randomDelay(3000, 4000);
-    log("[portfolio-auto] Reloaded directory page to clear promo modal", "playwright");
-    const currentUrl = page.url();
-    if (!currentUrl.includes("/project/directory")) {
-      await page.goto(dirUrl, { waitUntil: "load", timeout: 30000 });
-      log("[portfolio-auto] Re-navigated to directory after modal dismiss", "playwright");
-      await randomDelay(2000, 3000);
+
+    // The "Adding Companies" promo modal may appear with its own search input.
+    // Strategy: Click "+ Add Company" button. If the promo modal is blocking it,
+    // use the modal's search input directly.
+    let addCompanyClicked = false;
+    try {
+      await page.click('#new-add-company-btn button, [data-pendo="new-add-company-open-modal-button"]', {
+        timeout: 5000,
+      });
+      addCompanyClicked = true;
+      log("[portfolio-auto] Clicked Add Company button directly", "playwright");
+    } catch {
+      log("[portfolio-auto] Add Company button blocked, looking for promo modal search", "playwright");
     }
 
-    await page.click(SEL.directory.addCompanyBtn, { timeout: 10000 });
-    await randomDelay(1500, 2500);
-
-    const searchSelectors = [
-      '[data-qa="core-search-input"]',
-      'input[placeholder*="Search"]',
-      'input[type="search"]',
-      '.search input',
-      'input[aria-label*="Search"]',
-    ];
-    let searchFilled = false;
-    for (const sel of searchSelectors) {
-      const input = page.locator(sel).first();
-      if ((await input.count()) > 0 && (await input.isVisible())) {
-        await input.fill(customerCompanyName, { timeout: 5000 });
-        searchFilled = true;
-        break;
+    if (!addCompanyClicked) {
+      const modalSearchInput = page
+        .locator('input[type="search"], input[placeholder*="search" i], input[placeholder*="Search"]')
+        .first();
+      if ((await modalSearchInput.count()) > 0 && (await modalSearchInput.isVisible())) {
+        await modalSearchInput.fill(customerCompanyName);
+        log("[portfolio-auto] Typed company name into modal search input", "playwright");
+        await randomDelay(2000, 3000);
+      } else {
+        const getStarted = page
+          .locator("button, a, span")
+          .filter({ hasText: /^Get Started$/ })
+          .first();
+        if ((await getStarted.count()) > 0 && (await getStarted.isVisible())) {
+          await getStarted.click({ force: true });
+          log("[portfolio-auto] Clicked Get Started in promo modal", "playwright");
+          await randomDelay(2000, 3000);
+          await page.click('#new-add-company-btn button, [data-pendo="new-add-company-open-modal-button"]', {
+            timeout: 10000,
+          });
+        } else {
+          throw new Error("Could not find Add Company button or promo modal search input");
+        }
       }
     }
-    if (!searchFilled) {
-      await page.fill(SEL.directory.searchInput, customerCompanyName);
+
+    if (addCompanyClicked) {
+      await randomDelay(1500, 2500);
+      const searchSelectors = [
+        'input[type="search"]',
+        'input[placeholder*="search" i]',
+        'input[placeholder*="Search"]',
+        '[data-qa="core-search-input"]',
+        ".search input",
+        'input[aria-label*="Search"]',
+      ];
+      let searchFilled = false;
+      for (const sel of searchSelectors) {
+        const input = page.locator(sel).first();
+        if ((await input.count()) > 0 && (await input.isVisible())) {
+          await input.fill(customerCompanyName, { timeout: 5000 });
+          searchFilled = true;
+          log(`[portfolio-auto] Filled company search with: ${customerCompanyName}`, "playwright");
+          break;
+        }
+      }
+      if (!searchFilled) {
+        throw new Error("Could not find any search input in Add Company dialog");
+      }
     }
+
     await randomDelay(2000, 3000);
 
-    const resultWithName = page.locator(`text="${customerCompanyName.replace(/"/g, '\\"')}"`).first();
-    const addToProjectBtn = resultWithName.locator("..").locator("..").locator('button:has-text("Add to Project")');
-    if ((await addToProjectBtn.count()) > 0) {
+    const addToProjectBtn = page
+      .locator(
+        'button:has-text("Add to Project"), button:has-text("Add"), [data-pendo="new-add-company-save-from-company-directory"]'
+      )
+      .first();
+    if ((await addToProjectBtn.count()) > 0 && (await addToProjectBtn.isVisible())) {
       await addToProjectBtn.click({ timeout: 8000 });
+      log("[portfolio-auto] Clicked Add to Project", "playwright");
     } else {
-      await page.click(SEL.directory.addToProjectBtn, { timeout: 8000 });
+      const createNewBtn = page
+        .locator('button:has-text("Create"), button:has-text("Add New"), a:has-text("manually add")')
+        .first();
+      if ((await createNewBtn.count()) > 0) {
+        await createNewBtn.click({ timeout: 8000 });
+        log("[portfolio-auto] Clicked Create/Add New Company", "playwright");
+      } else {
+        log("[portfolio-auto] No Add to Project or Create New button found — company may already exist", "playwright");
+      }
     }
-    await randomDelay(3000, 5000);
 
+    await randomDelay(3000, 5000);
     await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
-    await page
-      .click('button[type="submit"][value="Save"], button:has-text("Save")', { timeout: 10000 })
-      .catch(() => {});
+
+    await page.click('button[type="submit"][value="Save"], button:has-text("Save")', { timeout: 5000 }).catch(() => {});
     await randomDelay(3000, 5000);
 
     await logStep(page, result, "add_customer_to_directory", "success", Date.now() - stepStart);
