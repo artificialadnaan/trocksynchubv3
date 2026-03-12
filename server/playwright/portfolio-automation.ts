@@ -885,66 +885,34 @@ export async function scrapeBidBoardData(
 
     // Step A: Overview tab — Customer Company, Project Number
     try {
-      // The customer company value div contains "Owner/Client" at the end — target it directly
-      const ownerClientDiv = page.locator('div:has-text("Owner/Client")').filter({ hasText: /Owner\/Client$/ });
-      if ((await ownerClientDiv.count()) > 0) {
-        const rawText = await ownerClientDiv.first().textContent().catch(() => null);
-        if (rawText) {
-          scrapedData.customerCompanyName = rawText
-            .replace(
-              /\s*(Owner\/Client|General Contractor|Subcontractor|Sub-contractor|Architect|Engineer|Developer|Vendor)\s*$/i,
-              ""
-            )
-            .trim();
-        }
-      }
-
-      // Fallback: sibling-based extraction from "Customer Company" label
-      if (!scrapedData.customerCompanyName) {
-        const customerLabel = page.locator('text="Customer Company"').first();
-        if ((await customerLabel.count()) > 0) {
-          const nextSibling = customerLabel.locator("xpath=following-sibling::*[1]");
-          if ((await nextSibling.count()) > 0) {
-            const text = await nextSibling.textContent().catch(() => null);
-            if (text?.trim()) scrapedData.customerCompanyName = text.trim();
-          }
-          if (!scrapedData.customerCompanyName) {
-            const parentNext = customerLabel.locator("..").locator("xpath=following-sibling::*[1]");
-            if ((await parentNext.count()) > 0) {
-              const text = await parentNext.textContent().catch(() => null);
-              if (text?.trim()) scrapedData.customerCompanyName = text.trim();
-            }
-          }
-          if (!scrapedData.customerCompanyName) {
-            const parent = customerLabel.locator("..");
-            const children = parent.locator(":scope > div, :scope > span");
-            const count = await children.count();
-            for (let i = 0; i < count; i++) {
-              const text = await children.nth(i).textContent().catch(() => null);
-              const t = text?.trim();
-              if (
-                t &&
-                t !== "Customer Company" &&
-                t !== "Customer Information" &&
-                t.length > 1 &&
-                t.length < 100
-              ) {
-                scrapedData.customerCompanyName = t;
-                break;
-              }
+      scrapedData.customerCompanyName = await page.evaluate(() => {
+        const roles = [
+          "Owner/Client",
+          "General Contractor",
+          "Subcontractor",
+          "Sub-contractor",
+          "Architect",
+          "Engineer",
+          "Developer",
+          "Vendor",
+        ];
+        const candidates = document.querySelectorAll('div[style*="word-break"], div, span');
+        for (const el of candidates) {
+          const directText =
+            el.childNodes.length === 1 && el.childNodes[0].nodeType === Node.TEXT_NODE
+              ? el.childNodes[0].textContent?.trim()
+              : null;
+          if (!directText) continue;
+          for (const role of roles) {
+            if (directText.endsWith(role)) {
+              return directText
+                .replace(new RegExp("\\s*" + role.replace("/", "\\/") + "\\s*$", "i"), "")
+                .trim();
             }
           }
         }
-      }
-
-      if (scrapedData.customerCompanyName) {
-        scrapedData.customerCompanyName = scrapedData.customerCompanyName
-          .replace(
-            /\s*(Owner\/Client|General Contractor|Subcontractor|Sub-contractor|Architect|Engineer|Developer|Vendor)\s*$/i,
-            ""
-          )
-          .trim();
-      }
+        return null;
+      });
     } catch {
       /* optional */
     }
@@ -1049,20 +1017,6 @@ export async function scrapeBidBoardData(
           `[portfolio-auto] Estimating scrape fallback failed: ${err instanceof Error ? err.message : String(err)}`,
           "playwright"
         );
-      }
-    }
-
-    // Fix known issue: extraction sometimes prepends a duplicate of the first character
-    if (scrapedData.customerCompanyName && scrapedData.customerCompanyName.length > 2) {
-      const name = scrapedData.customerCompanyName;
-      if (name[0] === name[1] && name[0] !== " ") {
-        if (name[1] === name[1].toUpperCase() && name[2] === name[2].toLowerCase()) {
-          scrapedData.customerCompanyName = name.substring(1);
-          log(
-            `[portfolio-auto] Fixed duplicate leading char: "${name}" → "${scrapedData.customerCompanyName}"`,
-            "playwright"
-          );
-        }
       }
     }
 
