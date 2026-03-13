@@ -1370,11 +1370,110 @@ export async function registerRoutes(
         }
       }
 
+      if (resourceName === "projects" && eventType === "create") {
+        const resourceId = event.resource_id != null ? String(event.resource_id) : "";
+        if (resourceId) {
+          try {
+            const { takeNextPendingPhase2 } = await import('./orchestrator/portfolio-orchestrator');
+            const pending = takeNextPendingPhase2();
+            if (pending) {
+              const companyId = String(event.company_id || "");
+              const portfolioProjectId = resourceId;
+              console.log(`[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId})`);
+              const webhookPayload = event;
+              setTimeout(async () => {
+                try {
+                  const { runPhase2 } = await import('./playwright/portfolio-automation');
+                  const phase2Input =
+                    pending.bidboardProjectUrl || pending.proposalPdfPath != null
+                      ? {
+                          bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
+                          proposalPdfPath: pending.proposalPdfPath ?? undefined,
+                        }
+                      : undefined;
+                  const result = await runPhase2(
+                    companyId,
+                    portfolioProjectId,
+                    pending.bidboardProjectId,
+                    phase2Input
+                  );
+                  await storage.createAuditLog({
+                    action: "webhook_triggered_phase2",
+                    entityType: "webhook",
+                    entityId: String(webhookPayload.id || "unknown"),
+                    source: "procore",
+                    status: result.success ? "success" : "failed",
+                    details: {
+                      webhookEventId: webhookPayload.id,
+                      webhookReason: webhookPayload.reason,
+                      portfolioProjectId,
+                      bidboardProjectId: pending.bidboardProjectId,
+                      automationSteps: result.steps.map((s) => ({ step: s.step, status: s.status })),
+                    },
+                  });
+                  console.log(`[webhook] Phase 2 completed: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
+                } catch (err: unknown) {
+                  console.error(`[webhook] Phase 2 failed: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }, 15000);
+            } else {
+              console.log(`[webhook] Project create for ${resourceId}, no pending Phase 2 job`);
+            }
+          } catch (err: any) {
+            console.error(`[webhook] Error in Phase 2 create handler:`, err.message);
+          }
+        }
+      }
+
       if (resourceName === "projects" && eventType === "update") {
         try {
           const projectId = String(event.project_id || event.resource_id || "");
           if (projectId) {
             console.log(`[webhook] Project update detected for ${projectId}, checking for changes...`);
+
+            const { takeNextPendingPhase2 } = await import('./orchestrator/portfolio-orchestrator');
+            const pending = takeNextPendingPhase2();
+            if (pending) {
+              const companyId = String(event.company_id || "");
+              const portfolioProjectId = projectId;
+              console.log(`[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId})`);
+              const webhookPayload = event;
+              setTimeout(async () => {
+                try {
+                  const { runPhase2 } = await import('./playwright/portfolio-automation');
+                  const phase2Input =
+                    pending.bidboardProjectUrl || pending.proposalPdfPath != null
+                      ? {
+                          bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
+                          proposalPdfPath: pending.proposalPdfPath ?? undefined,
+                        }
+                      : undefined;
+                  const result = await runPhase2(
+                    companyId,
+                    portfolioProjectId,
+                    pending.bidboardProjectId,
+                    phase2Input
+                  );
+                  await storage.createAuditLog({
+                    action: "webhook_triggered_phase2",
+                    entityType: "webhook",
+                    entityId: String(webhookPayload.id || "unknown"),
+                    source: "procore",
+                    status: result.success ? "success" : "failed",
+                    details: {
+                      webhookEventId: webhookPayload.id,
+                      webhookReason: webhookPayload.reason,
+                      portfolioProjectId,
+                      bidboardProjectId: pending.bidboardProjectId,
+                      automationSteps: result.steps.map((s) => ({ step: s.step, status: s.status })),
+                    },
+                  });
+                  console.log(`[webhook] Phase 2 completed: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
+                } catch (err: unknown) {
+                  console.error(`[webhook] Phase 2 failed: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }, 15000);
+            }
 
             const project = await storage.getProcoreProjectByProcoreId(projectId);
             if (!project) {
