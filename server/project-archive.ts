@@ -618,18 +618,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       progress.currentStep = 'Exporting budget data...';
       await provider.createFolder(`${basePath}/Budget`);
       try {
-        const budgetJson = JSON.stringify(docs.budget, null, 2);
-        const budgetBuffer = Buffer.from(budgetJson, 'utf-8');
-        await uploadDocumentWithRetry(
-          provider,
-          `${basePath}/Budget`,
-          'budget_export.json',
-          budgetBuffer,
-          'application/json'
-        );
+        const { generateBudgetPdf } = await import('./archive-pdf-generator');
+        const pdfBuffer = await generateBudgetPdf(docs.budget, docs.projectName);
+        await uploadDocumentWithRetry(provider, `${basePath}/Budget`, 'budget_report.pdf', pdfBuffer, 'application/pdf');
         filesUploaded++;
       } catch (e: any) {
-        errors.push(`Budget export: ${e.message}`);
+        console.warn(`[Archive] PDF generation failed for budget, falling back to JSON: ${e.message}`);
+        try {
+          const budgetJson = JSON.stringify(docs.budget, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Budget`, 'budget_export.json', Buffer.from(budgetJson), 'application/json');
+          filesUploaded++;
+        } catch (e2: any) {
+          errors.push(`Budget export: ${e2.message}`);
+        }
       }
     }
 
@@ -661,11 +662,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       await provider.createFolder(`${basePath}/Daily Logs`);
       if (docs.dailyLogs.items.length > 0) {
         try {
-          const json = JSON.stringify(docs.dailyLogs.items, null, 2);
-          await uploadDocumentWithRetry(provider, `${basePath}/Daily Logs`, 'daily_logs.json', Buffer.from(json), 'application/json');
+          const { generateDailyLogsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateDailyLogsPdf(docs.dailyLogs.items, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Daily Logs`, 'daily_logs_report.pdf', pdfBuffer, 'application/pdf');
           filesUploaded++;
         } catch (e: any) {
-          errors.push(`Daily logs export: ${e.message}`);
+          console.warn(`[Archive] PDF generation failed for daily logs, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.dailyLogs.items, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Daily Logs`, 'daily_logs.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Daily logs export: ${e2.message}`);
+          }
         }
       }
       for (const att of docs.dailyLogs.attachments) {
@@ -683,11 +692,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       await provider.createFolder(`${basePath}/Prime Contracts`);
       if (docs.primeContractsData?.length > 0) {
         try {
-          const json = JSON.stringify(docs.primeContractsData, null, 2);
-          await uploadDocumentWithRetry(provider, `${basePath}/Prime Contracts`, 'prime_contracts_data.json', Buffer.from(json), 'application/json');
+          const { generatePrimeContractsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generatePrimeContractsPdf(docs.primeContractsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Prime Contracts`, 'prime_contracts_report.pdf', pdfBuffer, 'application/pdf');
           filesUploaded++;
         } catch (e: any) {
-          errors.push(`Prime contracts JSON: ${e.message}`);
+          console.warn(`[Archive] PDF generation failed for prime contracts, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.primeContractsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Prime Contracts`, 'prime_contracts_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Prime contracts JSON: ${e2.message}`);
+          }
         }
       }
       for (const doc of docs.primeContracts) {
@@ -706,11 +723,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
         await provider.createFolder(`${basePath}/Commitments/Subcontracts`);
         if (docs.commitmentsData?.subcontracts?.length) {
           try {
-            const json = JSON.stringify(docs.commitmentsData.subcontracts, null, 2);
-            await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Subcontracts`, 'subcontracts_data.json', Buffer.from(json), 'application/json');
+            const { generateSubcontractsPdf } = await import('./archive-pdf-generator');
+            const pdfBuffer = await generateSubcontractsPdf(docs.commitmentsData.subcontracts, docs.projectName);
+            await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Subcontracts`, 'subcontracts_report.pdf', pdfBuffer, 'application/pdf');
             filesUploaded++;
           } catch (e: any) {
-            errors.push(`Subcontracts JSON: ${e.message}`);
+            console.warn(`[Archive] PDF generation failed for subcontracts, falling back to JSON: ${e.message}`);
+            try {
+              const json = JSON.stringify(docs.commitmentsData.subcontracts, null, 2);
+              await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Subcontracts`, 'subcontracts_data.json', Buffer.from(json), 'application/json');
+              filesUploaded++;
+            } catch (e2: any) {
+              errors.push(`Subcontracts JSON: ${e2.message}`);
+            }
           }
         }
         for (const doc of docs.commitments.subcontracts) {
@@ -725,11 +750,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
         await provider.createFolder(`${basePath}/Commitments/Purchase Orders`);
         if (docs.commitmentsData?.purchaseOrders?.length) {
           try {
-            const json = JSON.stringify(docs.commitmentsData.purchaseOrders, null, 2);
-            await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Purchase Orders`, 'purchase_orders_data.json', Buffer.from(json), 'application/json');
+            const { generatePurchaseOrdersPdf } = await import('./archive-pdf-generator');
+            const pdfBuffer = await generatePurchaseOrdersPdf(docs.commitmentsData.purchaseOrders, docs.projectName);
+            await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Purchase Orders`, 'purchase_orders_report.pdf', pdfBuffer, 'application/pdf');
             filesUploaded++;
           } catch (e: any) {
-            errors.push(`Purchase orders JSON: ${e.message}`);
+            console.warn(`[Archive] PDF generation failed for purchase orders, falling back to JSON: ${e.message}`);
+            try {
+              const json = JSON.stringify(docs.commitmentsData.purchaseOrders, null, 2);
+              await uploadDocumentWithRetry(provider, `${basePath}/Commitments/Purchase Orders`, 'purchase_orders_data.json', Buffer.from(json), 'application/json');
+              filesUploaded++;
+            } catch (e2: any) {
+              errors.push(`Purchase orders JSON: ${e2.message}`);
+            }
           }
         }
         for (const doc of docs.commitments.purchaseOrders) {
@@ -747,11 +780,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       await provider.createFolder(`${basePath}/Change Orders`);
       if (docs.changeOrdersData?.length) {
         try {
-          const json = JSON.stringify(docs.changeOrdersData, null, 2);
-          await uploadDocumentWithRetry(provider, `${basePath}/Change Orders`, 'change_orders_data.json', Buffer.from(json), 'application/json');
+          const { generateChangeOrdersPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateChangeOrdersPdf(docs.changeOrdersData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Change Orders`, 'change_orders_report.pdf', pdfBuffer, 'application/pdf');
           filesUploaded++;
         } catch (e: any) {
-          errors.push(`Change orders JSON: ${e.message}`);
+          console.warn(`[Archive] PDF generation failed for change orders, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.changeOrdersData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Change Orders`, 'change_orders_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Change orders JSON: ${e2.message}`);
+          }
         }
       }
       for (const doc of docs.changeOrders) {
@@ -767,11 +808,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       await provider.createFolder(`${basePath}/Change Events`);
       if (docs.changeEventsData?.length) {
         try {
-          const json = JSON.stringify(docs.changeEventsData, null, 2);
-          await uploadDocumentWithRetry(provider, `${basePath}/Change Events`, 'change_events_data.json', Buffer.from(json), 'application/json');
+          const { generateChangeEventsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateChangeEventsPdf(docs.changeEventsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Change Events`, 'change_events_report.pdf', pdfBuffer, 'application/pdf');
           filesUploaded++;
         } catch (e: any) {
-          errors.push(`Change events JSON: ${e.message}`);
+          console.warn(`[Archive] PDF generation failed for change events, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.changeEventsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Change Events`, 'change_events_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Change events JSON: ${e2.message}`);
+          }
         }
       }
       for (const doc of docs.changeEvents) {
@@ -787,11 +836,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       await provider.createFolder(`${basePath}/Direct Costs`);
       if (docs.directCostsData?.length) {
         try {
-          const json = JSON.stringify(docs.directCostsData, null, 2);
-          await uploadDocumentWithRetry(provider, `${basePath}/Direct Costs`, 'direct_costs_data.json', Buffer.from(json), 'application/json');
+          const { generateDirectCostsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateDirectCostsPdf(docs.directCostsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Direct Costs`, 'direct_costs_report.pdf', pdfBuffer, 'application/pdf');
           filesUploaded++;
         } catch (e: any) {
-          errors.push(`Direct costs JSON: ${e.message}`);
+          console.warn(`[Archive] PDF generation failed for direct costs, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.directCostsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Direct Costs`, 'direct_costs_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Direct costs JSON: ${e2.message}`);
+          }
         }
       }
       for (const doc of docs.directCosts) {
@@ -807,11 +864,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       await provider.createFolder(`${basePath}/Invoicing`);
       if (docs.invoicingData?.length) {
         try {
-          const json = JSON.stringify(docs.invoicingData, null, 2);
-          await uploadDocumentWithRetry(provider, `${basePath}/Invoicing`, 'requisitions_data.json', Buffer.from(json), 'application/json');
+          const { generateInvoicingPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateInvoicingPdf(docs.invoicingData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Invoicing`, 'invoicing_report.pdf', pdfBuffer, 'application/pdf');
           filesUploaded++;
         } catch (e: any) {
-          errors.push(`Invoicing JSON: ${e.message}`);
+          console.warn(`[Archive] PDF generation failed for invoicing, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.invoicingData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Invoicing`, 'requisitions_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Invoicing JSON: ${e2.message}`);
+          }
         }
       }
       for (const doc of docs.invoicing) {
@@ -827,11 +892,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       progress.currentStep = 'Exporting directory...';
       await provider.createFolder(`${basePath}/Directory`);
       try {
-        const json = JSON.stringify(docs.directory, null, 2);
-        await uploadDocumentWithRetry(provider, `${basePath}/Directory`, 'directory.json', Buffer.from(json), 'application/json');
+        const { generateDirectoryPdf } = await import('./archive-pdf-generator');
+        const pdfBuffer = await generateDirectoryPdf(docs.directory, docs.projectName);
+        await uploadDocumentWithRetry(provider, `${basePath}/Directory`, 'directory_report.pdf', pdfBuffer, 'application/pdf');
         filesUploaded++;
       } catch (e: any) {
-        errors.push(`Directory export: ${e.message}`);
+        console.warn(`[Archive] PDF generation failed for directory, falling back to JSON: ${e.message}`);
+        try {
+          const json = JSON.stringify(docs.directory, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Directory`, 'directory.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e2: any) {
+          errors.push(`Directory export: ${e2.message}`);
+        }
       }
     }
 
@@ -839,11 +912,19 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       progress.currentStep = 'Exporting estimating data...';
       await provider.createFolder(`${basePath}/Estimating`);
       try {
-        const json = JSON.stringify(docs.estimating, null, 2);
-        await uploadDocumentWithRetry(provider, `${basePath}/Estimating`, 'estimating.json', Buffer.from(json), 'application/json');
+        const { generateEstimatingPdf } = await import('./archive-pdf-generator');
+        const pdfBuffer = await generateEstimatingPdf(docs.estimating, docs.projectName);
+        await uploadDocumentWithRetry(provider, `${basePath}/Estimating`, 'estimating_report.pdf', pdfBuffer, 'application/pdf');
         filesUploaded++;
       } catch (e: any) {
-        errors.push(`Estimating export: ${e.message}`);
+        console.warn(`[Archive] PDF generation failed for estimating, falling back to JSON: ${e.message}`);
+        try {
+          const json = JSON.stringify(docs.estimating, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Estimating`, 'estimating.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e2: any) {
+          errors.push(`Estimating export: ${e2.message}`);
+        }
       }
     }
 

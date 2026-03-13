@@ -1177,6 +1177,237 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
   return { synced, newAssignments };
 }
 
+const ROLE_SYNC_BATCH_DELAY_MS = 200; // Smooth API rate between projects
+
+export async function syncProcoreRoleAssignmentsBatch(
+  batchSize: number,
+  cursor: number
+): Promise<{
+  synced: number;
+  newAssignments: Array<{
+    procoreProjectId: string;
+    projectName: string;
+    roleName: string;
+    assigneeId: string;
+    assigneeName: string;
+    assigneeEmail: string;
+    assigneeCompany: string;
+  }>;
+  nextCursor: number;
+  totalProjects: number;
+  batchProcessed: number;
+  skipped?: boolean;
+}> {
+  if (roleAssignmentSyncInProgress) {
+    console.log('[procore] Role assignment sync already in progress, skipping batch');
+    return {
+      synced: 0,
+      newAssignments: [],
+      nextCursor: cursor,
+      totalProjects: 0,
+      batchProcessed: 0,
+      skipped: true,
+    };
+  }
+
+  roleAssignmentSyncInProgress = true;
+
+  try {
+    const config = await getProcoreConfig();
+    const companyId = config.companyId;
+
+    type ProjectEntry = { procoreId: string; name: string };
+    const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
+    const activeWithMeta = allProjects
+      .filter(p => p.active !== false)
+      .map(p => ({
+        procoreId: p.procoreId,
+        name: p.name || '',
+        lastRoleCheckAt: p.lastRoleCheckAt,
+        procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+      }));
+    const byId = new Map(activeWithMeta.map(p => [p.procoreId, p]));
+    const mappings = await storage.getSyncMappings();
+    for (const m of mappings) {
+      for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
+        if (pid && !byId.has(pid)) {
+          const p = await storage.getProcoreProjectByProcoreId(pid);
+          if (p) {
+            byId.set(pid, {
+              procoreId: pid,
+              name: p.name || '',
+              lastRoleCheckAt: p.lastRoleCheckAt,
+              procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+            });
+          }
+        }
+      }
+    }
+    const fullList: ProjectEntry[] = Array.from(byId.values())
+      .map(p => ({ procoreId: p.procoreId, name: p.name }))
+      .sort((a, b) => String(a.procoreId).localeCompare(String(b.procoreId), undefined, { numeric: true }));
+
+    const totalProjects = fullList.length;
+    if (totalProjects === 0) {
+      return {
+        synced: 0,
+        newAssignments: [],
+        nextCursor: 0,
+        totalProjects: 0,
+        batchProcessed: 0,
+      };
+    }
+
+    const effectiveCursor = cursor >= totalProjects ? 0 : cursor;
+    const batch = fullList.slice(effectiveCursor, effectiveCursor + batchSize);
+    const batchProcessed = batch.length;
+
+    if (batchProcessed === 0) {
+      return {
+        synced: 0,
+        newAssignments: [],
+        nextCursor: 0,
+        totalProjects,
+        batchProcessed: 0,
+      };
+    }
+
+    const batchNum = Math.floor(effectiveCursor / batchSize) + 1;
+    const totalBatches = Math.ceil(totalProjects / batchSize);
+    console.log(`[procore] Syncing role assignments for ${batchProcessed} projects (batch ${batchNum}/${totalBatches}, cursor ${effectiveCursor})...`);
+
+    let synced = 0;
+    const newAssignments: Array<{
+      procoreProjectId: string;
+      projectName: string;
+      roleName: string;
+      assigneeId: string;
+      assigneeName: string;
+      assigneeEmail: string;
+      assigneeCompany: string;
+    }> = [];
+
+    async function processProject(project: ProjectEntry): Promise<void> {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
+      try {
+        let raw: any;
+        try {
+          raw = await fetchProcoreJson(
+            `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+            companyId,
+            { signal: controller.signal }
+          );
+        } catch (rateErr: any) {
+          clearTimeout(timeout);
+          if (rateErr.message?.includes('429')) {
+            console.log('[procore] Rate limited (429), waiting 60s before retrying project', project.procoreId);
+            await new Promise(r => setTimeout(r, 60000));
+            const c2 = new AbortController();
+            const t2 = setTimeout(() => c2.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
+            raw = await fetchProcoreJson(
+              `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+              companyId,
+              { signal: c2.signal }
+            );
+            clearTimeout(t2);
+          } else if (rateErr.name === 'AbortError') {
+            console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+            return;
+          } else {
+            throw rateErr;
+          }
+        }
+        clearTimeout(timeout);
+        const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
+
+        const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
+        const existingKeys = new Set(existingAssignments.map(a => `${a.roleName}||${a.assigneeId}`));
+
+        for (const assignment of assignments) {
+          const roleName = assignment.role || 'Unknown Role';
+          const assigneeId = assignment.user_id ? String(assignment.user_id) : (assignment.contact_id ? String(assignment.contact_id) : null);
+          if (!assigneeId) continue;
+          const nameParts = (assignment.name || '').split(' (');
+          const assigneeName = nameParts[0] || '';
+          const assigneeCompany = nameParts[1] ? nameParts[1].replace(')', '') : '';
+          let assigneeEmail = assignment.email_address || assignment.email || '';
+          if (!assigneeEmail) {
+            const user = await storage.getProcoreUserByProcoreId(assigneeId);
+            assigneeEmail = user?.emailAddress || '';
+          }
+
+          const isNew = !existingKeys.has(`${roleName}||${assigneeId}`);
+
+          await storage.upsertProcoreRoleAssignment({
+            procoreProjectId: project.procoreId,
+            projectName: project.name,
+            roleId: assignment.id ? String(assignment.id) : null,
+            roleName,
+            assigneeId,
+            assigneeName,
+            assigneeEmail,
+            assigneeCompany,
+            properties: assignment,
+            lastSyncedAt: new Date(),
+          });
+
+          if (isNew) {
+            newAssignments.push({
+              procoreProjectId: project.procoreId,
+              projectName: project.name,
+              roleName,
+              assigneeId,
+              assigneeName,
+              assigneeEmail,
+              assigneeCompany,
+            });
+          }
+
+          synced++;
+        }
+        await storage.updateProcoreProjectLastRoleCheck(project.procoreId);
+      } catch (err: any) {
+        clearTimeout(timeout);
+        if (err.name === 'AbortError') {
+          console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+          return;
+        }
+        if (err.message?.includes('403') || err.message?.includes('404')) {
+          return;
+        }
+        throw err;
+      }
+    }
+
+    await parallelWithLimit(batch, async (project) => {
+      try {
+        await processProject(project);
+      } catch (err: any) {
+        console.error(`[procore] Error fetching role assignments for project ${project.procoreId}:`, err.message);
+      }
+      await new Promise(r => setTimeout(r, ROLE_SYNC_BATCH_DELAY_MS));
+    }, ROLE_SYNC_CONCURRENCY);
+
+    const nextCursor = effectiveCursor + batchSize >= totalProjects ? 0 : effectiveCursor + batchSize;
+    if (nextCursor === 0) {
+      console.log(`[procore] Full rotation complete. Synced ${synced} role assignments, ${newAssignments.length} new assignments`);
+    } else {
+      console.log(`[procore] Synced ${synced} role assignments, ${newAssignments.length} new assignments (batch ${effectiveCursor}-${effectiveCursor + batchProcessed} of ${totalProjects})`);
+    }
+
+    return {
+      synced,
+      newAssignments,
+      nextCursor,
+      totalProjects,
+      batchProcessed,
+    };
+  } finally {
+    roleAssignmentSyncInProgress = false;
+  }
+}
+
 export async function runFullProcoreSync(): Promise<{
   projects: { synced: number; created: number; updated: number; changes: number };
   vendors: { synced: number; created: number; updated: number; changes: number };

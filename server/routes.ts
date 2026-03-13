@@ -67,7 +67,7 @@ import bcrypt from "bcrypt";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
 import { testHubSpotConnection, runFullHubSpotSync, syncHubSpotPipelines, updateHubSpotDealStage } from "./hubspot";
-import { runFullProcoreSync, syncProcoreBidBoard, syncProcoreRoleAssignments, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages, fetchProcoreProjectDetail } from "./procore";
+import { runFullProcoreSync, syncProcoreBidBoard, syncProcoreRoleAssignments, syncProcoreRoleAssignmentsBatch, updateProcoreProject, updateProcoreBid, fetchProcoreBidDetail, proxyProcoreAttachment, fetchProcoreProjectStages, fetchProcoreProjectDetail } from "./procore";
 import { runFullCompanycamSync } from "./companycam";
 import { processHubspotWebhookForProcore, syncHubspotCompanyToProcore, syncHubspotContactToProcore, runBulkHubspotToProcoreSync, testMatchingForCompany, testMatchingForContact, triggerPostSyncProcoreUpdates } from "./hubspot-procore-sync";
 import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifications";
@@ -4108,8 +4108,10 @@ export async function registerRoutes(
   let rolePollingRunning = false;
   let lastPollStartedAt: number | null = null;
   const ROLE_SYNC_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max
+  let rolePollingBatchCursor = 0;
+  let ROLE_POLLING_BATCH_SIZE = 50;
 
-  async function runRolePollingCycle() {
+  async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
     // Stale lock cleanup: if stuck longer than timeout, force-clear
     if (rolePollingRunning && lastPollStartedAt) {
       const staleLockMs = Date.now() - lastPollStartedAt;
@@ -4125,18 +4127,34 @@ export async function registerRoutes(
     rolePollingRunning = true;
     lastPollStartedAt = Date.now();
     const startTime = Date.now();
+    const fullSync = opts?.fullSync ?? false;
     try {
-      const syncWithTimeout = Promise.race([
-        syncProcoreRoleAssignments(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Role sync timed out after 5 minutes')), ROLE_SYNC_TIMEOUT_MS)
-        ),
-      ]);
-      const result = await syncWithTimeout;
+      const result = fullSync
+        ? await Promise.race([
+            syncProcoreRoleAssignments(),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Role sync timed out after 5 minutes')), ROLE_SYNC_TIMEOUT_MS)
+            ),
+          ])
+        : await Promise.race([
+            syncProcoreRoleAssignmentsBatch(ROLE_POLLING_BATCH_SIZE, rolePollingBatchCursor),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Role sync timed out after 5 minutes')), ROLE_SYNC_TIMEOUT_MS)
+            ),
+          ]);
+
       if (result.skipped) {
         console.log('[RolePolling] Skipped — Procore sync in progress, keeping previous result');
         return;
       }
+
+      if (!fullSync && 'nextCursor' in result) {
+        rolePollingBatchCursor = result.nextCursor;
+        if (result.nextCursor === 0) {
+          console.log('[RolePolling] Full sweep rotation complete');
+        }
+      }
+
       let emailResult = { sent: 0, skipped: 0, failed: 0 };
       if (result.newAssignments.length > 0) {
         try {
@@ -4154,6 +4172,16 @@ export async function registerRoutes(
         newAssignments: result.newAssignments.length,
         emails: emailResult,
         duration,
+        ...(fullSync
+          ? {}
+          : 'batchProcessed' in result && 'totalProjects' in result && 'nextCursor' in result
+            ? {
+                batchProcessed: result.batchProcessed,
+                totalProjects: result.totalProjects,
+                nextCursor: result.nextCursor,
+                fullRotationComplete: result.nextCursor === 0,
+              }
+            : {}),
       };
       if (result.newAssignments.length > 0) {
         await storage.createAuditLog({
@@ -4164,9 +4192,13 @@ export async function registerRoutes(
           details: lastRolePollResult as any,
           durationMs: duration,
         });
-        console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s — ${result.newAssignments.length} new assignments, ${emailResult.sent} emails sent`);
+        const batchInfo = !fullSync && 'batchProcessed' in result ? ` batch ${result.batchProcessed} projects` : '';
+        console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s${batchInfo} — ${result.newAssignments.length} new assignments, ${emailResult.sent} emails sent`);
       } else {
-        console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s — no new assignments`);
+        const batchInfo = !fullSync && 'batchProcessed' in result && 'totalProjects' in result
+          ? ` — batch ${result.batchProcessed} of ${result.totalProjects}`
+          : '';
+        console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s${batchInfo} — no new assignments`);
       }
     } catch (e: any) {
       console.error('[RolePolling] Role assignment sync failed:', e.message);
@@ -4202,7 +4234,7 @@ export async function registerRoutes(
       const val = (config?.value as any) || {};
       res.json({
         enabled: val.enabled || false,
-        intervalMinutes: val.intervalMinutes || 5,
+        intervalMinutes: val.intervalMinutes ?? 30,
         isRunning: rolePollingTimer !== null,
         lastPollAt: lastRolePollAt?.toISOString() || null,
         lastPollResult: lastRolePollResult,
@@ -4211,6 +4243,8 @@ export async function registerRoutes(
         webhookActive: lastWebhookRoleEventAt
           ? (Date.now() - lastWebhookRoleEventAt.getTime()) < 30 * 60 * 1000
           : false,
+        batchSize: ROLE_POLLING_BATCH_SIZE,
+        batchCursor: rolePollingBatchCursor,
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -4219,11 +4253,15 @@ export async function registerRoutes(
 
   app.post("/api/automation/role-polling/config", requireAuth, async (req, res) => {
     try {
-      const { enabled, intervalMinutes } = req.body;
-      const interval = intervalMinutes || 5;
+      const { enabled, intervalMinutes, batchSize: reqBatchSize } = req.body;
+      const interval = intervalMinutes ?? 30;
+      if (reqBatchSize !== undefined) {
+        ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(reqBatchSize) || 50));
+      }
+      const stored = { enabled, intervalMinutes: interval, batchSize: ROLE_POLLING_BATCH_SIZE };
       await storage.upsertAutomationConfig({
         key: "role_assignment_polling",
-        value: { enabled, intervalMinutes: interval },
+        value: stored,
         description: "Automatic Procore role assignment polling configuration",
       });
       if (enabled) {
@@ -4231,18 +4269,19 @@ export async function registerRoutes(
       } else {
         stopRolePolling();
       }
-      res.json({ success: true, enabled, intervalMinutes: interval });
+      res.json({ success: true, enabled, intervalMinutes: interval, batchSize: ROLE_POLLING_BATCH_SIZE });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
+  // Manual "Sync Now" uses full sync (all projects) — user expects complete check. Scheduled polling uses batched sync.
   app.post("/api/automation/role-polling/trigger", requireAuth, async (_req, res) => {
     try {
       if (rolePollingRunning) {
         return res.json({ message: "Role assignment sync already in progress", running: true });
       }
-      runRolePollingCycle();
+      runRolePollingCycle({ fullSync: true });
       res.json({ message: "Role assignment sync triggered", running: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -4254,7 +4293,10 @@ export async function registerRoutes(
       const config = await storage.getAutomationConfig("role_assignment_polling");
       const val = (config?.value as any);
       if (val?.enabled) {
-        startRolePolling(val.intervalMinutes || 5);
+        if (val.batchSize != null) {
+          ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(val.batchSize) || 50));
+        }
+        startRolePolling(val.intervalMinutes ?? 30);
       }
     } catch (e) {
       console.log('[RolePolling] No saved config, role polling disabled by default');

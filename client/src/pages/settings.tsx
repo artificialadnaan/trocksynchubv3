@@ -1902,13 +1902,15 @@ function RolePollingCard() {
     currentlyPolling: boolean;
     lastWebhookEventAt: string | null;
     webhookActive: boolean;
+    batchSize?: number;
+    batchCursor?: number;
   }>({
     queryKey: ["/api/automation/role-polling/config"],
     refetchInterval: 30000,
   });
 
   const [enabled, setEnabled] = useState(false);
-  const [interval, setIntervalVal] = useState(5);
+  const [interval, setIntervalVal] = useState(30);
 
   useEffect(() => {
     if (config) {
@@ -1983,7 +1985,7 @@ function RolePollingCard() {
           </div>
         </div>
         <p className="text-sm text-muted-foreground mt-1">
-          Polls Procore for new project role assignments and sends email notifications. Webhooks are the primary notification method; polling acts as a reliable fallback.
+          Syncs role assignments in batches of 50 projects per cycle to stay within Procore API limits. Webhooks handle real-time detection; polling is a background safety net. A full sweep of all projects completes over multiple cycles.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -2004,7 +2006,7 @@ function RolePollingCard() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <Label className="text-xs whitespace-nowrap">Poll every</Label>
           <Select value={String(interval)} onValueChange={handleIntervalChange}>
             <SelectTrigger className="w-32 h-8" data-testid="select-role-polling-interval">
@@ -2018,6 +2020,9 @@ function RolePollingCard() {
               <SelectItem value="30">30 minutes</SelectItem>
             </SelectContent>
           </Select>
+          <span className="text-xs text-muted-foreground">
+            {config?.batchSize ?? 50} projects per cycle
+          </span>
           <Button
             size="sm"
             variant="outline"
@@ -2040,19 +2045,31 @@ function RolePollingCard() {
               <span className="text-[10px] text-muted-foreground">{lastPollTime.toLocaleString()}</span>
             </div>
             {lastResult && !lastResult.error && (
-              <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
-                <div>
-                  <span className="font-medium text-foreground">Synced:</span>{" "}
-                  {lastResult.synced || 0} roles
+              <div className="space-y-2">
+                <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                  <div>
+                    <span className="font-medium text-foreground">Synced:</span>{" "}
+                    {lastResult.synced || 0} roles
+                  </div>
+                  <div>
+                    <span className="font-medium text-foreground">New:</span>{" "}
+                    {lastResult.newAssignments || 0} assignments
+                  </div>
+                  <div>
+                    <span className="font-medium text-foreground">Emails:</span>{" "}
+                    {lastResult.emails?.sent || 0} sent
+                  </div>
                 </div>
-                <div>
-                  <span className="font-medium text-foreground">New:</span>{" "}
-                  {lastResult.newAssignments || 0} assignments
-                </div>
-                <div>
-                  <span className="font-medium text-foreground">Emails:</span>{" "}
-                  {lastResult.emails?.sent || 0} sent
-                </div>
+                {lastResult.fullRotationComplete && lastResult.totalProjects != null ? (
+                  <p className="text-xs text-green-600">
+                    ✓ Full sweep complete ({lastResult.totalProjects} projects)
+                  </p>
+                ) : lastResult.totalProjects != null && lastResult.totalProjects > 0 && lastResult.nextCursor != null ? (
+                  <p className="text-xs text-muted-foreground">
+                    Batch: {lastResult.nextCursor === 0 ? lastResult.totalProjects : lastResult.nextCursor}/{lastResult.totalProjects} projects (
+                    {lastResult.nextCursor === 0 ? 100 : Math.round((lastResult.nextCursor / lastResult.totalProjects) * 100)}% of full sweep)
+                  </p>
+                ) : null}
               </div>
             )}
             {lastResult?.error && (
