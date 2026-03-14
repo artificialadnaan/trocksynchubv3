@@ -1630,6 +1630,26 @@ export async function triggerPortfolioAutomationFromStageChange(
       });
       mapping = match ?? null;
     }
+
+    // Broader fallback: partial name match (for "Copy of..." test projects or renamed projects)
+    if (!mapping && name) {
+        const nameLower = normalizeKey(name);
+        const all = await storage.getSyncMappings();
+        const partialMatch = all.find((m) => {
+          const n = normalizeKey(
+            m.procoreProjectName || m.bidboardProjectName || m.hubspotDealName || ""
+          );
+          // Check if either name contains the other (handles "Copy of..." prefixes)
+          return n && (nameLower.includes(n) || n.includes(nameLower));
+        });
+        mapping = partialMatch ?? null;
+        if (mapping) {
+          log(
+            `[portfolio-auto] Found partial name match: "${projectName}" matched mapping for "${mapping.procoreProjectName || mapping.bidboardProjectName}"`,
+            "playwright"
+          );
+        }
+    }
   }
 
   const bidboardProjectId = mapping?.bidboardProjectId || mapping?.procoreProjectId;

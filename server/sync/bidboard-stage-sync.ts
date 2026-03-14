@@ -197,8 +197,82 @@ export async function diffBidBoardStages(
 
     const match = await findSyncMappingForRow(row);
     const hubspotDealId = match?.mapping?.hubspotDealId;
-    if (!hubspotDealId) continue;
 
+    if (!hubspotDealId) {
+      // No HubSpot deal found — can't sync stage to HubSpot.
+      // BUT: still trigger portfolio automation if stage is "Sent to Production"
+      const normalizedNewStage = normalizeStageLabel(newStatus);
+      if (
+        normalizedNewStage === "Sent to Production" ||
+        normalizedNewStage === "Service - Sent to Production"
+      ) {
+        const projectName = row.Name?.toString()?.trim() || "";
+        const projectNumber = row["Project #"]?.toString()?.trim() || null;
+        const customerName = row["Customer Name"]?.toString()?.trim() || "";
+
+        log(
+          `[sync] No HubSpot deal for "${projectName}" but stage changed to "${newStatus}" — triggering portfolio automation directly`,
+          "sync"
+        );
+
+        // Update sync state so we don't re-trigger on next cycle
+        await storage.upsertBidboardSyncState({
+          projectId,
+          projectName,
+          currentStage: newStatus,
+          metadata: {
+            projectNumber: row["Project #"],
+            customerName: row["Customer Name"],
+          },
+        });
+
+        // Log the event
+        await storage.createBidboardAutomationLog({
+          projectName,
+          action: "bidboard_stage_sync",
+          status: "success",
+          details: {
+            previousStage: previousStage || "(new)",
+            newStage: newStatus,
+            note: "No HubSpot deal mapping — portfolio automation triggered without HubSpot sync",
+          },
+        });
+
+        // Trigger portfolio automation (fire and forget — don't block the sync loop)
+        try {
+          await triggerPortfolioAutomationFromStageChange(
+            projectName,
+            projectNumber,
+            customerName
+          );
+        } catch (err) {
+          log(
+            `[sync] Portfolio automation trigger failed for ${projectName} (no HubSpot deal): ${err instanceof Error ? err.message : String(err)}`,
+            "sync"
+          );
+        }
+      } else {
+        // Not a production stage and no HubSpot deal — just update sync state and move on
+        await storage.upsertBidboardSyncState({
+          projectId,
+          projectName: row.Name?.toString()?.trim(),
+          currentStage: newStatus,
+          metadata: {
+            projectNumber: row["Project #"],
+            customerName: row["Customer Name"],
+          },
+        });
+
+        log(
+          `[sync] Stage change detected for "${row.Name}" (${previousStage || "(new)"} → ${newStatus}) but no HubSpot deal found — skipping HubSpot sync`,
+          "sync"
+        );
+      }
+
+      continue;
+    }
+
+    // HubSpot deal found — proceed as before (add to changes for HubSpot sync)
     const totalSales = parseFloat(String(row["Total Sales"] || 0)) || 0;
     changes.push({
       projectName: row.Name?.toString()?.trim() || "",
