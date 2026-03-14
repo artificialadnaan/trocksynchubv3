@@ -963,14 +963,27 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       errors: errors.length,
     };
 
-    const summaryJson = JSON.stringify(summary, null, 2);
-    await uploadDocumentWithRetry(
-      provider,
-      basePath,
-      '_archive_summary.json',
-      Buffer.from(summaryJson, 'utf-8'),
-      'application/json'
-    );
+    try {
+      const { generateArchiveCoverSheetPdf } = await import('./archive-pdf-generator');
+      const coverBuffer = await generateArchiveCoverSheetPdf(summary, baseFolder.webUrl);
+      await uploadDocumentWithRetry(
+        provider,
+        basePath,
+        '00_Archive_Cover_Sheet.pdf',
+        coverBuffer,
+        'application/pdf'
+      );
+    } catch (coverErr: any) {
+      console.warn(`[Archive] Cover sheet PDF failed, falling back to JSON: ${coverErr.message}`);
+      const summaryJson = JSON.stringify(summary, null, 2);
+      await uploadDocumentWithRetry(
+        provider,
+        basePath,
+        '_archive_summary.json',
+        Buffer.from(summaryJson, 'utf-8'),
+        'application/json'
+      );
+    }
 
     progress.status = 'completed';
     progress.progress = 100;
