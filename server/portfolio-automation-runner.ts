@@ -94,6 +94,7 @@ export async function runPhase1WithRetry(
           const phase2Result = await runPhase2(cid, result.portfolioProjectId, bidboardProjectId, {
             bidboardProjectUrl,
             proposalPdfPath: output.proposalPdfPath ?? null,
+            customerName: context.customerName,
           });
           // Merge Phase 2 (and Phase 3) steps into result
           phase2Result.steps.forEach((s) => result.steps.push(s));
@@ -119,6 +120,7 @@ export async function runPhase1WithRetry(
           bidboardProjectUrl,
           proposalPdfPath: output.proposalPdfPath ?? null,
           estimateExcelPath: output.estimateExcelPath ?? null,
+          customerName: context.customerName,
         });
       }
 

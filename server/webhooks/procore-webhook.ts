@@ -112,6 +112,7 @@ export async function handleProcoreProjectWebhook(
                 ? {
                     bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
                     proposalPdfPath: pending.proposalPdfPath ?? undefined,
+                    customerName: pending.customerName,
                   }
                 : undefined;
 

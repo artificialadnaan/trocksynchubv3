@@ -1030,59 +1030,78 @@ export async function scrapeBidBoardData(
       /* Overview tab may not exist or already be active */
     }
 
+    // Strategy 0: Read from the client/owner name input field (most reliable)
     try {
-      scrapedData.customerCompanyName = await page.evaluate(() => {
-        const roles = [
-          "Owner/Client",
-          "General Contractor",
-          "Subcontractor",
-          "Sub-contractor",
-          "Architect",
-          "Engineer",
-          "Developer",
-          "Vendor",
-        ];
+      const clientInput = page.locator(
+        '[data-testid="client-name"], input[name="client_name"], #client_name, input[name="owner_name"], input[placeholder*="Client"], input[placeholder*="Owner"]'
+      );
+      if ((await clientInput.count()) > 0) {
+        const val = await clientInput.first().inputValue().catch(() => "");
+        if (val?.trim()) {
+          scrapedData.customerCompanyName = val.trim();
+          log(`[portfolio-auto] Found customer from input field: "${scrapedData.customerCompanyName}"`, "playwright");
+        }
+      }
+    } catch {
+      /* optional */
+    }
 
-        // Strategy 1: Look for text nodes ending with a role name (e.g. "Acme Corp Owner/Client")
-        const candidates = document.querySelectorAll('div[style*="word-break"], div, span');
-        for (const el of candidates) {
-          const directText =
-            el.childNodes.length === 1 && el.childNodes[0].nodeType === Node.TEXT_NODE
-              ? el.childNodes[0].textContent?.trim()
-              : null;
-          if (!directText) continue;
-          for (const role of roles) {
-            if (directText.endsWith(role)) {
-              return directText
-                .replace(new RegExp("\\s*" + role.replace("/", "\\/") + "\\s*$", "i"), "")
-                .trim();
+    // Strategy 1 & 2: Fallback to DOM text scraping if input field empty
+    if (!scrapedData.customerCompanyName) {
+      try {
+        scrapedData.customerCompanyName = await page.evaluate(() => {
+          const roles = [
+            "Owner/Client",
+            "General Contractor",
+            "Subcontractor",
+            "Sub-contractor",
+            "Architect",
+            "Engineer",
+            "Developer",
+            "Vendor",
+          ];
+
+          // Strategy 1: Look for text nodes ending with a role name (e.g. "Acme Corp Owner/Client")
+          const candidates = document.querySelectorAll('div[style*="word-break"], div, span');
+          for (const el of candidates) {
+            const directText =
+              el.childNodes.length === 1 && el.childNodes[0].nodeType === Node.TEXT_NODE
+                ? el.childNodes[0].textContent?.trim()
+                : null;
+            if (!directText) continue;
+            for (const role of roles) {
+              if (directText.endsWith(role)) {
+                return directText
+                  .replace(new RegExp("\\s*" + role.replace("/", "\\/") + "\\s*$", "i"), "")
+                  .trim();
+              }
             }
           }
-        }
 
-        // Strategy 2: Look for a role label element and grab the company name from a sibling/parent
-        for (const role of roles) {
-          const roleEls = document.querySelectorAll(`span, div, p`);
-          for (const el of roleEls) {
-            const text = el.textContent?.trim();
-            if (text === role || text === `(${role})`) {
-              // Look for company name in parent container
-              const container = el.closest('div[class]') ?? el.parentElement;
-              if (container) {
-                const allText = container.textContent?.trim() ?? '';
-                const cleaned = allText.replace(role, '').replace(/[()]/g, '').trim();
-                if (cleaned && cleaned.length > 1 && cleaned.length < 100) {
-                  return cleaned;
+          // Strategy 2: Look for a role label element and grab the company name from a sibling/parent
+          for (const role of roles) {
+            const roleEls = document.querySelectorAll(`span, div, p`);
+            for (const el of roleEls) {
+              const text = el.textContent?.trim();
+              if (text === role || text === `(${role})`) {
+                // Look for company name in parent container
+                const container = el.closest('div[class]') ?? el.parentElement;
+                if (container) {
+                  const allText = container.textContent?.trim() ?? '';
+                  const cleaned = allText.replace(role, '').replace(/[()]/g, '').trim();
+                  if (cleaned && cleaned.length > 1 && cleaned.length < 100) {
+                    return cleaned;
+                  }
                 }
               }
             }
           }
-        }
 
-        return null;
-      });
-    } catch {
-      /* optional */
+          return null;
+        });
+      } catch {
+        /* optional */
+      }
     }
 
     if (scrapedData.customerCompanyName) {
@@ -1530,7 +1549,8 @@ export async function runPhase3(
   bidboardProjectUrl: string,
   proposalPdfPath: string | null,
   bidboardProjectId?: string,
-  existingPage?: Page
+  existingPage?: Page,
+  customerName?: string
 ): Promise<PortfolioAutomationResult> {
   const result: PortfolioAutomationResult = {
     success: false,
@@ -1568,6 +1588,12 @@ export async function runPhase3(
       companyId,
       portfolioProjectId,
     });
+
+    // Use HubSpot customer name as fallback if DOM scrape didn't find it
+    if (!scrapedData.customerCompanyName && customerName) {
+      scrapedData.customerCompanyName = customerName;
+      log(`[portfolio-auto] Using HubSpot customer name as fallback: ${customerName}`, "playwright");
+    }
 
     if (scrapedData.customerCompanyName) {
       await addCustomerToDirectory(
@@ -1699,6 +1725,7 @@ export async function runPhase1(
 export interface Phase2Input {
   proposalPdfPath?: string | null;
   bidboardProjectUrl?: string;
+  customerName?: string;
 }
 
 /**
@@ -1776,7 +1803,8 @@ export async function runPhase2(
         phase2Input.bidboardProjectUrl,
         phase2Input.proposalPdfPath,
         bidboardProjectId,
-        page
+        page,
+        phase2Input.customerName
       );
       phase3Result.steps.forEach((s) => result.steps.push(s));
       result.success = result.success && phase3Result.success;

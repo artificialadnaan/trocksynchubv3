@@ -1389,6 +1389,7 @@ export async function registerRoutes(
                       ? {
                           bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
                           proposalPdfPath: pending.proposalPdfPath ?? undefined,
+                          customerName: pending.customerName,
                         }
                       : undefined;
                   const result = await runPhase2WithRetry(
@@ -1447,6 +1448,7 @@ export async function registerRoutes(
                       ? {
                           bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
                           proposalPdfPath: pending.proposalPdfPath ?? undefined,
+                          customerName: pending.customerName,
                         }
                       : undefined;
                   const result = await runPhase2WithRetry(
@@ -5049,7 +5051,7 @@ export async function registerRoutes(
 
   app.post("/api/portfolio-automation/test/phase3", requireAuth, async (req, res) => {
     try {
-      const { companyId, portfolioProjectId, bidboardProjectUrl, proposalPdfPath, bidboardProjectId } = req.body || {};
+      const { companyId, portfolioProjectId, bidboardProjectUrl, proposalPdfPath, bidboardProjectId, customerName } = req.body || {};
       if (!companyId || !portfolioProjectId || !bidboardProjectUrl) {
         return res.status(400).json({ error: "companyId, portfolioProjectId, and bidboardProjectUrl are required" });
       }
@@ -5066,7 +5068,9 @@ export async function registerRoutes(
             portfolioProjectId,
             bidboardProjectUrl,
             proposalPdfPath || null,
-            bidboardProjectId
+            bidboardProjectId,
+            undefined,
+            customerName || undefined
           );
           testJobResults.set(jobId, {
             status: "completed",

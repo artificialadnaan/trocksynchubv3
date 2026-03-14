@@ -17,6 +17,7 @@ export interface PendingPhase2Job {
   bidboardProjectUrl: string;
   proposalPdfPath?: string | null;
   estimateExcelPath?: string | null;
+  customerName?: string;
   timestamp: number;
 }
 
@@ -30,7 +31,7 @@ const MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
  */
 export function registerPendingPhase2(
   bidboardProjectId: string,
-  options?: { bidboardProjectUrl?: string; proposalPdfPath?: string | null; estimateExcelPath?: string | null }
+  options?: { bidboardProjectUrl?: string; proposalPdfPath?: string | null; estimateExcelPath?: string | null; customerName?: string }
 ): void {
   const bidboardProjectUrl = options?.bidboardProjectUrl || "";
   pendingPhase2Queue.push({
@@ -38,6 +39,7 @@ export function registerPendingPhase2(
     bidboardProjectUrl,
     proposalPdfPath: options?.proposalPdfPath ?? null,
     estimateExcelPath: options?.estimateExcelPath ?? null,
+    customerName: options?.customerName,
     timestamp: Date.now(),
   });
   if (pendingPhase2Queue.length > MAX_QUEUE_SIZE) {
