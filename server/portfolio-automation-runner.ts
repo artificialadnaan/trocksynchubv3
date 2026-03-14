@@ -50,7 +50,20 @@ export async function runPhase1WithRetry(
     );
 
     const { runPhase1 } = await import("./playwright/portfolio-automation");
-    const output = await runPhase1(bidboardProjectUrl, bidboardProjectId);
+
+    const completedStepNames =
+      attempt > 1 && lastOutput
+        ? lastOutput.result.steps
+            .filter((s) => s.status === "success")
+            .map((s) => s.step)
+        : [];
+    const previousOutput =
+      attempt > 1 && lastOutput ? { estimateExcelPath: lastOutput.estimateExcelPath, proposalPdfPath: lastOutput.proposalPdfPath } : undefined;
+
+    const output = await runPhase1(bidboardProjectUrl, bidboardProjectId, {
+      completedStepNames,
+      previousOutput,
+    });
     lastOutput = output;
     const { result } = output;
     result.completedAt = result.completedAt ?? new Date();

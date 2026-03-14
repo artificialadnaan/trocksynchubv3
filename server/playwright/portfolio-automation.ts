@@ -297,6 +297,27 @@ function logAutomationSummary(result: PortfolioAutomationResult): void {
   log(`${"═".repeat(60)}\n`, "playwright");
 }
 
+// ─── Helper: Dismiss any open modals (e.g. Add to Portfolio confirmation) ──
+// The Add to Portfolio confirmation dialog can linger and block clicks on the Estimation tab.
+
+async function dismissOpenModals(page: Page): Promise<void> {
+  const openModal = page.locator('.MuiDialog-root, [role="presentation"].MuiModal-root, [role="dialog"]');
+  if ((await openModal.count()) > 0) {
+    await page.keyboard.press("Escape");
+    await randomDelay(800, 1200);
+    await page.keyboard.press("Escape");
+    await randomDelay(800, 1200);
+  }
+  try {
+    await page.waitForFunction(
+      () => document.querySelectorAll('.MuiDialog-root, .MuiModal-root, [role="dialog"]').length === 0,
+      { timeout: 10000 }
+    );
+  } catch {
+    log("[portfolio-auto] Warning: modal may still be present, proceeding anyway", "playwright");
+  }
+}
+
 // ─── Helper: Wait for modal to close ────────────────────────────
 
 async function waitForModalToClose(page: Page, timeoutMs: number = 120000): Promise<void> {
@@ -381,150 +402,223 @@ async function waitForProcoreSpaLoaded(
 // PHASE 1: Bid Board Actions
 // ═══════════════════════════════════════════════════════════════
 
+const PHASE1_ADD_TO_PORTFOLIO_STEPS = [
+  "click_add_to_portfolio",
+  "confirm_add_to_portfolio",
+  "wait_portfolio_creation",
+] as const;
+
+/** Check if project is already in Portfolio (Add to Portfolio menu item does not exist). */
+async function isProjectAlreadyInPortfolio(page: Page): Promise<boolean> {
+  await page.keyboard.press("Escape");
+  await randomDelay(500, 1000);
+
+  let menuOpened = false;
+  const ellipsisButtons = page.locator(SEL.ellipsisButton);
+  if ((await ellipsisButtons.count()) > 0) {
+    try {
+      await ellipsisButtons.first().click({ timeout: 8000 });
+      menuOpened = true;
+    } catch {
+      /* try stage caret fallback */
+    }
+  }
+  if (!menuOpened) {
+    const stageCaret = page.locator('[data-qa="ci-ChevronDown"]').first();
+    if ((await stageCaret.count()) > 0) {
+      await stageCaret.click({ timeout: 8000 });
+      menuOpened = true;
+    }
+  }
+  if (!menuOpened) return false;
+
+  await page.waitForSelector('[role="menuitem"]', { timeout: 5000 }).catch(() => {});
+  await randomDelay(800, 1500);
+
+  const addToPortfolioItem = page.locator(SEL.addToPortfolio.menuItem).first();
+  const count = await addToPortfolioItem.count();
+  const exists = count > 0 && (await addToPortfolioItem.isVisible());
+  await page.keyboard.press("Escape");
+  await randomDelay(300, 600);
+  return !exists;
+}
+
 /**
  * Phase 1: Runs in the Bid Board context.
  * Steps: Add to Portfolio → Export Estimate → Export Proposal → Upload Docs → Send to Documents Tool
+ * On retry, skips steps that already succeeded (resume from failed step).
  */
 export async function runPhase1BidBoardActions(
   page: Page,
   bidboardProjectUrl: string,
-  result: PortfolioAutomationResult
+  result: PortfolioAutomationResult,
+  retryOptions?: Phase1RetryOptions
 ): Promise<{ estimateExcelPath: string | null; proposalPdfPath: string | null }> {
-  let estimateExcelPath: string | null = null;
-  let proposalPdfPath: string | null = null;
+  const completedStepNames = retryOptions?.completedStepNames ?? [];
+  const previousOutput = retryOptions?.previousOutput;
+
+  let estimateExcelPath: string | null = previousOutput?.estimateExcelPath ?? null;
+  let proposalPdfPath: string | null = previousOutput?.proposalPdfPath ?? null;
 
   await fs.mkdir(DOWNLOADS_DIR, { recursive: true });
 
-  // ── Step 2: Click ellipsis → Add to Portfolio ─────────────
-  const step2Start = Date.now();
-  try {
-    await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
-    const bidboardSpaSelectors = [
-      ".aid-projBarOverview",
-      ".aid-projBarEstimation",
-      ".aid-tab",
-      '[data-qa="ci-EllipsisVertical"]',
-    ];
-    await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project");
+  const completedSet = new Set(completedStepNames);
+  const skipAddToPortfolio =
+    completedSet.has("click_add_to_portfolio") || completedSet.has("confirm_add_to_portfolio");
 
-    await page.keyboard.press("Escape");
-    await randomDelay(500, 1000);
+  // ── Navigate and optionally skip add-to-portfolio block ───
+  await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
+  const bidboardSpaSelectors = [
+    ".aid-projBarOverview",
+    ".aid-projBarEstimation",
+    ".aid-tab",
+    '[data-qa="ci-EllipsisVertical"]',
+  ];
+  await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project");
 
-    let menuOpened = false;
-    const ellipsisButtons = page.locator(SEL.ellipsisButton);
-    if ((await ellipsisButtons.count()) > 0) {
-      try {
-        await ellipsisButtons.first().click({ timeout: 8000 });
-        menuOpened = true;
-        log("[portfolio-auto] Clicked header ellipsis", "playwright");
-      } catch {
-        /* try stage caret fallback */
-      }
-    }
-    if (!menuOpened) {
-      const stageCaret = page.locator('[data-qa="ci-ChevronDown"]').first();
-      if ((await stageCaret.count()) > 0) {
-        await stageCaret.click({ timeout: 8000 });
-        menuOpened = true;
-        log("[portfolio-auto] Clicked stage badge caret (ellipsis fallback)", "playwright");
-      }
-    }
-    if (!menuOpened) {
-      throw new Error("Could not open Global Actions menu (ellipsis or stage caret)");
-    }
-    await page.waitForSelector('[role="menuitem"]', { timeout: 5000 });
-    await randomDelay(1000, 2000);
+  const alreadyInPortfolio = await isProjectAlreadyInPortfolio(page);
+  const shouldSkipAddToPortfolio = skipAddToPortfolio || alreadyInPortfolio;
 
-    await clickMenuItem(
-      page,
-      SEL.addToPortfolio.menuItem,
-      'li[role="menuitem"]:has-text("Add To Portfolio")',
-      "Add to Portfolio"
+  if (shouldSkipAddToPortfolio) {
+    log(
+      `[portfolio-auto] Skipping add-to-portfolio (already in Portfolio or completed in previous attempt)`,
+      "playwright"
     );
-    await randomDelay(1000, 2000);
+    for (const step of PHASE1_ADD_TO_PORTFOLIO_STEPS) {
+      await logStep(page, result, step, "skipped", 0, {
+        metadata: { reason: "Resuming from failed step; project already in Portfolio" },
+      });
+    }
+  } else {
+    // ── Step 2: Click ellipsis → Add to Portfolio ─────────────
+    const step2Start = Date.now();
+    try {
+      await page.keyboard.press("Escape");
+      await randomDelay(500, 1000);
 
-    await logStep(page, result, "click_add_to_portfolio", "success", Date.now() - step2Start);
-  } catch (err: unknown) {
-    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step2-add-to-portfolio");
-    await logStep(page, result, "click_add_to_portfolio", "failed", Date.now() - step2Start, {
-      error: err instanceof Error ? err.message : String(err),
-      screenshotPath,
-      metadata: { diagnostics },
-    });
-    throw err;
-  }
+      let menuOpened = false;
+      const ellipsisButtons = page.locator(SEL.ellipsisButton);
+      if ((await ellipsisButtons.count()) > 0) {
+        try {
+          await ellipsisButtons.first().click({ timeout: 8000 });
+          menuOpened = true;
+          log("[portfolio-auto] Clicked header ellipsis", "playwright");
+        } catch {
+          /* try stage caret fallback */
+        }
+      }
+      if (!menuOpened) {
+        const stageCaret = page.locator('[data-qa="ci-ChevronDown"]').first();
+        if ((await stageCaret.count()) > 0) {
+          await stageCaret.click({ timeout: 8000 });
+          menuOpened = true;
+          log("[portfolio-auto] Clicked stage badge caret (ellipsis fallback)", "playwright");
+        }
+      }
+      if (!menuOpened) {
+        throw new Error("Could not open Global Actions menu (ellipsis or stage caret)");
+      }
+      await page.waitForSelector('[role="menuitem"]', { timeout: 5000 });
+      await randomDelay(1000, 2000);
 
-  // ── Step 3: Confirm "Add To Portfolio" modal ──────────────
-  const step3Start = Date.now();
-  try {
-    await waitForConfirmButtonEnabled(page, 30000);
-    await page.click(SEL.confirmButton, { timeout: 10000 });
-    await logStep(page, result, "confirm_add_to_portfolio", "success", Date.now() - step3Start);
-  } catch (err: unknown) {
-    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step3-confirm-portfolio");
-    await logStep(page, result, "confirm_add_to_portfolio", "failed", Date.now() - step3Start, {
-      error: err instanceof Error ? err.message : String(err),
-      screenshotPath,
-      metadata: { diagnostics },
-    });
-    throw err;
-  }
+      await clickMenuItem(
+        page,
+        SEL.addToPortfolio.menuItem,
+        'li[role="menuitem"]:has-text("Add To Portfolio")',
+        "Add to Portfolio"
+      );
+      await randomDelay(1000, 2000);
 
-  // ── Step 4: Wait for portfolio creation ───────────────────
-  const step4Start = Date.now();
-  try {
-    await waitForModalToClose(page, 120000);
-    await randomDelay(3000, 5000);
+      await logStep(page, result, "click_add_to_portfolio", "success", Date.now() - step2Start);
+    } catch (err: unknown) {
+      const { screenshotPath, diagnostics } = await captureFailureContext(page, "step2-add-to-portfolio");
+      await logStep(page, result, "click_add_to_portfolio", "failed", Date.now() - step2Start, {
+        error: err instanceof Error ? err.message : String(err),
+        screenshotPath,
+        metadata: { diagnostics },
+      });
+      throw err;
+    }
 
-    const currentUrl = page.url();
-    log(`[portfolio-auto] After Add to Portfolio, URL: ${currentUrl}`, "playwright");
+    // ── Step 3: Confirm "Add To Portfolio" modal ──────────────
+    const step3Start = Date.now();
+    try {
+      await waitForConfirmButtonEnabled(page, 30000);
+      await page.click(SEL.confirmButton, { timeout: 10000 });
+      await logStep(page, result, "confirm_add_to_portfolio", "success", Date.now() - step3Start);
+    } catch (err: unknown) {
+      const { screenshotPath, diagnostics } = await captureFailureContext(page, "step3-confirm-portfolio");
+      await logStep(page, result, "confirm_add_to_portfolio", "failed", Date.now() - step3Start, {
+        error: err instanceof Error ? err.message : String(err),
+        screenshotPath,
+        metadata: { diagnostics },
+      });
+      throw err;
+    }
 
-    await logStep(page, result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
-      metadata: { url: currentUrl },
-    });
-  } catch (err: unknown) {
-    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step4-wait-portfolio");
-    await logStep(page, result, "wait_portfolio_creation", "failed", Date.now() - step4Start, {
-      error: err instanceof Error ? err.message : String(err),
-      screenshotPath,
-      metadata: { diagnostics },
-    });
+    // ── Step 4: Wait for portfolio creation ───────────────────
+    const step4Start = Date.now();
+    try {
+      await waitForModalToClose(page, 120000);
+      await randomDelay(3000, 5000);
+
+      const currentUrl = page.url();
+      log(`[portfolio-auto] After Add to Portfolio, URL: ${currentUrl}`, "playwright");
+
+      await logStep(page, result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
+        metadata: { url: currentUrl },
+      });
+    } catch (err: unknown) {
+      const { screenshotPath, diagnostics } = await captureFailureContext(page, "step4-wait-portfolio");
+      await logStep(page, result, "wait_portfolio_creation", "failed", Date.now() - step4Start, {
+        error: err instanceof Error ? err.message : String(err),
+        screenshotPath,
+        metadata: { diagnostics },
+      });
+    }
   }
 
   // ── Step 5-6: Go to Estimating tab → Export Excel ─────────
-  const step6Start = Date.now();
-  try {
-    await page.click(SEL.tabs.estimating, { timeout: 10000 });
-    await randomDelay(3000, 5000);
-
-    await page.click(SEL.estimateExport.exportButton, { timeout: 10000 });
-    await randomDelay(1000, 2000);
-
-    await clickMenuItem(
-      page,
-      SEL.estimateExport.estimateMenuItem,
-      SEL.estimateExport.estimateMenuItemFallback,
-      "Estimate export submenu"
-    );
-    await randomDelay(1000, 2000);
-
-    const downloadPromise = page.waitForEvent("download", { timeout: 60000 });
-    await clickMenuItem(
-      page,
-      SEL.estimateExport.excelMenuItem,
-      SEL.estimateExport.excelMenuItemFallback,
-      "Excel export"
-    );
-
-    const download = await downloadPromise;
-    const timestamp = Date.now();
-    estimateExcelPath = path.join(DOWNLOADS_DIR, `estimate-${timestamp}.xlsx`);
-    await download.saveAs(estimateExcelPath);
-
-    await logStep(page, result, "export_estimate_excel", "success", Date.now() - step6Start, {
-      metadata: { filePath: estimateExcelPath },
+  if (completedSet.has("export_estimate_excel")) {
+    await logStep(page, result, "export_estimate_excel", "skipped", 0, {
+      metadata: { reason: "Completed in previous attempt", filePath: estimateExcelPath },
     });
-  } catch (err: unknown) {
+  } else {
+    const step6Start = Date.now();
+    try {
+      await dismissOpenModals(page);
+
+      await page.click(SEL.tabs.estimating, { timeout: 10000 });
+      await randomDelay(3000, 5000);
+
+      await page.click(SEL.estimateExport.exportButton, { timeout: 10000 });
+      await randomDelay(1000, 2000);
+
+      await clickMenuItem(
+        page,
+        SEL.estimateExport.estimateMenuItem,
+        SEL.estimateExport.estimateMenuItemFallback,
+        "Estimate export submenu"
+      );
+      await randomDelay(1000, 2000);
+
+      const downloadPromise = page.waitForEvent("download", { timeout: 60000 });
+      await clickMenuItem(
+        page,
+        SEL.estimateExport.excelMenuItem,
+        SEL.estimateExport.excelMenuItemFallback,
+        "Excel export"
+      );
+
+      const download = await downloadPromise;
+      const timestamp = Date.now();
+      estimateExcelPath = path.join(DOWNLOADS_DIR, `estimate-${timestamp}.xlsx`);
+      await download.saveAs(estimateExcelPath);
+
+      await logStep(page, result, "export_estimate_excel", "success", Date.now() - step6Start, {
+        metadata: { filePath: estimateExcelPath },
+      });
+    } catch (err: unknown) {
     const { screenshotPath, diagnostics } = await captureFailureContext(page, "step6-export-estimate");
     await logStep(page, result, "export_estimate_excel", "failed", Date.now() - step6Start, {
       error: err instanceof Error ? err.message : String(err),
@@ -532,11 +626,17 @@ export async function runPhase1BidBoardActions(
       metadata: { diagnostics },
     });
   }
+  }
 
   // ── Step 7-8: Go to Proposal tab → Handle warning → Export PDF ──
-  const step8Start = Date.now();
-  try {
-    await page.click(SEL.tabs.proposal, { timeout: 10000 });
+  if (completedSet.has("export_proposal_pdf")) {
+    await logStep(page, result, "export_proposal_pdf", "skipped", 0, {
+      metadata: { reason: "Completed in previous attempt", filePath: proposalPdfPath },
+    });
+  } else {
+    const step8Start = Date.now();
+    try {
+      await page.click(SEL.tabs.proposal, { timeout: 10000 });
     await randomDelay(2000, 4000);
 
     try {
@@ -569,162 +669,175 @@ export async function runPhase1BidBoardActions(
     await logStep(page, result, "export_proposal_pdf", "success", Date.now() - step8Start, {
       metadata: { filePath: proposalPdfPath },
     });
-  } catch (err: unknown) {
-    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step8-export-proposal");
-    await logStep(page, result, "export_proposal_pdf", "failed", Date.now() - step8Start, {
-      error: err instanceof Error ? err.message : String(err),
-      screenshotPath,
-      metadata: { diagnostics },
-    });
+    } catch (err: unknown) {
+      const { screenshotPath, diagnostics } = await captureFailureContext(page, "step8-export-proposal");
+      await logStep(page, result, "export_proposal_pdf", "failed", Date.now() - step8Start, {
+        error: err instanceof Error ? err.message : String(err),
+        screenshotPath,
+        metadata: { diagnostics },
+      });
+    }
   }
 
   // ── Step 9-11: Go to Documents tab → Upload files ─────────
-  const step11Start = Date.now();
-  try {
-    await page.click(SEL.tabs.documents, { timeout: 10000 });
-    await randomDelay(3000, 5000);
-
-    await page.click(SEL.documents.uploadButton, { timeout: 10000 });
-    await randomDelay(1000, 2000);
-
-    await clickMenuItem(
-      page,
-      SEL.documents.uploadAttachments,
-      SEL.documents.uploadAttachmentsFallback,
-      "Upload Attachments"
-    );
-    await randomDelay(2000, 3000);
-
-    const filesToUpload: string[] = [];
-    if (estimateExcelPath) {
-      try {
-        await fs.access(estimateExcelPath);
-        filesToUpload.push(estimateExcelPath);
-      } catch {
-        /* file doesn't exist */
-      }
-    }
-    if (proposalPdfPath) {
-      try {
-        await fs.access(proposalPdfPath);
-        filesToUpload.push(proposalPdfPath);
-      } catch {
-        /* file doesn't exist */
-      }
-    }
-
-    if (filesToUpload.length > 0) {
-      const [fileChooser] = await Promise.all([
-        page.waitForEvent("filechooser", { timeout: 10000 }),
-        page.click('button:has-text("Upload Files")'),
-      ]);
-      await fileChooser.setFiles(filesToUpload);
-
-      const fileCount = filesToUpload.length;
-      const fileCountText = fileCount === 1 ? "1 file selected" : `${fileCount} files selected`;
-      await page.waitForSelector(`text="${fileCountText}"`, { timeout: 15000 }).catch(() => {});
-      await randomDelay(500, 1000);
-
-      await page.waitForSelector(`${SEL.documents.attachButton}:not([disabled])`, { timeout: 15000 });
-      await page.click(SEL.documents.attachButton, { timeout: 10000 });
+  if (completedSet.has("upload_documents")) {
+    await logStep(page, result, "upload_documents", "skipped", 0, {
+      metadata: { reason: "Completed in previous attempt" },
+    });
+  } else {
+    const step11Start = Date.now();
+    try {
+      await page.click(SEL.tabs.documents, { timeout: 10000 });
       await randomDelay(3000, 5000);
-      await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+
+      await page.click(SEL.documents.uploadButton, { timeout: 10000 });
+      await randomDelay(1000, 2000);
+
+      await clickMenuItem(
+        page,
+        SEL.documents.uploadAttachments,
+        SEL.documents.uploadAttachmentsFallback,
+        "Upload Attachments"
+      );
       await randomDelay(2000, 3000);
 
-      await logStep(page, result, "upload_documents", "success", Date.now() - step11Start, {
-        metadata: { filesUploaded: filesToUpload.length },
-      });
-    } else {
-      await logStep(page, result, "upload_documents", "skipped", Date.now() - step11Start, {
-        metadata: { reason: "No files to upload" },
-      });
-    }
-  } catch (err: unknown) {
+      const filesToUpload: string[] = [];
+      if (estimateExcelPath) {
+        try {
+          await fs.access(estimateExcelPath);
+          filesToUpload.push(estimateExcelPath);
+        } catch {
+          /* file doesn't exist */
+        }
+      }
+      if (proposalPdfPath) {
+        try {
+          await fs.access(proposalPdfPath);
+          filesToUpload.push(proposalPdfPath);
+        } catch {
+          /* file doesn't exist */
+        }
+      }
+
+      if (filesToUpload.length > 0) {
+        const [fileChooser] = await Promise.all([
+          page.waitForEvent("filechooser", { timeout: 10000 }),
+          page.click('button:has-text("Upload Files")'),
+        ]);
+        await fileChooser.setFiles(filesToUpload);
+
+        const fileCount = filesToUpload.length;
+        const fileCountText = fileCount === 1 ? "1 file selected" : `${fileCount} files selected`;
+        await page.waitForSelector(`text="${fileCountText}"`, { timeout: 15000 }).catch(() => {});
+        await randomDelay(500, 1000);
+
+        await page.waitForSelector(`${SEL.documents.attachButton}:not([disabled])`, { timeout: 15000 });
+        await page.click(SEL.documents.attachButton, { timeout: 10000 });
+        await randomDelay(3000, 5000);
+        await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+        await randomDelay(2000, 3000);
+
+        await logStep(page, result, "upload_documents", "success", Date.now() - step11Start, {
+          metadata: { filesUploaded: filesToUpload.length },
+        });
+      } else {
+        await logStep(page, result, "upload_documents", "skipped", Date.now() - step11Start, {
+          metadata: { reason: "No files to upload" },
+        });
+      }
+    } catch (err: unknown) {
     const { screenshotPath, diagnostics } = await captureFailureContext(page, "step11-upload-docs");
     await logStep(page, result, "upload_documents", "failed", Date.now() - step11Start, {
       error: err instanceof Error ? err.message : String(err),
       screenshotPath,
       metadata: { diagnostics },
     });
+    }
   }
 
   // ── Step 12: Send Drawings folder to Documents Tool ───────
-  const step12Start = Date.now();
-  try {
-    // Dismiss Attach Files modal if still open from failed upload (avoids StyledModalScrim blocking clicks)
+  if (completedSet.has("send_to_documents_tool")) {
+    await logStep(page, result, "send_to_documents_tool", "skipped", 0, {
+      metadata: { reason: "Completed in previous attempt" },
+    });
+  } else {
+    const step12Start = Date.now();
     try {
-      const cancelBtn = page.locator('button:has-text("Cancel"), [role="dialog"] button:has([data-qa="ci-Close"])').first();
-      if ((await cancelBtn.count()) > 0) {
-        await cancelBtn.click({ timeout: 3000 });
-        await page.waitForSelector(SEL.modal.dialog, { state: "hidden", timeout: 5000 }).catch(() => {});
-        await randomDelay(500, 1000);
+      // Dismiss Attach Files modal if still open from failed upload (avoids StyledModalScrim blocking clicks)
+      try {
+          const cancelBtn = page.locator('button:has-text("Cancel"), [role="dialog"] button:has([data-qa="ci-Close"])').first();
+        if ((await cancelBtn.count()) > 0) {
+          await cancelBtn.click({ timeout: 3000 });
+          await page.waitForSelector(SEL.modal.dialog, { state: "hidden", timeout: 5000 }).catch(() => {});
+          await randomDelay(500, 1000);
+        }
+      } catch {
+        /* modal may already be closed */
       }
-    } catch {
-      /* modal may already be closed */
-    }
 
-    // Target the ellipsis next to the "Folders" header in the left sidebar (not the page-level ellipsis)
-    const foldersHeader = page.locator('text="Folders"').first();
-    let clicked = false;
+      // Target the ellipsis next to the "Folders" header in the left sidebar (not the page-level ellipsis)
+      const foldersHeader = page.locator('text="Folders"').first();
+      let clicked = false;
 
-    // Try 1: Sibling/adjacent ellipsis next to "Folders" text
-    const foldersEllipsis = foldersHeader
-      .locator("..")
-      .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
-      .first();
-    if ((await foldersEllipsis.count()) > 0) {
-      await foldersEllipsis.click({ timeout: 8000 });
-      clicked = true;
-      log("[portfolio-auto] Clicked Folders header ellipsis", "playwright");
-    }
-
-    // Try 2: Hover first in case it's hidden until hover
-    if (!clicked) {
-      await foldersHeader.hover();
-      await randomDelay(500, 500);
-      const hoverEllipsis = foldersHeader
+      // Try 1: Sibling/adjacent ellipsis next to "Folders" text
+      const foldersEllipsis = foldersHeader
         .locator("..")
         .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
         .first();
-      if ((await hoverEllipsis.count()) > 0) {
-        await hoverEllipsis.click({ timeout: 8000 });
+      if ((await foldersEllipsis.count()) > 0) {
+        await foldersEllipsis.click({ timeout: 8000 });
         clicked = true;
-        log("[portfolio-auto] Clicked Folders header ellipsis (after hover)", "playwright");
+        log("[portfolio-auto] Clicked Folders header ellipsis", "playwright");
       }
+
+      // Try 2: Hover first in case it's hidden until hover
+      if (!clicked) {
+        await foldersHeader.hover();
+        await randomDelay(500, 500);
+        const hoverEllipsis = foldersHeader
+          .locator("..")
+          .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
+          .first();
+        if ((await hoverEllipsis.count()) > 0) {
+          await hoverEllipsis.click({ timeout: 8000 });
+          clicked = true;
+          log("[portfolio-auto] Clicked Folders header ellipsis (after hover)", "playwright");
+        }
+      }
+
+      // Try 3: Right-click the Folders header
+      if (!clicked) {
+        await foldersHeader.click({ button: "right", timeout: 8000 });
+        clicked = true;
+        log("[portfolio-auto] Right-clicked Folders header for context menu", "playwright");
+      }
+
+      if (!clicked) {
+        throw new Error("Could not find ellipsis button for Drawings folder");
+      }
+
+      await randomDelay(1000, 2000);
+
+      await clickMenuItem(
+        page,
+        SEL.documents.sendToDocumentsTool,
+        '[role="menuitem"]:has-text("Send To Documents Tool")',
+        "Send To Documents Tool"
+      );
+      await randomDelay(2000, 3000);
+
+      await waitForModalToClose(page, 300000);
+      await randomDelay(3000, 5000);
+
+      await logStep(page, result, "send_to_documents_tool", "success", Date.now() - step12Start);
+    } catch (err: unknown) {
+      const { screenshotPath, diagnostics } = await captureFailureContext(page, "step12-send-docs-tool");
+      await logStep(page, result, "send_to_documents_tool", "failed", Date.now() - step12Start, {
+        error: err instanceof Error ? err.message : String(err),
+        screenshotPath,
+        metadata: { diagnostics },
+      });
     }
-
-    // Try 3: Right-click the Folders header
-    if (!clicked) {
-      await foldersHeader.click({ button: "right", timeout: 8000 });
-      clicked = true;
-      log("[portfolio-auto] Right-clicked Folders header for context menu", "playwright");
-    }
-
-    if (!clicked) {
-      throw new Error("Could not find ellipsis button for Drawings folder");
-    }
-
-    await randomDelay(1000, 2000);
-
-    await clickMenuItem(
-      page,
-      SEL.documents.sendToDocumentsTool,
-      '[role="menuitem"]:has-text("Send To Documents Tool")',
-      "Send To Documents Tool"
-    );
-    await randomDelay(2000, 3000);
-
-    await waitForModalToClose(page, 300000);
-    await randomDelay(3000, 5000);
-
-    await logStep(page, result, "send_to_documents_tool", "success", Date.now() - step12Start);
-  } catch (err: unknown) {
-    const { screenshotPath, diagnostics } = await captureFailureContext(page, "step12-send-docs-tool");
-    await logStep(page, result, "send_to_documents_tool", "failed", Date.now() - step12Start, {
-      error: err instanceof Error ? err.message : String(err),
-      screenshotPath,
-      metadata: { diagnostics },
-    });
   }
 
   return { estimateExcelPath, proposalPdfPath };
@@ -1433,13 +1546,23 @@ export interface Phase1Output {
   proposalPdfPath: string | null;
 }
 
+export interface Phase1RetryOptions {
+  completedStepNames: string[];
+  previousOutput?: {
+    estimateExcelPath: string | null;
+    proposalPdfPath: string | null;
+  };
+}
+
 /**
  * Run the complete Phase 1 automation from a Bid Board project URL.
  * Phase 2 is triggered separately by the webhook handler.
+ * On retry, pass completedStepNames and previousOutput to resume from the failed step.
  */
 export async function runPhase1(
   bidboardProjectUrl: string,
-  bidboardProjectId: string
+  bidboardProjectId: string,
+  retryOptions?: Phase1RetryOptions
 ): Promise<Phase1Output> {
   const result: PortfolioAutomationResult = {
     success: false,
@@ -1461,7 +1584,7 @@ export async function runPhase1(
     }
     await logStep(page, result, "login", "success", 0);
 
-    const phase1Out = await runPhase1BidBoardActions(page, bidboardProjectUrl, result);
+    const phase1Out = await runPhase1BidBoardActions(page, bidboardProjectUrl, result, retryOptions);
     estimateExcelPath = phase1Out.estimateExcelPath;
     proposalPdfPath = phase1Out.proposalPdfPath;
 
