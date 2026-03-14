@@ -24,7 +24,6 @@ import { log } from "../index";
 import { storage } from "../storage";
 import * as path from "path";
 import * as fs from "fs/promises";
-import { registerPendingPhase2 } from "../orchestrator/portfolio-orchestrator";
 
 // ─── Download directory ─────────────────────────────────────────
 const DOWNLOADS_DIR = path.join(process.cwd(), "data", "portfolio-automation-downloads");
@@ -580,14 +579,6 @@ export async function runPhase1BidBoardActions(
 
       await logStep(page, result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
         metadata: { url: currentUrl, portfolioProjectId: result.portfolioProjectId },
-      });
-
-      // Register Phase 2 immediately — portfolio creation is irreversible. Webhook fallback if direct chain fails.
-      // If later steps (export, upload) fail, Phase 2 still needs to run because the portfolio exists.
-      registerPendingPhase2(result.bidboardProjectId, {
-        bidboardProjectUrl,
-        proposalPdfPath: null,
-        estimateExcelPath: null,
       });
     } catch (err: unknown) {
       const { screenshotPath, diagnostics } = await captureFailureContext(page, "step4-wait-portfolio");

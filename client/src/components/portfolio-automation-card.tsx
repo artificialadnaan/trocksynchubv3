@@ -13,11 +13,6 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import {
   Table,
   TableBody,
   TableCell,
@@ -47,13 +42,6 @@ import {
   X,
 } from "lucide-react";
 import React, { useState, useEffect } from "react";
-
-const DEFAULT_RECIPIENTS = [
-  "sgibson@trockgc.com",
-  "jhelms@trockgc.com",
-  "bbell@trockgc.com",
-  "adnaan.iqbal@gmail.com",
-];
 
 interface PortfolioRunStep {
   step: string;
@@ -114,12 +102,11 @@ function getScreenshotFilename(path: string): string {
 
 export function PortfolioAutomationCard() {
   const { toast } = useToast();
-  const [emailConfigOpen, setEmailConfigOpen] = useState(false);
   const [triggerInput, setTriggerInput] = useState("");
   const [emailEnabled, setEmailEnabled] = useState(false);
   const [emailRecipients, setEmailRecipients] = useState<string[]>([]);
   const [emailRecipientInput, setEmailRecipientInput] = useState("");
-  const [emailFrequency, setEmailFrequency] = useState("on_failure");
+  const [emailFrequency, setEmailFrequency] = useState("immediate");
 
   const { data: config, isLoading } = useQuery<PortfolioConfig>({
     queryKey: ["/api/portfolio-automation/config"],
@@ -138,8 +125,8 @@ export function PortfolioAutomationCard() {
     if (config) {
       setEnabled(config.enabled);
       setEmailEnabled(config.emailConfig?.enabled ?? false);
-      setEmailRecipients(config.emailConfig?.recipients?.length ? config.emailConfig.recipients : DEFAULT_RECIPIENTS);
-      setEmailFrequency(config.emailConfig?.frequency ?? "on_failure");
+      setEmailRecipients(config.emailConfig?.recipients?.length ? [...config.emailConfig.recipients] : []);
+      setEmailFrequency(config.emailConfig?.frequency ?? "immediate");
     }
   }, [config]);
 
@@ -299,54 +286,57 @@ export function PortfolioAutomationCard() {
           )}
         </div>
 
-        <Collapsible open={emailConfigOpen} onOpenChange={setEmailConfigOpen}>
-          <CollapsibleTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="flex items-center gap-2 -ml-2 text-muted-foreground hover:text-foreground"
-            >
-              {emailConfigOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-              <Mail className="w-4 h-4" />
-              Email Report Configuration
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <div className="mt-4 space-y-4 rounded-lg border p-4 bg-muted/20">
-              <div className="flex items-center justify-between">
-                <Label>Enable email reports</Label>
-                <Switch checked={emailEnabled} onCheckedChange={setEmailEnabled} />
+        <div>
+          <h4 className="text-sm font-medium mb-2 flex items-center gap-2">
+            <Mail className="w-4 h-4" />
+            Email Report Configuration
+          </h4>
+          <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="email-enabled">Enable completion emails</Label>
+              <Switch
+                id="email-enabled"
+                checked={emailEnabled}
+                onCheckedChange={setEmailEnabled}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Frequency</Label>
+              <Select value={emailFrequency} onValueChange={setEmailFrequency}>
+                <SelectTrigger className="mt-1 w-full max-w-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="immediate">Immediate (after each run)</SelectItem>
+                  <SelectItem value="daily">Daily</SelectItem>
+                  <SelectItem value="weekly">Weekly</SelectItem>
+                  <SelectItem value="on_failure">On failure only</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="text-xs">Recipients</Label>
+              <p className="text-xs text-muted-foreground mt-0.5 mb-1.5">
+                Add email addresses to receive portfolio automation reports
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  type="email"
+                  placeholder="email@example.com"
+                  value={emailRecipientInput}
+                  onChange={(e) => setEmailRecipientInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRecipient())}
+                  className="flex-1 max-w-xs"
+                />
+                <Button type="button" size="sm" variant="outline" onClick={addRecipient}>
+                  Add
+                </Button>
               </div>
-              <div>
-                <Label className="text-xs">Report frequency</Label>
-                <Select value={emailFrequency} onValueChange={setEmailFrequency}>
-                  <SelectTrigger className="mt-1 w-48">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="each_run">After each run</SelectItem>
-                    <SelectItem value="daily">Daily summary</SelectItem>
-                    <SelectItem value="weekly">Weekly summary</SelectItem>
-                    <SelectItem value="on_failure">On failure only</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label className="text-xs">Recipients</Label>
-                <div className="flex gap-2 mt-1">
-                  <Input
-                    type="email"
-                    placeholder="email@example.com"
-                    value={emailRecipientInput}
-                    onChange={(e) => setEmailRecipientInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRecipient())}
-                  />
-                  <Button type="button" size="sm" variant="outline" onClick={addRecipient}>
-                    Add
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {emailRecipients.map((r) => (
+              <div className="flex flex-wrap gap-2 mt-2 min-h-[2rem]">
+                {emailRecipients.length === 0 ? (
+                  <span className="text-xs text-muted-foreground">No recipients — add one above</span>
+                ) : (
+                  emailRecipients.map((r) => (
                     <Badge
                       key={r}
                       variant="secondary"
@@ -356,16 +346,16 @@ export function PortfolioAutomationCard() {
                       {r}
                       <X className="w-3 h-3" />
                     </Badge>
-                  ))}
-                </div>
+                  ))
+                )}
               </div>
-              <Button size="sm" onClick={handleSaveEmailConfig} disabled={saveConfig.isPending}>
-                {saveConfig.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
-                Save
-              </Button>
             </div>
-          </CollapsibleContent>
-        </Collapsible>
+            <Button size="sm" onClick={handleSaveEmailConfig} disabled={saveConfig.isPending}>
+              {saveConfig.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+              Save
+            </Button>
+          </div>
+        </div>
 
         <Separator />
 

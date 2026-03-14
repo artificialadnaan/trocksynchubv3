@@ -112,11 +112,14 @@ export async function runPhase1WithRetry(
           result.error = (result.error ? result.error + "; " : "") + (err instanceof Error ? err.message : String(err));
           result.success = false;
         }
-      } else if (!result.portfolioProjectId) {
-        log(
-          `[portfolio-runner] No portfolioProjectId from Phase 1, relying on webhook fallback`,
-          "playwright"
-        );
+      }
+      if (!cid || !result.portfolioProjectId || !result.success) {
+        const { registerPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
+        registerPendingPhase2(bidboardProjectId, {
+          bidboardProjectUrl,
+          proposalPdfPath: output.proposalPdfPath ?? null,
+          estimateExcelPath: output.estimateExcelPath ?? null,
+        });
       }
 
       await sendPortfolioAutomationEmail(result, attempts, {
