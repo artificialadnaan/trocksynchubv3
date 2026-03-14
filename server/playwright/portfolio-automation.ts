@@ -1169,17 +1169,42 @@ export async function scrapeBidBoardData(
       }
     }
 
-    // Step C: If inclusions/exclusions/scope still empty, try Portfolio Estimating page (Notes section)
+    // Step C: Try Portfolio Estimating page for customer info and/or inclusions/exclusions
     const needsEstimatingScrape =
       scrapedData.inclusions.length === 0 &&
       scrapedData.exclusions.length === 0 &&
-      !scrapedData.scopeOfWork &&
-      opts?.companyId &&
-      opts?.portfolioProjectId;
+      !scrapedData.scopeOfWork;
+    const needsCustomerScrape = !scrapedData.customerCompanyName;
+    const canScrapeEstimating = opts?.companyId && opts?.portfolioProjectId;
 
-    if (needsEstimatingScrape) {
-      log("[portfolio-auto] Bid Board Proposal empty — scraping from Portfolio Estimating Notes", "playwright");
-      const estimatingUrl = `https://us02.procore.com/webclients/host/companies/${opts.companyId}/projects/${opts.portfolioProjectId}/tools/estimating/estimate`;
+    if ((needsEstimatingScrape || needsCustomerScrape) && canScrapeEstimating) {
+      log("[portfolio-auto] Scraping from Portfolio Estimating page", "playwright");
+
+      // First: scrape customer from Portfolio Estimating Overview (Details) tab
+      if (needsCustomerScrape) {
+        try {
+          const detailsUrl = `https://us02.procore.com/webclients/host/companies/${opts!.companyId}/projects/${opts!.portfolioProjectId}/tools/estimating/details`;
+          await page.goto(detailsUrl, { waitUntil: "load", timeout: 60000 });
+          await waitForProcoreSpaLoaded(page, [".aid-customerInformation", ".aid-projBarDetails", ".aid-tab"], "Portfolio Estimating Details");
+
+          const customerEl = page.locator('.aid-customerInformation .aid-listItem .MuiListItemText-primary div[style*="word-break"]').first();
+          if ((await customerEl.count()) > 0) {
+            const name = await customerEl.textContent().catch(() => null);
+            if (name?.trim()) {
+              scrapedData.customerCompanyName = name.trim();
+              log(`[portfolio-auto] Found customer on Portfolio Estimating Overview: "${scrapedData.customerCompanyName}"`, "playwright");
+            }
+          }
+        } catch (err: unknown) {
+          log(`[portfolio-auto] Customer scrape from Estimating Overview failed: ${err instanceof Error ? err.message : String(err)}`, "playwright");
+        }
+      }
+
+      // Second: scrape inclusions/exclusions/scope from Estimating tab
+      if (!needsEstimatingScrape) {
+        // Skip notes scrape — we only came here for the customer
+      } else {
+      const estimatingUrl = `https://us02.procore.com/webclients/host/companies/${opts!.companyId}/projects/${opts!.portfolioProjectId}/tools/estimating/estimate`;
       try {
         await page.goto(estimatingUrl, { waitUntil: "load", timeout: 60000 });
         const estimatingSpaSelectors = [
@@ -1233,6 +1258,7 @@ export async function scrapeBidBoardData(
           "playwright"
         );
       }
+      } // end else (needsEstimatingScrape)
     }
 
     log(`[portfolio-auto] Scraped Bid Board data summary:`, "playwright");
