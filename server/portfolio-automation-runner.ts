@@ -80,15 +80,54 @@ export async function runPhase1WithRetry(
         `[portfolio-runner] Phase 1 succeeded on attempt ${attempt}`,
         "playwright"
       );
+
+      // Chain Phase 2 and Phase 3 directly (primary path). Webhook remains as fallback if this fails.
+      const companyId = (await storage.getAutomationConfig("procore_config"))?.value as { companyId?: string } | undefined;
+      const cid = companyId?.companyId;
+      if (cid && result.portfolioProjectId) {
+        try {
+          log(
+            `[portfolio-runner] Chaining Phase 2 directly for portfolio ${result.portfolioProjectId}`,
+            "playwright"
+          );
+          const { runPhase2 } = await import("./playwright/portfolio-automation");
+          const phase2Result = await runPhase2(cid, result.portfolioProjectId, bidboardProjectId, {
+            bidboardProjectUrl,
+            proposalPdfPath: output.proposalPdfPath ?? null,
+          });
+          // Merge Phase 2 (and Phase 3) steps into result
+          phase2Result.steps.forEach((s) => result.steps.push(s));
+          result.success = result.success && phase2Result.success;
+          result.completedAt = phase2Result.completedAt ?? result.completedAt;
+          if (phase2Result.error) result.error = phase2Result.error;
+          log(
+            `[portfolio-runner] Phase 2+3 direct chain ${phase2Result.success ? "succeeded" : "failed"}`,
+            "playwright"
+          );
+        } catch (err) {
+          log(
+            `[portfolio-runner] Phase 2 direct chain failed (webhook fallback): ${err instanceof Error ? err.message : String(err)}`,
+            "playwright"
+          );
+          result.error = (result.error ? result.error + "; " : "") + (err instanceof Error ? err.message : String(err));
+          result.success = false;
+        }
+      } else if (!result.portfolioProjectId) {
+        log(
+          `[portfolio-runner] No portfolioProjectId from Phase 1, relying on webhook fallback`,
+          "playwright"
+        );
+      }
+
       await sendPortfolioAutomationEmail(result, attempts, {
         projectName: context.projectName,
         projectNumber: context.projectNumber,
         bidboardProjectId,
         portfolioProjectId: result.portfolioProjectId,
         triggerSource: context.triggerSource,
-        phase: "phase1",
+        phase: cid && result.portfolioProjectId ? "phase2+3" : "phase1",
         firstAttemptStart,
-        lastAttemptEnd: result.completedAt,
+        lastAttemptEnd: result.completedAt ?? new Date(),
       });
       return output;
     }

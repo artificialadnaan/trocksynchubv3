@@ -4967,15 +4967,7 @@ export async function registerRoutes(
       setImmediate(async () => {
         try {
           const { runPhase1WithRetry } = await import("./portfolio-automation-runner");
-          const { registerPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
-          const { result, proposalPdfPath, estimateExcelPath } = await runPhase1WithRetry(
-            url,
-            bidboardId!,
-            { triggerSource: "manual" }
-          );
-          if (result.success) {
-            registerPendingPhase2(bidboardId!, { bidboardProjectUrl: url, proposalPdfPath, estimateExcelPath });
-          }
+          await runPhase1WithRetry(url, bidboardId!, { triggerSource: "manual" });
         } catch (err) {
           console.error("[portfolio-auto] Manual trigger failed:", (err as Error).message);
         }

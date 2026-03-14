@@ -297,6 +297,13 @@ function logAutomationSummary(result: PortfolioAutomationResult): void {
   log(`${"═".repeat(60)}\n`, "playwright");
 }
 
+// ─── Helper: Extract portfolio project ID from URL ────────────────────────
+// Portfolio URLs: /projects/{id}/tools/estimating/ (Bid Board uses /tools/bid-board/project/)
+function extractPortfolioProjectIdFromUrl(url: string): string | null {
+  const match = url.match(/\/projects\/(\d+)\//);
+  return match ? match[1] : null;
+}
+
 // ─── Helper: Dismiss any open modals (e.g. Add to Portfolio confirmation) ──
 // The Add to Portfolio confirmation dialog can linger and block clicks on the Estimation tab.
 
@@ -565,8 +572,22 @@ export async function runPhase1BidBoardActions(
       const currentUrl = page.url();
       log(`[portfolio-auto] After Add to Portfolio, URL: ${currentUrl}`, "playwright");
 
+      const portfolioProjectId = extractPortfolioProjectIdFromUrl(currentUrl);
+      if (portfolioProjectId) {
+        result.portfolioProjectId = portfolioProjectId;
+        log(`[portfolio-auto] Extracted portfolio project ID: ${portfolioProjectId}`, "playwright");
+      }
+
       await logStep(page, result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
-        metadata: { url: currentUrl },
+        metadata: { url: currentUrl, portfolioProjectId: result.portfolioProjectId },
+      });
+
+      // Register Phase 2 immediately — portfolio creation is irreversible. Webhook fallback if direct chain fails.
+      // If later steps (export, upload) fail, Phase 2 still needs to run because the portfolio exists.
+      registerPendingPhase2(result.bidboardProjectId, {
+        bidboardProjectUrl,
+        proposalPdfPath: null,
+        estimateExcelPath: null,
       });
     } catch (err: unknown) {
       const { screenshotPath, diagnostics } = await captureFailureContext(page, "step4-wait-portfolio");
@@ -590,6 +611,16 @@ export async function runPhase1BidBoardActions(
 
       await page.click(SEL.tabs.estimating, { timeout: 10000 });
       await randomDelay(3000, 5000);
+
+      // Extract portfolio project ID from URL if not yet set (e.g. when skipping add-to-portfolio)
+      if (!result.portfolioProjectId) {
+        const url = page.url();
+        const pid = extractPortfolioProjectIdFromUrl(url);
+        if (pid) {
+          result.portfolioProjectId = pid;
+          log(`[portfolio-auto] Extracted portfolio project ID from Estimation tab URL: ${pid}`, "playwright");
+        }
+      }
 
       await page.click(SEL.estimateExport.exportButton, { timeout: 10000 });
       await randomDelay(1000, 2000);
@@ -1799,7 +1830,7 @@ export async function triggerPortfolioAutomationFromStageChange(
   );
 
   const { runPhase1WithRetry } = await import("../portfolio-automation-runner");
-  const { result, proposalPdfPath, estimateExcelPath } = await runPhase1WithRetry(
+  const { result } = await runPhase1WithRetry(
     bidboardProjectUrl,
     bidboardProjectId,
     {
@@ -1809,14 +1840,6 @@ export async function triggerPortfolioAutomationFromStageChange(
       triggerSource: "stage_sync",
     }
   );
-
-  if (result.success) {
-    registerPendingPhase2(bidboardProjectId, {
-      bidboardProjectUrl,
-      proposalPdfPath,
-      estimateExcelPath,
-    });
-  }
 
   return result;
 }
