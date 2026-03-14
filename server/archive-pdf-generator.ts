@@ -13,22 +13,29 @@ import * as fs from 'fs';
 import * as path from 'path';
 import PDFDocument from 'pdfkit';
 
-// Brand constants
+// Brand constants — T-Rock Construction identity
 const BRAND_RED = '#d11921';
-const BRAND_DARK = '#0a0a0a';
-const BRAND_GRAY = '#2c2f32';
-const BRAND_LIGHT = '#f5f5f5';
+const BRAND_DARK = '#111214';
+const BRAND_GRAY = '#1e2024';
+const BRAND_MID = '#3a3d44';
+const BRAND_LIGHT = '#f6f7f8';
+const BRAND_LIGHTER = '#fafafa';
 const BRAND_WHITE = '#ffffff';
+const BRAND_MUTED = '#6b7280';
+const TABLE_HEADER_BG = '#1e2024';
+const TABLE_ALT_ROW = '#f9fafb';
+const TABLE_DIVIDER = '#e5e7eb';
 
 const MARGIN = 50;
-const BOTTOM_MARGIN = 50;
-const HEADER_BAND_HEIGHT = 70;
-const ROW_HEIGHT = 20;
-const TABLE_HEADER_HEIGHT = 20;
-const FOOTER_TOP_OFFSET = 40;
-const LOGO_SIZE = 40;
-const LOGO_LEFT = 20;
-const COMPANY_NAME_LEFT = 70;
+const BOTTOM_MARGIN = 55;
+const HEADER_BAND_HEIGHT = 56;
+const RED_STRIPE_HEIGHT = 3;
+const ROW_HEIGHT = 22;
+const TABLE_HEADER_HEIGHT = 24;
+const FOOTER_TOP_OFFSET = 45;
+const LOGO_SIZE = 32;
+const LOGO_LEFT = MARGIN;
+const COMPANY_NAME_LEFT = MARGIN + 42;
 const CONTENT_WIDTH_PORTRAIT = 512; // PAGE_WIDTH - 2*MARGIN for LETTER
 const CONTENT_WIDTH_LANDSCAPE = 692; // PAGE_HEIGHT - 2*MARGIN for LETTER landscape
 
@@ -96,15 +103,17 @@ function drawTable(
   const pageOpts = landscape ? { size: 'LETTER' as const, layout: 'landscape' as const } : { size: 'LETTER' as const };
 
   function drawTableHeaderRow(y: number): void {
-    doc.fillColor(BRAND_GRAY).rect(tableLeft, y, totalWidth, TABLE_HEADER_HEIGHT).fill();
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(BRAND_WHITE);
+    doc.fillColor(TABLE_HEADER_BG).rect(tableLeft, y, totalWidth, TABLE_HEADER_HEIGHT).fill();
+    // Red accent line at top of header
+    doc.fillColor(BRAND_RED).rect(tableLeft, y, totalWidth, 2).fill();
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND_WHITE);
     let x = tableLeft;
     for (let i = 0; i < headers.length; i++) {
       const h = headers[i];
       const align = h.align ?? 'left';
       const text = truncate(h.label, 25).toUpperCase();
-      const paddingH = 5;
-      const paddingV = 4;
+      const paddingH = 8;
+      const paddingV = 8;
       if (align === 'right') {
         doc.text(text, x, y + paddingV, { width: h.width - paddingH * 2, align: 'right' });
       } else if (align === 'center') {
@@ -138,14 +147,18 @@ function drawTable(
     checkPageBreak(ROW_HEIGHT);
     const row = rows[ri];
     const isTotals = isTotalsRow(row, ri, rows.length);
-    const bg = isTotals ? BRAND_RED : (ri % 2 === 0 ? BRAND_WHITE : BRAND_LIGHT);
+    const bg = isTotals ? BRAND_GRAY : (ri % 2 === 0 ? BRAND_WHITE : TABLE_ALT_ROW);
     const textColor = isTotals ? BRAND_WHITE : BRAND_DARK;
 
     doc.fillColor(bg).rect(tableLeft, doc.y, totalWidth, ROW_HEIGHT).fill();
-    doc.fillColor(textColor).fontSize(9).font(isTotals ? 'Helvetica-Bold' : 'Helvetica');
+    if (isTotals) {
+      // Red left accent on totals row
+      doc.fillColor(BRAND_RED).rect(tableLeft, doc.y, 3, ROW_HEIGHT).fill();
+    }
+    doc.fillColor(textColor).fontSize(8.5).font(isTotals ? 'Helvetica-Bold' : 'Helvetica');
 
-    const paddingH = 5;
-    const paddingV = 4;
+    const paddingH = 8;
+    const paddingV = 6;
     let x = tableLeft;
     for (let ci = 0; ci < headers.length; ci++) {
       const h = headers[ci];
@@ -165,8 +178,8 @@ function drawTable(
 
     // Horizontal divider line between rows (not after last row to avoid double line)
     if (ri < rows.length - 1) {
-      doc.strokeColor('#e0e0e0').lineWidth(0.5)
-        .moveTo(tableLeft, doc.y).lineTo(tableLeft + totalWidth, doc.y).stroke();
+      doc.strokeColor(TABLE_DIVIDER).lineWidth(0.3)
+        .moveTo(tableLeft + 8, doc.y).lineTo(tableLeft + totalWidth - 8, doc.y).stroke();
     }
   }
 
@@ -187,6 +200,8 @@ function addPageHeader(
 
   // Header band - full width dark bar
   doc.fillColor(BRAND_GRAY).rect(0, 0, pageWidth, HEADER_BAND_HEIGHT).fill();
+  // Red accent stripe below header
+  doc.fillColor(BRAND_RED).rect(0, HEADER_BAND_HEIGHT, pageWidth, RED_STRIPE_HEIGHT).fill();
 
   // Logo
   if (logoBuffer) {
@@ -201,33 +216,39 @@ function addPageHeader(
   }
 
   // Company name
-  doc.fontSize(14).font('Helvetica-Bold').fillColor(BRAND_WHITE);
-  doc.text('T-ROCK CONSTRUCTION', COMPANY_NAME_LEFT, 22);
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_WHITE);
+  doc.text('T-ROCK CONSTRUCTION', COMPANY_NAME_LEFT, 17);
 
-  // Report title in header band
-  doc.fontSize(10).font('Helvetica');
-  doc.text(reportTitle, COMPANY_NAME_LEFT, 44);
+  // Report title in header band - lighter color
+  doc.fontSize(9).font('Helvetica').fillColor('#9ca3af');
+  doc.text(reportTitle, COMPANY_NAME_LEFT, 32);
 
   doc.fillColor(BRAND_DARK);
 
   if (isFirstPage) {
-    // Sub-header: project name, subtitle, date
-    doc.fontSize(20).font('Helvetica-Bold').fillColor(BRAND_RED);
-    doc.text(projectName || 'Project', MARGIN, 90);
-    doc.fontSize(12).font('Helvetica').fillColor('#666666');
-    doc.text(reportTitle || 'Report', MARGIN, 115);
-    doc.fontSize(10).fillColor('#999999');
-    doc.text(`Generated: ${fmtDate(new Date())}`, MARGIN, 130);
+    const contentTop = HEADER_BAND_HEIGHT + RED_STRIPE_HEIGHT + 20;
+
+    // Project name - large, bold
+    doc.fontSize(22).font('Helvetica-Bold').fillColor(BRAND_DARK);
+    doc.text(projectName || 'Project', MARGIN, contentTop);
+
+    // Report type + generated date on same line
+    const metaY = contentTop + 28;
+    doc.fontSize(10).font('Helvetica').fillColor(BRAND_MUTED);
+    doc.text(reportTitle || 'Report', MARGIN, metaY);
+    doc.fontSize(9).fillColor('#9ca3af');
+    doc.text(`Generated ${fmtDate(new Date())}`, MARGIN, metaY + 14);
     doc.fillColor(BRAND_DARK);
 
-    // Red accent line
-    doc.strokeColor(BRAND_RED).lineWidth(2)
-      .moveTo(MARGIN, 145).lineTo(pageWidth - MARGIN, 145).stroke();
+    // Thin separator line
+    const lineY = metaY + 30;
+    doc.strokeColor(TABLE_DIVIDER).lineWidth(0.5)
+      .moveTo(MARGIN, lineY).lineTo(pageWidth - MARGIN, lineY).stroke();
 
-    return 150;
+    return lineY + 8;
   }
 
-  return 90;
+  return HEADER_BAND_HEIGHT + RED_STRIPE_HEIGHT + 16;
 }
 
 function addFooter(doc: PDFKit.PDFDocument): void {
@@ -238,12 +259,12 @@ function addFooter(doc: PDFKit.PDFDocument): void {
     const w = doc.page.width;
     const h = doc.page.height;
 
-    doc.strokeColor('#cccccc').lineWidth(0.5)
-      .moveTo(MARGIN, h - FOOTER_TOP_OFFSET).lineTo(w - MARGIN, h - FOOTER_TOP_OFFSET).stroke();
+    // Red accent line above footer
+    doc.fillColor(BRAND_RED).rect(MARGIN, h - FOOTER_TOP_OFFSET, w - 2 * MARGIN, 1).fill();
 
-    doc.fontSize(8).font('Helvetica').fillColor('#999999');
-    doc.text('T-Rock Construction — Confidential', MARGIN, h - 35, { width: w / 2 });
-    doc.text(`Page ${i + 1} of ${pages.count}`, w / 2, h - 35, {
+    doc.fontSize(7).font('Helvetica').fillColor('#9ca3af');
+    doc.text('T-Rock Construction  |  Confidential', MARGIN, h - 32, { width: w / 2 });
+    doc.text(`${i + 1} / ${pages.count}`, w / 2, h - 32, {
       width: w / 2 - MARGIN,
       align: 'right',
     });
@@ -269,9 +290,9 @@ async function createEmptyPdf(projectName: string, reportTitle: string, category
   const startY = addPageHeader(doc, projectName, reportTitle, true);
   const pageHeight = doc.page.height;
   const contentMidY = (startY + pageHeight - FOOTER_TOP_OFFSET) / 2;
-  doc.fontSize(14).font('Helvetica').fillColor('#999999');
+  doc.fontSize(12).font('Helvetica').fillColor(BRAND_MUTED);
   const msg = `No ${category} data available for this project.`;
-  const textHeight = 18;
+  const textHeight = 16;
   doc.text(msg, MARGIN, contentMidY - textHeight / 2, {
     width: CONTENT_WIDTH_PORTRAIT,
     align: 'center',
@@ -1016,6 +1037,7 @@ const STAT_LABELS: Record<string, string> = {
 function drawHeaderBand(doc: PDFKit.PDFDocument, reportTitle: string): void {
   const pageWidth = doc.page.width;
   doc.fillColor(BRAND_GRAY).rect(0, 0, pageWidth, HEADER_BAND_HEIGHT).fill();
+  doc.fillColor(BRAND_RED).rect(0, HEADER_BAND_HEIGHT, pageWidth, RED_STRIPE_HEIGHT).fill();
   if (logoBuffer) {
     try {
       doc.image(logoBuffer, LOGO_LEFT, (HEADER_BAND_HEIGHT - LOGO_SIZE) / 2, {
@@ -1026,10 +1048,10 @@ function drawHeaderBand(doc: PDFKit.PDFDocument, reportTitle: string): void {
       /* ignore */
     }
   }
-  doc.fontSize(14).font('Helvetica-Bold').fillColor(BRAND_WHITE);
-  doc.text('T-ROCK CONSTRUCTION', COMPANY_NAME_LEFT, 22);
-  doc.fontSize(10).font('Helvetica');
-  doc.text(reportTitle, COMPANY_NAME_LEFT, 44);
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_WHITE);
+  doc.text('T-ROCK CONSTRUCTION', COMPANY_NAME_LEFT, 17);
+  doc.fontSize(9).font('Helvetica').fillColor('#9ca3af');
+  doc.text(reportTitle, COMPANY_NAME_LEFT, 32);
   doc.fillColor(BRAND_DARK);
 }
 
@@ -1056,70 +1078,70 @@ export async function generateArchiveCoverSheetPdf(
 
   drawHeaderBand(doc, 'Project Archive');
 
-  // Centered project name
-  doc.fontSize(24).font('Helvetica-Bold').fillColor(BRAND_RED);
-  doc.text(summary.projectName || 'Project', 0, 90, {
-    width: pageWidth,
-    align: 'center',
-  });
-  doc.fontSize(16).font('Helvetica-Bold').fillColor(BRAND_GRAY);
-  doc.text('PROJECT ARCHIVE', 0, 118, {
-    width: pageWidth,
-    align: 'center',
-  });
+  const coverTop = HEADER_BAND_HEIGHT + RED_STRIPE_HEIGHT + 30;
+
+  // Project name - left-aligned, bold, large
+  doc.fontSize(26).font('Helvetica-Bold').fillColor(BRAND_DARK);
+  doc.text(summary.projectName || 'Project', MARGIN, coverTop);
+
+  // Subtitle
+  doc.fontSize(12).font('Helvetica').fillColor(BRAND_MUTED);
+  doc.text('Project Archive', MARGIN, coverTop + 34);
+
+  // Thin red line
+  const sepY = coverTop + 54;
+  doc.fillColor(BRAND_RED).rect(MARGIN, sepY, 60, 3).fill();
   doc.fillColor(BRAND_DARK);
 
-  doc.strokeColor(BRAND_RED).lineWidth(2)
-    .moveTo(MARGIN, 138).lineTo(pageWidth - MARGIN, 138).stroke();
+  let y = sepY + 20;
 
-  let y = 155;
+  // Archive info block
+  const boxWidth = pageWidth - 2 * MARGIN;
+  const boxLeft = MARGIN;
+  const boxPadding = 20;
+  const lineHeight = 20;
 
-  // Archive info block - ~400pt wide, centered
-  const boxWidth = 400;
-  const boxLeft = (pageWidth - boxWidth) / 2;
-  const boxPadding = 16;
-  const lineHeight = 18;
-
-  const boxHeight = storageUrl ? 150 : 120;
+  const boxHeight = storageUrl ? 140 : 115;
   doc.fillColor(BRAND_LIGHT).rect(boxLeft, y, boxWidth, boxHeight).fill();
+  // Left red accent on info block
+  doc.fillColor(BRAND_RED).rect(boxLeft, y, 3, boxHeight).fill();
   doc.fillColor(BRAND_DARK);
 
-  const col1X = boxLeft + boxPadding;
+  const col1X = boxLeft + boxPadding + 4;
   const col2X = boxLeft + boxWidth / 2 + boxPadding;
-  const labelWidth = 75;
+  const labelWidth = 80;
   const row1Y = y + boxPadding;
   const row2Y = row1Y + lineHeight;
   const row3Y = row2Y + lineHeight;
 
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#666666');
-  doc.text('Archived:', col1X, row1Y);
-  doc.text('Extracted:', col1X, row2Y);
-  doc.text('Storage:', col1X, row3Y);
-  doc.text('Total Files:', col2X, row1Y);
-  doc.text('Errors:', col2X, row2Y);
+  doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND_MUTED);
+  doc.text('ARCHIVED', col1X, row1Y);
+  doc.text('EXTRACTED', col1X, row2Y);
+  doc.text('STORAGE', col1X, row3Y);
+  doc.text('TOTAL FILES', col2X, row1Y);
+  doc.text('ERRORS', col2X, row2Y);
 
-  doc.font('Helvetica').fillColor(BRAND_DARK);
+  doc.font('Helvetica').fillColor(BRAND_DARK).fontSize(9);
   doc.text(fmtDate(summary.archivedAt), col1X + labelWidth, row1Y);
   doc.text(fmtDate(summary.extractedAt), col1X + labelWidth, row2Y);
   doc.text(summary.providerType || '—', col1X + labelWidth, row3Y);
+  doc.font('Helvetica-Bold');
   doc.text(String(summary.filesUploaded), col2X + labelWidth, row1Y);
-  doc.fillColor(summary.errors > 0 ? BRAND_RED : '#228B22');
+  doc.fillColor(summary.errors > 0 ? BRAND_RED : '#16a34a');
   doc.text(String(summary.errors), col2X + labelWidth, row2Y);
-  doc.fillColor(BRAND_DARK);
+  doc.fillColor(BRAND_DARK).font('Helvetica');
 
   if (storageUrl) {
-    doc.fontSize(9).font('Helvetica').fillColor('#666666');
-    doc.text(storageUrl, col1X, row3Y + lineHeight + 8, { width: boxWidth - boxPadding * 2 });
+    doc.fontSize(8).font('Helvetica').fillColor(BRAND_MUTED);
+    doc.text(storageUrl, col1X, row3Y + lineHeight + 4, { width: boxWidth - boxPadding * 2 - 8 });
   }
 
-  y += boxHeight + 16;
+  y += boxHeight + 24;
 
   // Archive contents section
-  doc.fontSize(14).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_DARK);
   doc.text('Archive Contents', MARGIN, y);
-  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 16).lineTo(MARGIN + 140, y + 16).stroke();
-  doc.fillColor(BRAND_DARK);
-  y += 36;
+  y += 20;
 
   const stats = summary.statistics ?? {};
   const tableLeft = MARGIN;
@@ -1129,10 +1151,11 @@ export async function generateArchiveCoverSheetPdf(
   const arcRowHeight = 16;
 
   // Table header
-  doc.fillColor(BRAND_GRAY).rect(tableLeft, y, tableWidth, TABLE_HEADER_HEIGHT).fill();
-  doc.fontSize(9).font('Helvetica-Bold').fillColor(BRAND_WHITE);
-  doc.text('CATEGORY', tableLeft + 5, y + 4, { width: colCategory - 10 });
-  doc.text('ITEMS', tableLeft + colCategory, y + 4, { width: colItems - 10, align: 'right' });
+  doc.fillColor(TABLE_HEADER_BG).rect(tableLeft, y, tableWidth, TABLE_HEADER_HEIGHT).fill();
+  doc.fillColor(BRAND_RED).rect(tableLeft, y, tableWidth, 2).fill();
+  doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND_WHITE);
+  doc.text('CATEGORY', tableLeft + 8, y + 8, { width: colCategory - 16 });
+  doc.text('ITEMS', tableLeft + colCategory, y + 8, { width: colItems - 16, align: 'right' });
   doc.font('Helvetica').fillColor(BRAND_DARK);
   y += TABLE_HEADER_HEIGHT;
 
@@ -1148,28 +1171,29 @@ export async function generateArchiveCoverSheetPdf(
     const label = STAT_LABELS[key] ?? key;
     const val = stats[key];
 
-    const bg = i % 2 === 0 ? BRAND_WHITE : BRAND_LIGHT;
+    const bg = i % 2 === 0 ? BRAND_WHITE : TABLE_ALT_ROW;
     doc.fillColor(bg).rect(tableLeft, y, tableWidth, arcRowHeight).fill();
 
     const isZeroOrEmpty =
       key === 'hasBudget' ? false : (typeof val === 'number' ? val === 0 : !val);
-    doc.fillColor(isZeroOrEmpty ? '#bbbbbb' : BRAND_DARK).fontSize(9).font('Helvetica');
+    doc.fillColor(isZeroOrEmpty ? '#c5c8cc' : BRAND_DARK).fontSize(8.5).font('Helvetica');
 
-    doc.text(label, tableLeft + 5, y + 4, { width: colCategory - 10 });
+    doc.text(label, tableLeft + 8, y + 4, { width: colCategory - 16 });
 
     const displayVal =
       key === 'hasBudget'
         ? (val ? 'Yes' : 'No')
         : String(typeof val === 'number' ? val : val ?? 0);
+    doc.font(isZeroOrEmpty ? 'Helvetica' : 'Helvetica-Bold');
     doc.text(displayVal, tableLeft + colCategory, y + 4, {
-      width: colItems - 10,
+      width: colItems - 16,
       align: 'right',
     });
 
-    doc.fillColor(BRAND_DARK);
+    doc.font('Helvetica').fillColor(BRAND_DARK);
     if (i < statOrder.length - 1) {
-      doc.strokeColor('#e0e0e0').lineWidth(0.5)
-        .moveTo(tableLeft, y + arcRowHeight).lineTo(tableLeft + tableWidth, y + arcRowHeight).stroke();
+      doc.strokeColor(TABLE_DIVIDER).lineWidth(0.3)
+        .moveTo(tableLeft + 8, y + arcRowHeight).lineTo(tableLeft + tableWidth - 8, y + arcRowHeight).stroke();
     }
     y += arcRowHeight;
   }

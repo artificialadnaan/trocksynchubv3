@@ -1395,9 +1395,11 @@ export async function editPrimeContract(
       try {
         await page.click('button:has-text("Attach Files")', { timeout: 8000 });
         await randomDelay(2000, 3000);
-        const fileInput = page.locator('input[type="file"]');
-        if ((await fileInput.count()) > 0) {
-          await fileInput.setInputFiles(proposalPdfPath);
+        // Scope file input to the MuiDialog modal to avoid strict mode violation
+        // (page has multiple input[type="file"] — one inside modal, one on the form)
+        const modalFileInput = page.locator('.MuiDialog-root input[type="file"], [role="dialog"] input[type="file"]').first();
+        if ((await modalFileInput.count()) > 0) {
+          await modalFileInput.setInputFiles(proposalPdfPath);
         } else {
           const [fileChooser] = await Promise.all([
             page.waitForEvent("filechooser", { timeout: 10000 }),
@@ -1412,9 +1414,29 @@ export async function editPrimeContract(
         await randomDelay(3000, 5000);
       } catch (err: unknown) {
         log(
-          `[portfolio-auto] Failed to attach proposal PDF: ${err instanceof Error ? err.message : String(err)}`,
+          `[portfolio-auto] Failed to attach proposal PDF (best-effort): ${err instanceof Error ? err.message : String(err)}`,
           "playwright"
         );
+        // Dismiss the Attach Files modal so it doesn't block Save
+        try {
+          const modalCancel = page.locator('.MuiDialog-root button:has-text("Cancel"), [role="dialog"] button:has-text("Cancel")').first();
+          if ((await modalCancel.count()) > 0) {
+            await modalCancel.click({ timeout: 3000 });
+            await randomDelay(500, 1000);
+          }
+          // Also try clicking the modal backdrop or close button as fallback
+          const closeBtn = page.locator('.MuiDialog-root [data-qa="ci-Close"], [role="dialog"] button[aria-label="Close"]').first();
+          if ((await closeBtn.count()) > 0) {
+            await closeBtn.click({ timeout: 3000 });
+            await randomDelay(500, 1000);
+          }
+        } catch {
+          // Press Escape as last resort to dismiss any modal
+          await page.keyboard.press("Escape").catch(() => {});
+          await randomDelay(500, 1000);
+        }
+        // Wait for modal to be fully gone before continuing
+        await page.waitForSelector('.MuiDialog-root', { state: 'hidden', timeout: 5000 }).catch(() => {});
       }
     }
 
