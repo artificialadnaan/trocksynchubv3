@@ -1097,7 +1097,20 @@ export async function downloadProcoreFile(url: string): Promise<Buffer | null> {
     const response = await client.get(url, {
       responseType: 'arraybuffer',
     });
-    return Buffer.from(response.data);
+    const buf = Buffer.from(response.data);
+
+    // Detect JSON responses disguised as PDFs
+    // Real PDFs start with %PDF, JSON starts with { or [
+    if (buf.length > 0 && url.includes('.pdf')) {
+      const firstByte = buf[0];
+      const firstChar = String.fromCharCode(firstByte);
+      if (firstChar === '{' || firstChar === '[') {
+        console.warn(`[ProcoreDocs] PDF endpoint returned JSON instead of PDF for ${url}, skipping`);
+        return null;
+      }
+    }
+
+    return buf;
   } catch (e: any) {
     console.error(`[ProcoreDocs] Failed to download file from ${url}: ${e.message}`);
     return null;

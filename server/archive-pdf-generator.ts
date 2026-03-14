@@ -150,7 +150,7 @@ function drawTable(
     for (let ci = 0; ci < headers.length; ci++) {
       const h = headers[ci];
       const align = (h.align ?? 'left') as Align;
-      const cellText = truncate(row[ci] ?? '', 40);
+      const cellText = truncate(row[ci] ?? '', 60);
       if (align === 'right') {
         doc.text(cellText, x, doc.y + paddingV, { width: h.width - paddingH * 2, align: 'right' });
       } else if (align === 'center') {
@@ -324,21 +324,21 @@ function generateCommitmentsTablePdf(
   ];
 
   const rows = data.map((c: any) => [
-    truncate(c.number ?? c.contract_number ?? c.id ?? '', 12),
-    truncate(c.title ?? c.name ?? '', 25),
-    truncate(c.vendor?.name ?? c.vendor_name ?? '', 22),
-    truncate(c.status ?? c.status_name ?? '', 10),
-    fmtDate(c.executed_at ?? c.executed_date ?? c.signed_date),
-    fmtCurrency(c.total_value ?? c.value ?? c.amount ?? 0),
-    String(c.percent_complete ?? c.percentage_complete ?? '') + (c.percent_complete != null ? '%' : ''),
-    fmtCurrency(c.paid_to_date ?? c.amount_paid ?? 0),
+    truncate(c.number ?? c.contract_number ?? String(c.id ?? ''), 30),
+    truncate(c.title ?? c.name ?? '', 35),
+    truncate(c.vendor?.company ?? c.vendor?.name ?? c.vendor_name ?? '', 30),
+    truncate(c.status ?? '', 15),
+    fmtDate(c.execution_date ?? c.executed_date ?? c.signed_date),
+    fmtCurrency(c.grand_total ?? c.revised_contract ?? c.total_value ?? c.value ?? 0),
+    (c.percentage_paid != null ? String(Math.round(parseFloat(c.percentage_paid))) + '%' : ''),
+    fmtCurrency(c.total_payments ?? c.paid_to_date ?? c.amount_paid ?? 0),
   ]);
 
   let totalVal = 0,
     totalPaid = 0;
   for (const c of data) {
-    totalVal += parseFloat(c.total_value ?? c.value ?? c.amount ?? 0) || 0;
-    totalPaid += parseFloat(c.paid_to_date ?? c.amount_paid ?? 0) || 0;
+    totalVal += parseFloat(c.grand_total ?? c.revised_contract ?? c.total_value ?? 0) || 0;
+    totalPaid += parseFloat(c.total_payments ?? c.paid_to_date ?? 0) || 0;
   }
   rows.push(['', '', '', '', 'Totals', fmtCurrency(totalVal), '', fmtCurrency(totalPaid)]);
 
@@ -368,9 +368,9 @@ function generateCommitmentsTablePdf(
         { label: 'Amount', width: 145, align: 'right' as Align },
       ];
       const liRows = lineItems.map((li: any) => [
-        truncate(li.line_number ?? li.number ?? li.id ?? '', 10),
-        truncate(li.description ?? li.name ?? '', 50),
-        fmtCurrency(li.amount ?? li.total ?? 0),
+        truncate(li.line_number ?? li.number ?? li.cost_code ?? String(li.id ?? ''), 15),
+        truncate(li.description ?? li.name ?? '', 60),
+        fmtCurrency(li.total_amount ?? li.amount ?? li.total ?? 0),
       ]);
       drawTable(doc, liHeaders, liRows, doc.y, {
         projectName,
@@ -447,8 +447,8 @@ export async function generateBudgetPdf(
       { label: 'Over/Under', width: 81, align: 'right' as Align },
     ];
     const rows = lineItems.map((li: any) => [
-      truncate(li.cost_code ?? li.code ?? '', 15),
-      truncate(li.description ?? li.name ?? '', 25),
+      truncate(li.cost_code ?? li.code ?? '', 18),
+      truncate(li.description ?? li.name ?? '', 50),
       fmtCurrency(li.original_budget ?? li.original ?? 0),
       fmtCurrency(li.approved_change_orders ?? li.approved_cos ?? 0),
       fmtCurrency(li.revised_budget ?? li.revised ?? 0),
@@ -519,19 +519,19 @@ export async function generateDailyLogsPdf(data: any[], projectName: string): Pr
     doc.fontSize(10).font('Helvetica').fillColor(BRAND_DARK);
 
     const weather = log.weather ?? log.weather_conditions ?? '';
-    if (weather) doc.text(`Weather: ${truncate(String(weather), 80)}`);
+    if (weather) doc.text(`Weather: ${truncate(String(weather), 100)}`);
 
     const work = log.work_performed ?? log.notes ?? log.description ?? '';
-    if (work) doc.text(`Work Performed: ${truncate(String(work), 200)}`);
+    if (work) doc.text(`Work Performed: ${truncate(String(work), 250)}`);
 
     const workers = log.workers_on_site ?? log.workers ?? log.craft_workers ?? '';
-    if (workers) doc.text(`Workers: ${truncate(String(workers), 80)}`);
+    if (workers) doc.text(`Workers: ${truncate(String(workers), 100)}`);
 
     const visitors = log.visitors ?? '';
-    if (visitors) doc.text(`Visitors: ${truncate(String(visitors), 80)}`);
+    if (visitors) doc.text(`Visitors: ${truncate(String(visitors), 100)}`);
 
     const equipment = log.equipment ?? log.equipment_used ?? '';
-    if (equipment) doc.text(`Equipment: ${truncate(String(equipment), 80)}`);
+    if (equipment) doc.text(`Equipment: ${truncate(String(equipment), 100)}`);
 
     doc.moveDown(0.5);
     doc.strokeColor('#cccccc').lineWidth(0.5).moveTo(MARGIN, doc.y).lineTo(pageWidth - MARGIN, doc.y).stroke();
@@ -573,17 +573,17 @@ export async function generatePrimeContractsPdf(data: any[], projectName: string
     { label: '% Complete', width: 44, align: 'right' as Align },
   ];
   const rows = items.map((c: any) => [
-    truncate(c.number ?? c.contract_number ?? c.id ?? '', 12),
-    truncate(c.title ?? c.name ?? '', 25),
-    truncate(c.vendor?.name ?? c.vendor_name ?? '', 18),
-    truncate(c.status ?? c.status_name ?? '', 10),
-    fmtDate(c.executed_at ?? c.executed_date ?? c.signed_date),
-    fmtCurrency(c.total_value ?? c.value ?? c.amount ?? 0),
-    String(c.percent_complete ?? c.percentage_complete ?? '') + (c.percent_complete != null ? '%' : ''),
+    truncate(c.number ?? c.contract_number ?? String(c.id ?? ''), 30),
+    truncate(c.title ?? c.name ?? '', 35),
+    truncate(c.vendor?.company ?? c.vendor?.name ?? c.contractor?.company ?? c.vendor_name ?? '', 25),
+    truncate(c.status ?? '', 15),
+    fmtDate(c.execution_date ?? c.executed_date ?? c.signed_date),
+    fmtCurrency(c.grand_total ?? c.revised_contract ?? c.total_value ?? c.value ?? 0),
+    (c.percentage_paid != null ? String(Math.round(parseFloat(c.percentage_paid))) + '%' : ''),
   ]);
 
   let totalVal = 0;
-  for (const c of items) totalVal += parseFloat(c.total_value ?? c.value ?? c.amount ?? 0) || 0;
+  for (const c of items) totalVal += parseFloat(c.grand_total ?? c.revised_contract ?? c.total_value ?? 0) || 0;
   rows.push(['', '', '', '', 'Total', fmtCurrency(totalVal), '']);
 
   y = drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Prime Contracts Report' });
@@ -607,9 +607,9 @@ export async function generatePrimeContractsPdf(data: any[], projectName: string
         { label: 'Amount', width: 95, align: 'right' as Align },
       ];
       const liRows = lineItems.map((li: any) => [
-        truncate(li.line_number ?? li.number ?? li.id ?? '', 10),
-        truncate(li.description ?? li.name ?? '', 40),
-        fmtCurrency(li.amount ?? li.total ?? 0),
+        truncate(li.line_number ?? li.number ?? li.cost_code ?? String(li.id ?? ''), 15),
+        truncate(li.description ?? li.name ?? '', 50),
+        fmtCurrency(li.total_amount ?? li.amount ?? li.total ?? 0),
       ]);
       drawTable(doc, liHeaders, liRows, doc.y, { projectName, reportTitle: 'Prime Contracts Report' });
     }
@@ -667,12 +667,12 @@ export async function generateChangeOrdersPdf(data: any[], projectName: string):
     { label: 'Grand Total', width: 51, align: 'right' as Align },
   ];
   const rows = items.map((c: any) => [
-    truncate(c.number ?? c.package_number ?? c.id ?? '', 14),
-    truncate(c.title ?? c.name ?? '', 30),
-    truncate(c.status ?? c.status_name ?? '', 12),
+    truncate(c.number ?? c.package_number ?? String(c.id ?? ''), 30),
+    truncate(c.title ?? c.name ?? '', 40),
+    truncate(c.status ?? '', 15),
     fmtDate(c.created_at ?? c.created_date ?? c.created),
     fmtDate(c.due_date ?? c.due),
-    fmtCurrency(c.grand_total ?? c.total ?? c.amount ?? 0),
+    fmtCurrency(c.grand_total ?? c.revised_contract ?? c.total ?? c.amount ?? 0),
   ]);
 
   drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Change Orders Report' });
@@ -697,10 +697,10 @@ export async function generateChangeOrdersPdf(data: any[], projectName: string):
         { label: 'Status', width: 70 },
       ];
       const liRows = coItems.map((li: any) => [
-        truncate(li.line_number ?? li.number ?? li.id ?? '', 10),
-        truncate(li.description ?? li.name ?? '', 35),
-        fmtCurrency(li.amount ?? li.total ?? 0),
-        truncate(li.status ?? li.status_name ?? '', 12),
+        truncate(li.line_number ?? li.number ?? li.cost_code ?? String(li.id ?? ''), 15),
+        truncate(li.description ?? li.name ?? '', 50),
+        fmtCurrency(li.grand_total ?? li.total_amount ?? li.amount ?? li.total ?? 0),
+        truncate(li.status ?? '', 15),
       ]);
       drawTable(doc, liHeaders, liRows, doc.y, { projectName, reportTitle: 'Change Orders Report' });
     }
@@ -738,16 +738,16 @@ export async function generateChangeEventsPdf(data: any[], projectName: string):
     { label: 'Amount', width: 51, align: 'right' as Align },
   ];
   const rows = items.map((c: any) => [
-    truncate(c.number ?? c.event_number ?? c.id ?? '', 12),
-    truncate(c.title ?? c.name ?? '', 30),
-    truncate(c.status ?? c.status_name ?? '', 12),
-    truncate(c.change_event_type ?? c.type ?? '', 15),
+    truncate(c.number ?? c.event_number ?? String(c.id ?? ''), 30),
+    truncate(c.title ?? c.name ?? '', 40),
+    truncate(c.status ?? '', 15),
+    truncate(c.change_event_type ?? c.type ?? '', 20),
     fmtDate(c.created_at ?? c.created_date ?? c.created),
-    fmtCurrency(c.amount ?? c.total ?? 0),
+    fmtCurrency(c.grand_total ?? c.revised_contract ?? c.amount ?? c.total ?? 0),
   ]);
 
   let total = 0;
-  for (const c of items) total += parseFloat(c.amount ?? c.total ?? 0) || 0;
+  for (const c of items) total += parseFloat(c.grand_total ?? c.revised_contract ?? c.amount ?? c.total ?? 0) || 0;
   rows.push(['', '', '', '', 'Total', fmtCurrency(total)]);
 
   drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Change Events Report' });
@@ -783,16 +783,16 @@ export async function generateDirectCostsPdf(data: any[], projectName: string): 
     { label: 'Amount', width: 49, align: 'right' as Align },
   ];
   const rows = items.map((c: any) => [
-    truncate(c.id ?? '', 10),
-    truncate(c.vendor?.name ?? c.vendor_name ?? '', 25),
-    truncate(c.description ?? c.name ?? '', 28),
-    truncate(c.status ?? c.status_name ?? '', 12),
+    truncate(String(c.id ?? ''), 20),
+    truncate(c.vendor?.company ?? c.vendor?.name ?? c.vendor_name ?? '', 35),
+    truncate(c.description ?? c.name ?? '', 50),
+    truncate(c.status ?? '', 15),
     fmtDate(c.created_at ?? c.created_date ?? c.created),
-    fmtCurrency(c.amount ?? c.total ?? 0),
+    fmtCurrency(c.grand_total ?? c.revised_contract ?? c.amount ?? c.total ?? 0),
   ]);
 
   let total = 0;
-  for (const c of items) total += parseFloat(c.amount ?? c.total ?? 0) || 0;
+  for (const c of items) total += parseFloat(c.grand_total ?? c.revised_contract ?? c.amount ?? c.total ?? 0) || 0;
   rows.push(['', '', '', '', 'Total', fmtCurrency(total)]);
 
   drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Direct Costs Report' });
@@ -831,22 +831,22 @@ export async function generateInvoicingPdf(data: any[], projectName: string): Pr
     { label: 'Balance', width: 117, align: 'right' as Align },
   ];
   const rows = items.map((c: any) => [
-    truncate(c.number ?? c.invoice_number ?? c.id ?? '', 12),
-    truncate(c.billing_period ?? c.period ?? '', 15),
-    truncate(c.contract?.title ?? c.contract_title ?? c.contract_number ?? '', 22),
-    truncate(c.status ?? c.status_name ?? '', 12),
-    fmtCurrency(c.amount_billed ?? c.billed ?? 0),
-    fmtCurrency(c.amount_paid ?? c.paid ?? 0),
-    fmtCurrency(c.balance ?? c.amount_due ?? 0),
+    truncate(c.number ?? c.invoice_number ?? String(c.id ?? ''), 30),
+    truncate(c.billing_period ?? c.period ?? '', 25),
+    truncate(c.contract?.title ?? c.contract_title ?? c.contract_number ?? '', 35),
+    truncate(c.status ?? '', 15),
+    fmtCurrency(c.grand_total ?? c.amount_billed ?? c.billed ?? 0),
+    fmtCurrency(c.amount_paid ?? c.paid ?? c.total_payments ?? 0),
+    fmtCurrency(c.balance ?? c.amount_due ?? c.remaining_balance_outstanding ?? 0),
   ]);
 
   let totalBilled = 0,
     totalPaid = 0,
     totalBal = 0;
   for (const c of items) {
-    totalBilled += parseFloat(c.amount_billed ?? c.billed ?? 0) || 0;
-    totalPaid += parseFloat(c.amount_paid ?? c.paid ?? 0) || 0;
-    totalBal += parseFloat(c.balance ?? c.amount_due ?? 0) || 0;
+    totalBilled += parseFloat(c.grand_total ?? c.amount_billed ?? c.billed ?? 0) || 0;
+    totalPaid += parseFloat(c.amount_paid ?? c.paid ?? c.total_payments ?? 0) || 0;
+    totalBal += parseFloat(c.balance ?? c.amount_due ?? c.remaining_balance_outstanding ?? 0) || 0;
   }
   rows.push(['', '', '', 'Totals', fmtCurrency(totalBilled), fmtCurrency(totalPaid), fmtCurrency(totalBal)]);
 
@@ -880,7 +880,7 @@ export async function generateDirectoryPdf(data: any[], projectName: string): Pr
 
   const byCompany = new Map<string, any[]>();
   for (const p of items) {
-    const company = p.company?.name ?? p.company_name ?? p.vendor?.name ?? 'Unknown';
+    const company = p.vendor?.company ?? p.company?.name ?? p.company_name ?? p.vendor?.name ?? 'Unknown';
     if (!byCompany.has(company)) byCompany.set(company, []);
     byCompany.get(company)!.push(p);
   }
@@ -906,11 +906,11 @@ export async function generateDirectoryPdf(data: any[], projectName: string): Pr
     doc.y += 24;
     const members = byCompany.get(company)!;
     const rows = members.map((p: any) => [
-      truncate(p.name ?? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() ?? p.user?.name ?? '', 22),
-      truncate(company, 22),
-      truncate(p.role ?? p.job_title ?? p.title ?? '', 18),
-      truncate(p.email ?? p.email_address ?? p.user?.email ?? '', 28),
-      truncate(p.phone ?? p.phone_number ?? '', 16),
+      truncate(p.name ?? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() ?? p.user?.name ?? '', 30),
+      truncate(company, 30),
+      truncate(p.role ?? p.job_title ?? p.title ?? '', 25),
+      truncate(p.email ?? p.email_address ?? p.user?.email ?? '', 35),
+      truncate(p.phone ?? p.phone_number ?? '', 20),
     ]);
     drawTable(doc, headers, rows, doc.y, { projectName, reportTitle: 'Project Directory' });
     doc.moveDown(0.5);
@@ -944,13 +944,14 @@ export async function generateEstimatingPdf(data: any[], projectName: string): P
     const lineItems = item.line_items ?? item.bid_items ?? item.items ?? [item];
     for (const li of lineItems) {
       flatRows.push([
-        truncate(li.line_number ?? li.number ?? li.id ?? '', 10),
-        truncate(li.description ?? li.name ?? li.item_name ?? '', 35),
+        truncate(li.line_number ?? li.number ?? li.cost_code ?? String(li.id ?? ''), 15),
+        truncate(li.description ?? li.name ?? li.item_name ?? '', 60),
         String(li.quantity ?? li.qty ?? ''),
-        truncate(li.unit ?? li.unit_of_measure ?? '', 10),
+        truncate(li.unit ?? li.unit_of_measure ?? '', 15),
         fmtCurrency(li.unit_cost ?? li.cost ?? 0),
         fmtCurrency(
-          li.total_cost ??
+          li.total_amount ??
+            li.total_cost ??
             li.total ??
             (Number(li.quantity ?? li.qty) || 0) * (Number(li.unit_cost ?? li.cost) || 0)
         ),
