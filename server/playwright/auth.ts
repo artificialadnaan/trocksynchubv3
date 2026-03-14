@@ -179,10 +179,12 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
   const loginUrl = credentials.sandbox ? PROCORE_URLS.loginSandbox : PROCORE_URLS.login;
   
   log(`Navigating to Procore login: ${loginUrl}`, "playwright");
-  await page.goto(loginUrl, { waitUntil: "networkidle" });
-  
+  // Use 'load' instead of 'networkidle' — Procore's login page has persistent connections
+  // (analytics, SSO polling) that prevent networkidle from ever firing
+  await page.goto(loginUrl, { waitUntil: "load" });
+
   await randomDelay(1000, 2000);
-  
+
   // STEP 1: Enter email
   log("Step 1: Entering email", "playwright");
   const emailInput = await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 15000 });
@@ -442,7 +444,8 @@ export async function loginToProcore(page: Page): Promise<boolean> {
   
   try {
     log(`Navigating to Procore login: ${loginUrl}`, "playwright");
-    await page.goto(loginUrl, { waitUntil: "networkidle", timeout: 30000 });
+    // Use 'load' instead of 'networkidle' — Procore's login page has persistent connections
+    await page.goto(loginUrl, { waitUntil: "load", timeout: 30000 });
     
     // Wait a moment for page to stabilize
     await page.waitForTimeout(1500);
