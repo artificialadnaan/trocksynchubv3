@@ -1383,7 +1383,7 @@ export async function registerRoutes(
               const webhookPayload = event;
               setTimeout(async () => {
                 try {
-                  const { runPhase2 } = await import('./playwright/portfolio-automation');
+                  const { runPhase2WithRetry } = await import('./portfolio-automation-runner');
                   const phase2Input =
                     pending.bidboardProjectUrl || pending.proposalPdfPath != null
                       ? {
@@ -1391,11 +1391,12 @@ export async function registerRoutes(
                           proposalPdfPath: pending.proposalPdfPath ?? undefined,
                         }
                       : undefined;
-                  const result = await runPhase2(
+                  const result = await runPhase2WithRetry(
                     companyId,
                     portfolioProjectId,
                     pending.bidboardProjectId,
-                    phase2Input
+                    phase2Input,
+                    { triggerSource: 'webhook' }
                   );
                   await storage.createAuditLog({
                     action: "webhook_triggered_phase2",
@@ -1440,7 +1441,7 @@ export async function registerRoutes(
               const webhookPayload = event;
               setTimeout(async () => {
                 try {
-                  const { runPhase2 } = await import('./playwright/portfolio-automation');
+                  const { runPhase2WithRetry } = await import('./portfolio-automation-runner');
                   const phase2Input =
                     pending.bidboardProjectUrl || pending.proposalPdfPath != null
                       ? {
@@ -1448,11 +1449,12 @@ export async function registerRoutes(
                           proposalPdfPath: pending.proposalPdfPath ?? undefined,
                         }
                       : undefined;
-                  const result = await runPhase2(
+                  const result = await runPhase2WithRetry(
                     companyId,
                     portfolioProjectId,
                     pending.bidboardProjectId,
-                    phase2Input
+                    phase2Input,
+                    { triggerSource: 'webhook' }
                   );
                   await storage.createAuditLog({
                     action: "webhook_triggered_phase2",
@@ -4964,10 +4966,14 @@ export async function registerRoutes(
 
       setImmediate(async () => {
         try {
-          const { runPhase1 } = await import("./playwright/portfolio-automation");
+          const { runPhase1WithRetry } = await import("./portfolio-automation-runner");
           const { registerPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
-          const { result, proposalPdfPath, estimateExcelPath } = await runPhase1(url, bidboardId!);
-          if (result.completedAt) {
+          const { result, proposalPdfPath, estimateExcelPath } = await runPhase1WithRetry(
+            url,
+            bidboardId!,
+            { triggerSource: "manual" }
+          );
+          if (result.success) {
             registerPendingPhase2(bidboardId!, { bidboardProjectUrl: url, proposalPdfPath, estimateExcelPath });
           }
         } catch (err) {

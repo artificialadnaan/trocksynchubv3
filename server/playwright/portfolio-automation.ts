@@ -1655,9 +1655,19 @@ export async function triggerPortfolioAutomationFromStageChange(
     "playwright"
   );
 
-  const { result, proposalPdfPath, estimateExcelPath } = await runPhase1(bidboardProjectUrl, bidboardProjectId);
+  const { runPhase1WithRetry } = await import("../portfolio-automation-runner");
+  const { result, proposalPdfPath, estimateExcelPath } = await runPhase1WithRetry(
+    bidboardProjectUrl,
+    bidboardProjectId,
+    {
+      projectName,
+      projectNumber: projectNumber || undefined,
+      customerName,
+      triggerSource: "stage_sync",
+    }
+  );
 
-  if (result.completedAt) {
+  if (result.success) {
     registerPendingPhase2(bidboardProjectId, {
       bidboardProjectUrl,
       proposalPdfPath,

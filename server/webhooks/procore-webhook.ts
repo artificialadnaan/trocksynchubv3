@@ -26,7 +26,7 @@
  */
 
 import { Request, Response } from "express";
-import { runPhase2 } from "../playwright/portfolio-automation";
+import { runPhase2WithRetry } from "../portfolio-automation-runner";
 import { storage } from "../storage";
 import { log } from "../index";
 import {
@@ -115,11 +115,12 @@ export async function handleProcoreProjectWebhook(
                   }
                 : undefined;
 
-            const result = await runPhase2(
+            const result = await runPhase2WithRetry(
               companyId,
               portfolioProjectId,
               pending.bidboardProjectId,
-              phase2Input
+              phase2Input,
+              { triggerSource: "webhook" }
             );
 
             await storage.createAuditLog({
@@ -159,7 +160,13 @@ export async function handleProcoreProjectWebhook(
           );
           setTimeout(async () => {
             try {
-              const result = await runPhase2(companyId, portfolioProjectId);
+              const result = await runPhase2WithRetry(
+                companyId,
+                portfolioProjectId,
+                undefined,
+                undefined,
+                { triggerSource: "webhook" }
+              );
               log(
                 `[webhook] Auto Phase 2 completed: ${result.success ? "success" : "failed"}`,
                 "webhook"
