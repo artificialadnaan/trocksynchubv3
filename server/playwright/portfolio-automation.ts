@@ -1019,6 +1019,17 @@ export async function scrapeBidBoardData(
     await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board (scrape)");
 
     // Step A: Overview tab — Customer Company, Project Number
+    // Must navigate to Overview tab first — page may land on Estimation tab
+    try {
+      const overviewTab = page.locator(SEL.tabs.overview);
+      if ((await overviewTab.count()) > 0) {
+        await overviewTab.click({ timeout: 8000 });
+        await randomDelay(2000, 3000);
+      }
+    } catch {
+      /* Overview tab may not exist or already be active */
+    }
+
     try {
       scrapedData.customerCompanyName = await page.evaluate(() => {
         const roles = [
@@ -1031,6 +1042,8 @@ export async function scrapeBidBoardData(
           "Developer",
           "Vendor",
         ];
+
+        // Strategy 1: Look for text nodes ending with a role name (e.g. "Acme Corp Owner/Client")
         const candidates = document.querySelectorAll('div[style*="word-break"], div, span');
         for (const el of candidates) {
           const directText =
@@ -1046,10 +1059,34 @@ export async function scrapeBidBoardData(
             }
           }
         }
+
+        // Strategy 2: Look for a role label element and grab the company name from a sibling/parent
+        for (const role of roles) {
+          const roleEls = document.querySelectorAll(`span, div, p`);
+          for (const el of roleEls) {
+            const text = el.textContent?.trim();
+            if (text === role || text === `(${role})`) {
+              // Look for company name in parent container
+              const container = el.closest('div[class]') ?? el.parentElement;
+              if (container) {
+                const allText = container.textContent?.trim() ?? '';
+                const cleaned = allText.replace(role, '').replace(/[()]/g, '').trim();
+                if (cleaned && cleaned.length > 1 && cleaned.length < 100) {
+                  return cleaned;
+                }
+              }
+            }
+          }
+        }
+
         return null;
       });
     } catch {
       /* optional */
+    }
+
+    if (scrapedData.customerCompanyName) {
+      log(`[portfolio-auto] Found customer company on Overview tab: "${scrapedData.customerCompanyName}"`, "playwright");
     }
 
     try {
