@@ -1018,50 +1018,52 @@ export async function scrapeBidBoardData(
     ];
     await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board (scrape)");
 
-    // Step A: Overview tab — Customer Company, Project Number
-    // Must navigate to Overview tab first — page may land on Estimation tab
-    try {
-      const overviewTab = page.locator(SEL.tabs.overview);
-      if ((await overviewTab.count()) > 0) {
-        await overviewTab.click({ timeout: 8000 });
-        await randomDelay(2000, 3000);
-      }
-    } catch {
-      /* Overview tab may not exist or already be active */
-    }
+    // Step A: Customer Company, Project Number
+    // Scrape customer on current tab FIRST (page often lands on Estimating where customer is visible),
+    // then try Overview tab if not found.
 
-    // Strategy 0: Read from the client/owner name input field (most reliable)
-    try {
-      const clientInput = page.locator(
-        '[data-testid="client-name"], input[name="client_name"], #client_name, input[name="owner_name"], input[placeholder*="Client"], input[placeholder*="Owner"]'
-      );
-      if ((await clientInput.count()) > 0) {
-        const val = await clientInput.first().inputValue().catch(() => "");
-        if (val?.trim()) {
-          scrapedData.customerCompanyName = val.trim();
-          log(`[portfolio-auto] Found customer from input field: "${scrapedData.customerCompanyName}"`, "playwright");
-        }
-      }
-    } catch {
-      /* optional */
-    }
-
-    // Strategy 1 & 2: Fallback to DOM text scraping if input field empty
-    if (!scrapedData.customerCompanyName) {
+    const scrapeCustomerFromDOM = async (): Promise<string | null> => {
+      // Strategy A: MUI list item — role in secondary text, company in div[style*="word-break"]
       try {
-        scrapedData.customerCompanyName = await page.evaluate(() => {
-          const roles = [
-            "Owner/Client",
-            "General Contractor",
-            "Subcontractor",
-            "Sub-contractor",
-            "Architect",
-            "Engineer",
-            "Developer",
-            "Vendor",
-          ];
+        const val = await page.evaluate(() => {
+          const roles = ["Owner/Client", "General Contractor", "Subcontractor", "Sub-contractor", "Architect", "Engineer", "Developer", "Vendor"];
+          // Find MuiListItem or li that contains a role label
+          const listItems = document.querySelectorAll('.MuiListItem-root, li, [role="listitem"]');
+          for (const li of listItems) {
+            const liText = li.textContent || '';
+            for (const role of roles) {
+              if (liText.includes(role)) {
+                // Look for company name in div[style*="word-break"] or MuiListItemText-primary
+                const nameEl = li.querySelector('div[style*="word-break"], .MuiListItemText-primary div, .MuiListItemText-primary');
+                const name = nameEl?.textContent?.trim();
+                if (name && name !== role && !roles.includes(name) && name.length > 1 && name.length < 100) {
+                  return name;
+                }
+              }
+            }
+          }
+          return null;
+        });
+        if (val) return val;
+      } catch { /* optional */ }
 
-          // Strategy 1: Look for text nodes ending with a role name (e.g. "Acme Corp Owner/Client")
+      // Strategy B: Input field (client_name / owner_name)
+      try {
+        const clientInput = page.locator(
+          '[data-testid="client-name"], input[name="client_name"], #client_name, input[name="owner_name"], input[placeholder*="Client"], input[placeholder*="Owner"]'
+        );
+        if ((await clientInput.count()) > 0) {
+          const val = await clientInput.first().inputValue().catch(() => "");
+          if (val?.trim()) return val.trim();
+        }
+      } catch { /* optional */ }
+
+      // Strategy C: Text nodes ending with role name (e.g. "Acme Corp Owner/Client")
+      // Strategy D: Role label element, grab company from parent container
+      try {
+        const val = await page.evaluate(() => {
+          const roles = ["Owner/Client", "General Contractor", "Subcontractor", "Sub-contractor", "Architect", "Engineer", "Developer", "Vendor"];
+
           const candidates = document.querySelectorAll('div[style*="word-break"], div, span');
           for (const el of candidates) {
             const directText =
@@ -1078,13 +1080,11 @@ export async function scrapeBidBoardData(
             }
           }
 
-          // Strategy 2: Look for a role label element and grab the company name from a sibling/parent
           for (const role of roles) {
-            const roleEls = document.querySelectorAll(`span, div, p`);
+            const roleEls = document.querySelectorAll('span, div, p');
             for (const el of roleEls) {
               const text = el.textContent?.trim();
               if (text === role || text === `(${role})`) {
-                // Look for company name in parent container
                 const container = el.closest('div[class]') ?? el.parentElement;
                 if (container) {
                   const allText = container.textContent?.trim() ?? '';
@@ -1099,13 +1099,37 @@ export async function scrapeBidBoardData(
 
           return null;
         });
+        if (val) return val;
+      } catch { /* optional */ }
+
+      return null;
+    };
+
+    // Try scraping on current tab first (often Estimating tab where customer is visible)
+    scrapedData.customerCompanyName = await scrapeCustomerFromDOM();
+    if (scrapedData.customerCompanyName) {
+      log(`[portfolio-auto] Found customer on current tab: "${scrapedData.customerCompanyName}"`, "playwright");
+    }
+
+    // If not found, try Overview tab
+    if (!scrapedData.customerCompanyName) {
+      try {
+        const overviewTab = page.locator(SEL.tabs.overview);
+        if ((await overviewTab.count()) > 0) {
+          await overviewTab.click({ timeout: 8000 });
+          await randomDelay(2000, 3000);
+        }
       } catch {
-        /* optional */
+        /* Overview tab may not exist or already be active */
+      }
+      scrapedData.customerCompanyName = await scrapeCustomerFromDOM();
+      if (scrapedData.customerCompanyName) {
+        log(`[portfolio-auto] Found customer on Overview tab: "${scrapedData.customerCompanyName}"`, "playwright");
       }
     }
 
-    if (scrapedData.customerCompanyName) {
-      log(`[portfolio-auto] Found customer company on Overview tab: "${scrapedData.customerCompanyName}"`, "playwright");
+    if (!scrapedData.customerCompanyName) {
+      log(`[portfolio-auto] Customer company not found on any tab`, "playwright");
     }
 
     try {
