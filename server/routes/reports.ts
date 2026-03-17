@@ -185,4 +185,37 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
     const result = await syncAllProjectChangeOrders();
     res.json(result);
   }));
+
+  // Rollback deals that were zeroed out by change order sync
+  app.post("/api/change-orders/rollback-zeroed", requireAuth, asyncHandler(async (_req, res) => {
+    const { updateHubSpotDeal } = await import('../hubspot');
+    const { getAuditLogs } = await import('../storage').then(m => m.storage);
+
+    // Find all change_order_sync audit logs where newAmount=0 and previousAmount>0
+    const { logs } = await getAuditLogs({ limit: 500 });
+    const zeroedLogs = logs.filter((log: any) => {
+      if (log.action !== 'change_order_sync' || log.status !== 'success') return false;
+      const d = log.details as any;
+      return d && d.newAmount === 0 && d.previousAmount > 0;
+    });
+
+    const restored: any[] = [];
+    const errors: any[] = [];
+
+    for (const log of zeroedLogs) {
+      const d = log.details as any;
+      const dealId = log.entityId;
+      const previousAmount = d.previousAmount;
+      try {
+        await updateHubSpotDeal(dealId, { amount: String(previousAmount) });
+        restored.push({ dealId, restoredAmount: previousAmount });
+        console.log(`[ChangeOrder Rollback] Restored deal ${dealId} to $${previousAmount}`);
+      } catch (err: any) {
+        errors.push({ dealId, error: err.message });
+        console.error(`[ChangeOrder Rollback] Failed to restore deal ${dealId}:`, err.message);
+      }
+    }
+
+    res.json({ totalFound: zeroedLogs.length, restored: restored.length, errors: errors.length, details: { restored, errors } });
+  }));
 }
