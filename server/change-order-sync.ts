@@ -32,8 +32,8 @@
  * 
  * HubSpot Properties Updated:
  * - amount: Total contract value
- * - hs_change_order_approved: Approved changes total
- * - hs_change_order_pending: Pending changes total
+ * - change_order_approved: Approved changes total
+ * - change_order_pending: Pending changes total
  * 
  * Automation Config:
  * - sync_change_orders: Enable/disable (Sync Config: "Update HubSpot deal amount on Change Orders")
@@ -139,12 +139,24 @@ export async function calculateTotalContractValue(projectId: string): Promise<Co
   };
 }
 
-export async function updateHubSpotDealAmount(dealId: string, amount: number): Promise<{ success: boolean; error?: string }> {
+export async function updateHubSpotDealAmount(
+  dealId: string,
+  amount: number,
+  approvedChangeOrders?: number,
+  pendingChangeOrders?: number,
+): Promise<{ success: boolean; error?: string }> {
   try {
     const { updateHubSpotDeal } = await import('./hubspot');
-    await updateHubSpotDeal(dealId, { amount: String(amount) });
-    
-    console.log(`[ChangeOrder] Updated HubSpot deal ${dealId} amount to $${amount.toLocaleString()}`);
+    const properties: Record<string, string> = { amount: String(amount) };
+    if (approvedChangeOrders !== undefined) {
+      properties.change_order_approved = String(approvedChangeOrders);
+    }
+    if (pendingChangeOrders !== undefined) {
+      properties.change_order_pending = String(pendingChangeOrders);
+    }
+    await updateHubSpotDeal(dealId, properties);
+
+    console.log(`[ChangeOrder] Updated HubSpot deal ${dealId} — amount: $${amount.toLocaleString()}, approved COs: $${(approvedChangeOrders ?? 0).toLocaleString()}, pending COs: $${(pendingChangeOrders ?? 0).toLocaleString()}`);
     return { success: true };
   } catch (error: any) {
     console.error(`[ChangeOrder] Error updating HubSpot deal amount:`, error.message);
@@ -173,6 +185,15 @@ export async function syncChangeOrdersToHubSpot(procoreProjectId: string): Promi
     const mapping = await storage.getSyncMappingByProcoreProjectId(procoreProjectId);
     
     if (!mapping?.hubspotDealId) {
+      await storage.createAuditLog({
+        action: 'change_order_sync',
+        entityType: 'deal_amount',
+        entityId: procoreProjectId,
+        source: 'procore',
+        destination: 'hubspot',
+        status: 'skipped',
+        errorMessage: 'No HubSpot deal linked to this project',
+      });
       return { success: false, error: 'No HubSpot deal linked to this project' };
     }
 
@@ -192,7 +213,12 @@ export async function syncChangeOrdersToHubSpot(procoreProjectId: string): Promi
       };
     }
 
-    const updateResult = await updateHubSpotDealAmount(mapping.hubspotDealId, contractValue.totalContractValue);
+    const updateResult = await updateHubSpotDealAmount(
+      mapping.hubspotDealId,
+      contractValue.totalContractValue,
+      contractValue.approvedChangeOrders,
+      contractValue.pendingChangeOrders,
+    );
 
     if (updateResult.success) {
       await storage.createAuditLog({
