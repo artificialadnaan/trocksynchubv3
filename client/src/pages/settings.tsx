@@ -1,3 +1,58 @@
+/**
+ * Settings Page
+ * ==============
+ * 
+ * Central configuration hub for all application settings.
+ * Manages API connections, automation toggles, and system preferences.
+ * 
+ * Settings Sections:
+ * 
+ * 1. API Connections:
+ *    - HubSpot OAuth connection
+ *    - Procore OAuth connection
+ *    - CompanyCam API token
+ *    - Test connection buttons
+ * 
+ * 2. Playwright/Browser Automation:
+ *    - Procore browser credentials (email/password)
+ *    - Sandbox vs production toggle
+ *    - Test login functionality
+ * 
+ * 3. Automation Toggles:
+ *    - BidBoard polling enable/disable
+ *    - Stage sync to HubSpot enable/disable
+ *    - Change order sync enable/disable
+ *    - HubSpot → BidBoard auto-create
+ * 
+ * 4. Email Notifications:
+ *    - Gmail/Outlook provider selection
+ *    - OAuth connection for email providers
+ *    - Test email functionality
+ * 
+ * 5. Stage Mappings:
+ *    - Configure Procore → HubSpot stage translations
+ *    - Enable/disable specific mappings
+ *    - Set portfolio trigger stages
+ * 
+ * 6. Polling Configuration:
+ *    - Poll intervals for each service
+ *    - Enable/disable polling jobs
+ *    - Manual trigger buttons
+ * 
+ * Data Sources:
+ * - GET /api/settings/connections: Service connection status
+ * - GET /api/automation/config: Automation settings
+ * - GET /api/stage-mappings: Stage translation rules
+ * - POST /api/settings/*: Update various settings
+ * 
+ * Security:
+ * - Passwords encrypted before storage
+ * - OAuth tokens managed via secure flow
+ * - Session authentication required
+ * 
+ * @page Settings
+ */
+
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +71,16 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -23,6 +88,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { RfpAutomationCard } from "@/components/rfp-automation-card";
+import { PortfolioAutomationCard } from "@/components/portfolio-automation-card";
+import StorageSettings from "@/components/settings/StorageSettings";
 import {
   Link2,
   Clock,
@@ -40,18 +108,35 @@ import {
   Wifi,
   WifiOff,
   Hash,
+  Trash2,
+  Users,
+  Upload,
+  FileText,
+  RotateCcw,
 } from "lucide-react";
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import * as XLSX from "xlsx";
 import type { PollJob } from "@shared/schema";
 
+/** Main settings page component with all configuration options */
 export default function SettingsPage() {
   const { toast } = useToast();
   const [hubspotDialogOpen, setHubspotDialogOpen] = useState(false);
   const [procoreDialogOpen, setProcoreDialogOpen] = useState(false);
   const [companycamDialogOpen, setCompanycamDialogOpen] = useState(false);
+  const [microsoftDialogOpen, setMicrosoftDialogOpen] = useState(false);
+  const [gmailDialogOpen, setGmailDialogOpen] = useState(false);
 
   const { data: connections, isLoading: connLoading } = useQuery<any>({
     queryKey: ["/api/dashboard/connections"],
+  });
+
+  const { data: microsoftStatus } = useQuery<{ connected: boolean; email?: string; userName?: string }>({
+    queryKey: ["/api/integrations/microsoft/status"],
+  });
+
+  const { data: gmailStatus } = useQuery<{ connected: boolean; email?: string; userName?: string; method?: string }>({
+    queryKey: ["/api/integrations/gmail/status"],
   });
 
   const { data: integrationConfig } = useQuery<any>({
@@ -86,10 +171,10 @@ export default function SettingsPage() {
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 md:space-y-6">
       <div>
-        <h2 className="text-2xl font-bold" data-testid="text-settings-title">Settings</h2>
-        <p className="text-muted-foreground text-sm mt-1">Manage connections, schedules, and system configuration</p>
+        <h2 className="text-xl md:text-2xl font-bold" data-testid="text-settings-title">Settings</h2>
+        <p className="text-muted-foreground text-xs md:text-sm mt-1">Manage connections, schedules, and configuration</p>
       </div>
 
       <Card>
@@ -129,10 +214,32 @@ export default function SettingsPage() {
                 onConfigure={() => setCompanycamDialogOpen(true)}
                 onDisconnect={() => disconnectMutation.mutate("companycam")}
               />
+
+              <Separator className="my-2" />
+              <p className="text-xs text-muted-foreground font-medium mb-2">Email & Cloud Storage</p>
+
+              <ConnectionCard
+                name="Gmail"
+                description="Send emails via Gmail API"
+                connected={gmailStatus?.connected}
+                email={gmailStatus?.email}
+                onConfigure={() => setGmailDialogOpen(true)}
+                onDisconnect={() => disconnectMutation.mutate("gmail")}
+              />
+              <ConnectionCard
+                name="Microsoft 365"
+                description="SharePoint file storage, Outlook email"
+                connected={microsoftStatus?.connected}
+                email={microsoftStatus?.email}
+                onConfigure={() => setMicrosoftDialogOpen(true)}
+                onDisconnect={() => disconnectMutation.mutate("microsoft")}
+              />
             </>
           )}
         </CardContent>
       </Card>
+
+      <StorageSettings />
 
       <Card>
         <CardHeader className="pb-3">
@@ -194,11 +301,21 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      <HubSpotOwnerMappingsCard />
+
       <StageMappingCard />
+
+      <BidBoardStageSyncCard />
+
+      <PortfolioAutomationCard />
+
+      <RfpAutomationCard />
 
       <HubspotProcoreSyncCard />
 
       <PollingCard />
+
+      <ProcorePollingCard />
 
       <RolePollingCard />
 
@@ -234,38 +351,200 @@ export default function SettingsPage() {
         onOpenChange={setCompanycamDialogOpen}
         existingConfig={integrationConfig?.companycam}
       />
+      <MicrosoftConfigDialog
+        open={microsoftDialogOpen}
+        onOpenChange={setMicrosoftDialogOpen}
+        status={microsoftStatus}
+      />
+      <GmailConfigDialog
+        open={gmailDialogOpen}
+        onOpenChange={setGmailDialogOpen}
+        status={gmailStatus}
+      />
     </div>
   );
 }
 
-function ConnectionCard({ name, description, connected, expiresAt, configuredAt, onConfigure, onDisconnect }: {
-  name: string; description: string; connected?: boolean; expiresAt?: string; configuredAt?: string;
+function HubSpotOwnerMappingsCard() {
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { data: mappings = [], refetch } = useQuery<{ id: number; hubspotOwnerId: string; email: string; name: string | null }[]>({
+    queryKey: ["/api/hubspot/owner-mappings"],
+  });
+  const [ownerId, setOwnerId] = useState("");
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+
+  const bulkImportMutation = useMutation({
+    mutationFn: async (mappings: Array<{ hubspotOwnerId: string; email: string; name?: string }>) => {
+      const res = await apiRequest("POST", "/api/hubspot/owner-mappings/bulk", { mappings });
+      return res.json();
+    },
+    onSuccess: (data: { created: number }) => {
+      toast({ title: `Imported ${data.created} owner mappings` });
+      refetch();
+    },
+    onError: (e: Error) => toast({ title: "Failed to import", description: e.message, variant: "destructive" }),
+  });
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = ev.target?.result;
+        if (!data) return;
+        const wb = XLSX.read(data, { type: "binary" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
+        const header = (rows[0] || []) as string[];
+        const nameIdx = header.findIndex((h) => /name/i.test(String(h)));
+        const emailIdx = header.findIndex((h) => /email/i.test(String(h)));
+        const idIdx = header.findIndex((h) => /^(HS\s*ID|HubSpot\s*ID|hs_object_id)\s*#?\s*$/i.test(String(h).trim()));
+        const out: Array<{ hubspotOwnerId: string; email: string; name?: string }> = [];
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i] as unknown[];
+          const n = nameIdx >= 0 ? String(row[nameIdx] ?? "").trim() : "";
+          const em = emailIdx >= 0 ? String(row[emailIdx] ?? "").trim() : "";
+          const id = idIdx >= 0 ? String(row[idIdx] ?? "").trim() : "";
+          if (id && em) out.push({ hubspotOwnerId: id, email: em, name: n || undefined });
+        }
+        if (out.length === 0) {
+          toast({ title: "No valid rows", description: "Expected columns: Name, Email, HS ID #", variant: "destructive" });
+        } else {
+          bulkImportMutation.mutate(out);
+        }
+      } catch (err: any) {
+        toast({ title: "Invalid file", description: err?.message, variant: "destructive" });
+      }
+      e.target.value = "";
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const addMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/hubspot/owner-mappings", { hubspotOwnerId: ownerId, email, name: name || null });
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Owner mapping added" });
+      setOwnerId(""); setEmail(""); setName("");
+      refetch();
+    },
+    onError: (e: Error) => toast({ title: "Failed to add mapping", description: e.message, variant: "destructive" }),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (hubspotOwnerId: string) => {
+      await apiRequest("DELETE", `/api/hubspot/owner-mappings/${encodeURIComponent(hubspotOwnerId)}`);
+    },
+    onSuccess: () => {
+      toast({ title: "Mapping removed" });
+      refetch();
+    },
+    onError: (e: Error) => toast({ title: "Failed to remove mapping", variant: "destructive" }),
+  });
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base font-semibold flex items-center gap-2">
+          <Users className="w-4 h-4" />
+          HubSpot Deal Owner Mappings
+        </CardTitle>
+        <p className="text-xs text-muted-foreground mt-1">
+          When HubSpot returns owner ID only (no email), add a mapping so closeout surveys and stage-change emails reach the deal owner.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-wrap gap-2 items-end">
+          <div>
+            <Label className="text-xs">Owner ID</Label>
+            <Input placeholder="e.g. 12345" value={ownerId} onChange={(e) => setOwnerId(e.target.value)} className="w-28 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs">Email</Label>
+            <Input type="email" placeholder="owner@example.com" value={email} onChange={(e) => setEmail(e.target.value)} className="w-48 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs">Name (optional)</Label>
+            <Input placeholder="John Doe" value={name} onChange={(e) => setName(e.target.value)} className="w-36 h-9" />
+          </div>
+          <Button size="sm" onClick={() => addMutation.mutate()} disabled={!ownerId || !email || addMutation.isPending}>
+            {addMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+            Add
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={bulkImportMutation.isPending}
+          >
+            {bulkImportMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            Import Excel
+          </Button>
+        </div>
+        {mappings.length > 0 ? (
+          <div className="space-y-2">
+            {mappings.map((m) => (
+              <div key={m.id} className="flex items-center justify-between py-2 px-3 rounded border text-sm">
+                <span className="font-mono text-muted-foreground">{m.hubspotOwnerId}</span>
+                <span>{m.name || "—"}</span>
+                <span>{m.email}</span>
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => deleteMutation.mutate(m.hubspotOwnerId)}>
+                  <Trash2 className="w-4 h-4 text-destructive" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">No owner mappings. Add one when HubSpot only returns owner ID.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ConnectionCard({ name, description, connected, expiresAt, configuredAt, email, onConfigure, onDisconnect }: {
+  name: string; description: string; connected?: boolean; expiresAt?: string; configuredAt?: string; email?: string;
   onConfigure: () => void; onDisconnect: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between py-3 px-4 rounded-lg border" data-testid={`connection-${name.toLowerCase().replace(/\s+/g, "-")}`}>
-      <div className="flex-1">
-        <div className="flex items-center gap-2">
+    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3 px-3 md:px-4 rounded-lg border" data-testid={`connection-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+      <div className="flex-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
           <p className="text-sm font-medium">{name}</p>
-          <Badge variant={connected ? "default" : "secondary"} className={connected ? "bg-green-500/10 text-green-600 border-green-500/20" : ""}>
+          <Badge variant={connected ? "default" : "secondary"} className={`text-[10px] md:text-xs ${connected ? "bg-green-500/10 text-green-600 border-green-500/20" : ""}`}>
             {connected ? "Connected" : "Not Connected"}
           </Badge>
         </div>
-        <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+        <p className="text-[10px] md:text-xs text-muted-foreground mt-0.5 truncate">{description}</p>
+        {email && (
+          <p className="text-[10px] md:text-xs text-muted-foreground truncate">Account: {email}</p>
+        )}
         {expiresAt && (
-          <p className="text-xs text-muted-foreground">Token expires: {new Date(expiresAt).toLocaleString()}</p>
+          <p className="text-[10px] md:text-xs text-muted-foreground">Expires: {new Date(expiresAt).toLocaleDateString()}</p>
         )}
         {configuredAt && (
-          <p className="text-xs text-muted-foreground">Configured: {new Date(configuredAt).toLocaleString()}</p>
+          <p className="text-[10px] md:text-xs text-muted-foreground">Configured: {new Date(configuredAt).toLocaleDateString()}</p>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-shrink-0">
         {connected && (
-          <Button variant="ghost" size="sm" onClick={onDisconnect} data-testid={`button-disconnect-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+          <Button variant="ghost" size="sm" className="h-9 w-9 p-0 md:h-8 md:w-auto md:px-2" onClick={onDisconnect} data-testid={`button-disconnect-${name.toLowerCase().replace(/\s+/g, "-")}`}>
             <Unplug className="w-4 h-4 text-muted-foreground" />
           </Button>
         )}
-        <Button variant="outline" size="sm" onClick={onConfigure} data-testid={`button-configure-${name.toLowerCase().replace(/\s+/g, "-")}`}>
+        <Button variant="outline" size="sm" className="h-9 md:h-8 text-xs md:text-sm" onClick={onConfigure} data-testid={`button-configure-${name.toLowerCase().replace(/\s+/g, "-")}`}>
           <Settings2 className="w-4 h-4 mr-1" />
           {connected ? "Configure" : "Set Up"}
         </Button>
@@ -718,6 +997,344 @@ function CompanyCamConfigDialog({ open, onOpenChange, existingConfig }: {
   );
 }
 
+function MicrosoftConfigDialog({ open, onOpenChange, status }: {
+  open: boolean; onOpenChange: (open: boolean) => void; status?: { connected: boolean; email?: string; userName?: string };
+}) {
+  const { toast } = useToast();
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [spTestResult, setSpTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [siteUrl, setSiteUrl] = useState("");
+  const [siteName, setSiteName] = useState("");
+  const [documentLibrary, setDocumentLibrary] = useState("Documents");
+
+  // Fetch SharePoint config
+  const { data: spConfig, refetch: refetchSpConfig } = useQuery({
+    queryKey: ["/api/integrations/sharepoint/config"],
+    enabled: open && status?.connected,
+  });
+
+  // Initialize form values when config loads
+  React.useEffect(() => {
+    const cfg = spConfig && typeof spConfig === 'object' && 'config' in spConfig
+      ? (spConfig as { config?: { siteUrl?: string; siteName?: string; documentLibrary?: string } }).config
+      : undefined;
+    if (cfg) {
+      setSiteUrl(cfg.siteUrl || "");
+      setSiteName(cfg.siteName || "");
+      setDocumentLibrary(cfg.documentLibrary || "Documents");
+    }
+  }, [spConfig]);
+
+  const oauthMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("GET", "/api/oauth/microsoft/authorize");
+      const { url } = await res.json();
+      window.open(url, "_blank");
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/microsoft/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setTestResult(data);
+    },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  const saveSpConfigMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/sharepoint/config", {
+        siteUrl,
+        siteName,
+        documentLibrary,
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || "Failed to save configuration");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "SharePoint Configuration Saved" });
+      refetchSpConfig();
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testSpMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/sharepoint/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setSpTestResult(data);
+    },
+    onError: (e: Error) => {
+      setSpTestResult({ success: false, message: e.message });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+              <span className="text-blue-600 font-bold text-sm">MS</span>
+            </div>
+            Microsoft 365 Configuration
+          </DialogTitle>
+          <DialogDescription>
+            Connect to Microsoft 365 for SharePoint file storage and Outlook email sending.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 pt-2">
+          {status?.connected ? (
+            <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+              <p className="text-sm font-medium text-green-700 dark:text-green-400">Connected</p>
+              {status.email && <p className="text-xs text-muted-foreground mt-1">Account: {status.email}</p>}
+              {status.userName && <p className="text-xs text-muted-foreground">Name: {status.userName}</p>}
+            </div>
+          ) : (
+            <div className="p-3 rounded-lg bg-muted/50 border">
+              <p className="text-sm font-medium mb-1">Setup Required</p>
+              <p className="text-xs text-muted-foreground">
+                Set <code className="bg-muted px-1 rounded">MICROSOFT_CLIENT_ID</code> and <code className="bg-muted px-1 rounded">MICROSOFT_CLIENT_SECRET</code> environment variables, then click Authorize.
+              </p>
+            </div>
+          )}
+
+          <div className="p-3 rounded-lg bg-muted/30 border">
+            <p className="text-xs font-medium mb-2">Enabled Features:</p>
+            <ul className="text-xs text-muted-foreground space-y-1">
+              <li>• <strong>SharePoint:</strong> Store project archives and documents</li>
+              <li>• <strong>Outlook:</strong> Send email notifications</li>
+            </ul>
+          </div>
+
+          {testResult && (
+            <TestResultBanner result={testResult} />
+          )}
+
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              variant="outline"
+              onClick={() => testMutation.mutate()}
+              disabled={testMutation.isPending || !status?.connected}
+              data-testid="button-test-microsoft"
+            >
+              {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+              Test Connection
+            </Button>
+            <Button
+              onClick={() => oauthMutation.mutate()}
+              disabled={oauthMutation.isPending}
+              data-testid="button-oauth-microsoft"
+            >
+              {oauthMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Link2 className="w-4 h-4 mr-1" />}
+              {status?.connected ? "Re-authorize" : "Authorize with Microsoft"}
+            </Button>
+          </div>
+
+          {status?.connected && (
+            <>
+              <Separator />
+              
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded bg-green-600/10 flex items-center justify-center">
+                    <span className="text-green-600 font-bold text-xs">SP</span>
+                  </div>
+                  <h4 className="font-medium text-sm">SharePoint Configuration</h4>
+                  {Boolean((spConfig as { connected?: boolean } | undefined)?.connected) ? (
+                    <span className="ml-auto text-xs text-green-600 bg-green-600/10 px-2 py-0.5 rounded">Connected</span>
+                  ) : null}
+                </div>
+                
+                <p className="text-xs text-muted-foreground">
+                  Configure your SharePoint site for project archives. Archives will be stored in the specified document library.
+                </p>
+
+                <div className="space-y-3">
+                  <div>
+                    <Label htmlFor="sp-site-url" className="text-xs">SharePoint Site URL</Label>
+                    <Input
+                      id="sp-site-url"
+                      placeholder="e.g., trockgc.sharepoint.com"
+                      value={siteUrl}
+                      onChange={(e) => setSiteUrl(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">Your SharePoint domain (without https://)</p>
+                  </div>
+
+                  <div>
+                    <Label htmlFor="sp-site-name" className="text-xs">Site Name</Label>
+                    <Input
+                      id="sp-site-name"
+                      placeholder="e.g., TRockProjects"
+                      value={siteName}
+                      onChange={(e) => setSiteName(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">The name of your SharePoint site</p>
+                  </div>
+
+                  <div>
+                    <Label htmlFor="sp-doc-lib" className="text-xs">Document Library</Label>
+                    <Input
+                      id="sp-doc-lib"
+                      placeholder="Documents"
+                      value={documentLibrary}
+                      onChange={(e) => setDocumentLibrary(e.target.value)}
+                      className="mt-1"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">The document library for archives (default: Documents)</p>
+                  </div>
+                </div>
+
+                {spTestResult && (
+                  <TestResultBanner result={spTestResult} />
+                )}
+
+                <div className="flex items-center justify-between gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={() => testSpMutation.mutate()}
+                    disabled={testSpMutation.isPending || !siteUrl || !siteName}
+                  >
+                    {testSpMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+                    Test SharePoint
+                  </Button>
+                  <Button
+                    onClick={() => saveSpConfigMutation.mutate()}
+                    disabled={saveSpConfigMutation.isPending || !siteUrl || !siteName}
+                  >
+                    {saveSpConfigMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Save className="w-4 h-4 mr-1" />}
+                    Save Configuration
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function GmailConfigDialog({ open, onOpenChange, status }: {
+  open: boolean; onOpenChange: (open: boolean) => void; status?: { connected: boolean; email?: string; userName?: string; method?: string };
+}) {
+  const { toast } = useToast();
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const oauthMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("GET", "/api/oauth/google/authorize");
+      const { url } = await res.json();
+      window.open(url, "_blank");
+    },
+    onError: (e: Error) => {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const testMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/integrations/gmail/test");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setTestResult(data);
+    },
+    onError: (e: Error) => {
+      setTestResult({ success: false, message: e.message });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center">
+              <span className="text-red-600 font-bold text-sm">G</span>
+            </div>
+            Gmail Configuration
+          </DialogTitle>
+          <DialogDescription>
+            Connect Gmail to send email notifications via Google's API.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 pt-2">
+          {status?.connected ? (
+            <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20">
+              <p className="text-sm font-medium text-green-700 dark:text-green-400">Connected</p>
+              {status.email && <p className="text-xs text-muted-foreground mt-1">Account: {status.email}</p>}
+              {status.method && <p className="text-xs text-muted-foreground">Method: {status.method === 'oauth' ? 'OAuth' : status.method === 'env' ? 'Environment Variable' : 'Replit Integration'}</p>}
+            </div>
+          ) : (
+            <div className="p-3 rounded-lg bg-muted/50 border">
+              <p className="text-sm font-medium mb-1">Setup Required</p>
+              <p className="text-xs text-muted-foreground">
+                Set <code className="bg-muted px-1 rounded">GOOGLE_CLIENT_ID</code> and <code className="bg-muted px-1 rounded">GOOGLE_CLIENT_SECRET</code> environment variables, then click Authorize.
+              </p>
+            </div>
+          )}
+
+          <div className="p-3 rounded-lg bg-muted/30 border">
+            <p className="text-xs font-medium mb-2">Connection Methods (in priority order):</p>
+            <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
+              <li>OAuth authentication (recommended)</li>
+              <li>GMAIL_ACCESS_TOKEN environment variable</li>
+              <li>Replit Google Mail integration</li>
+            </ol>
+          </div>
+
+          {testResult && (
+            <TestResultBanner result={testResult} />
+          )}
+
+          <Separator />
+
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              variant="outline"
+              onClick={() => testMutation.mutate()}
+              disabled={testMutation.isPending}
+              data-testid="button-test-gmail"
+            >
+              {testMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Activity className="w-4 h-4 mr-1" />}
+              Test Connection
+            </Button>
+            <Button
+              onClick={() => oauthMutation.mutate()}
+              disabled={oauthMutation.isPending}
+              data-testid="button-oauth-gmail"
+            >
+              {oauthMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Link2 className="w-4 h-4 mr-1" />}
+              {status?.connected && status.method === 'oauth' ? "Re-authorize" : "Authorize with Google"}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function TestResultBanner({ result }: { result: { success: boolean; message: string } }) {
   return (
     <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${result.success ? "bg-green-500/10 text-green-700 dark:text-green-400" : "bg-red-500/10 text-red-700 dark:text-red-400"}`} data-testid="test-result-banner">
@@ -758,6 +1375,7 @@ function HubspotProcoreSyncCard() {
   const [enabled, setEnabled] = useState(false);
   const [bulkSyncing, setBulkSyncing] = useState(false);
   const [bulkResult, setBulkResult] = useState<any>(null);
+  const [companyPollingMinutes, setCompanyPollingMinutes] = useState<number>(60);
 
   const { data: config, isLoading } = useQuery<any>({
     queryKey: ["/api/automation/hubspot-procore/config"],
@@ -766,14 +1384,13 @@ function HubspotProcoreSyncCard() {
   useEffect(() => {
     if (config) {
       setEnabled(config.enabled || false);
+      setCompanyPollingMinutes(config.companyPollingIntervalMinutes || 60);
     }
   }, [config]);
 
   const saveConfig = useMutation({
-    mutationFn: async (newEnabled: boolean) => {
-      const res = await apiRequest("POST", "/api/automation/hubspot-procore/config", {
-        enabled: newEnabled,
-      });
+    mutationFn: async (payload: { enabled?: boolean; companyPollingIntervalMinutes?: number }) => {
+      const res = await apiRequest("POST", "/api/automation/hubspot-procore/config", payload);
       return res.json();
     },
     onSuccess: () => {
@@ -784,7 +1401,11 @@ function HubspotProcoreSyncCard() {
 
   const handleToggle = (val: boolean) => {
     setEnabled(val);
-    saveConfig.mutate(val);
+    saveConfig.mutate({ enabled: val, companyPollingIntervalMinutes: companyPollingMinutes || undefined });
+  };
+
+  const handleSavePolling = () => {
+    saveConfig.mutate({ enabled, companyPollingIntervalMinutes: companyPollingMinutes || undefined });
   };
 
   const handleBulkSync = async (type: 'companies' | 'contacts' | 'both') => {
@@ -842,6 +1463,32 @@ function HubspotProcoreSyncCard() {
             <div className="flex items-center gap-1"><Badge variant="outline" className="text-[10px] h-4 px-1">40</Badge> Person name in vendor</div>
           </div>
           <p className="text-[10px] text-muted-foreground">Threshold: score ≥ 60 = match found. Below threshold = new vendor created.</p>
+        </div>
+
+        <Separator />
+
+        <div>
+          <p className="text-xs font-medium mb-2">Company Polling (fallback for missed webhooks)</p>
+          <p className="text-xs text-muted-foreground mb-2">
+            Periodically fetch recent HubSpot companies and sync to Procore. Duplicates are not recreated — matching updates existing vendors.
+          </p>
+          <div className="flex items-center gap-2">
+            <Select value={String(companyPollingMinutes)} onValueChange={(v) => setCompanyPollingMinutes(Number(v))}>
+              <SelectTrigger className="w-32 h-8">
+                <SelectValue placeholder="Interval" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">Off</SelectItem>
+                <SelectItem value="15">Every 15 min</SelectItem>
+                <SelectItem value="30">Every 30 min</SelectItem>
+                <SelectItem value="60">Every 60 min</SelectItem>
+                <SelectItem value="120">Every 2 hours</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button size="sm" variant="outline" disabled={saveConfig.isPending} onClick={handleSavePolling}>
+              {saveConfig.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : "Save"}
+            </Button>
+          </div>
         </div>
 
         <Separator />
@@ -1083,6 +1730,166 @@ function PollingCard() {
   );
 }
 
+function ProcorePollingCard() {
+  const { toast } = useToast();
+
+  const { data: pollingConfig, isLoading } = useQuery<{
+    enabled: boolean;
+    intervalMinutes: number;
+    isRunning: boolean;
+    lastPollAt: string | null;
+    lastPollResult: any;
+    currentlyPolling: boolean;
+  }>({
+    queryKey: ["/api/automation/procore-polling/config"],
+    refetchInterval: 30000,
+  });
+
+  const [pollingEnabled, setPollingEnabled] = useState(false);
+  const [interval, setIntervalVal] = useState(15);
+
+  useEffect(() => {
+    if (pollingConfig) {
+      setPollingEnabled(pollingConfig.enabled);
+      setIntervalVal(pollingConfig.intervalMinutes);
+    }
+  }, [pollingConfig]);
+
+  const savePolling = useMutation({
+    mutationFn: async (config: { enabled: boolean; intervalMinutes: number }) => {
+      const res = await apiRequest("POST", "/api/automation/procore-polling/config", config);
+      return res.json();
+    },
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/automation/procore-polling/config"] });
+      toast({ title: vars.enabled ? `Procore polling enabled (every ${vars.intervalMinutes} min)` : "Procore polling disabled" });
+    },
+  });
+
+  const triggerNow = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/automation/procore-polling/trigger", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Procore sync triggered" });
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["/api/automation/procore-polling/config"] }), 5000);
+    },
+  });
+
+  const handleToggle = (val: boolean) => {
+    setPollingEnabled(val);
+    savePolling.mutate({ enabled: val, intervalMinutes: interval });
+  };
+
+  const handleIntervalChange = (val: string) => {
+    const mins = parseInt(val);
+    setIntervalVal(mins);
+    if (pollingEnabled) {
+      savePolling.mutate({ enabled: true, intervalMinutes: mins });
+    }
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  const lastResult = pollingConfig?.lastPollResult;
+  const lastPollTime = pollingConfig?.lastPollAt ? new Date(pollingConfig.lastPollAt) : null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2" data-testid="text-procore-polling-title">
+            <Clock className="w-4 h-4" />
+            Procore Data Polling
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {pollingEnabled ? (
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse" />
+                  Active
+                </span>
+              ) : "Off"}
+            </span>
+            <Switch
+              checked={pollingEnabled}
+              onCheckedChange={handleToggle}
+              data-testid="switch-procore-polling-enabled"
+            />
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground mt-1">
+          Automatically syncs Procore projects, vendors, and users to the local database on a timer.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center gap-3">
+          <Label className="text-xs whitespace-nowrap">Sync every</Label>
+          <Select value={String(interval)} onValueChange={handleIntervalChange}>
+            <SelectTrigger className="w-32 h-8" data-testid="select-procore-polling-interval">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="15">15 minutes</SelectItem>
+              <SelectItem value="30">30 minutes</SelectItem>
+              <SelectItem value="60">1 hour</SelectItem>
+              <SelectItem value="120">2 hours</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => triggerNow.mutate()}
+            disabled={pollingConfig?.currentlyPolling || triggerNow.isPending}
+            data-testid="button-trigger-procore-poll-now"
+          >
+            {pollingConfig?.currentlyPolling ? (
+              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Syncing...</>
+            ) : (
+              <><RefreshCw className="w-3 h-3 mr-1" /> Sync Now</>
+            )}
+          </Button>
+        </div>
+
+        {lastPollTime && (
+          <div className="rounded-md bg-muted/50 p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium">Last Poll</p>
+              <span className="text-[10px] text-muted-foreground">{lastPollTime.toLocaleString()}</span>
+            </div>
+            {lastResult && !lastResult.error && (
+              <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                <div>
+                  <span className="font-medium text-foreground">Projects:</span>{" "}
+                  {lastResult.projects?.created || 0} new, {lastResult.projects?.updated || 0} updated
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Vendors:</span>{" "}
+                  {lastResult.vendors?.created || 0} new, {lastResult.vendors?.updated || 0} updated
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Users:</span>{" "}
+                  {lastResult.users?.created || 0} new, {lastResult.users?.updated || 0} updated
+                </div>
+              </div>
+            )}
+            {lastResult?.duration && (
+              <div className="text-xs text-muted-foreground border-t pt-2 mt-1">
+                <span className="font-medium text-foreground">Duration:</span>{" "}
+                {(lastResult.duration / 1000).toFixed(1)}s
+              </div>
+            )}
+            {lastResult?.error && (
+              <p className="text-xs text-red-600">Error: {lastResult.error}</p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function RolePollingCard() {
   const { toast } = useToast();
 
@@ -1095,13 +1902,15 @@ function RolePollingCard() {
     currentlyPolling: boolean;
     lastWebhookEventAt: string | null;
     webhookActive: boolean;
+    batchSize?: number;
+    batchCursor?: number;
   }>({
     queryKey: ["/api/automation/role-polling/config"],
     refetchInterval: 30000,
   });
 
   const [enabled, setEnabled] = useState(false);
-  const [interval, setIntervalVal] = useState(5);
+  const [interval, setIntervalVal] = useState(30);
 
   useEffect(() => {
     if (config) {
@@ -1176,7 +1985,7 @@ function RolePollingCard() {
           </div>
         </div>
         <p className="text-sm text-muted-foreground mt-1">
-          Polls Procore for new project role assignments and sends email notifications. Webhooks are the primary notification method; polling acts as a reliable fallback.
+          Syncs role assignments in batches of 50 projects per cycle to stay within Procore API limits. Webhooks handle real-time detection; polling is a background safety net. A full sweep of all projects completes over multiple cycles.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -1197,7 +2006,7 @@ function RolePollingCard() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <Label className="text-xs whitespace-nowrap">Poll every</Label>
           <Select value={String(interval)} onValueChange={handleIntervalChange}>
             <SelectTrigger className="w-32 h-8" data-testid="select-role-polling-interval">
@@ -1211,6 +2020,9 @@ function RolePollingCard() {
               <SelectItem value="30">30 minutes</SelectItem>
             </SelectContent>
           </Select>
+          <span className="text-xs text-muted-foreground">
+            {config?.batchSize ?? 50} projects per cycle
+          </span>
           <Button
             size="sm"
             variant="outline"
@@ -1233,19 +2045,31 @@ function RolePollingCard() {
               <span className="text-[10px] text-muted-foreground">{lastPollTime.toLocaleString()}</span>
             </div>
             {lastResult && !lastResult.error && (
-              <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
-                <div>
-                  <span className="font-medium text-foreground">Synced:</span>{" "}
-                  {lastResult.synced || 0} roles
+              <div className="space-y-2">
+                <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                  <div>
+                    <span className="font-medium text-foreground">Synced:</span>{" "}
+                    {lastResult.synced || 0} roles
+                  </div>
+                  <div>
+                    <span className="font-medium text-foreground">New:</span>{" "}
+                    {lastResult.newAssignments || 0} assignments
+                  </div>
+                  <div>
+                    <span className="font-medium text-foreground">Emails:</span>{" "}
+                    {lastResult.emails?.sent || 0} sent
+                  </div>
                 </div>
-                <div>
-                  <span className="font-medium text-foreground">New:</span>{" "}
-                  {lastResult.newAssignments || 0} assignments
-                </div>
-                <div>
-                  <span className="font-medium text-foreground">Emails:</span>{" "}
-                  {lastResult.emails?.sent || 0} sent
-                </div>
+                {lastResult.fullRotationComplete && lastResult.totalProjects != null ? (
+                  <p className="text-xs text-green-600">
+                    ✓ Full sweep complete ({lastResult.totalProjects} projects)
+                  </p>
+                ) : lastResult.totalProjects != null && lastResult.totalProjects > 0 && lastResult.nextCursor != null ? (
+                  <p className="text-xs text-muted-foreground">
+                    Batch: {lastResult.nextCursor === 0 ? lastResult.totalProjects : lastResult.nextCursor}/{lastResult.totalProjects} projects (
+                    {lastResult.nextCursor === 0 ? 100 : Math.round((lastResult.nextCursor / lastResult.totalProjects) * 100)}% of full sweep)
+                  </p>
+                ) : null}
               </div>
             )}
             {lastResult?.error && (
@@ -1255,6 +2079,293 @@ function RolePollingCard() {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+interface StageSyncRun {
+  id: number;
+  startedAt: string;
+  completedAt: string | null;
+  status: string;
+  totalChanges: number;
+  syncedCount: number;
+  failedCount: number;
+  changes: Array<{ projectName: string; previousStage: string; newStage: string; hubspotDealId: string }> | null;
+  errors: string[] | null;
+}
+
+function BidBoardStageSyncCard() {
+  const { toast } = useToast();
+  const [reportOpen, setReportOpen] = useState(false);
+  const [resetBaselineOpen, setResetBaselineOpen] = useState(false);
+
+  const { data: config, isLoading } = useQuery<{
+    enabled: boolean;
+    intervalMinutes: number;
+    dryRun: boolean;
+    lastSyncAt: string | null;
+    currentlySyncing: boolean;
+  }>({
+    queryKey: ["/api/bidboard/stage-sync/config"],
+    refetchInterval: 15000,
+  });
+
+  const { data: history = [], refetch: refetchHistory } = useQuery<StageSyncRun[]>({
+    queryKey: ["/api/bidboard/stage-sync/history"],
+    enabled: reportOpen,
+  });
+
+  const [enabled, setEnabled] = useState(false);
+  const [interval, setIntervalVal] = useState(15);
+  const [dryRun, setDryRun] = useState(true);
+
+  useEffect(() => {
+    if (config) {
+      setEnabled(config.enabled);
+      setIntervalVal(config.intervalMinutes || 15);
+      setDryRun(config.dryRun !== false);
+    }
+  }, [config]);
+
+  const saveConfig = useMutation({
+    mutationFn: async (vars: { enabled: boolean; intervalMinutes: number; dryRun?: boolean }) => {
+      const res = await apiRequest("POST", "/api/bidboard/stage-sync/config", vars);
+      return res.json();
+    },
+    onSuccess: (_, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/config"] });
+      toast({ title: vars.enabled ? `Stage sync enabled (every ${vars.intervalMinutes} min)` : "Stage sync disabled" });
+    },
+  });
+
+  const triggerNow = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/bidboard/stage-sync/trigger", {});
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Stage sync triggered" });
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/history"] });
+    },
+  });
+
+  const resetBaseline = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/bidboard/stage-sync/reset-baseline", {});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Reset failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      setResetBaselineOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/bidboard/stage-sync/history"] });
+      toast({ title: "Baseline reset", description: data.message });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Reset failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const handleToggle = (val: boolean) => {
+    setEnabled(val);
+    saveConfig.mutate({ enabled: val, intervalMinutes: interval, dryRun });
+  };
+
+  const handleIntervalChange = (val: string) => {
+    const mins = parseInt(val);
+    setIntervalVal(mins);
+    if (enabled) {
+      saveConfig.mutate({ enabled: true, intervalMinutes: mins, dryRun });
+    }
+  };
+
+  const handleDryRunToggle = (val: boolean) => {
+    setDryRun(val);
+    saveConfig.mutate({ enabled, intervalMinutes: interval, dryRun: val });
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  const lastSyncTime = config?.lastSyncAt ? new Date(config.lastSyncAt) : null;
+
+  return (
+    <>
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <RefreshCw className="w-4 h-4" />
+              BidBoard Stage Sync
+            </CardTitle>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">
+                {enabled ? (
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-green-500 inline-block animate-pulse" />
+                    Active
+                  </span>
+                ) : "Off"}
+              </span>
+              <Switch checked={enabled} onCheckedChange={handleToggle} />
+            </div>
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">
+            Exports Bid Board project list from Procore and syncs stage changes to HubSpot deals.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <Label className="text-xs whitespace-nowrap">Sync every</Label>
+            <Select value={String(interval)} onValueChange={handleIntervalChange}>
+              <SelectTrigger className="w-32 h-8">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {[5, 10, 15, 20, 30, 45, 60].map((m) => (
+                  <SelectItem key={m} value={String(m)}>
+                    {m === 60 ? "60 minutes" : `${m} minutes`}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => triggerNow.mutate()}
+              disabled={config?.currentlySyncing || triggerNow.isPending}
+            >
+              {config?.currentlySyncing ? (
+                <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Syncing...</>
+              ) : (
+                <><RefreshCw className="w-3 h-3 mr-1" /> Sync Now</>
+              )}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => { setReportOpen(true); refetchHistory(); }}
+            >
+              <FileText className="w-3 h-3 mr-1" /> View Report
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-amber-600 border-amber-200 hover:bg-amber-50 hover:text-amber-700"
+              onClick={() => setResetBaselineOpen(true)}
+            >
+              <RotateCcw className="w-3 h-3 mr-1" /> Reset Baseline
+            </Button>
+            <AlertDialog open={resetBaselineOpen} onOpenChange={setResetBaselineOpen}>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Reset Baseline</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will delete all sync run history. The next stage sync will re-initialize
+                    the baseline (seed bidboard_status for all projects without pushing to HubSpot).
+                    Use this if a previous sync pushed incorrect changes without a proper baseline.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={(e) => { e.preventDefault(); resetBaseline.mutate(); }}
+                    className="bg-amber-600 hover:bg-amber-700"
+                    disabled={resetBaseline.isPending}
+                  >
+                    {resetBaseline.isPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : null}
+                    Reset
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
+
+          <div className="flex items-center justify-between rounded-md border p-3">
+            <div>
+              <Label className="text-sm font-medium">Mode</Label>
+              <p className="text-xs text-muted-foreground">
+                {dryRun ? "Dry Run — logs changes only, no HubSpot updates" : "Live — pushes changes to HubSpot"}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">{dryRun ? "Dry Run" : "Live"}</span>
+              <Switch checked={!dryRun} onCheckedChange={(v) => handleDryRunToggle(!v)} />
+            </div>
+          </div>
+
+          {lastSyncTime && (
+            <div className="rounded-md bg-muted/50 p-3">
+              <p className="text-xs text-muted-foreground">
+                Last sync: {lastSyncTime.toLocaleString()}
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={reportOpen} onOpenChange={setReportOpen}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Stage Sync Report</DialogTitle>
+            <DialogDescription>
+              Sync runs and changes detected at each run
+            </DialogDescription>
+          </DialogHeader>
+          <div className="overflow-y-auto flex-1 min-h-0 -mx-6 px-6">
+            {history.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">No sync runs yet</p>
+            ) : (
+              <div className="space-y-4">
+                {history.map((run) => (
+                  <div key={run.id} className="rounded-lg border p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">
+                        {new Date(run.startedAt).toLocaleString()}
+                      </span>
+                      <Badge variant={
+                        run.status === "success" ? "default" :
+                        run.status === "partial" ? "secondary" : "destructive"
+                      }>
+                        {run.status}
+                      </Badge>
+                    </div>
+                    <div className="text-xs text-muted-foreground grid grid-cols-3 gap-2">
+                      <span>Total: {run.totalChanges}</span>
+                      <span>Synced: {run.syncedCount}</span>
+                      <span>Failed: {run.failedCount}</span>
+                    </div>
+                    {run.changes && run.changes.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-xs font-medium">Changes:</p>
+                        <div className="text-xs space-y-1 max-h-40 overflow-y-auto">
+                          {run.changes.map((c, i) => (
+                            <div key={i} className="py-1 border-b border-dashed last:border-0">
+                              <span className="font-medium">{c.projectName}</span>
+                              <span className="text-muted-foreground"> — {c.previousStage} → {c.newStage}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {run.errors && run.errors.length > 0 && (
+                      <div className="mt-2">
+                        <p className="text-xs font-medium text-red-600">Errors:</p>
+                        <ul className="text-xs text-red-600 list-disc list-inside">
+                          {run.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}
+                          {run.errors.length > 5 && <li>...and {run.errors.length - 5} more</li>}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -1268,7 +2379,7 @@ function StageMappingCard() {
     queryKey: ["/api/stage-mapping/config"],
   });
 
-  const { data: hubspotStages } = useQuery<{ stageId: string; label: string; pipelineLabel: string }[]>({
+  const { data: hubspotStages, refetch: refetchHubspotStages } = useQuery<{ stageId: string; label: string; pipelineLabel: string }[]>({
     queryKey: ["/api/stage-mapping/hubspot-stages"],
   });
 
@@ -1295,6 +2406,24 @@ function StageMappingCard() {
     },
     onError: (e: Error) => {
       toast({ title: "Failed to save", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const refreshPipelinesMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/stage-mapping/refresh-hubspot-pipelines");
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.message || "Failed to refresh pipelines");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      refetchHubspotStages();
+      toast({ title: "Pipelines Refreshed", description: `Found ${data.stages?.length || 0} stages from HubSpot` });
+    },
+    onError: (e: Error) => {
+      toast({ title: "Failed to refresh", description: e.message, variant: "destructive" });
     },
   });
 
@@ -1327,7 +2456,20 @@ function StageMappingCard() {
             <ArrowRightLeft className="w-4 h-4" />
             BidBoard → HubSpot Stage Mapping
           </CardTitle>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refreshPipelinesMutation.mutate()}
+              disabled={refreshPipelinesMutation.isPending}
+              title="Refresh HubSpot Pipelines"
+            >
+              {refreshPipelinesMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+            </Button>
             <div className="flex items-center gap-2">
               <Label htmlFor="stage-mapping-toggle" className="text-xs text-muted-foreground">
                 {enabled ? "Active" : "Disabled"}
@@ -1361,10 +2503,60 @@ function StageMappingCard() {
       <CardContent>
         {configLoading ? (
           <Skeleton className="h-40 w-full" />
+        ) : statuses.length === 0 && stages.length === 0 ? (
+          <div className="text-center py-6 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              No BidBoard data or HubSpot stages found.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refreshPipelinesMutation.mutate()}
+              disabled={refreshPipelinesMutation.isPending}
+            >
+              {refreshPipelinesMutation.isPending ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4 mr-2" />
+              )}
+              Refresh HubSpot Pipelines
+            </Button>
+          </div>
         ) : statuses.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-6">
-            No BidBoard data imported yet. Import a BidBoard CSV on the Procore Data page first.
-          </p>
+          <div className="py-4 space-y-4">
+            <div className="text-center">
+              <p className="text-sm text-muted-foreground">
+                No BidBoard data imported yet. Import a BidBoard CSV on the Procore Data page first to configure stage mappings.
+              </p>
+            </div>
+            
+            {stages.length > 0 && (
+              <div className="border rounded-lg p-4 bg-muted/30">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-medium">Available HubSpot Stages ({stages.length})</h4>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => refreshPipelinesMutation.mutate()}
+                    disabled={refreshPipelinesMutation.isPending}
+                  >
+                    {refreshPipelinesMutation.isPending ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3 h-3" />
+                    )}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {stages.map(s => (
+                    <Badge key={s.stageId} variant="secondary" className="text-xs">
+                      {s.label}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         ) : (
           <div className="space-y-2">
             <div className="grid grid-cols-[1fr,auto,1fr] gap-3 items-center px-2 pb-1 border-b">
@@ -1493,7 +2685,7 @@ function ProjectNumberCard() {
           </div>
         </div>
         <p className="text-sm text-muted-foreground mt-1">
-          Automatically assigns a project number (dayOfYear + 2-digit year + suffix) to new HubSpot deals. Updates the deal's Project Number field and sends an email notification.
+          Assigns project numbers in the format <code className="font-mono text-xs">OFFICE-TYPE-JULIAN-suffix</code> (e.g. DFW-9-06326-ab) to new HubSpot deals. Office from Project Location (DFW/ATL), type from Project Type dropdown (4=Service, 9=Residential), Julian date (day of year + year), then incremental suffix (aa, ab, ac…). Updates the deal's Project Number field and sends an email notification.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">

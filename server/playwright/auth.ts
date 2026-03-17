@@ -1,0 +1,550 @@
+/**
+ * Playwright Authentication Module
+ * =================================
+ * 
+ * This module handles browser-based authentication to Procore.
+ * It manages credentials securely and maintains login sessions.
+ * 
+ * Why Browser Authentication?
+ * Some Procore features (BidBoard, Portfolio transitions) require
+ * browser automation because they don't have complete API coverage.
+ * This module handles logging in and maintaining authenticated sessions.
+ * 
+ * Security Features:
+ * - Passwords encrypted at rest using AES-256-GCM
+ * - Encryption key derived from SESSION_SECRET environment variable
+ * - Session cookies saved to avoid repeated logins
+ * - Sessions expire and re-authenticate as needed
+ * 
+ * Login Flow:
+ * 1. Check for existing valid session
+ * 2. If no session, decrypt stored credentials
+ * 3. Navigate to Procore login page
+ * 4. Enter email, wait for password field
+ * 5. Enter password, click sign in
+ * 6. Handle any 2FA or security prompts
+ * 7. Save session cookies for reuse
+ * 
+ * Key Functions:
+ * - loginToProcore(): Main login function
+ * - ensureLoggedIn(): Ensures valid session, re-logs if needed
+ * - saveProcoreCredentials(): Securely stores credentials
+ * - testLogin(): Validates credentials without saving
+ * - encryptPassword()/decryptPassword(): Credential encryption
+ * 
+ * Environment Variables Required:
+ * - SESSION_SECRET: Used to derive encryption key for credentials
+ * 
+ * @module playwright/auth
+ */
+
+import { Page } from "playwright";
+import { getPage, saveSession, clearSession, closeBrowser, withRetry, randomDelay, takeScreenshot } from "./browser";
+import { PROCORE_SELECTORS, PROCORE_URLS } from "./selectors";
+import { log } from "../index";
+import { storage } from "../storage";
+import crypto from "crypto";
+
+const ENCRYPTION_ALGORITHM = "aes-256-gcm";
+
+interface ProcoreCredentials {
+  email: string;
+  password: string;
+  sandbox?: boolean;
+}
+
+interface LoginResult {
+  success: boolean;
+  error?: string;
+  screenshotPath?: string;
+}
+
+function getSessionSecret(): string {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret) {
+    throw new Error("SESSION_SECRET environment variable is required for credential encryption");
+  }
+  return secret;
+}
+
+function deriveKey(secret: string, salt: Buffer): Buffer {
+  return crypto.scryptSync(secret, salt, 32);
+}
+
+export function encryptPassword(password: string): string {
+  const secret = getSessionSecret();
+  const salt = crypto.randomBytes(16);
+  const key = deriveKey(secret, salt);
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+
+  let encrypted = cipher.update(password, "utf8", "hex");
+  encrypted += cipher.final("hex");
+
+  const authTag = cipher.getAuthTag();
+
+  return `${salt.toString("hex")}:${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted}`;
+}
+
+export function decryptPassword(encryptedData: string): string {
+  const parts = encryptedData.split(":");
+  const secret = getSessionSecret();
+
+  // Support both old format (iv:authTag:encrypted) and new format (salt:iv:authTag:encrypted)
+  let salt: Buffer, iv: Buffer, authTag: Buffer, encrypted: string;
+  if (parts.length === 4) {
+    // New format with random salt
+    salt = Buffer.from(parts[0], "hex");
+    iv = Buffer.from(parts[1], "hex");
+    authTag = Buffer.from(parts[2], "hex");
+    encrypted = parts[3];
+  } else if (parts.length === 3) {
+    // Legacy format with hardcoded salt — backward compatibility
+    salt = Buffer.from("salt");
+    iv = Buffer.from(parts[0], "hex");
+    authTag = Buffer.from(parts[1], "hex");
+    encrypted = parts[2];
+  } else {
+    throw new Error("Invalid encrypted data format");
+  }
+
+  const key = deriveKey(secret, salt);
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+
+  let decrypted = decipher.update(encrypted, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+
+  return decrypted;
+}
+
+export async function getProcoreCredentials(): Promise<ProcoreCredentials | null> {
+  const config = await storage.getAutomationConfig("procore_browser_credentials");
+  
+  if (!config?.value) {
+    return null;
+  }
+  
+  const { email, encryptedPassword, sandbox } = config.value as {
+    email: string;
+    encryptedPassword: string;
+    sandbox?: boolean;
+  };
+  
+  try {
+    const password = decryptPassword(encryptedPassword);
+    return { email, password, sandbox };
+  } catch (error) {
+    log(`Failed to decrypt Procore credentials: ${error}`, "playwright");
+    return null;
+  }
+}
+
+export async function saveProcoreCredentials(
+  email: string,
+  password: string,
+  sandbox: boolean = false
+): Promise<void> {
+  const encryptedPassword = encryptPassword(password);
+  
+  await storage.upsertAutomationConfig({
+    key: "procore_browser_credentials",
+    value: {
+      email,
+      encryptedPassword,
+      sandbox,
+    },
+    description: "Procore browser automation credentials (encrypted)",
+  });
+  
+  log("Procore browser credentials saved", "playwright");
+}
+
+async function isLoggedIn(page: Page): Promise<boolean> {
+  try {
+    const url = page.url();
+    
+    // Check if we're on a logged-in page (various Procore domains)
+    const isOnProcoreApp = url.includes("app.procore.com") || 
+                           url.includes("sandbox.procore.com") ||
+                           url.includes("us02.procore.com") ||
+                           url.includes(".procore.com/webclients") ||
+                           url.includes(".procore.com/") && !url.includes("login");
+    
+    if (isOnProcoreApp) {
+      // First check URL - if we're on a project or dashboard page, we're logged in
+      if (url.includes("/projects") || url.includes("/company") || url.includes("/webclients") || url.includes("/dashboard")) {
+        log(`Logged in - detected dashboard/project URL: ${url}`, "playwright");
+        return true;
+      }
+      
+      // Look for user menu or other logged-in indicators
+      const userMenu = await page.$(PROCORE_SELECTORS.nav.userMenu);
+      if (userMenu) return true;
+      
+      // Check for other common logged-in elements
+      const hasNav = await page.$('nav, [class*="navigation"], [class*="sidebar"], [class*="header"]');
+      const hasProjectSelector = await page.$('[class*="project"], [class*="company"]');
+      
+      if (hasNav || hasProjectSelector) {
+        log(`Logged in - detected navigation elements`, "playwright");
+        return true;
+      }
+    }
+    
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function performLogin(page: Page, credentials: ProcoreCredentials): Promise<LoginResult> {
+  const loginUrl = credentials.sandbox ? PROCORE_URLS.loginSandbox : PROCORE_URLS.login;
+  
+  log(`Navigating to Procore login: ${loginUrl}`, "playwright");
+  // Use 'load' instead of 'networkidle' — Procore's login page has persistent connections
+  // (analytics, SSO polling) that prevent networkidle from ever firing
+  await page.goto(loginUrl, { waitUntil: "load" });
+
+  await randomDelay(1000, 2000);
+
+  // STEP 1: Enter email
+  log("Step 1: Entering email", "playwright");
+  const emailInput = await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 15000 });
+  await emailInput.fill(credentials.email);
+  
+  await randomDelay(500, 1000);
+  
+  // Check if password field is already visible (old login flow)
+  let passwordVisible = await page.$(PROCORE_SELECTORS.login.passwordInput);
+  
+  if (!passwordVisible) {
+    // Two-step login: Click Continue button to proceed to password step
+    log("Clicking Continue to proceed to password step", "playwright");
+    try {
+      // Try to find and click Continue/Next button
+      const continueButton = await page.waitForSelector(PROCORE_SELECTORS.login.continueButton, { timeout: 5000 });
+      await continueButton.click();
+      
+      // Wait for password field to appear
+      log("Waiting for password field...", "playwright");
+      await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+    } catch (e) {
+      // Maybe there's a submit button instead
+      log("Trying submit button for email step", "playwright");
+      const submitBtn = await page.$('button[type="submit"]');
+      if (submitBtn) {
+        await submitBtn.click();
+        await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+      } else {
+        const screenshotPath = await takeScreenshot(page, "login-no-continue-button");
+        return {
+          success: false,
+          error: "Could not find Continue button or password field",
+          screenshotPath,
+        };
+      }
+    }
+  }
+  
+  await randomDelay(500, 1000);
+  
+  // STEP 2: Enter password
+  log("Step 2: Entering password", "playwright");
+  const passwordInput = await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 10000 });
+  await passwordInput.fill(credentials.password);
+  
+  await randomDelay(500, 1000);
+  
+  // Click Sign In / Submit
+  log("Clicking Sign In", "playwright");
+  const submitButton = await page.waitForSelector(PROCORE_SELECTORS.login.submitButton, { timeout: 10000 });
+  await submitButton.click();
+  
+  // Wait for navigation - Procore may do multiple redirects
+  log("Waiting for login to complete...", "playwright");
+  
+  // Give the page time to redirect
+  await page.waitForTimeout(3000);
+  
+  // Check URL to see if we've left the login page
+  const postLoginUrl = page.url();
+  log(`Post-login URL: ${postLoginUrl}`, "playwright");
+  
+  // If still on login page, wait for navigation or error
+  if (postLoginUrl.includes("login")) {
+    try {
+      await Promise.race([
+        page.waitForURL(/procore\.com(?!.*login)/, { timeout: 30000 }),
+        page.waitForSelector(PROCORE_SELECTORS.login.errorMessage, { timeout: 30000 }),
+        page.waitForSelector(PROCORE_SELECTORS.login.mfaInput, { timeout: 30000 }),
+      ]);
+    } catch (error) {
+      // Check if we actually navigated away from login
+      const currentUrl = page.url();
+      if (!currentUrl.includes("login")) {
+        log(`Navigation detected to: ${currentUrl}`, "playwright");
+      } else {
+        const screenshotPath = await takeScreenshot(page, "login-timeout");
+        return {
+          success: false,
+          error: "Login timed out after submitting credentials",
+          screenshotPath,
+        };
+      }
+    }
+  }
+  
+  // Wait a bit more for page to stabilize after redirects
+  await page.waitForTimeout(2000);
+  
+  // Check for MFA
+  const mfaInput = await page.$(PROCORE_SELECTORS.login.mfaInput);
+  if (mfaInput) {
+    const screenshotPath = await takeScreenshot(page, "mfa-required");
+    return {
+      success: false,
+      error: "MFA required - please configure MFA handling or use an account without MFA",
+      screenshotPath,
+    };
+  }
+  
+  // Check for error message (only if still on login page)
+  const currentUrl = page.url();
+  if (currentUrl.includes("login")) {
+    const errorElement = await page.$(PROCORE_SELECTORS.login.errorMessage);
+    if (errorElement) {
+      const errorText = await errorElement.textContent();
+      const screenshotPath = await takeScreenshot(page, "login-error");
+      return {
+        success: false,
+        error: `Login failed: ${errorText}`,
+        screenshotPath,
+      };
+    }
+  }
+  
+  // Verify we're logged in
+  if (await isLoggedIn(page)) {
+    await saveSession();
+    log("Successfully logged into Procore", "playwright");
+    return { success: true };
+  }
+  
+  // If URL indicates we're on Procore (not login), consider it success
+  if (!currentUrl.includes("login") && currentUrl.includes("procore.com")) {
+    await saveSession();
+    log(`Login appears successful - on URL: ${currentUrl}`, "playwright");
+    return { success: true };
+  }
+  
+  const screenshotPath = await takeScreenshot(page, "login-unknown-state");
+  return {
+    success: false,
+    error: `Unknown login state. Current URL: ${currentUrl}`,
+    screenshotPath,
+  };
+}
+
+export async function ensureLoggedIn(options?: { targetUrl?: string }): Promise<{ page: Page; success: boolean; error?: string }> {
+  let page = await getPage();
+
+  // If targetUrl provided, try navigating there first — we may already be logged in
+  if (options?.targetUrl) {
+    try {
+      await page.goto(options.targetUrl, { waitUntil: "load", timeout: 60000 });
+      await page.waitForTimeout(2000);
+      const url = page.url();
+      if (url.includes("/tools/bid-board") || url.includes("/webclients") && !url.includes("login")) {
+        log("Already on Bid Board dashboard, skipping login", "playwright");
+        return { page, success: true };
+      }
+      if (url.includes("login.procore.com") || url.includes("login-sandbox.procore.com")) {
+        log("Redirected to login (stale session), clearing session for fresh login", "playwright");
+        await clearSession();
+        await closeBrowser();
+        page = await getPage();
+      }
+    } catch (e) {
+      log(`Target URL check failed: ${(e as Error).message}`, "playwright");
+    }
+  }
+
+  // Check if already logged in
+  if (await isLoggedIn(page)) {
+    log("Already logged into Procore", "playwright");
+    return { page, success: true };
+  }
+
+  // On login page with stale session — clear and get fresh context
+  const url = page.url();
+  if (url.includes("login.procore.com") || url.includes("login-sandbox.procore.com")) {
+    log("On login page, clearing stale session for fresh login", "playwright");
+    await clearSession();
+    await closeBrowser();
+    page = await getPage();
+  }
+
+  // Get credentials
+  const credentials = await getProcoreCredentials();
+  if (!credentials) {
+    return {
+      page,
+      success: false,
+      error: "Procore browser credentials not configured. Please save credentials in Settings.",
+    };
+  }
+
+  // Perform login with retry
+  const result = await withRetry(
+    () => performLogin(page, credentials),
+    3,
+    2000
+  );
+
+  return {
+    page,
+    success: result.success,
+    error: result.error,
+  };
+}
+
+export async function logout(): Promise<void> {
+  const page = await getPage();
+  
+  // Click user menu and find logout
+  try {
+    const userMenu = await page.$(PROCORE_SELECTORS.nav.userMenu);
+    if (userMenu) {
+      await userMenu.click();
+      await randomDelay(500, 1000);
+      
+      const logoutLink = await page.$('a:has-text("Log Out"), a:has-text("Sign Out")');
+      if (logoutLink) {
+        await logoutLink.click();
+        await page.waitForURL(/login/, { timeout: 10000 });
+      }
+    }
+  } catch (error) {
+    log(`Logout error: ${error}`, "playwright");
+  }
+  
+  await clearSession();
+  log("Logged out of Procore", "playwright");
+}
+
+export async function testLogin(email: string, password: string, sandbox: boolean = false): Promise<LoginResult> {
+  // Clear any existing session first (before getting page)
+  await clearSession();
+  
+  // Now get a fresh page from a new context
+  const page = await getPage();
+  
+  const result = await performLogin(page, { email, password, sandbox });
+  
+  if (result.success) {
+    // Save credentials if login was successful
+    await saveProcoreCredentials(email, password, sandbox);
+  }
+  
+  return result;
+}
+
+/**
+ * Login to Procore using an external Page object (for isolated browser instances)
+ * Uses stored credentials from the database
+ * Handles Procore's two-step login flow (email -> Continue -> password -> Sign In)
+ */
+export async function loginToProcore(page: Page): Promise<boolean> {
+  const credentials = await getProcoreCredentials();
+  
+  if (!credentials) {
+    log("No Procore credentials configured", "playwright");
+    return false;
+  }
+  
+  const loginUrl = credentials.sandbox ? PROCORE_URLS.loginSandbox : PROCORE_URLS.login;
+  
+  try {
+    log(`Navigating to Procore login: ${loginUrl}`, "playwright");
+    // Use 'load' instead of 'networkidle' — Procore's login page has persistent connections
+    await page.goto(loginUrl, { waitUntil: "load", timeout: 30000 });
+    
+    // Wait a moment for page to stabilize
+    await page.waitForTimeout(1500);
+    
+    // STEP 1: Enter email
+    log("Step 1: Entering email", "playwright");
+    await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 15000 });
+    await page.fill(PROCORE_SELECTORS.login.emailInput, credentials.email);
+    
+    await page.waitForTimeout(500);
+    
+    // Check if password field is already visible (old login flow)
+    let passwordVisible = await page.$(PROCORE_SELECTORS.login.passwordInput);
+    
+    if (!passwordVisible) {
+      // Two-step login: Click Continue button
+      log("Clicking Continue to proceed to password step", "playwright");
+      try {
+        const continueButton = await page.waitForSelector(PROCORE_SELECTORS.login.continueButton, { timeout: 5000 });
+        await continueButton.click();
+        
+        // Wait for password field
+        log("Waiting for password field...", "playwright");
+        await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+      } catch {
+        // Try generic submit button
+        log("Trying submit button for email step", "playwright");
+        const submitBtn = await page.$('button[type="submit"]');
+        if (submitBtn) {
+          await submitBtn.click();
+          await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
+        } else {
+          log("Could not find Continue button or password field", "playwright");
+          return false;
+        }
+      }
+    }
+    
+    await page.waitForTimeout(500);
+    
+    // STEP 2: Enter password
+    log("Step 2: Entering password", "playwright");
+    await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 10000 });
+    await page.fill(PROCORE_SELECTORS.login.passwordInput, credentials.password);
+    
+    await page.waitForTimeout(500);
+    
+    // Click Sign In
+    log("Clicking Sign In", "playwright");
+    await page.click(PROCORE_SELECTORS.login.submitButton);
+    
+    // Wait for navigation
+    try {
+      await page.waitForURL(/app\.procore\.com|sandbox\.procore\.com|us02\.procore\.com/, { timeout: 30000 });
+      log("Successfully logged into Procore", "playwright");
+      return true;
+    } catch {
+      // Check for MFA or error
+      const mfaInput = await page.$(PROCORE_SELECTORS.login.mfaInput);
+      if (mfaInput) {
+        log("MFA required - cannot proceed", "playwright");
+        return false;
+      }
+      
+      const errorElement = await page.$(PROCORE_SELECTORS.login.errorMessage);
+      if (errorElement) {
+        const errorText = await errorElement.textContent();
+        log(`Login failed: ${errorText}`, "playwright");
+        return false;
+      }
+      
+      log("Login navigation timed out", "playwright");
+      return false;
+    }
+  } catch (error: any) {
+    log(`Login error: ${error.message}`, "playwright");
+    return false;
+  }
+}

@@ -1,0 +1,299 @@
+/**
+ * Change Order Sync Module
+ * ========================
+ * 
+ * This module synchronizes change order data from Procore to HubSpot.
+ * It calculates total contract values including approved and pending changes.
+ * 
+ * What are Change Orders?
+ * Change orders represent modifications to the original contract scope and price.
+ * They can be:
+ * - Approved: Confirmed additional work/cost
+ * - Pending: Requested but not yet approved
+ * - Rejected: Denied changes
+ * 
+ * Contract Value Calculation:
+ * totalContractValue = primeContractAmount + approvedChangeOrders + pendingChangeOrders
+ * 
+ * This includes pending because pending changes represent work expected
+ * to be performed and should be visible in pipeline reporting.
+ * 
+ * Data Flow:
+ * 1. Fetch change order packages from Procore API
+ * 2. Calculate approved and pending amounts
+ * 3. Update HubSpot deal with total contract value
+ * 4. Store change order details for reference
+ * 
+ * Key Functions:
+ * - getProjectChangeOrders(): Fetch change orders from Procore
+ * - getPrimeContractAmount(): Get original contract value
+ * - calculateTotalContractValue(): Compute total with changes
+ * - syncChangeOrdersToHubSpot(): Push values to HubSpot deal
+ * 
+ * HubSpot Properties Updated:
+ * - amount: Total contract value
+ * - hs_change_order_approved: Approved changes total
+ * - hs_change_order_pending: Pending changes total
+ * 
+ * Automation Config:
+ * - sync_change_orders: Enable/disable (Sync Config: "Update HubSpot deal amount on Change Orders")
+ * 
+ * @module change-order-sync
+ */
+
+import { storage } from './storage';
+import { getProcoreClient, getCompanyId } from './procore';
+
+/** Change order record from Procore */
+export interface ChangeOrder {
+  id: string;
+  number: string;
+  title: string;
+  status: string;
+  approvedAmount: number;
+  pendingAmount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContractValue {
+  primeContractAmount: number;
+  approvedChangeOrders: number;
+  pendingChangeOrders: number;
+  totalContractValue: number;
+  changeOrders: ChangeOrder[];
+}
+
+export async function getProjectChangeOrders(projectId: string): Promise<ChangeOrder[]> {
+  try {
+    const client = await getProcoreClient();
+    const companyId = await getCompanyId();
+
+    const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
+      params: { company_id: companyId },
+    });
+    const packages = response.data || [];
+
+    const changeOrders: ChangeOrder[] = [];
+
+    for (const pkg of packages) {
+      const status = (pkg.status || 'pending').toLowerCase();
+      const amount = parseFloat(pkg.grand_total || pkg.amount || 0);
+      changeOrders.push({
+        id: String(pkg.id),
+        number: pkg.number || '',
+        title: pkg.title || pkg.description || '',
+        status: pkg.status || 'pending',
+        approvedAmount: status === 'approved' ? amount : 0,
+        pendingAmount: status !== 'approved' ? amount : 0,
+        createdAt: pkg.created_at || '',
+        updatedAt: pkg.updated_at || '',
+      });
+    }
+
+    return changeOrders;
+  } catch (error: any) {
+    console.error(`[ChangeOrder] Error fetching change orders for project ${projectId}:`, error.message);
+    return [];
+  }
+}
+
+export async function getPrimeContractAmount(projectId: string): Promise<number> {
+  try {
+    const client = await getProcoreClient();
+    const companyId = await getCompanyId();
+    
+    const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
+      params: { company_id: companyId },
+    });
+    const contracts = response.data || [];
+
+    if (contracts.length === 0) return 0;
+
+    const totalAmount = contracts.reduce((sum: number, contract: any) => {
+      return sum + parseFloat(contract.signed_contract_value || contract.contract_amount || 0);
+    }, 0);
+
+    return totalAmount;
+  } catch (error: any) {
+    console.error(`[ChangeOrder] Error fetching prime contract for project ${projectId}:`, error.message);
+    return 0;
+  }
+}
+
+export async function calculateTotalContractValue(projectId: string): Promise<ContractValue> {
+  const primeContractAmount = await getPrimeContractAmount(projectId);
+  const changeOrders = await getProjectChangeOrders(projectId);
+
+  const approvedChangeOrders = changeOrders.reduce((sum, co) => sum + co.approvedAmount, 0);
+  const pendingChangeOrders = changeOrders.reduce((sum, co) => sum + co.pendingAmount, 0);
+  // Include both approved and pending change orders in total (pending represents expected work)
+  const totalContractValue = primeContractAmount + approvedChangeOrders + pendingChangeOrders;
+
+  return {
+    primeContractAmount,
+    approvedChangeOrders,
+    pendingChangeOrders,
+    totalContractValue,
+    changeOrders,
+  };
+}
+
+export async function updateHubSpotDealAmount(dealId: string, amount: number): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { updateHubSpotDeal } = await import('./hubspot');
+    await updateHubSpotDeal(dealId, { amount: String(amount) });
+    
+    console.log(`[ChangeOrder] Updated HubSpot deal ${dealId} amount to $${amount.toLocaleString()}`);
+    return { success: true };
+  } catch (error: any) {
+    console.error(`[ChangeOrder] Error updating HubSpot deal amount:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+export async function syncChangeOrdersToHubSpot(procoreProjectId: string): Promise<{
+  success: boolean;
+  dealId?: string;
+  previousAmount?: number;
+  newAmount?: number;
+  contractValue?: ContractValue;
+  error?: string;
+}> {
+  // Check if change order sync is enabled (Sync Config: "Update HubSpot deal amount on Change Orders")
+  const changeOrderSyncConfig = await storage.getAutomationConfig("sync_change_orders");
+  const syncEnabled = (changeOrderSyncConfig?.value as any)?.enabled === true || (changeOrderSyncConfig as any)?.isActive === true;
+  
+  if (!syncEnabled) {
+    console.log(`[ChangeOrder] Change order sync disabled - skipping HubSpot update for project ${procoreProjectId}`);
+    return { success: false, error: 'Change order sync is disabled' };
+  }
+  
+  try {
+    const mapping = await storage.getSyncMappingByProcoreProjectId(procoreProjectId);
+    
+    if (!mapping?.hubspotDealId) {
+      return { success: false, error: 'No HubSpot deal linked to this project' };
+    }
+
+    const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+    const previousAmount = deal?.amount ? parseFloat(deal.amount) : 0;
+
+    const contractValue = await calculateTotalContractValue(procoreProjectId);
+
+    if (contractValue.totalContractValue === previousAmount) {
+      console.log(`[ChangeOrder] No amount change for project ${procoreProjectId}`);
+      return {
+        success: true,
+        dealId: mapping.hubspotDealId,
+        previousAmount,
+        newAmount: contractValue.totalContractValue,
+        contractValue,
+      };
+    }
+
+    const updateResult = await updateHubSpotDealAmount(mapping.hubspotDealId, contractValue.totalContractValue);
+
+    if (updateResult.success) {
+      await storage.createAuditLog({
+        action: 'change_order_sync',
+        entityType: 'deal_amount',
+        entityId: mapping.hubspotDealId,
+        source: 'procore',
+        destination: 'hubspot',
+        status: 'success',
+        details: {
+          procoreProjectId,
+          previousAmount,
+          newAmount: contractValue.totalContractValue,
+          primeContractAmount: contractValue.primeContractAmount,
+          approvedChangeOrders: contractValue.approvedChangeOrders,
+          changeOrderCount: contractValue.changeOrders.length,
+        },
+      });
+
+      return {
+        success: true,
+        dealId: mapping.hubspotDealId,
+        previousAmount,
+        newAmount: contractValue.totalContractValue,
+        contractValue,
+      };
+    } else {
+      return {
+        success: false,
+        dealId: mapping.hubspotDealId,
+        error: updateResult.error,
+        contractValue,
+      };
+    }
+  } catch (error: any) {
+    console.error(`[ChangeOrder] Error syncing change orders:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+export async function handleChangeOrderWebhook(payload: {
+  resource_name: string;
+  event_type: string;
+  resource_id: string;
+  project_id: string;
+  user_id?: string;
+  metadata?: any;
+}): Promise<{ processed: boolean; result?: any; error?: string }> {
+  if (payload.resource_name !== 'Change Order' && payload.resource_name !== 'Change Order Package') {
+    return { processed: false, error: 'Not a change order event' };
+  }
+
+  const relevantEvents = ['create', 'update', 'delete'];
+  if (!relevantEvents.includes(payload.event_type)) {
+    return { processed: false, error: `Event type ${payload.event_type} not processed` };
+  }
+
+  console.log(`[ChangeOrder] Processing ${payload.resource_name} ${payload.event_type} for project ${payload.project_id}`);
+
+  const result = await syncChangeOrdersToHubSpot(payload.project_id);
+
+  return { processed: true, result };
+}
+
+export async function syncAllProjectChangeOrders(): Promise<{
+  projectsChecked: number;
+  projectsUpdated: number;
+  errors: string[];
+}> {
+  const result = {
+    projectsChecked: 0,
+    projectsUpdated: 0,
+    errors: [] as string[],
+  };
+
+  try {
+    const mappings = await storage.getSyncMappings();
+    const projectsWithHubspot = mappings.filter(m => (m.procoreProjectId || m.portfolioProjectId) && m.hubspotDealId);
+
+    for (const mapping of projectsWithHubspot) {
+      // Use Portfolio project ID when available (change orders live on Portfolio projects)
+      const projectId = mapping.portfolioProjectId || mapping.procoreProjectId;
+      if (!projectId) continue;
+      
+      result.projectsChecked++;
+      
+      try {
+        const syncResult = await syncChangeOrdersToHubSpot(projectId);
+        
+        if (syncResult.success && syncResult.previousAmount !== syncResult.newAmount) {
+          result.projectsUpdated++;
+        }
+      } catch (err: any) {
+        result.errors.push(`Project ${projectId}: ${err.message}`);
+      }
+    }
+
+    console.log(`[ChangeOrder] Sync complete: ${result.projectsChecked} checked, ${result.projectsUpdated} updated`);
+    return result;
+  } catch (error: any) {
+    result.errors.push(error.message);
+    return result;
+  }
+}

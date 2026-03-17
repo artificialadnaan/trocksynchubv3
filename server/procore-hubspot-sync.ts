@@ -1,9 +1,53 @@
+/**
+ * Procore ↔ HubSpot Sync Module
+ * ==============================
+ * 
+ * This module handles bidirectional synchronization between Procore projects
+ * and HubSpot deals. It maintains the core linking between the two systems.
+ * 
+ * Key Features:
+ * - Automatic matching by project number or exact name
+ * - Sync mappings persist links between entities
+ * - Stage mapping: Procore stages → HubSpot deal stages
+ * - Conflict detection when data differs between systems
+ * - Dry-run mode for testing without writes
+ * 
+ * Sync Flow:
+ * 1. Load all Procore projects and HubSpot deals from local cache
+ * 2. Match projects to deals by project number (preferred) or name
+ * 3. Create/update sync mappings for matched pairs
+ * 4. Optionally create new HubSpot deals for unmatched Procore projects
+ * 5. Track conflicts when field values differ
+ * 
+ * Stage Mapping (PROCORE_TO_HUBSPOT_STAGE):
+ * Procore Stage              → HubSpot Stage
+ * ─────────────────────────────────────────────
+ * "Estimate in Progress"     → "Estimating"
+ * "Estimate under review"    → "Internal Review"
+ * "Estimate sent to Client"  → "Proposal Sent"
+ * "Sent to production"       → "Closed Won"
+ * "Production – lost"        → "Closed Lost"
+ * 
+ * Important Functions:
+ * - syncProcoreToHubspot(): Main sync function (defaults to read-only)
+ * - mapProcoreStageToHubspot(): Converts Procore stage to HubSpot label
+ * - resolveHubspotStageId(): Converts label to actual HubSpot stage ID
+ * - getSyncOverview(): Returns sync statistics
+ * 
+ * Configuration:
+ * - skipHubspotWrites: If true (default), only reads/links data
+ * - dryRun: Full simulation mode, no database or API writes
+ * 
+ * @module procore-hubspot-sync
+ */
+
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken } from './hubspot';
 import { db } from './db';
-import { syncMappings, hubspotDeals, procoreProjects } from '@shared/schema';
+import { syncMappings, hubspotDeals, procoreProjects, type SyncMapping } from '@shared/schema';
 import { eq, and, ilike, or, isNull, sql, desc, ne } from 'drizzle-orm';
 
+/** Result of a sync operation */
 interface SyncResult {
   matched: number;
   newMappings: number;
@@ -40,28 +84,101 @@ function normalizeNameForMatch(name: string | null): string {
   return name.toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
+async function logProjectNumberValidation(projectNumber: string | null): Promise<void> {
+  if (!projectNumber) return;
+  try {
+    const { validateProjectNumber } = await import("./services/reconciliation/guardrails");
+    const validation = validateProjectNumber(projectNumber);
+    if (validation.errors.length > 0) {
+      console.warn(`[reconciliation] Invalid project number: ${projectNumber} — ${validation.errors.join(", ")}`);
+    } else if (validation.warnings.length > 0) {
+      console.log(`[reconciliation] Project number note: ${projectNumber} (${validation.era}) — ${validation.warnings.join(", ")}`);
+    }
+  } catch {
+    // Non-blocking — don't fail sync
+  }
+}
+
+// Procore Portfolio/BidBoard Stage → HubSpot Deal Stage mapping
+// These should match your HubSpot pipeline stage labels or internal IDs
 const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
-  'Estimating': 'closedlost',
-  'Estimating - Sent to Client': 'appointmentscheduled',
-  'Estimating - Canceled': '3200448216',
-  'Service - Estimating': 'closedwon',
-  'Service - Close Out': 'presentationscheduled',
-  'Service - Close Out Final Invoice': 'presentationscheduled',
-  'Service - Won': 'presentationscheduled',
-  'Closed Won': '3200448214',
-  'Closed Lost': '3200448215',
-  'On Hold': 'contractsent',
+  // Estimating stages
+  'Estimate in Progress': 'Estimating',
+  'Service – Estimating': 'Service – Estimating',
+  'Service - Estimating': 'Service – Estimating',
+  'Estimating - Under Review': 'Estimating',
+
+  // Review stages
+  'Estimate under review': 'Internal Review',
+  'Estimate sent to Client': 'Proposal Sent',
+  
+  // Won stages
+  'Service – sent to production': 'Service – Won',
+  'Service - sent to production': 'Service – Won',
+  'Sent to production': 'Closed Won',
+  'Closed': 'Closed Won',
+
+  // Lost stages
+  'Service – lost': 'Service – Lost',
+  'Service - lost': 'Service – Lost',
+  'Production – lost': 'Closed Lost',
+  'Production - lost': 'Closed Lost',
 };
 
 export function mapProcoreStageToHubspot(procoreStage: string | null): string {
-  if (!procoreStage) return 'decisionmakerboughtin';
-  return PROCORE_TO_HUBSPOT_STAGE[procoreStage] || 'decisionmakerboughtin';
+  if (!procoreStage) return 'Estimating'; // Default to Estimating for new projects
+  const trimmed = procoreStage.trim();
+  return PROCORE_TO_HUBSPOT_STAGE[trimmed] || trimmed; // Pass through if no mapping
 }
 
-export async function syncProcoreToHubspot(): Promise<SyncResult> {
+/** Normalize Unicode dashes (em dash, en dash, etc.) to ASCII hyphen for stage label comparison */
+function normalizeStageDashes(s: string): string {
+  return s
+    .replace(/[\u2013\u2014\u2212\uFE58\uFE63\uFF0D]/g, "-")  // en dash, em dash, minus, etc. → hyphen
+    .trim();
+}
+
+// Resolve stage label to actual HubSpot stage ID
+// mapProcoreStageToHubspot returns labels, but HubSpot API requires stage IDs
+export async function resolveHubspotStageId(stageLabel: string): Promise<{ stageId: string; stageName: string } | null> {
+  const pipelines = await storage.getHubspotPipelines();
+  const trimmedLabel = normalizeStageDashes(stageLabel);
+
+  for (const pipeline of pipelines) {
+    const stages = (pipeline.stages as any[]) || [];
+    for (const stage of stages) {
+      const label = normalizeStageDashes(stage.label || stage.stageName || "");
+      if (label.toLowerCase() === trimmedLabel.toLowerCase() || stage.stageId === trimmedLabel) {
+        return {
+          stageId: stage.stageId,
+          stageName: stage.label || stage.stageName || label,
+        };
+      }
+    }
+  }
+
+  console.warn(`[procore-hubspot-sync] No HubSpot stage found matching label: "${stageLabel}"`);
+  return null;
+}
+
+export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubspotWrites?: boolean } = {}): Promise<SyncResult> {
+  // Default to read-only mode (skipHubspotWrites = true) - only read and link data
+  // Must explicitly pass skipHubspotWrites: false to enable HubSpot writes
+  const { dryRun = false, skipHubspotWrites = true } = options;
   const start = Date.now();
   const details: SyncDetail[] = [];
   let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0;
+  
+  // dryRun implies skipHubspotWrites - it's a full simulation with no writes anywhere
+  const effectiveSkipHubspotWrites = dryRun || skipHubspotWrites;
+  
+  if (dryRun) {
+    console.log('[procore-hubspot-sync] Running in DRY-RUN mode. No data will be written to HubSpot or database.');
+  } else if (effectiveSkipHubspotWrites) {
+    console.log('[procore-hubspot-sync] Running in READ-ONLY mode. No data will be written to HubSpot.');
+  } else {
+    console.log('[procore-hubspot-sync] Running sync with HubSpot writes ENABLED.');
+  }
 
   const allProcore = await db.select().from(procoreProjects);
   const allHubspot = await db.select().from(hubspotDeals);
@@ -232,12 +349,20 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
       },
     };
 
-    if (existingMapping) {
-      await storage.updateSyncMapping(existingMapping.id, mappingData);
-      updatedMappings++;
+    if (!dryRun) {
+      if (existingMapping) {
+        await storage.updateSyncMapping(existingMapping.id, mappingData);
+        updatedMappings++;
+        logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
+      } else {
+        await storage.createSyncMapping(mappingData);
+        newMappings++;
+        logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
+      }
     } else {
-      await storage.createSyncMapping(mappingData);
-      newMappings++;
+      // In dry-run, count what would happen
+      if (existingMapping) updatedMappings++;
+      else newMappings++;
     }
 
     details.push({
@@ -253,106 +378,135 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
   }
 
   if (pendingHubspotUpdates.length > 0) {
-    try {
-      const accessToken = await getAccessToken();
-      const BATCH_SIZE = 100;
-      for (let i = 0; i < pendingHubspotUpdates.length; i += BATCH_SIZE) {
-        const batch = pendingHubspotUpdates.slice(i, i + BATCH_SIZE);
-        const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals/batch/update', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            inputs: batch.map(u => ({ id: u.id, properties: u.properties })),
-          }),
-        });
-        if (response.ok) {
-          hubspotUpdates += batch.length;
-        } else {
-          const errText = await response.text();
-          console.error(`[procore-hubspot-sync] Batch update failed (batch ${Math.floor(i / BATCH_SIZE) + 1}):`, errText);
-        }
-      }
-      console.log(`[procore-hubspot-sync] Batch updated ${hubspotUpdates} HubSpot deals`);
-    } catch (e: any) {
-      console.error('[procore-hubspot-sync] HubSpot batch update error:', e.message);
-    }
-  }
-
-  if (pendingHubspotCreates.length > 0) {
-    try {
-      const accessToken = await getAccessToken();
-      for (const item of pendingHubspotCreates) {
-        const project = item.project;
-        try {
-          const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
+    if (effectiveSkipHubspotWrites) {
+      console.log(`[procore-hubspot-sync] SKIPPED: Would have updated ${pendingHubspotUpdates.length} HubSpot deals (read-only mode)`);
+    } else {
+      try {
+        const accessToken = await getAccessToken();
+        const BATCH_SIZE = 100;
+        for (let i = 0; i < pendingHubspotUpdates.length; i += BATCH_SIZE) {
+          const batch = pendingHubspotUpdates.slice(i, i + BATCH_SIZE);
+          const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals/batch/update', {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${accessToken}`,
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ properties: item.properties }),
+            body: JSON.stringify({
+              inputs: batch.map(u => ({ id: u.id, properties: u.properties })),
+            }),
           });
           if (response.ok) {
-            const created = await response.json();
-            hubspotCreated++;
-            matched++;
-
-            await storage.createSyncMapping({
-              hubspotDealId: created.id,
-              hubspotDealName: created.properties?.dealname || project.name,
-              procoreProjectId: project.procoreId,
-              procoreProjectName: project.name,
-              procoreProjectNumber: project.projectNumber,
-              procoreCompanyId: project.companyId,
-              lastSyncAt: new Date(),
-              lastSyncStatus: 'synced',
-              lastSyncDirection: 'procore_to_hubspot',
-              metadata: {
-                matchType: 'created_in_hubspot',
-                conflicts: [],
-                procoreStage: project.stage,
-                procoreCity: project.city,
-                procoreState: project.stateCode,
-                procoreEstimatedValue: project.estimatedValue,
-                hubspotStage: item.properties.dealstage,
-                hubspotAmount: item.properties.amount || null,
-                hubspotPipeline: 'Sales Pipeline',
-                updatedFields: Object.keys(item.properties),
-                lastSyncTimestamp: new Date().toISOString(),
-              },
-            });
-            newMappings++;
-
-            details.push({
-              procoreProjectId: project.procoreId,
-              procoreProjectName: project.name || '',
-              procoreProjectNumber: project.projectNumber,
-              hubspotDealId: created.id,
-              hubspotDealName: created.properties?.dealname || project.name,
-              matchType: 'exact_name',
-              action: 'created',
-            });
+            hubspotUpdates += batch.length;
           } else {
-            const errBody = await response.json().catch(() => ({}));
-            const isUniqueConflict = errBody?.category === 'VALIDATION_ERROR' &&
-              JSON.stringify(errBody).includes('CONFLICTING_UNIQUE_VALUE');
-            if (isUniqueConflict && item.properties.project_number) {
-              delete item.properties.project_number;
-              const retryResponse = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${accessToken}`,
-                  'Content-Type': 'application/json',
+            const errText = await response.text();
+            console.error(`[procore-hubspot-sync] Batch update failed (batch ${Math.floor(i / BATCH_SIZE) + 1}):`, errText);
+          }
+        }
+        console.log(`[procore-hubspot-sync] Batch updated ${hubspotUpdates} HubSpot deals`);
+      } catch (e: any) {
+        console.error('[procore-hubspot-sync] HubSpot batch update error:', e.message);
+      }
+    }
+  }
+
+  if (pendingHubspotCreates.length > 0) {
+    if (effectiveSkipHubspotWrites) {
+      console.log(`[procore-hubspot-sync] SKIPPED: Would have created ${pendingHubspotCreates.length} HubSpot deals for unmatched Procore projects (read-only mode)`);
+      // Still track these as unmatched
+      for (const item of pendingHubspotCreates) {
+        details.push({
+          procoreProjectId: item.project.procoreId,
+          procoreProjectName: item.project.name || '',
+          procoreProjectNumber: item.project.projectNumber,
+          hubspotDealId: null,
+          hubspotDealName: null,
+          matchType: 'unmatched',
+          action: 'skipped',
+        });
+      }
+    } else {
+      try {
+        const accessToken = await getAccessToken();
+        for (const item of pendingHubspotCreates) {
+          const project = item.project;
+          try {
+            // Resolve stage label to actual HubSpot stage ID before creating deal
+            const stageLabel = item.properties.dealstage;
+            const resolvedStage = await resolveHubspotStageId(stageLabel);
+            if (resolvedStage) {
+              item.properties.dealstage = resolvedStage.stageId;
+            } else {
+              console.warn(`[procore-hubspot-sync] Could not resolve stage "${stageLabel}" for project ${project.name}, using label as-is`);
+            }
+            
+            const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ properties: item.properties }),
+            });
+            if (response.ok) {
+              const created = await response.json();
+              hubspotCreated++;
+              matched++;
+
+              await storage.createSyncMapping({
+                hubspotDealId: created.id,
+                hubspotDealName: created.properties?.dealname || project.name,
+                procoreProjectId: project.procoreId,
+                procoreProjectName: project.name,
+                procoreProjectNumber: project.projectNumber,
+                procoreCompanyId: project.companyId,
+                lastSyncAt: new Date(),
+                lastSyncStatus: 'synced',
+                lastSyncDirection: 'procore_to_hubspot',
+                metadata: {
+                  matchType: 'created_in_hubspot',
+                  conflicts: [],
+                  procoreStage: project.stage,
+                  procoreCity: project.city,
+                  procoreState: project.stateCode,
+                  procoreEstimatedValue: project.estimatedValue,
+                  hubspotStage: item.properties.dealstage,
+                  hubspotAmount: item.properties.amount || null,
+                  hubspotPipeline: 'Sales Pipeline',
+                  updatedFields: Object.keys(item.properties),
+                  lastSyncTimestamp: new Date().toISOString(),
                 },
-                body: JSON.stringify({ properties: item.properties }),
               });
-              if (retryResponse.ok) {
-                const created = await retryResponse.json();
-                hubspotCreated++;
-                matched++;
+              newMappings++;
+              logProjectNumberValidation(project.projectNumber);
+
+              details.push({
+                procoreProjectId: project.procoreId,
+                procoreProjectName: project.name || '',
+                procoreProjectNumber: project.projectNumber,
+                hubspotDealId: created.id,
+                hubspotDealName: created.properties?.dealname || project.name,
+                matchType: 'exact_name',
+                action: 'created',
+              });
+            } else {
+              const errBody = await response.json().catch(() => ({}));
+              const isUniqueConflict = errBody?.category === 'VALIDATION_ERROR' &&
+                JSON.stringify(errBody).includes('CONFLICTING_UNIQUE_VALUE');
+              if (isUniqueConflict && item.properties.project_number) {
+                delete item.properties.project_number;
+                const retryResponse = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({ properties: item.properties }),
+                });
+                if (retryResponse.ok) {
+                  const created = await retryResponse.json();
+                  hubspotCreated++;
+                  matched++;
 
                 await storage.createSyncMapping({
                   hubspotDealId: created.id,
@@ -375,6 +529,7 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
                   },
                 });
                 newMappings++;
+                logProjectNumberValidation(project.projectNumber);
                 details.push({
                   procoreProjectId: project.procoreId,
                   procoreProjectName: project.name || '',
@@ -405,9 +560,10 @@ export async function syncProcoreToHubspot(): Promise<SyncResult> {
           console.error(`[procore-hubspot-sync] Error creating deal for ${project.name}:`, e.message);
         }
       }
-      console.log(`[procore-hubspot-sync] Created ${hubspotCreated} new HubSpot deals`);
-    } catch (e: any) {
-      console.error('[procore-hubspot-sync] HubSpot create error:', e.message);
+        console.log(`[procore-hubspot-sync] Created ${hubspotCreated} new HubSpot deals`);
+      } catch (e: any) {
+        console.error('[procore-hubspot-sync] HubSpot create error:', e.message);
+      }
     }
   }
 
@@ -537,6 +693,7 @@ export async function createManualMapping(
       lastSyncTimestamp: new Date().toISOString(),
     },
   });
+  logProjectNumberValidation(project[0].projectNumber);
 
   return { success: true, message: 'Mapping created successfully', mapping };
 }
@@ -567,7 +724,48 @@ export async function getUnmatchedProjects(): Promise<{
   }).from(hubspotDeals);
 
   return {
-    unmatchedProcore: allProcore.filter(p => !mappedProcoreIds.has(p.procoreId)),
+    unmatchedProcore: allProcore.filter(p => !mappedProcoreIds.has(p.procoreId)).map(p => ({ ...p, name: p.name ?? '' })),
     unmatchedHubspot: allHubspot.filter(d => !mappedHubspotIds.has(d.hubspotId)),
   };
+}
+
+/**
+ * Auto-link: Find HubSpot deal by project number and create sync mapping if not exists.
+ * Used when Procore webhook arrives and no mapping exists - enables stage sync without manual link.
+ */
+export async function findOrCreateMappingByProjectNumber(params: {
+  procoreProjectId: string;
+  projectNumber: string;
+  projectName: string | null;
+  companyId?: string | null;
+}): Promise<SyncMapping | null> {
+  const { procoreProjectId, projectNumber, projectName, companyId } = params;
+  if (!projectNumber?.trim()) return null;
+
+  const existing = await storage.getSyncMappingByProcoreProjectId(procoreProjectId);
+  if (existing) return existing;
+
+  const deal = await storage.getHubspotDealByProjectNumber(projectNumber.trim());
+  if (!deal?.hubspotId) return null;
+
+  const mapping = await storage.createSyncMapping({
+    hubspotDealId: deal.hubspotId,
+    hubspotDealName: deal.dealName,
+    procoreProjectId,
+    procoreProjectName: projectName,
+    procoreProjectNumber: projectNumber.trim(),
+    procoreCompanyId: companyId ?? null,
+    lastSyncAt: new Date(),
+    lastSyncStatus: 'synced',
+    lastSyncDirection: 'auto_project_number',
+    metadata: {
+      matchType: 'project_number',
+      autoLinkedAt: new Date().toISOString(),
+      lastSyncTimestamp: new Date().toISOString(),
+    },
+  });
+  logProjectNumberValidation(projectNumber.trim());
+
+  console.log(`[procore-hubspot-sync] Auto-linked project ${procoreProjectId} to deal ${deal.hubspotId} by project number ${projectNumber}`);
+  return mapping;
 }

@@ -1,3 +1,50 @@
+/**
+ * Storage Layer - Database Access and Business Logic
+ * ===================================================
+ * 
+ * This module provides the data access layer for the T-Rock Sync Hub application.
+ * It implements the Repository pattern, abstracting all database operations behind
+ * a clean interface (IStorage).
+ * 
+ * Key Responsibilities:
+ * - CRUD operations for all database entities
+ * - Data synchronization state management (sync mappings)
+ * - Webhook and audit logging
+ * - OAuth token management
+ * - Automation configuration storage
+ * - Email template management
+ * 
+ * Data Models:
+ * - Users: Application authentication
+ * - SyncMappings: Links between HubSpot deals, Procore projects, and CompanyCam projects
+ * - StageMappings: Procore → HubSpot stage translation rules
+ * - HubSpot*: Cached CRM data (companies, contacts, deals, pipelines)
+ * - Procore*: Cached project data (projects, vendors, users, bids)
+ * - CompanyCam*: Cached photo documentation data
+ * - WebhookLogs: Incoming webhook event tracking
+ * - AuditLogs: System activity and sync history
+ * - AutomationConfig: Feature flags and settings
+ * - EmailTemplates: Notification email templates
+ * 
+ * Usage:
+ * ```typescript
+ * import { storage } from './storage';
+ * 
+ * // Get a sync mapping by HubSpot deal ID
+ * const mapping = await storage.getSyncMappingByHubspotDealId('12345');
+ * 
+ * // Create an audit log entry
+ * await storage.createAuditLog({
+ *   action: 'sync_complete',
+ *   entityType: 'project',
+ *   entityId: 'proj-123',
+ *   status: 'success',
+ * });
+ * ```
+ * 
+ * @module storage
+ */
+
 import { eq, desc, and, gte, lte, sql, ilike, or } from "drizzle-orm";
 import { db } from "./db";
 import {
@@ -15,6 +62,8 @@ import {
   hubspotContacts, type HubspotContact, type InsertHubspotContact,
   hubspotDeals, type HubspotDeal, type InsertHubspotDeal,
   hubspotPipelines, type HubspotPipeline, type InsertHubspotPipeline,
+  hubspotOwners, type HubspotOwner, type InsertHubspotOwner,
+  hubspotOwnerMappings, type HubspotOwnerMapping, type InsertHubspotOwnerMapping,
   hubspotChangeHistory, type HubspotChangeHistory, type InsertHubspotChangeHistory,
   procoreProjects, type ProcoreProject, type InsertProcoreProject,
   procoreVendors, type ProcoreVendor, type InsertProcoreVendor,
@@ -31,20 +80,78 @@ import {
   procoreRoleAssignments, type ProcoreRoleAssignment, type InsertProcoreRoleAssignment,
   emailTemplates, type EmailTemplate, type InsertEmailTemplate,
   emailSendLog, type EmailSendLog, type InsertEmailSendLog,
+  bidboardSyncState, type BidboardSyncState,
+  bidboardStageSyncRuns, type BidboardStageSyncRun,
+  bidboardAutomationLogs, type BidboardAutomationLog,
+  closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
+  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
+  rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
+  rfpApprovals, type RfpApproval, type InsertRfpApproval,
+  reportScheduleConfig, type ReportScheduleConfig, type InsertReportScheduleConfig,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
 
+/** Classify audit log action as "sync" (meaningful end-to-end sync) or "system" (polling, acks, health, etc.) */
+function inferAuditCategory(action: string): "sync" | "system" {
+  const a = (action || "").toLowerCase();
+  // System: webhook acks, OAuth, polling skips, health, token
+  if (a === "webhook_received" || a === "oauth_connect" || a.includes("_skipped") ||
+      a.includes("poll") || a.includes("health") || a === "received") return "system";
+  // Sync: data created/updated in target system
+  if (a.includes("vendor_created") || a.includes("vendor_updated") || a.includes("project_created") ||
+      a.includes("deal_project") || a.includes("stage_change_processed") || a.includes("role_assignment_processed") ||
+      a.includes("deactivation_closeout") || a.includes("document") || a.includes("rfp_") ||
+      a.includes("change_order") || a.includes("closeout") || a.includes("procore_hubspot") ||
+      a.includes("mapping_created") || a.includes("deal_project_number") || a.includes("companycam") ||
+      a.includes("project_deactivation") || a.includes("email_sent") || a.includes("bidboard")) return "sync";
+  return "system";
+}
+
+/**
+ * Storage Interface - Defines all database operations available in the application.
+ * 
+ * This interface ensures type safety and provides a clear contract for the storage layer.
+ * All methods are async and return Promises for database operations.
+ * 
+ * Method Categories:
+ * - User Management: Authentication and user CRUD
+ * - Sync Mappings: Core linking between HubSpot/Procore/CompanyCam entities
+ * - Stage Mappings: Workflow stage translation rules
+ * - Logging: Webhooks, audits, and email logs
+ * - External Data: Cached HubSpot, Procore, and CompanyCam data
+ * - Configuration: Automation settings and feature flags
+ */
 export interface IStorage {
+  // ==================== USER MANAGEMENT ====================
+  /** Get user by internal ID */
   getUser(id: string): Promise<User | undefined>;
+  /** Get user by username for authentication */
   getUserByUsername(username: string): Promise<User | undefined>;
+  /** Create a new user with hashed password */
   createUser(user: InsertUser): Promise<User>;
 
+  // ==================== SYNC MAPPINGS ====================
+  // Sync mappings are the core data structure linking entities across systems
+  /** Get all sync mappings (HubSpot ↔ Procore ↔ CompanyCam links) */
   getSyncMappings(): Promise<SyncMapping[]>;
+  /** Find mapping by HubSpot deal ID */
   getSyncMappingByHubspotDealId(dealId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by Procore project ID (includes BidBoard projects) */
   getSyncMappingByProcoreProjectId(projectId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by BidBoard-specific project ID */
+  getSyncMappingByBidboardProjectId(bidboardProjectId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by Portfolio project ID (post-award projects) */
+  getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by Procore project number (e.g. DFW-1-06426-ah) */
+  getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
+  /** Create a new sync mapping linking entities */
   createSyncMapping(mapping: InsertSyncMapping): Promise<SyncMapping>;
+  /** Update an existing sync mapping */
   updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined>;
+  /** Search mappings by deal name, project name, or project number */
   searchSyncMappings(query: string): Promise<SyncMapping[]>;
+  /** Transition a project from BidBoard (estimating) to Portfolio (active project) phase */
+  transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined>;
 
   getStageMappings(): Promise<StageMapping[]>;
   createStageMapping(mapping: InsertStageMapping): Promise<StageMapping>;
@@ -76,9 +183,8 @@ export interface IStorage {
   updatePollJob(jobName: string, data: Partial<InsertPollJob>): Promise<PollJob | undefined>;
 
   getDashboardStats(): Promise<{
-    totalSyncs: number;
-    successfulSyncs: number;
-    failedSyncs: number;
+    syncs: { total: number; successful: number; failed: number; successRate: number };
+    system: { total: number; successful: number; failed: number };
     pendingWebhooks: number;
     recentActivity: AuditLog[];
     syncsByDay: { date: string; count: number; success: number; failed: number }[];
@@ -101,9 +207,27 @@ export interface IStorage {
   getHubspotPipelines(): Promise<HubspotPipeline[]>;
   getHubspotChangeHistoryList(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: HubspotChangeHistory[]; total: number }>;
 
+  // Delete methods for webhook-driven deletions
+  deleteHubspotContact(hubspotId: string): Promise<void>;
+  deleteHubspotCompany(hubspotId: string): Promise<void>;
+  deleteHubspotDeal(hubspotId: string): Promise<void>;
+
+  // HubSpot Owners
+  upsertHubspotOwner(data: InsertHubspotOwner): Promise<HubspotOwner>;
+  getHubspotOwnerByHubspotId(hubspotId: string): Promise<HubspotOwner | undefined>;
+  getHubspotOwners(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotOwner[]; total: number }>;
+  deleteHubspotOwner(hubspotId: string): Promise<void>;
+
+  /** User-provided owner ID → email/name mappings (fallback when HubSpot API returns ID only) */
+  getHubspotOwnerMappingByHubspotId(hubspotOwnerId: string): Promise<HubspotOwnerMapping | undefined>;
+  upsertHubspotOwnerMapping(data: InsertHubspotOwnerMapping): Promise<HubspotOwnerMapping>;
+  getHubspotOwnerMappings(): Promise<HubspotOwnerMapping[]>;
+  deleteHubspotOwnerMapping(hubspotOwnerId: string): Promise<void>;
+
   upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
   getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
   getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }>;
+  updateProcoreProjectLastRoleCheck(procoreId: string): Promise<void>;
 
   upsertProcoreVendor(data: InsertProcoreVendor): Promise<ProcoreVendor>;
   getProcoreVendorByProcoreId(procoreId: string): Promise<ProcoreVendor | undefined>;
@@ -112,6 +236,7 @@ export interface IStorage {
   upsertProcoreUser(data: InsertProcoreUser): Promise<ProcoreUser>;
   getProcoreUserByProcoreId(procoreId: string): Promise<ProcoreUser | undefined>;
   getProcoreUsers(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreUser[]; total: number }>;
+  deleteProcoreUser(procoreId: string): Promise<void>;
 
   createProcoreChangeHistory(data: InsertProcoreChangeHistory): Promise<ProcoreChangeHistory>;
   getProcoreChangeHistory(filters: { entityType?: string; changeType?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreChangeHistory[]; total: number }>;
@@ -132,13 +257,17 @@ export interface IStorage {
   clearBidboardEstimates(): Promise<void>;
   getBidboardDistinctStatuses(): Promise<string[]>;
   getHubspotDealsByDealNames(names: string[]): Promise<HubspotDeal[]>;
+  /** Find HubSpot deal by project_number in properties (for auto-link by project number) */
+  getHubspotDealByProjectNumber(projectNumber: string): Promise<HubspotDeal | undefined>;
 
   upsertCompanycamProject(data: InsertCompanycamProject): Promise<CompanycamProject>;
   getCompanycamProjectByCompanycamId(companycamId: string): Promise<CompanycamProject | undefined>;
   getCompanycamProjects(filters: { search?: string; status?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamProject[]; total: number }>;
+  deleteCompanycamProject(companycamId: string): Promise<void>;
   upsertCompanycamUser(data: InsertCompanycamUser): Promise<CompanycamUser>;
   getCompanycamUserByCompanycamId(companycamId: string): Promise<CompanycamUser | undefined>;
   getCompanycamUsers(filters: { search?: string; role?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamUser[]; total: number }>;
+  deleteCompanycamUser(companycamId: string): Promise<void>;
   upsertCompanycamPhoto(data: InsertCompanycamPhoto): Promise<CompanycamPhoto>;
   getCompanycamPhotoByCompanycamId(companycamId: string): Promise<CompanycamPhoto | undefined>;
   getCompanycamPhotos(filters: { search?: string; projectId?: string; limit?: number; offset?: number }): Promise<{ data: CompanycamPhoto[]; total: number }>;
@@ -160,6 +289,32 @@ export interface IStorage {
   checkEmailDedupeKey(dedupeKey: string): Promise<boolean>;
   getEmailSendLogs(filters: { templateKey?: string; limit?: number; offset?: number }): Promise<{ data: EmailSendLog[]; total: number }>;
   getEmailSendLogCounts(): Promise<{ total: number; sent: number; failed: number }>;
+
+  getBidboardSyncStates(): Promise<BidboardSyncState[]>;
+  getBidboardSyncState(projectId: string): Promise<BidboardSyncState | undefined>;
+  upsertBidboardSyncState(data: { projectId: string; projectName?: string; currentStage?: string; metadata?: any }): Promise<BidboardSyncState>;
+  getBidboardAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
+  getPortfolioAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
+  createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog>;
+
+  createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey>;
+  getCloseoutSurveyByToken(token: string): Promise<CloseoutSurvey | undefined>;
+  getCloseoutSurveyByProjectId(projectId: string): Promise<CloseoutSurvey | undefined>;
+  updateCloseoutSurvey(id: number, data: Partial<InsertCloseoutSurvey>): Promise<CloseoutSurvey | undefined>;
+  getCloseoutSurveys(filters: { limit?: number; offset?: number }): Promise<{ data: CloseoutSurvey[]; total: number }>;
+
+  // ==================== RFP APPROVAL REQUESTS ====================
+  createRfpApprovalRequest(data: InsertRfpApprovalRequest): Promise<RfpApprovalRequest>;
+  getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined>;
+  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
+
+  // RFP Reporting
+  getRfpChangeLog(rfpId: number): Promise<RfpChangeLog[]>;
+  getRfpApprovals(rfpId: number): Promise<RfpApproval[]>;
+  getReportScheduleConfig(): Promise<ReportScheduleConfig | undefined>;
+  upsertReportScheduleConfig(data: Partial<InsertReportScheduleConfig>): Promise<ReportScheduleConfig>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -189,7 +344,31 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getSyncMappingByProcoreProjectId(projectId: string): Promise<SyncMapping | undefined> {
-    const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.procoreProjectId, projectId));
+    const [mapping] = await db.select().from(syncMappings).where(
+      or(
+        eq(syncMappings.procoreProjectId, projectId),
+        eq(syncMappings.portfolioProjectId, projectId),
+        eq(syncMappings.bidboardProjectId, projectId)
+      )
+    );
+    return mapping;
+  }
+
+  async getSyncMappingByBidboardProjectId(bidboardProjectId: string): Promise<SyncMapping | undefined> {
+    const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.bidboardProjectId, bidboardProjectId));
+    return mapping;
+  }
+
+  async getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined> {
+    const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.portfolioProjectId, portfolioProjectId));
+    return mapping;
+  }
+
+  async getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined> {
+    if (!projectNumber?.trim()) return undefined;
+    const [mapping] = await db.select().from(syncMappings).where(
+      eq(syncMappings.procoreProjectNumber, projectNumber.trim())
+    );
     return mapping;
   }
 
@@ -211,6 +390,39 @@ export class DatabaseStorage implements IStorage {
         ilike(syncMappings.procoreProjectNumber, `%${query}%`)
       )
     ).orderBy(desc(syncMappings.lastSyncAt));
+  }
+
+  async transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined> {
+    // Find mapping by bidboard project ID
+    let mapping = await this.getSyncMappingByBidboardProjectId(bidboardProjectId);
+    
+    // Fallback: check if procoreProjectId matches (for backwards compatibility)
+    if (!mapping) {
+      mapping = await this.getSyncMappingByProcoreProjectId(bidboardProjectId);
+    }
+    
+    if (!mapping) {
+      console.log(`[transition] No mapping found for BidBoard project ${bidboardProjectId}`);
+      return undefined;
+    }
+    
+    // Update the mapping with portfolio info, preserving the original BidBoard project ID.
+    // Do not use mapping.procoreProjectName as fallback—that is the BidBoard project name, not the Portfolio project name.
+    const [result] = await db.update(syncMappings)
+      .set({
+        bidboardProjectId: mapping.bidboardProjectId || bidboardProjectId,
+        portfolioProjectId,
+        portfolioProjectName: portfolioProjectName ?? null,
+        projectPhase: 'portfolio',
+        sentToPortfolioAt: new Date(),
+        lastSyncAt: new Date(),
+        lastSyncStatus: 'portfolio_transition',
+      })
+      .where(eq(syncMappings.id, mapping.id))
+      .returning();
+    
+    console.log(`[transition] Updated mapping ${mapping.id}: BidBoard ${bidboardProjectId} → Portfolio ${portfolioProjectId}`);
+    return result;
   }
 
   async getStageMappings(): Promise<StageMapping[]> {
@@ -277,8 +489,10 @@ export class DatabaseStorage implements IStorage {
     return { logs, total: countResult[0]?.count || 0 };
   }
 
-  async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
-    const [result] = await db.insert(auditLogs).values(log).returning();
+  async createAuditLog(log: InsertAuditLog & { category?: "sync" | "system" }): Promise<AuditLog> {
+    const category = log.category ?? inferAuditCategory(log.action);
+    const { category: _c, ...logData } = log as InsertAuditLog & { category?: "sync" | "system" };
+    const [result] = await db.insert(auditLogs).values({ ...logData, category }).returning();
     return result;
   }
 
@@ -322,6 +536,28 @@ export class DatabaseStorage implements IStorage {
         set: { ...data, updatedAt: new Date() },
       }).returning();
     return result;
+  }
+
+  // Testing Mode helpers
+  async getTestingMode(): Promise<{ enabled: boolean; testEmail: string }> {
+    const config = await this.getAutomationConfig('testing_mode');
+    if (!config) {
+      return { enabled: false, testEmail: '' };
+    }
+    const value = config.value as { enabled?: boolean; testEmail?: string };
+    return {
+      enabled: value.enabled ?? false,
+      testEmail: value.testEmail ?? '',
+    };
+  }
+
+  async setTestingMode(enabled: boolean, testEmail: string = ''): Promise<void> {
+    await this.upsertAutomationConfig({
+      key: 'testing_mode',
+      value: { enabled, testEmail },
+      description: 'Testing mode settings - redirects all emails to test email address',
+      isActive: true,
+    });
   }
 
   async getContractCounter(projectId: string, counterType: string): Promise<ContractCounter | undefined> {
@@ -372,25 +608,45 @@ export class DatabaseStorage implements IStorage {
     const now = new Date();
     const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const isSuccess = eq(auditLogs.status, "success");
+    const isError = eq(auditLogs.status, "error");
+    const isSync = eq(auditLogs.category, "sync");
+    const isSystem = eq(auditLogs.category, "system");
+    const in24h = gte(auditLogs.createdAt, twentyFourHoursAgo);
 
-    const [totalRes, successRes, failedRes, pendingRes, recentActivity, dailyStats] = await Promise.all([
-      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(gte(auditLogs.createdAt, twentyFourHoursAgo)),
-      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(gte(auditLogs.createdAt, twentyFourHoursAgo), eq(auditLogs.status, "success"))),
-      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(gte(auditLogs.createdAt, twentyFourHoursAgo), eq(auditLogs.status, "error"))),
+    const [
+      syncTotal, syncSuccess, syncFailed,
+      systemTotal, systemSuccess, systemFailed,
+      pendingRes, recentActivity, dailyStats
+    ] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSync)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSync, isSuccess)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSync, isError)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSystem)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSystem, isSuccess)),
+      db.select({ count: sql<number>`count(*)::int` }).from(auditLogs).where(and(in24h, isSystem, isError)),
       db.select({ count: sql<number>`count(*)::int` }).from(webhookLogs).where(eq(webhookLogs.status, "received")),
       db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(20),
       db.select({
         date: sql<string>`to_char(${auditLogs.createdAt}, 'YYYY-MM-DD')`,
-        count: sql<number>`count(*)::int`,
-        success: sql<number>`count(*) filter (where ${auditLogs.status} = 'success')::int`,
-        failed: sql<number>`count(*) filter (where ${auditLogs.status} = 'error')::int`,
+        count: sql<number>`count(*) filter (where ${auditLogs.category} = 'sync')::int`,
+        success: sql<number>`count(*) filter (where ${auditLogs.category} = 'sync' and ${auditLogs.status} = 'success')::int`,
+        failed: sql<number>`count(*) filter (where ${auditLogs.category} = 'sync' and ${auditLogs.status} = 'error')::int`,
       }).from(auditLogs).where(gte(auditLogs.createdAt, sevenDaysAgo)).groupBy(sql`to_char(${auditLogs.createdAt}, 'YYYY-MM-DD')`).orderBy(sql`to_char(${auditLogs.createdAt}, 'YYYY-MM-DD')`),
     ]);
 
+    const syncTotalVal = syncTotal[0]?.count || 0;
+    const syncSuccessVal = syncSuccess[0]?.count || 0;
+    const syncFailedVal = syncFailed[0]?.count || 0;
+    const successRate = syncTotalVal > 0 ? Math.round((syncSuccessVal / syncTotalVal) * 100) : 0;
+
     return {
-      totalSyncs: totalRes[0]?.count || 0,
-      successfulSyncs: successRes[0]?.count || 0,
-      failedSyncs: failedRes[0]?.count || 0,
+      syncs: { total: syncTotalVal, successful: syncSuccessVal, failed: syncFailedVal, successRate },
+      system: {
+        total: systemTotal[0]?.count || 0,
+        successful: systemSuccess[0]?.count || 0,
+        failed: systemFailed[0]?.count || 0,
+      },
       pendingWebhooks: pendingRes[0]?.count || 0,
       recentActivity,
       syncsByDay: dailyStats,
@@ -431,6 +687,88 @@ export class DatabaseStorage implements IStorage {
         set: { ...data, lastSyncedAt: new Date() },
       }).returning();
     return result;
+  }
+
+  async deleteHubspotContact(hubspotId: string): Promise<void> {
+    await db.delete(hubspotContacts).where(eq(hubspotContacts.hubspotId, hubspotId));
+  }
+
+  async deleteHubspotCompany(hubspotId: string): Promise<void> {
+    await db.delete(hubspotCompanies).where(eq(hubspotCompanies.hubspotId, hubspotId));
+  }
+
+  async deleteHubspotDeal(hubspotId: string): Promise<void> {
+    await db.delete(hubspotDeals).where(eq(hubspotDeals.hubspotId, hubspotId));
+  }
+
+  async upsertHubspotOwner(data: InsertHubspotOwner): Promise<HubspotOwner> {
+    const [result] = await db.insert(hubspotOwners).values(data)
+      .onConflictDoUpdate({
+        target: hubspotOwners.hubspotId,
+        set: {
+          email: data.email,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          userId: data.userId,
+          teams: data.teams,
+          archived: data.archived,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result;
+  }
+
+  async getHubspotOwnerByHubspotId(hubspotId: string): Promise<HubspotOwner | undefined> {
+    const [result] = await db.select().from(hubspotOwners).where(eq(hubspotOwners.hubspotId, hubspotId));
+    return result;
+  }
+
+  async getHubspotOwners(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: HubspotOwner[]; total: number }> {
+    const { search, limit = 100, offset = 0 } = filters;
+    const conditions = [];
+    if (search) {
+      conditions.push(
+        or(
+          ilike(hubspotOwners.email, `%${search}%`),
+          ilike(hubspotOwners.firstName, `%${search}%`),
+          ilike(hubspotOwners.lastName, `%${search}%`)
+        )
+      );
+    }
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const [data, countRes] = await Promise.all([
+      db.select().from(hubspotOwners).where(whereClause).limit(limit).offset(offset).orderBy(hubspotOwners.firstName),
+      db.select({ count: sql<number>`count(*)::int` }).from(hubspotOwners).where(whereClause),
+    ]);
+    return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async deleteHubspotOwner(hubspotId: string): Promise<void> {
+    await db.delete(hubspotOwners).where(eq(hubspotOwners.hubspotId, hubspotId));
+  }
+
+  async getHubspotOwnerMappingByHubspotId(hubspotOwnerId: string): Promise<HubspotOwnerMapping | undefined> {
+    const [result] = await db.select().from(hubspotOwnerMappings).where(eq(hubspotOwnerMappings.hubspotOwnerId, hubspotOwnerId));
+    return result;
+  }
+
+  async upsertHubspotOwnerMapping(data: InsertHubspotOwnerMapping): Promise<HubspotOwnerMapping> {
+    const [result] = await db.insert(hubspotOwnerMappings).values(data)
+      .onConflictDoUpdate({
+        target: hubspotOwnerMappings.hubspotOwnerId,
+        set: { email: data.email, name: data.name ?? null, updatedAt: new Date() },
+      })
+      .returning();
+    return result!;
+  }
+
+  async getHubspotOwnerMappings(): Promise<HubspotOwnerMapping[]> {
+    return db.select().from(hubspotOwnerMappings).orderBy(hubspotOwnerMappings.hubspotOwnerId);
+  }
+
+  async deleteHubspotOwnerMapping(hubspotOwnerId: string): Promise<void> {
+    await db.delete(hubspotOwnerMappings).where(eq(hubspotOwnerMappings.hubspotOwnerId, hubspotOwnerId));
   }
 
   async getHubspotCompanyByHubspotId(hubspotId: string): Promise<HubspotCompany | undefined> {
@@ -592,6 +930,12 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  async updateProcoreProjectLastRoleCheck(procoreId: string): Promise<void> {
+    await db.update(procoreProjects)
+      .set({ lastRoleCheckAt: new Date(), updatedAt: new Date() })
+      .where(eq(procoreProjects.procoreId, procoreId));
+  }
+
   async getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }> {
     const limit = filters.limit || 50;
     const offset = filters.offset || 0;
@@ -705,6 +1049,10 @@ export class DatabaseStorage implements IStorage {
         : db.select({ count: sql<number>`count(*)::int` }).from(procoreUsers),
     ]);
     return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async deleteProcoreUser(procoreId: string): Promise<void> {
+    await db.delete(procoreUsers).where(eq(procoreUsers.procoreId, procoreId));
   }
 
   async createProcoreChangeHistory(data: InsertProcoreChangeHistory): Promise<ProcoreChangeHistory> {
@@ -927,6 +1275,14 @@ export class DatabaseStorage implements IStorage {
     return results;
   }
 
+  async getHubspotDealByProjectNumber(projectNumber: string): Promise<HubspotDeal | undefined> {
+    if (!projectNumber?.trim()) return undefined;
+    const [deal] = await db.select().from(hubspotDeals).where(
+      sql`(${hubspotDeals.properties}->>'project_number') = ${projectNumber.trim()}`
+    ).limit(1);
+    return deal;
+  }
+
   async upsertCompanycamProject(data: InsertCompanycamProject): Promise<CompanycamProject> {
     const [result] = await db.insert(companycamProjects).values(data)
       .onConflictDoUpdate({
@@ -968,6 +1324,10 @@ export class DatabaseStorage implements IStorage {
     return { data, total: countRes[0]?.count || 0 };
   }
 
+  async deleteCompanycamProject(companycamId: string): Promise<void> {
+    await db.delete(companycamProjects).where(eq(companycamProjects.companycamId, companycamId));
+  }
+
   async upsertCompanycamUser(data: InsertCompanycamUser): Promise<CompanycamUser> {
     const [result] = await db.insert(companycamUsers).values(data)
       .onConflictDoUpdate({
@@ -1007,6 +1367,10 @@ export class DatabaseStorage implements IStorage {
         : db.select({ count: sql<number>`count(*)::int` }).from(companycamUsers),
     ]);
     return { data, total: countRes[0]?.count || 0 };
+  }
+
+  async deleteCompanycamUser(companycamId: string): Promise<void> {
+    await db.delete(companycamUsers).where(eq(companycamUsers.companycamId, companycamId));
   }
 
   async upsertCompanycamPhoto(data: InsertCompanycamPhoto): Promise<CompanycamPhoto> {
@@ -1154,12 +1518,26 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createEmailSendLog(data: InsertEmailSendLog): Promise<EmailSendLog> {
-    const [result] = await db.insert(emailSendLog).values(data).returning();
-    return result;
+    try {
+      const [result] = await db.insert(emailSendLog).values(data).returning();
+      return result!;
+    } catch (err: any) {
+      if (err.code === '23505' && err.constraint === 'email_send_log_dedupe_key_unique') {
+        const [existing] = await db.select().from(emailSendLog).where(eq(emailSendLog.dedupeKey, data.dedupeKey)).limit(1);
+        if (existing) return existing;
+      }
+      throw err;
+    }
   }
 
   async checkEmailDedupeKey(dedupeKey: string): Promise<boolean> {
-    const [result] = await db.select({ count: sql<number>`count(*)::int` }).from(emailSendLog).where(eq(emailSendLog.dedupeKey, dedupeKey));
+    // Only skip if email was successfully sent (not failed attempts)
+    const [result] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(emailSendLog)
+      .where(and(
+        eq(emailSendLog.dedupeKey, dedupeKey),
+        eq(emailSendLog.status, 'sent')
+      ));
     return (result?.count || 0) > 0;
   }
 
@@ -1183,6 +1561,818 @@ export class DatabaseStorage implements IStorage {
       sent: sentRes?.count || 0,
       failed: failedRes?.count || 0,
     };
+  }
+
+  async getBidboardSyncStates(): Promise<BidboardSyncState[]> {
+    return db.select().from(bidboardSyncState).orderBy(desc(bidboardSyncState.lastCheckedAt));
+  }
+
+  async getBidboardSyncState(projectId: string): Promise<BidboardSyncState | undefined> {
+    const [result] = await db.select().from(bidboardSyncState).where(eq(bidboardSyncState.projectId, projectId));
+    return result;
+  }
+
+  async upsertBidboardSyncState(data: { projectId: string; projectName?: string; currentStage?: string; metadata?: any }): Promise<BidboardSyncState> {
+    const [result] = await db
+      .insert(bidboardSyncState)
+      .values({
+        projectId: data.projectId,
+        projectName: data.projectName,
+        currentStage: data.currentStage,
+        lastCheckedAt: new Date(),
+        lastChangedAt: new Date(),
+        metadata: data.metadata,
+      })
+      .onConflictDoUpdate({
+        target: [bidboardSyncState.projectId],
+        set: {
+          projectName: data.projectName,
+          currentStage: data.currentStage,
+          lastCheckedAt: new Date(),
+          metadata: data.metadata,
+        },
+      })
+      .returning();
+    return result;
+  }
+
+  async getBidboardAutomationLogs(limit: number = 50): Promise<BidboardAutomationLog[]> {
+    return db.select().from(bidboardAutomationLogs).orderBy(desc(bidboardAutomationLogs.createdAt)).limit(limit);
+  }
+
+  async getPortfolioAutomationLogs(limit: number = 300): Promise<BidboardAutomationLog[]> {
+    return db
+      .select()
+      .from(bidboardAutomationLogs)
+      .where(ilike(bidboardAutomationLogs.action, "portfolio_automation:%"))
+      .orderBy(desc(bidboardAutomationLogs.createdAt))
+      .limit(limit);
+  }
+
+  async createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog> {
+    const [result] = await db
+      .insert(bidboardAutomationLogs)
+      .values({
+        projectId: data.projectId || null,
+        projectName: data.projectName || null,
+        action: data.action,
+        status: data.status,
+        details: data.details,
+        errorMessage: data.errorMessage,
+        screenshotPath: data.screenshotPath,
+      })
+      .returning();
+    return result;
+  }
+
+  async createBidboardStageSyncRun(data: {
+    status: string;
+    totalChanges?: number;
+    syncedCount?: number;
+    failedCount?: number;
+    changes?: any;
+    errors?: any;
+    exportPath?: string;
+    options?: any;
+  }): Promise<BidboardStageSyncRun> {
+    const [result] = await db.insert(bidboardStageSyncRuns).values({
+      status: data.status,
+      completedAt: new Date(),
+      totalChanges: data.totalChanges ?? 0,
+      syncedCount: data.syncedCount ?? 0,
+      failedCount: data.failedCount ?? 0,
+      changes: data.changes ?? null,
+      errors: data.errors ?? null,
+      exportPath: data.exportPath ?? null,
+      options: data.options ?? null,
+    }).returning();
+    return result;
+  }
+
+  async updateBidboardStageSyncRun(id: number, data: { status?: string; completedAt?: Date; totalChanges?: number; syncedCount?: number; failedCount?: number; changes?: any; errors?: any; exportPath?: string }): Promise<BidboardStageSyncRun | undefined> {
+    const [result] = await db.update(bidboardStageSyncRuns).set(data).where(eq(bidboardStageSyncRuns.id, id)).returning();
+    return result;
+  }
+
+  async getBidboardStageSyncRuns(limit: number = 50): Promise<BidboardStageSyncRun[]> {
+    return db.select().from(bidboardStageSyncRuns).orderBy(desc(bidboardStageSyncRuns.startedAt)).limit(limit);
+  }
+
+  async hasSuccessfulBidboardStageSyncRun(): Promise<boolean> {
+    try {
+      // Only "success" and "initialized" count as valid baseline. "partial" (e.g. broken
+      // sync that pushed changes without a baseline) must not skip re-initialization.
+      const runs = await db.select().from(bidboardStageSyncRuns).where(
+        or(
+          eq(bidboardStageSyncRuns.status, "success"),
+          eq(bidboardStageSyncRuns.status, "initialized")
+        )
+      ).limit(1);
+      return runs.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async deleteAllBidboardStageSyncRuns(): Promise<number> {
+    const deleted = await db.delete(bidboardStageSyncRuns).returning();
+    return deleted.length;
+  }
+
+  async createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey> {
+    const [result] = await db.insert(closeoutSurveys).values(data).returning();
+    return result;
+  }
+
+  async getCloseoutSurveyByToken(token: string): Promise<CloseoutSurvey | undefined> {
+    const [result] = await db.select().from(closeoutSurveys).where(eq(closeoutSurveys.surveyToken, token));
+    return result;
+  }
+
+  async getCloseoutSurveyByProjectId(projectId: string): Promise<CloseoutSurvey | undefined> {
+    const [result] = await db.select().from(closeoutSurveys).where(eq(closeoutSurveys.procoreProjectId, projectId)).orderBy(desc(closeoutSurveys.sentAt));
+    return result;
+  }
+
+  async updateCloseoutSurvey(id: number, data: Partial<InsertCloseoutSurvey>): Promise<CloseoutSurvey | undefined> {
+    const [result] = await db.update(closeoutSurveys).set(data).where(eq(closeoutSurveys.id, id)).returning();
+    return result;
+  }
+
+  async getCloseoutSurveys(filters: { limit?: number; offset?: number }): Promise<{ data: CloseoutSurvey[]; total: number }> {
+    const [countResult] = await db.select({ count: sql<number>`count(*)::int` }).from(closeoutSurveys);
+    const data = await db.select().from(closeoutSurveys).orderBy(desc(closeoutSurveys.sentAt)).limit(filters.limit || 50).offset(filters.offset || 0);
+    return { data, total: countResult?.count || 0 };
+  }
+
+  async createRfpApprovalRequest(data: InsertRfpApprovalRequest): Promise<RfpApprovalRequest> {
+    const [result] = await db.insert(rfpApprovalRequests).values(data).returning();
+    return result;
+  }
+
+  async getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests).where(eq(rfpApprovalRequests.token, token));
+    return result;
+  }
+
+  async getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests)
+      .where(and(eq(rfpApprovalRequests.hubspotDealId, dealId), eq(rfpApprovalRequests.status, 'pending')))
+      .orderBy(desc(rfpApprovalRequests.createdAt));
+    return result;
+  }
+
+  async updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.update(rfpApprovalRequests).set(data).where(eq(rfpApprovalRequests.id, id)).returning();
+    return result;
+  }
+
+  async getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests).where(eq(rfpApprovalRequests.id, id));
+    return result;
+  }
+
+  async getRfpChangeLog(rfpId: number): Promise<RfpChangeLog[]> {
+    return db.select().from(rfpChangeLog).where(eq(rfpChangeLog.rfpId, rfpId)).orderBy(desc(rfpChangeLog.changedAt));
+  }
+
+  async getRfpApprovals(rfpId: number): Promise<RfpApproval[]> {
+    return db.select().from(rfpApprovals).where(eq(rfpApprovals.rfpId, rfpId)).orderBy(rfpApprovals.createdAt);
+  }
+
+  async getReportScheduleConfig(): Promise<ReportScheduleConfig | undefined> {
+    const [result] = await db.select().from(reportScheduleConfig).limit(1);
+    return result;
+  }
+
+  async upsertReportScheduleConfig(data: Partial<InsertReportScheduleConfig>): Promise<ReportScheduleConfig> {
+    const existing = await this.getReportScheduleConfig();
+    const updateData = { ...data, updatedAt: new Date() };
+    if (existing) {
+      const [result] = await db.update(reportScheduleConfig).set(updateData).where(eq(reportScheduleConfig.id, existing.id)).returning();
+      return result!;
+    }
+    const [result] = await db.insert(reportScheduleConfig).values(updateData as InsertReportScheduleConfig).returning();
+    return result!;
+  }
+
+  async seedEmailTemplates(): Promise<void> {
+    const existingTemplates = await this.getEmailTemplates();
+    
+    // T-Rock branded email wrapper
+    const emailWrapper = (content: string) => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>T-Rock Construction</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f4f4f5; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f4f4f5;">
+    <tr>
+      <td style="padding: 40px 20px;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="margin: 0 auto; max-width: 600px;">
+          
+          <!-- Header with Logo -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 30px 40px; border-radius: 12px 12px 0 0; text-align: center;">
+              <img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction" width="180" style="max-width: 180px; height: auto; display: block; margin: 0 auto;" referrerpolicy="no-referrer">
+            </td>
+          </tr>
+          
+          <!-- Orange Accent Bar -->
+          <tr>
+            <td style="background: linear-gradient(90deg, #d11921 0%, #e53935 100%); height: 4px;"></td>
+          </tr>
+          
+          <!-- Main Content -->
+          <tr>
+            <td style="background-color: #ffffff; padding: 40px;">
+              ${content}
+            </td>
+          </tr>
+          
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #1a1a2e; padding: 30px 40px; border-radius: 0 0 12px 12px;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr>
+                  <td style="text-align: center;">
+                    <p style="color: #94a3b8; font-size: 13px; margin: 0 0 10px 0; line-height: 1.5;">
+                      T-Rock Construction, LLC<br>
+                      3001 Long Prairie Rd. Ste. 200, Flower Mound, TX 75022
+                    </p>
+                    <p style="color: #64748b; font-size: 12px; margin: 0;">
+                      <a href="tel:2145484733" style="color: #d11921; text-decoration: none;">(214) 548-4733</a> &nbsp;|&nbsp;
+                      <a href="https://trockgc.com" style="color: #d11921; text-decoration: none;">trockgc.com</a>
+                    </p>
+                    <p style="color: #475569; font-size: 11px; margin: 20px 0 0 0;">
+                      © ${new Date().getFullYear()} T-Rock Construction. All rights reserved.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+    const defaultTemplates = [
+      {
+        templateKey: "project_role_assignment",
+        name: "Project Role Assignment",
+        description: "Sent when a user is assigned a role on a Procore project",
+        subject: "You've been assigned to {{projectName}} | T-Rock Construction",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #e53935 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">👷</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                New Project Assignment
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                You've been added to a project team
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Hello <strong style="color: #1a1a2e;">{{assigneeName}}</strong>,
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                You have been assigned a new role on one of our active projects. Please review the details below and get started right away.
+              </p>
+              
+              <!-- Info Card -->
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Name</span><br>
+                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{projectName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Your Role</span><br>
+                      <span style="color: #d11921; font-size: 18px; font-weight: 700;">{{roleName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project ID</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px; font-family: monospace;">{{projectId}}</span>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Primary CTA Button -->
+              <div style="text-align: center; margin: 24px 0;">
+                <a href="{{procoreUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 32px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  Open in Procore →
+                </a>
+              </div>
+              
+              <!-- Quick Links Section -->
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 24px 0;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
+                  Quick Links
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 8px; width: 33.33%; text-align: center;">
+                      <a href="{{procoreUrl}}" style="display: inline-block; background-color: #f97316; color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 10px 16px; border-radius: 6px; width: 100%; box-sizing: border-box;">
+                        🔧 Procore
+                      </a>
+                    </td>
+                    <td style="padding: 8px; width: 33.33%; text-align: center;">
+                      <a href="{{hubspotUrl}}" style="display: inline-block; background-color: #ff5c35; color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 10px 16px; border-radius: 6px; width: 100%; box-sizing: border-box;">
+                        📊 HubSpot
+                      </a>
+                    </td>
+                    <td style="padding: 8px; width: 33.33%; text-align: center;">
+                      <a href="{{companycamUrl}}" style="display: inline-block; background-color: #00b4d8; color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 10px 16px; border-radius: 6px; width: 100%; box-sizing: border-box;">
+                        📷 CompanyCam
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <p style="color: #64748b; font-size: 13px; line-height: 1.6; margin: 24px 0 0 0; text-align: center;">
+                Questions about this assignment? Contact your Project Manager or reply to this email.
+              </p>
+        `),
+        enabled: true,
+        variables: ["assigneeName", "projectName", "roleName", "projectId", "companyId", "procoreUrl", "hubspotUrl", "companycamUrl"],
+      },
+      {
+        templateKey: "stage_change_notification",
+        name: "Deal Stage Change",
+        description: "Sent when a deal/project stage changes",
+        subject: "Stage Update: {{projectName}} - {{newStage}}",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">📈</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                Project Stage Updated
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                A project has moved to a new stage in the pipeline
+              </p>
+              
+              <!-- Project Name Card -->
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;">
+                <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project</span>
+                <h2 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 8px 0 0 0;">{{projectName}}</h2>
+                <p style="color: #64748b; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;">ID: {{projectId}}</p>
+              </div>
+              
+              <!-- Stage Change Visual -->
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 24px 0;">
+                <tr>
+                  <td style="width: 44%; vertical-align: top;">
+                    <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-radius: 12px; padding: 20px; text-align: center; border: 2px solid #fecaca;">
+                      <span style="color: #991b1b; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Previous Stage</span>
+                      <p style="color: #7f1d1d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{previousStage}}</p>
+                    </div>
+                  </td>
+                  <td style="width: 12%; vertical-align: middle; text-align: center;">
+                    <div style="background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); width: 36px; height: 36px; border-radius: 50%; margin: 0 auto; line-height: 36px;">
+                      <span style="color: #ffffff; font-size: 18px; font-weight: bold;">→</span>
+                    </div>
+                  </td>
+                  <td style="width: 44%; vertical-align: top;">
+                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 20px; text-align: center; border: 2px solid #86efac;">
+                      <span style="color: #166534; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">New Stage</span>
+                      <p style="color: #14532d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{newStage}}</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+              
+              <!-- HubSpot Stage Info -->
+              <div style="background-color: #fff7ed; border-left: 4px solid #f97316; border-radius: 0 8px 8px 0; padding: 16px 20px; margin: 0 0 24px 0;">
+                <p style="color: #9a3412; font-size: 12px; font-weight: 600; text-transform: uppercase; margin: 0 0 4px 0;">HubSpot Deal Stage</p>
+                <p style="color: #c2410c; font-size: 16px; font-weight: 700; margin: 0;">{{hubspotStage}}</p>
+              </div>
+              
+              <!-- Quick Links Section -->
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
+                  View Project In
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{procoreUrl}}" style="display: block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        🔧 Procore
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{hubspotUrl}}" style="display: block; background: linear-gradient(135deg, #ff5c35 0%, #e04e2d 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📊 HubSpot
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{companycamUrl}}" style="display: block; background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📷 CompanyCam
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Timestamp -->
+              <div style="text-align: center; padding: 16px; background-color: #f1f5f9; border-radius: 8px;">
+                <p style="color: #64748b; font-size: 12px; margin: 0;">
+                  Stage updated on <strong>{{timestamp}}</strong>
+                </p>
+                <p style="color: #94a3b8; font-size: 11px; margin: 8px 0 0 0;">
+                  Synced automatically by T-Rock Sync Hub
+                </p>
+              </div>
+        `),
+        enabled: true,
+        variables: ["projectName", "projectId", "previousStage", "newStage", "hubspotStage", "timestamp", "procoreUrl", "hubspotUrl", "companycamUrl"],
+      },
+      {
+        templateKey: "project_kickoff",
+        name: "Project Kickoff",
+        description: "Client kickoff email sent to the Project Manager when assigned – ready to forward to client",
+        subject: "{{projectName}} - Project Kickoff & Team Introduction",
+        bodyHtml: emailWrapper(`
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Hello <strong style="color: #1a1a2e;">{{clientName}}</strong>,
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                We're excited to officially kick off the <strong>{{projectName}}</strong>. This email serves as an introduction to your project team and outlines how we'll be working together moving forward.
+              </p>
+              
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Project Overview</p>
+              <ul style="color: #374151; font-size: 15px; line-height: 1.8; margin: 0 0 24px 0; padding-left: 24px;">
+                <li><strong>Project Name:</strong> {{projectName}}</li>
+                <li><strong>Scope Summary:</strong> {{scopeSummary}}</li>
+                <li><strong>Start Date:</strong> {{startDate}}</li>
+                <li><strong>Target Completion Date:</strong> {{endDate}}</li>
+              </ul>
+              
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Your Project Team</p>
+              <p style="color: #64748b; font-size: 14px; margin: 0 0 16px 0;">Below are the key team members who will be overseeing and supporting this project:</p>
+              <ul style="color: #374151; font-size: 15px; line-height: 1.9; margin: 0 0 24px 0; padding-left: 24px;">
+                <li><strong>Project Manager:</strong> {{pmName}}<br>Email: {{pmEmail}} | Phone: {{pmPhone}}</li>
+                <li><strong>Superintendent:</strong> {{superName}}<br>Email: {{superEmail}} | Phone: {{superPhone}}</li>
+                <li><strong>Accounts Receivable:</strong> Kristy Scheidegger<br>Email: trockAR@trockgc.com | Phone: 469-927-3209</li>
+              </ul>
+              
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Communication &amp; Next Steps</p>
+              <ul style="color: #374151; font-size: 15px; line-height: 1.8; margin: 0 0 16px 0; padding-left: 24px;">
+                <li><strong>Primary Point of Contact:</strong> {{primaryContact}}</li>
+                <li><strong>Preferred Communication Method:</strong> {{preferredMethod}}</li>
+                <li><strong>Status Update Frequency:</strong> {{statusFrequency}}</li>
+              </ul>
+              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
+                Our next step will be {{nextStep}}. We will reach out shortly to confirm timelines and any required information.
+              </p>
+              
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Closing</p>
+              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
+                Thank you for the opportunity to work with you. We look forward to a successful collaboration.
+              </p>
+              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0;">
+                Best regards,<br><strong>{{pmName}}</strong>
+              </p>
+              
+              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 32px 0 24px 0;">
+              <p style="color: #94a3b8; font-size: 12px; margin: 0 0 12px 0;">Quick Links</p>
+              <p style="margin: 0;">
+                <a href="{{procoreUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none; margin-right: 16px;">Procore</a>
+                <a href="{{hubspotUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none; margin-right: 16px;">HubSpot</a>
+                <a href="{{companycamUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none;">CompanyCam</a>
+              </p>
+        `),
+        enabled: true,
+        variables: ["clientName", "projectName", "scopeSummary", "startDate", "endDate", "pmName", "pmEmail", "pmPhone", "superName", "superEmail", "superPhone", "primaryContact", "preferredMethod", "statusFrequency", "nextStep", "procoreUrl", "hubspotUrl", "companycamUrl"],
+      },
+      {
+        templateKey: "closeout_survey",
+        name: "Project Closeout Survey",
+        description: "Client satisfaction survey sent when project reaches closeout stage",
+        subject: "How did we do? {{projectName}} | T-Rock Construction",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #34d399 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">🎉</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                Project Complete!
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                We'd love to hear about your experience
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Dear <strong style="color: #1a1a2e;">{{clientName}}</strong>,
+              </p>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Thank you for choosing T-Rock Construction for your project <strong>{{projectName}}</strong>. We're committed to delivering exceptional service and would greatly appreciate your feedback.
+              </p>
+              
+              <!-- Project Summary Card -->
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 32px 0; text-align: center;">
+                <span style="color: #94a3b8; font-size: 12px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Completed Project</span>
+                <h2 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 8px 0 0 0;">{{projectName}}</h2>
+              </div>
+              
+              <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
+                Your feedback helps us improve and ensures we continue to exceed expectations. Please take a moment to share your experience:
+              </p>
+              
+              <!-- Survey CTA Button -->
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="{{surveyUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  Take Quick Survey →
+                </a>
+              </div>
+              
+              <!-- Google Review Section -->
+              <div style="background-color: #f8fafc; border-radius: 8px; padding: 20px; margin: 24px 0; text-align: center;">
+                <p style="color: #1a1a2e; font-size: 14px; font-weight: 600; margin: 0 0 12px 0;">
+                  ⭐ Love your experience? Leave us a Google Review!
+                </p>
+                <a href="{{googleReviewUrl}}" style="color: #d11921; font-size: 14px; text-decoration: underline;">
+                  Write a Review on Google
+                </a>
+              </div>
+              
+              <p style="color: #64748b; font-size: 14px; line-height: 1.6; margin: 32px 0 0 0; text-align: center;">
+                Thank you for your partnership. We look forward to working with you again!
+              </p>
+        `),
+        enabled: true,
+        variables: ["clientName", "projectName", "surveyUrl", "googleReviewUrl"],
+      },
+      {
+        templateKey: "bidboard_sync_summary",
+        name: "BidBoard Sync Summary",
+        description: "Daily/hourly summary of BidBoard sync activities",
+        subject: "📋 BidBoard Sync Report | {{date}}",
+        bodyHtml: emailWrapper(`
+              <!-- Icon Badge -->
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">📊</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                BidBoard Sync Summary
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                Automated sync report for <strong>{{date}}</strong>
+              </p>
+              
+              <!-- Stats Grid -->
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 24px 0;">
+                <tr>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #bfdbfe;">
+                      <span style="font-size: 28px; font-weight: 800; color: #1d4ed8; display: block;">{{projectsScanned}}</span>
+                      <p style="color: #1e40af; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">Scanned</p>
+                    </div>
+                  </td>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #fcd34d;">
+                      <span style="font-size: 28px; font-weight: 800; color: #d97706; display: block;">{{stageChanges}}</span>
+                      <p style="color: #b45309; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">Stage Changes</p>
+                    </div>
+                  </td>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #86efac;">
+                      <span style="font-size: 28px; font-weight: 800; color: #15803d; display: block;">{{portfolioTransitions}}</span>
+                      <p style="color: #166534; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">To Portfolio</p>
+                    </div>
+                  </td>
+                  <td style="padding: 6px; width: 25%;">
+                    <div style="background: linear-gradient(135deg, #fce7f3 0%, #fbcfe8 100%); border-radius: 12px; padding: 20px 12px; text-align: center; border: 2px solid #f9a8d4;">
+                      <span style="font-size: 28px; font-weight: 800; color: #be185d; display: block;">{{hubspotUpdates}}</span>
+                      <p style="color: #9d174d; font-size: 10px; text-transform: uppercase; font-weight: 700; margin: 8px 0 0 0; letter-spacing: 0.5px;">HS Updated</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+              
+              <!-- Stage Changes Detail -->
+              {{#if changedProjects}}
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px; margin: 0 0 16px 0;">
+                  📋 Projects with Stage Changes
+                </p>
+                {{changedProjects}}
+              </div>
+              {{/if}}
+              
+              <!-- Quick Links Section -->
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 0 0 24px 0;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 16px 0; text-align: center;">
+                  Quick Access
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{bidboardUrl}}" style="display: block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        🎯 Open BidBoard
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{hubspotDealsUrl}}" style="display: block; background: linear-gradient(135deg, #ff5c35 0%, #e04e2d 100%); color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        📊 HubSpot Deals
+                      </a>
+                    </td>
+                    <td style="padding: 6px; width: 33.33%; text-align: center;">
+                      <a href="{{syncHubUrl}}" style="display: block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 12px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                        ⚡ Sync Hub
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <!-- Sync Status -->
+              <div style="text-align: center; padding: 16px; background-color: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0;">
+                <p style="color: #166534; font-size: 14px; font-weight: 600; margin: 0;">
+                  ✅ Sync Completed Successfully
+                </p>
+                <p style="color: #64748b; font-size: 12px; margin: 8px 0 0 0;">
+                  Next sync scheduled in {{nextSyncTime}}
+                </p>
+              </div>
+              
+              <!-- Footer Note -->
+              <p style="color: #94a3b8; font-size: 11px; line-height: 1.5; margin: 24px 0 0 0; text-align: center;">
+                This automated report is generated by T-Rock Sync Hub.<br>
+                Configure sync settings and notifications in the <a href="{{syncHubUrl}}/settings" style="color: #d11921;">Sync Hub Settings</a>.
+              </p>
+        `),
+        enabled: false,
+        variables: ["date", "projectsScanned", "stageChanges", "portfolioTransitions", "hubspotUpdates", "changedProjects", "bidboardUrl", "hubspotDealsUrl", "syncHubUrl", "nextSyncTime"],
+      },
+      {
+        templateKey: "rfp_review",
+        name: "RFP Review & Approval",
+        description: "Sent to reviewers when a deal reaches RFP stage for approval before BidBoard project creation",
+        subject: "RFP Review Required: {{dealName}}",
+        bodyHtml: emailWrapper(`
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">📋</span>
+                </div>
+              </div>
+              
+              <h1 style="color: #1a1a2e; font-size: 24px; font-weight: 700; text-align: center; margin: 0 0 8px 0;">
+                New RFP Ready for Review
+              </h1>
+              <p style="color: #64748b; font-size: 14px; text-align: center; margin: 0 0 32px 0;">
+                A deal requires your review and approval before proceeding
+              </p>
+              
+              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td style="padding: 12px 0;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Deal Name</span><br>
+                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{dealName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Type</span><br>
+                      <span style="color: #d11921; font-size: 18px; font-weight: 700;">{{projectType}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                        <tr>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Number</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{projectNumber}}</span>
+                          </td>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Amount</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{amount}}</span>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                        <tr>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Company</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{companyName}}</span>
+                          </td>
+                          <td style="width: 50%;">
+                            <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Estimator</span><br>
+                            <span style="color: #e2e8f0; font-size: 14px;">{{estimator}}</span>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Location</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{location}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Description</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{description}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Deal Owner</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{ownerName}}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 0; border-top: 1px solid #334155;">
+                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Attachments</span><br>
+                      <span style="color: #e2e8f0; font-size: 14px;">{{attachmentList}}</span>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="{{reviewUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 40px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                  Review &amp; Approve →
+                </a>
+              </div>
+              
+              <div style="background-color: #f8fafc; border-radius: 12px; padding: 20px; margin: 0 0 24px 0; text-align: center;">
+                <p style="color: #1a1a2e; font-size: 13px; font-weight: 700; margin: 0 0 12px 0;">
+                  View in HubSpot
+                </p>
+                <a href="{{hubspotDealUrl}}" style="color: #d11921; font-size: 14px; text-decoration: underline;">
+                  Open Deal in HubSpot
+                </a>
+              </div>
+              
+              <div style="text-align: center; padding: 16px; background-color: #fff7ed; border-radius: 8px; border: 1px solid #fed7aa;">
+                <p style="color: #9a3412; font-size: 13px; margin: 0;">
+                  You can edit deal fields and change the project type on the review page before approving.
+                </p>
+              </div>
+        `),
+        enabled: true,
+        variables: ["dealName", "projectType", "projectNumber", "amount", "companyName", "estimator", "location", "description", "ownerName", "attachmentList", "hubspotDealUrl", "reviewUrl"],
+      },
+    ];
+
+    for (const template of defaultTemplates) {
+      const exists = existingTemplates.find(t => t.templateKey === template.templateKey);
+      if (!exists) {
+        await db.insert(emailTemplates).values(template);
+        console.log(`[seed] Created email template: ${template.templateKey}`);
+      } else {
+        // Update existing template with new design (preserving user's enabled state)
+        await db.update(emailTemplates)
+          .set({
+            bodyHtml: template.bodyHtml,
+            subject: template.subject,
+            variables: template.variables,
+            description: template.description,
+          })
+          .where(eq(emailTemplates.templateKey, template.templateKey));
+        console.log(`[seed] Updated email template: ${template.templateKey}`);
+      }
+    }
   }
 }
 

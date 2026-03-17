@@ -1,4 +1,5 @@
 import { storage } from './storage';
+import { getAccessToken } from './procore';
 import type { HubspotCompany, HubspotContact, ProcoreVendor } from '@shared/schema';
 
 async function getProcoreConfig(): Promise<{ companyId: string; environment: string }> {
@@ -13,41 +14,6 @@ async function getProcoreConfig(): Promise<{ companyId: string; environment: str
 
 function getBaseUrl(environment: string): string {
   return environment === "sandbox" ? "https://sandbox.procore.com" : "https://api.procore.com";
-}
-
-async function getAccessToken(): Promise<string> {
-  const token = await storage.getOAuthToken("procore");
-  if (!token?.accessToken) throw new Error("No Procore OAuth token found.");
-
-  if (token.expiresAt && new Date(token.expiresAt).getTime() < Date.now() + 60000) {
-    if (token.refreshToken) {
-      const config = await storage.getAutomationConfig("procore_config");
-      const val = (config?.value as any) || {};
-      const loginUrl = (val.environment === "sandbox") ? "https://login-sandbox.procore.com" : "https://login.procore.com";
-      const response = await fetch(`${loginUrl}/oauth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          grant_type: 'refresh_token',
-          client_id: val.clientId,
-          client_secret: val.clientSecret,
-          refresh_token: token.refreshToken,
-        }),
-      });
-      if (!response.ok) throw new Error("Failed to refresh Procore token");
-      const data = await response.json();
-      await storage.upsertOAuthToken({
-        provider: "procore",
-        accessToken: data.access_token,
-        refreshToken: data.refresh_token || token.refreshToken,
-        tokenType: "Bearer",
-        expiresAt: new Date(Date.now() + (data.expires_in || 7200) * 1000),
-      });
-      return data.access_token;
-    }
-    throw new Error("Procore token expired.");
-  }
-  return token.accessToken;
 }
 
 async function procoreApiCall(method: string, endpoint: string, body?: any): Promise<any> {
@@ -289,8 +255,18 @@ export async function syncHubspotCompanyToProcore(hubspotId: string): Promise<{
   fieldsUpdated?: string[];
   message: string;
 }> {
-  const company = await storage.getHubspotCompanyByHubspotId(hubspotId);
-  if (!company) return { action: 'skipped', message: `HubSpot company ${hubspotId} not found in local database` };
+  let company = await storage.getHubspotCompanyByHubspotId(hubspotId);
+  if (!company) {
+    // Polling fallback: fetch from HubSpot API (webhook may have fired before local sync)
+    try {
+      const { syncSingleHubSpotCompany } = await import('./hubspot');
+      await syncSingleHubSpotCompany(hubspotId);
+      company = await storage.getHubspotCompanyByHubspotId(hubspotId);
+    } catch (e: any) {
+      console.log(`[hubspot-procore] Could not fetch company ${hubspotId} from HubSpot: ${e.message}`);
+    }
+    if (!company) return { action: 'skipped', message: `HubSpot company ${hubspotId} not found in local database` };
+  }
 
   const config = await getProcoreConfig();
 
@@ -553,9 +529,78 @@ export async function processHubspotWebhookForProcore(
     return syncHubspotCompanyToProcore(objectId);
   } else if (objectType === 'contact') {
     return syncHubspotContactToProcore(objectId);
+  } else if (objectType === 'deal') {
+    return processHubspotDealWebhookForProcore(objectId);
   }
 
   return { skipped: true, reason: `unsupported_object_type: ${objectType}` };
+}
+
+/**
+ * On any HubSpot deal webhook (create/update), push deal/company/contact data to linked
+ * Procore project immediately. Does not wait for full sync.
+ */
+async function processHubspotDealWebhookForProcore(hubspotDealId: string): Promise<any> {
+  const syncClientConfig = await storage.getAutomationConfig("sync_client_data");
+  const syncClientEnabled = (syncClientConfig?.value as any)?.enabled !== false;
+  if (!syncClientEnabled) return { skipped: true, reason: 'sync_client_data_disabled' };
+
+  const mapping = await storage.getSyncMappingByHubspotDealId(hubspotDealId);
+  if (!mapping) return { skipped: true, reason: 'no_procore_mapping' };
+
+  // syncHubSpotClientToBidBoard only works for BidBoard projects (BidBoard UI)
+  const projectId = mapping.bidboardProjectId || mapping.procoreProjectId;
+  if (!projectId) return { skipped: true, reason: 'no_linked_procore_project' };
+
+  try {
+    const { syncHubSpotClientToBidBoard } = await import("./playwright/bidboard");
+    const result = await syncHubSpotClientToBidBoard(projectId, hubspotDealId);
+    if (result.success) {
+      console.log(`[HubSpot→Procore] Deal ${hubspotDealId} client data synced to Procore project ${projectId}`);
+      return { success: true, projectId };
+    }
+    return { success: false, error: result.error };
+  } catch (err: any) {
+    console.error(`[HubSpot→Procore] Deal ${hubspotDealId} client data sync error:`, err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Polling: Fetch recent HubSpot companies and sync to Procore Company Directory.
+ * Prevents duplicates via findMatchingVendor — matched vendors are updated, not recreated.
+ */
+export async function runHubSpotCompanyToProcorePolling(
+  modifiedWithinMinutes: number = 60
+): Promise<{ processed: number; created: number; updated: number; skipped: number; errors: number }> {
+  const automationConfig = await storage.getAutomationConfig("hubspot_procore_auto_sync");
+  const enabled = (automationConfig?.value as any)?.enabled;
+  if (!enabled) return { processed: 0, created: 0, updated: 0, skipped: 0, errors: 0 };
+
+  const { fetchRecentHubSpotCompanyIds } = await import('./hubspot');
+  const { syncSingleHubSpotCompany } = await import('./hubspot');
+
+  const ids = await fetchRecentHubSpotCompanyIds(modifiedWithinMinutes);
+  if (ids.length === 0) return { processed: 0, created: 0, updated: 0, skipped: 0, errors: 0 };
+
+  console.log(`[HubSpot→Procore] Polling: syncing ${ids.length} recent companies to Procore Company Directory`);
+
+  let created = 0, updated = 0, skipped = 0, errors = 0;
+  for (const hubspotId of ids) {
+    try {
+      await syncSingleHubSpotCompany(hubspotId);
+      const result = await syncHubspotCompanyToProcore(hubspotId);
+      if (result.action === 'created') created++;
+      else if (result.action === 'updated') updated++;
+      else skipped++;
+    } catch (e: any) {
+      console.error(`[HubSpot→Procore] Polling error for company ${hubspotId}:`, e.message);
+      errors++;
+    }
+  }
+
+  console.log(`[HubSpot→Procore] Polling complete: ${created} created, ${updated} updated, ${skipped} skipped, ${errors} errors`);
+  return { processed: ids.length, created, updated, skipped, errors };
 }
 
 export async function triggerPostSyncProcoreUpdates(
@@ -597,7 +642,7 @@ export async function triggerPostSyncProcoreUpdates(
       }
     }
 
-    for (const hubspotId of recentIds) {
+    for (const hubspotId of Array.from(recentIds)) {
       try {
         const result = await syncHubspotCompanyToProcore(hubspotId);
         results.push({ type: 'company', hubspotId, ...result });
@@ -624,7 +669,7 @@ export async function triggerPostSyncProcoreUpdates(
       }
     }
 
-    for (const hubspotId of recentIds) {
+    for (const hubspotId of Array.from(recentIds)) {
       try {
         const result = await syncHubspotContactToProcore(hubspotId);
         results.push({ type: 'contact', hubspotId, ...result });

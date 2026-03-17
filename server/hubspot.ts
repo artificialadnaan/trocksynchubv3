@@ -1,79 +1,284 @@
+/**
+ * HubSpot Integration Module
+ * ==========================
+ * 
+ * This module handles all interactions with the HubSpot CRM API.
+ * It manages OAuth authentication, data synchronization, and deal/contact operations.
+ * 
+ * Key Features:
+ * - OAuth 2.0 authentication flow (authorization code grant)
+ * - Automatic token refresh when tokens expire
+ * - Full sync of companies, contacts, deals, and pipelines
+ * - Deal stage updates (triggered by Procore stage changes)
+ * - Change detection and history tracking
+ * 
+ * Data Flow:
+ * 1. User authenticates via OAuth → tokens stored in database
+ * 2. runFullHubSpotSync() fetches all CRM data → cached locally
+ * 3. Procore stage changes → mapProcoreStageToHubspot() → update deal stage
+ * 4. Webhooks from HubSpot → trigger sync updates
+ * 
+ * HubSpot API Scopes Required:
+ * - crm.objects.deals.read/write
+ * - crm.objects.contacts.read
+ * - crm.objects.companies.read
+ * - crm.schemas.*.read
+ * 
+ * Key Functions:
+ * - getHubSpotClient(): Returns authenticated API client
+ * - runFullHubSpotSync(): Syncs all HubSpot data to local database
+ * - updateHubSpotDealStage(): Updates deal stage (requires stage ID, not label)
+ * - syncHubSpotPipelines(): Syncs pipeline and stage definitions
+ * 
+ * @module hubspot
+ */
+
 import { Client } from '@hubspot/api-client';
 import { storage } from './storage';
 
-let connectionSettings: any;
+// HubSpot OAuth configuration
+const HUBSPOT_AUTH_URL = 'https://app.hubspot.com/oauth/authorize';
+const HUBSPOT_TOKEN_URL = 'https://api.hubapi.com/oauth/v1/token';
+
+export function getHubSpotOAuthConfig() {
+  return {
+    clientId: process.env.HUBSPOT_CLIENT_ID || '',
+    clientSecret: process.env.HUBSPOT_CLIENT_SECRET || '',
+    redirectUri: `${process.env.APP_URL || 'http://localhost:5000'}/api/oauth/hubspot/callback`,
+    scopes: [
+      'crm.objects.deals.read',
+      'crm.objects.deals.write',
+      'crm.objects.contacts.read',
+      'crm.objects.companies.read',
+      'crm.schemas.deals.read',
+      'crm.schemas.contacts.read',
+      'crm.schemas.companies.read',
+      'oauth',
+    ],
+  };
+}
+
+export function getHubSpotAuthUrl(): string {
+  const config = getHubSpotOAuthConfig();
+  const params = new URLSearchParams({
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
+    scope: config.scopes.join(' '),
+    response_type: 'code',
+  });
+  return `${HUBSPOT_AUTH_URL}?${params.toString()}`;
+}
+
+export async function exchangeHubSpotCode(code: string): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  const config = getHubSpotOAuthConfig();
+  
+  console.log('[hubspot-oauth] Exchanging authorization code for tokens...');
+  
+  const response = await fetch(HUBSPOT_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      redirect_uri: config.redirectUri,
+      code,
+    }),
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[hubspot-oauth] Token exchange failed:', response.status, errorText);
+    throw new Error(`HubSpot OAuth failed: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  console.log('[hubspot-oauth] Token exchange successful, expires_in:', data.expires_in);
+  
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresIn: data.expires_in,
+  };
+}
+
+export async function refreshHubSpotToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  const config = getHubSpotOAuthConfig();
+  
+  console.log('[hubspot-oauth] Refreshing access token...');
+  
+  const response = await fetch(HUBSPOT_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: refreshToken,
+    }),
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('[hubspot-oauth] Token refresh failed:', response.status, errorText);
+    throw new Error(`HubSpot token refresh failed: ${response.status} - ${errorText}`);
+  }
+  
+  const data = await response.json();
+  console.log('[hubspot-oauth] Token refresh successful, new expires_in:', data.expires_in);
+  
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token,
+    expiresIn: data.expires_in,
+  };
+}
+
+// Mutex: only one HubSpot token refresh at a time (refresh tokens may be single-use)
+let hubspotRefreshPromise: Promise<string> | null = null;
 
 export async function getAccessToken(): Promise<string> {
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY
-    ? 'repl ' + process.env.REPL_IDENTITY
-    : process.env.WEB_REPL_RENEWAL
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL
-    : null;
-
-  if (xReplitToken && hostname) {
-    if (connectionSettings && connectionSettings.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-      return connectionSettings.settings.access_token;
-    }
-
-    connectionSettings = null;
-
-    const response = await fetch(
-      'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=hubspot',
-      {
-        headers: {
-          'Accept': 'application/json',
-          'X-Replit-Token': xReplitToken
+  
+  // 1. Check for access token stored in database (from Settings page or OAuth flow)
+  const storedToken = await storage.getOAuthToken("hubspot");
+  
+  if (storedToken?.accessToken) {
+    // Check if token is expired and needs refresh
+    if (storedToken.expiresAt) {
+      const expiresAt = new Date(storedToken.expiresAt).getTime();
+      const now = Date.now();
+      const fiveMinutes = 5 * 60 * 1000;
+      
+      if (expiresAt <= now) {
+        // Try to refresh if we have a refresh token
+        if (storedToken.refreshToken) {
+          if (hubspotRefreshPromise) {
+            return hubspotRefreshPromise;
+          }
+          const doRefresh = async (): Promise<string> => {
+            const refreshed = await refreshHubSpotToken(storedToken.refreshToken!);
+            await storage.upsertOAuthToken({
+              provider: "hubspot",
+              accessToken: refreshed.accessToken,
+              refreshToken: refreshed.refreshToken,
+              tokenType: "Bearer",
+              expiresAt: new Date(Date.now() + refreshed.expiresIn * 1000),
+            });
+            console.log('[hubspot] Token refreshed successfully');
+            return refreshed.accessToken;
+          };
+          hubspotRefreshPromise = doRefresh();
+          try {
+            return await hubspotRefreshPromise;
+          } catch (refreshError: any) {
+            console.error('[hubspot] Token refresh failed:', refreshError.message);
+            throw new Error(`HubSpot token expired and refresh failed: ${refreshError.message}`);
+          } finally {
+            hubspotRefreshPromise = null;
+          }
+        }
+        throw new Error('HubSpot token expired and no refresh token available. Please re-authenticate in Settings.');
+      } else if (expiresAt - now < fiveMinutes && storedToken.refreshToken) {
+        // Token expires soon, proactively refresh (using mutex to prevent concurrent refreshes)
+        if (hubspotRefreshPromise) {
+          return hubspotRefreshPromise;
+        }
+        const doProactiveRefresh = async (): Promise<string> => {
+          const refreshed = await refreshHubSpotToken(storedToken.refreshToken!);
+          await storage.upsertOAuthToken({
+            provider: "hubspot",
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken,
+            tokenType: "Bearer",
+            expiresAt: new Date(Date.now() + refreshed.expiresIn * 1000),
+          });
+          console.log('[hubspot] Proactive token refresh successful');
+          return refreshed.accessToken;
+        };
+        hubspotRefreshPromise = doProactiveRefresh();
+        try {
+          return await hubspotRefreshPromise;
+        } catch (e: any) {
+          console.warn('[hubspot] Proactive refresh failed, using existing token:', e.message);
+        } finally {
+          hubspotRefreshPromise = null;
         }
       }
-    );
-
-    const data = await response.json();
-    connectionSettings = data.items?.[0];
-
-    const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
-
-    if (!connectionSettings || !accessToken) {
-      throw new Error('HubSpot not connected via Replit connector. Falling back to env var.');
-    }
-
-    const expiresAt = connectionSettings.settings?.expires_at;
-    if (expiresAt) {
-      const expiresTime = new Date(expiresAt).getTime();
-      if (expiresTime <= Date.now()) {
-        connectionSettings = null;
-        throw new Error('HubSpot OAuth token is expired. Please reconnect HubSpot in the integrations panel.');
+      
+      // Token is still valid
+      if (expiresAt > now) {
+        console.log('[hubspot] Using stored token (valid for', Math.round((expiresAt - now) / 60000), 'more minutes)');
+        return storedToken.accessToken;
       }
+    } else {
+      // No expiry set, assume it's a Private App token (doesn't expire)
+      console.log('[hubspot] Using stored token (no expiry - likely Private App token)');
+      return storedToken.accessToken;
     }
-
-    return accessToken;
   }
 
+  // 2. Check environment variable (for Private App tokens)
   if (process.env.HUBSPOT_ACCESS_TOKEN) {
+    console.log('[hubspot] Using HUBSPOT_ACCESS_TOKEN from environment');
     return process.env.HUBSPOT_ACCESS_TOKEN;
   }
 
-  throw new Error('HubSpot token not available. Configure Replit HubSpot integration or set HUBSPOT_ACCESS_TOKEN env var.');
+  console.error('[hubspot] No valid access token found');
+  throw new Error('HubSpot not connected. Please configure HubSpot in Settings or set HUBSPOT_ACCESS_TOKEN environment variable.');
 }
 
 export async function getHubSpotClient(): Promise<Client> {
   const accessToken = await getAccessToken();
+  // Token details intentionally not logged for security
   return new Client({ accessToken });
 }
 
 export async function testHubSpotConnection(): Promise<{ success: boolean; message: string; data?: any }> {
+  console.log('[hubspot-test] Testing HubSpot connection...');
   try {
     const client = await getHubSpotClient();
-    const response = await client.crm.deals.basicApi.getPage(1);
-    return {
-      success: true,
-      message: `Connected! Found ${(response as any).total || response.results?.length || 0} deals in your HubSpot account.`,
-      data: { totalDeals: (response as any).total || response.results?.length || 0 }
-    };
+    
+    // Test basic API access
+    console.log('[hubspot-test] Fetching deals to verify connection...');
+    const dealsResponse = await client.crm.deals.basicApi.getPage(1);
+    const totalDeals = (dealsResponse as any).total || dealsResponse.results?.length || 0;
+    console.log('[hubspot-test] Deals API successful, found', totalDeals, 'deals');
+    
+    // Test pipeline access
+    console.log('[hubspot-test] Fetching pipelines to verify schema access...');
+    try {
+      const pipelinesResponse = await client.crm.pipelines.pipelinesApi.getAll('deals');
+      const pipelineCount = pipelinesResponse.results?.length || 0;
+      const stageCount = pipelinesResponse.results?.reduce((sum, p) => sum + (p.stages?.length || 0), 0) || 0;
+      console.log('[hubspot-test] Pipelines API successful, found', pipelineCount, 'pipelines with', stageCount, 'stages');
+      
+      return {
+        success: true,
+        message: `Connected! Found ${totalDeals} deals and ${pipelineCount} pipelines (${stageCount} stages).`,
+        data: { totalDeals, pipelines: pipelineCount, stages: stageCount }
+      };
+    } catch (pipelineError: any) {
+      console.warn('[hubspot-test] Pipeline access failed:', pipelineError.message);
+      return {
+        success: true,
+        message: `Connected! Found ${totalDeals} deals. Note: Pipeline access may require additional scopes (crm.schemas.deals.read).`,
+        data: { totalDeals, pipelineError: pipelineError.message }
+      };
+    }
   } catch (e: any) {
+    console.error('[hubspot-test] Connection test failed:', e.message);
+    
+    // Provide more helpful error messages
+    let message = e.message || 'Failed to connect to HubSpot';
+    if (e.message?.includes('401')) {
+      message = 'Authentication failed. Please check your HubSpot access token is valid.';
+    } else if (e.message?.includes('403')) {
+      message = 'Access denied. Your HubSpot token may be missing required scopes.';
+    }
+    
     return {
       success: false,
-      message: e.message || 'Failed to connect to HubSpot'
+      message
     };
   }
 }
@@ -155,6 +360,119 @@ export async function syncHubSpotCompanies(): Promise<{ synced: number; created:
   return { synced: allCompanies.length, created, updated, changes };
 }
 
+/**
+ * Fetch and sync a single HubSpot company by ID.
+ * Called by webhook handlers for real-time company updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleHubSpotCompany(companyId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+  try {
+    const client = await getHubSpotClient();
+    const properties = ['name', 'domain', 'phone', 'address', 'city', 'state', 'zip', 'industry', 'hubspot_owner_id', 'hs_lastmodifieddate'];
+    
+    let company;
+    try {
+      company = await client.crm.companies.basicApi.getById(companyId, properties);
+    } catch (fetchErr: any) {
+      if (fetchErr.code === 404 || fetchErr.statusCode === 404) {
+        await storage.deleteHubspotCompany(companyId);
+        console.log(`[hubspot] Company ${companyId} deleted (not found in HubSpot)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const props = company.properties || {};
+    const existing = await storage.getHubspotCompanyByHubspotId(companyId);
+    const action = existing ? 'updated' : 'created';
+    
+    const data = {
+      hubspotId: companyId,
+      name: props.name || null,
+      domain: props.domain || null,
+      phone: props.phone || null,
+      address: props.address || null,
+      city: props.city || null,
+      state: props.state || null,
+      zip: props.zip || null,
+      industry: props.industry || null,
+      ownerId: props.hubspot_owner_id || null,
+      properties: props,
+      hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
+    };
+    
+    if (existing) {
+      const changedFields = detectChanges(existing, data, ['name', 'domain', 'phone', 'address', 'city', 'state', 'zip', 'industry', 'ownerId']);
+      for (const change of changedFields) {
+        await storage.createChangeHistory({
+          entityType: 'company',
+          entityHubspotId: companyId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: props,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createChangeHistory({
+        entityType: 'company',
+        entityHubspotId: companyId,
+        changeType: 'created',
+        fullSnapshot: props,
+        syncedAt: new Date(),
+      });
+    }
+    
+    await storage.upsertHubspotCompany(data);
+    console.log(`[hubspot] Company ${companyId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to sync company ${companyId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
+/**
+ * Fetch HubSpot company IDs modified in the last N minutes.
+ * Uses CRM Search API for efficient filtering.
+ */
+export async function fetchRecentHubSpotCompanyIds(modifiedWithinMinutes: number): Promise<string[]> {
+  const accessToken = await getAccessToken();
+  const since = new Date(Date.now() - modifiedWithinMinutes * 60 * 1000).toISOString();
+
+  const response = await fetch('https://api.hubapi.com/crm/v3/objects/companies/search', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      filterGroups: [{
+        filters: [{
+          propertyName: 'hs_lastmodifieddate',
+          operator: 'GTE',
+          value: since,
+        }],
+      }],
+      properties: ['name', 'hs_lastmodifieddate'],
+      limit: 200,
+      sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'DESCENDING' }],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`HubSpot search failed: ${response.status} ${err}`);
+  }
+
+  const data = await response.json();
+  const results = data.results || [];
+  return results.map((r: any) => String(r.id));
+}
+
 async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   const ownerMap = new Map<string, string>();
   const accessToken = await getAccessToken();
@@ -198,6 +516,69 @@ async function fetchHubSpotOwners(): Promise<Map<string, string>> {
     console.warn('Could not resolve any HubSpot owners. Owner names will show as IDs.');
   }
   return ownerMap;
+}
+
+/**
+ * Sync all HubSpot owners to the local database.
+ * Fetches owner data from HubSpot API and upserts to hubspot_owners table.
+ * If hubspot_owners table does not exist (e.g. fresh deploy), logs a warning and returns without failing.
+ */
+export async function syncHubSpotOwners(): Promise<{ synced: number; created: number; updated: number }> {
+  const accessToken = await getAccessToken();
+  let synced = 0;
+  let created = 0;
+  let updated = 0;
+
+  try {
+    const response = await fetch('https://api.hubapi.com/crm/v3/owners?limit=500', {
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
+    });
+
+    if (!response.ok) {
+      console.error(`[hubspot] Failed to fetch owners: ${response.status}`);
+      return { synced, created, updated };
+    }
+
+    const data = await response.json();
+    const owners = data.results || [];
+
+    for (const owner of owners) {
+      try {
+        const existing = await storage.getHubspotOwnerByHubspotId(String(owner.id));
+        await storage.upsertHubspotOwner({
+          hubspotId: String(owner.id),
+          email: owner.email || '',
+          firstName: owner.firstName || null,
+          lastName: owner.lastName || null,
+          userId: owner.userId ? String(owner.userId) : null,
+          teams: owner.teams ? JSON.stringify(owner.teams) : null,
+          archived: owner.archived || false,
+        });
+        synced++;
+        if (existing) {
+          updated++;
+        } else {
+          created++;
+        }
+      } catch (rowErr: any) {
+        if (rowErr.message?.includes('does not exist') || rowErr.code === '42P01') {
+          console.warn(`[hubspot] hubspot_owners table missing; owner sync skipped. Run db:push to create it.`);
+          return { synced, created, updated };
+        }
+        throw rowErr;
+      }
+    }
+
+    console.log(`[hubspot] Synced ${synced} owners (${created} created, ${updated} updated)`);
+  } catch (err: any) {
+    if (err.message?.includes('does not exist') || err.code === '42P01') {
+      console.warn(`[hubspot] hubspot_owners table missing; owner sync skipped. Run db:push to create it.`);
+    } else {
+      console.error(`[hubspot] Failed to sync owners:`, err.message);
+    }
+  }
+
+  return { synced, created, updated };
 }
 
 async function fetchContactCompanyAssociations(contactIds: string[]): Promise<Map<string, string>> {
@@ -360,9 +741,194 @@ export async function syncHubSpotContacts(): Promise<{ synced: number; created: 
   return { synced: allContacts.length, created, updated, changes };
 }
 
+/**
+ * Fetch and sync a single HubSpot contact by ID.
+ * Called by webhook handlers for real-time contact updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleHubSpotContact(contactId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted'; error?: string }> {
+  try {
+    const client = await getHubSpotClient();
+    const properties = ['firstname', 'lastname', 'email', 'phone', 'company', 'jobtitle', 'lifecyclestage', 'hubspot_owner_id', 'associatedcompanyid', 'hs_lastmodifieddate'];
+    
+    let contact;
+    try {
+      contact = await client.crm.contacts.basicApi.getById(contactId, properties);
+    } catch (fetchErr: any) {
+      if (fetchErr.code === 404 || fetchErr.statusCode === 404) {
+        // Contact was deleted - mark as deleted in our system
+        await storage.deleteHubspotContact(contactId);
+        console.log(`[hubspot] Contact ${contactId} deleted (not found in HubSpot)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const props = contact.properties || {};
+    const existing = await storage.getHubspotContactByHubspotId(contactId);
+    const ownerMap = await fetchHubSpotOwners();
+    
+    let associatedCompanyId = props.associatedcompanyid || null;
+    let associatedCompanyName: string | null = null;
+    if (associatedCompanyId) {
+      const company = await storage.getHubspotCompanyByHubspotId(associatedCompanyId);
+      associatedCompanyName = company?.name || null;
+    }
+    
+    const ownerName = props.hubspot_owner_id ? (ownerMap.get(props.hubspot_owner_id) || null) : null;
+    
+    const data = {
+      hubspotId: contactId,
+      firstName: props.firstname || null,
+      lastName: props.lastname || null,
+      email: props.email || null,
+      phone: props.phone || null,
+      company: props.company || null,
+      jobTitle: props.jobtitle || null,
+      lifecycleStage: props.lifecyclestage || null,
+      ownerId: props.hubspot_owner_id || null,
+      ownerName,
+      associatedCompanyId,
+      associatedCompanyName,
+      properties: props,
+      hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
+    };
+    
+    const action = existing ? 'updated' : 'created';
+    
+    if (existing) {
+      const changedFields = detectChanges(existing, data, ['firstName', 'lastName', 'email', 'phone', 'company', 'jobTitle', 'lifecycleStage', 'ownerId', 'ownerName', 'associatedCompanyId', 'associatedCompanyName']);
+      for (const change of changedFields) {
+        await storage.createChangeHistory({
+          entityType: 'contact',
+          entityHubspotId: contactId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: props,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createChangeHistory({
+        entityType: 'contact',
+        entityHubspotId: contactId,
+        changeType: 'created',
+        fullSnapshot: props,
+        syncedAt: new Date(),
+      });
+    }
+    
+    await storage.upsertHubspotContact(data);
+    console.log(`[hubspot] Contact ${contactId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to sync contact ${contactId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
+/**
+ * Delete a HubSpot contact from local database.
+ * Called when webhook indicates contact deletion.
+ */
+export async function deleteHubSpotContact(contactId: string): Promise<boolean> {
+  try {
+    await storage.deleteHubspotContact(contactId);
+    console.log(`[hubspot] Contact ${contactId} deleted from local database`);
+    return true;
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to delete contact ${contactId}:`, err.message);
+    return false;
+  }
+}
+
+export async function syncSingleHubSpotDeal(dealId: string): Promise<{ success: boolean; action: 'created' | 'updated'; error?: string }> {
+  try {
+    const client = await getHubSpotClient();
+    const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'bid_due_date', 'due_date', 'proposal_due_date', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'project_description__briefly_describe_the_project_', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
+
+    const deal = await client.crm.deals.basicApi.getById(dealId, properties, undefined, ['companies']);
+    const props = deal.properties || {};
+    const existing = await storage.getHubspotDealByHubspotId(dealId);
+    const ownerMap = await fetchHubSpotOwners();
+
+    const associations = (deal as any).associations || {};
+    const companyIds = associations.companies?.results?.map((a: any) => String(a.id)) || [];
+    const associatedCompanyId = companyIds[0] || null;
+
+    let associatedCompanyName: string | null = null;
+    if (associatedCompanyId) {
+      const company = await storage.getHubspotCompanyByHubspotId(associatedCompanyId);
+      associatedCompanyName = company?.name || null;
+    }
+
+    const pipelines = await storage.getHubspotPipelines();
+    const stageMap = new Map<string, { stageName: string; pipelineName: string }>();
+    for (const p of pipelines) {
+      for (const s of ((p.stages as any[]) || [])) {
+        stageMap.set(s.stageId, { stageName: s.label, pipelineName: p.label });
+      }
+    }
+    const stageInfo = props.dealstage ? stageMap.get(props.dealstage) : undefined;
+    const ownerName = props.hubspot_owner_id ? (ownerMap.get(props.hubspot_owner_id) || null) : null;
+
+    const data = {
+      hubspotId: dealId,
+      dealName: props.dealname || null,
+      amount: props.amount || null,
+      dealStage: props.dealstage || null,
+      dealStageName: stageInfo?.stageName || null,
+      pipeline: props.pipeline || null,
+      pipelineName: stageInfo?.pipelineName || null,
+      closeDate: props.closedate || null,
+      ownerId: props.hubspot_owner_id || null,
+      ownerName,
+      associatedCompanyId,
+      associatedCompanyName,
+      properties: props,
+      hubspotUpdatedAt: props.hs_lastmodifieddate ? new Date(props.hs_lastmodifieddate) : null,
+    };
+
+    const action = existing ? 'updated' : 'created';
+
+    if (existing) {
+      const changedFields = detectChanges(existing, data, ['dealName', 'amount', 'dealStage', 'dealStageName', 'pipeline', 'pipelineName', 'closeDate', 'ownerId', 'ownerName', 'associatedCompanyId', 'associatedCompanyName']);
+      for (const change of changedFields) {
+        await storage.createChangeHistory({
+          entityType: 'deal',
+          entityHubspotId: dealId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: props,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createChangeHistory({
+        entityType: 'deal',
+        entityHubspotId: dealId,
+        changeType: 'created',
+        fullSnapshot: props,
+        syncedAt: new Date(),
+      });
+    }
+
+    await storage.upsertHubspotDeal(data);
+    console.log(`[hubspot] Deal ${dealId} ${action} via single sync`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[hubspot] Failed to sync deal ${dealId}:`, err.message);
+    return { success: false, action: 'updated', error: err.message };
+  }
+}
+
 export async function syncHubSpotDeals(): Promise<{ synced: number; created: number; updated: number; changes: number; newDealIds: string[] }> {
   const client = await getHubSpotClient();
-  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'hubspot_owner_id', 'hs_lastmodifieddate'];
+  const properties = ['dealname', 'amount', 'dealstage', 'pipeline', 'closedate', 'bid_due_date', 'due_date', 'proposal_due_date', 'hubspot_owner_id', 'hs_lastmodifieddate', 'project_types', 'project_number', 'project_location', 'city', 'state', 'zip', 'country', 'description', 'project_description', 'project_description_briefly_describe_the_project', 'project_description__briefly_describe_the_project_', 'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes'];
 
   const allDeals = await fetchAllPages((after) =>
     client.crm.deals.basicApi.getPage(100, after, properties)
@@ -390,7 +956,7 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
     const hubspotId = deal.id;
     const props = deal.properties || {};
     const existing = await storage.getHubspotDealByHubspotId(hubspotId);
-    const stageInfo = stageMap.get(props.dealstage);
+    const stageInfo = props.dealstage ? stageMap.get(props.dealstage) : undefined;
 
     const associatedCompanyId = dealCompanyMap.get(hubspotId) || null;
 
@@ -462,41 +1028,76 @@ export async function syncHubSpotDeals(): Promise<{ synced: number; created: num
 }
 
 export async function syncHubSpotPipelines(): Promise<any[]> {
-  const client = await getHubSpotClient();
-  const response = await client.crm.pipelines.pipelinesApi.getAll('deals');
-  const pipelines = response.results || [];
-  const saved: any[] = [];
+  console.log('[hubspot-pipelines] Starting pipeline sync...');
+  
+  try {
+    const client = await getHubSpotClient();
+    
+    console.log('[hubspot-pipelines] Fetching pipelines from HubSpot API...');
+    const response = await client.crm.pipelines.pipelinesApi.getAll('deals');
+    const pipelines = response.results || [];
+    
+    console.log('[hubspot-pipelines] Found', pipelines.length, 'pipelines from HubSpot');
+    
+    if (pipelines.length === 0) {
+      console.warn('[hubspot-pipelines] No pipelines returned from HubSpot. This could indicate:');
+      console.warn('  - Missing scope: crm.schemas.deals.read');
+      console.warn('  - No deal pipelines configured in HubSpot');
+      return [];
+    }
+    
+    const saved: any[] = [];
 
-  for (const pipeline of pipelines) {
-    const stages = (pipeline.stages || []).map((s: any) => ({
-      stageId: s.id,
-      label: s.label,
-      displayOrder: s.displayOrder,
-      probability: s.metadata?.probability,
-      isClosed: s.metadata?.isClosed === 'true',
-    }));
+    for (const pipeline of pipelines) {
+      const stages = (pipeline.stages || []).map((s: any) => ({
+        stageId: s.id,
+        label: s.label,
+        displayOrder: s.displayOrder,
+        probability: s.metadata?.probability,
+        isClosed: s.metadata?.isClosed === 'true',
+      }));
 
-    const result = await storage.upsertHubspotPipeline({
-      hubspotId: pipeline.id,
-      label: pipeline.label,
-      displayOrder: pipeline.displayOrder,
-      stages,
-    });
-    saved.push(result);
+      console.log(`[hubspot-pipelines] Processing pipeline "${pipeline.label}" (${pipeline.id}) with ${stages.length} stages:`);
+      stages.forEach((s: any) => console.log(`  - ${s.label} (${s.stageId})`));
+
+      const result = await storage.upsertHubspotPipeline({
+        hubspotId: pipeline.id,
+        label: pipeline.label,
+        displayOrder: pipeline.displayOrder,
+        stages,
+      });
+      saved.push(result);
+    }
+
+    const totalStages = saved.reduce((sum, p) => sum + ((p.stages as any[])?.length || 0), 0);
+    console.log(`[hubspot-pipelines] Sync complete: ${saved.length} pipelines, ${totalStages} stages saved to database`);
+    
+    return saved;
+  } catch (e: any) {
+    console.error('[hubspot-pipelines] Pipeline sync failed:', e.message);
+    
+    if (e.message?.includes('403') || e.message?.includes('401')) {
+      console.error('[hubspot-pipelines] This appears to be an authentication/authorization error.');
+      console.error('[hubspot-pipelines] Make sure your HubSpot app has the "crm.schemas.deals.read" scope.');
+    }
+    
+    throw e;
   }
-
-  return saved;
 }
 
 export async function runFullHubSpotSync(): Promise<{
   companies: { synced: number; created: number; updated: number; changes: number };
   contacts: { synced: number; created: number; updated: number; changes: number };
-  deals: { synced: number; created: number; updated: number; changes: number };
+  deals: { synced: number; created: number; updated: number; changes: number; newDealIds: string[] };
+  owners: { synced: number; created: number; updated: number };
   pipelines: number;
   purgedHistory: number;
   duration: number;
 }> {
   const start = Date.now();
+
+  // Sync owners first so owner names are available for deals/contacts
+  const owners = await syncHubSpotOwners();
 
   const companies = await syncHubSpotCompanies();
 
@@ -514,6 +1115,7 @@ export async function runFullHubSpotSync(): Promise<{
     companies,
     contacts,
     deals,
+    owners,
     pipelines: pipelinesData.length,
     purgedHistory,
     duration,
@@ -533,13 +1135,96 @@ export async function updateHubSpotDealStage(hubspotDealId: string, stageId: str
   }
 }
 
-export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId: string | null; ownerName: string | null; ownerEmail: string | null }> {
+export async function updateHubSpotDeal(hubspotDealId: string, properties: Record<string, string>): Promise<{ success: boolean; message: string }> {
+  const props = { ...properties };
+  // bid_due_date is not a HubSpot property; map to closedate (Unix ms)
+  if (props.bid_due_date !== undefined) {
+    const dateStr = props.bid_due_date;
+    if (dateStr && /^\d{4}-\d{2}-\d{2}/.test(dateStr)) {
+      props.closedate = String(new Date(dateStr).getTime());
+    }
+    delete props.bid_due_date;
+  }
   try {
     const client = await getHubSpotClient();
-    const deal = await client.crm.deals.basicApi.getById(hubspotDealId, ['hubspot_owner_id']);
-    const ownerId = deal.properties?.hubspot_owner_id;
-    if (!ownerId) return { ownerId: null, ownerName: null, ownerEmail: null };
+    await client.crm.deals.basicApi.update(hubspotDealId, { properties: props });
+    return { success: true, message: `Deal ${hubspotDealId} updated` };
+  } catch (e: any) {
+    let body = e.body ?? e.response?.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = null;
+      }
+    }
+    const invalidProps: string[] = [];
+    if (body?.errors && Array.isArray(body.errors)) {
+      for (const err of body.errors) {
+        if (err.code === 'PROPERTY_DOESNT_EXIST' && err.context?.propertyName) {
+          const names = Array.isArray(err.context.propertyName) ? err.context.propertyName : [err.context.propertyName];
+          invalidProps.push(...names);
+        }
+      }
+    }
+    if (invalidProps.length > 0) {
+      const filtered = { ...props };
+      for (const key of invalidProps) {
+        delete filtered[key];
+      }
+      if (Object.keys(filtered).length > 0) {
+        try {
+          await (await getHubSpotClient()).crm.deals.basicApi.update(hubspotDealId, { properties: filtered });
+          console.warn(`[hubspot] Updated deal ${hubspotDealId} without unsupported properties: ${invalidProps.join(', ')}`);
+          return { success: true, message: `Deal ${hubspotDealId} updated (omitted ${invalidProps.length} unsupported properties)` };
+        } catch (retryErr: any) {
+          console.error(`Failed to update HubSpot deal ${hubspotDealId} (retry):`, retryErr.message);
+          return { success: false, message: retryErr.message };
+        }
+      }
+    }
+    console.error(`Failed to update HubSpot deal ${hubspotDealId}:`, e.message);
+    return { success: false, message: e.message };
+  }
+}
 
+export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId: string | null; ownerName: string | null; ownerEmail: string | null }> {
+  // Step 1: Resolve ownerId — prefer local DB (already synced by webhook handler), fall back to API
+  let ownerId: string | null = null;
+
+  const localDeal = await storage.getHubspotDealByHubspotId(hubspotDealId);
+  if (localDeal?.ownerId) {
+    ownerId = localDeal.ownerId;
+    console.log(`[HubSpot] Deal ${hubspotDealId} owner ID from local DB: ${ownerId}`);
+  } else {
+    try {
+      const client = await getHubSpotClient();
+      const deal = await client.crm.deals.basicApi.getById(hubspotDealId, ['hubspot_owner_id']);
+      ownerId = deal.properties?.hubspot_owner_id || null;
+      console.log(`[HubSpot] Deal ${hubspotDealId} owner ID from API: ${ownerId || 'none'}`);
+    } catch (e: any) {
+      console.error(`[HubSpot] API call to get deal ${hubspotDealId} failed: ${e.message}`);
+    }
+  }
+
+  if (!ownerId) {
+    console.log(`[HubSpot] Deal ${hubspotDealId} has no hubspot_owner_id (checked local DB and API)`);
+    return { ownerId: null, ownerName: null, ownerEmail: null };
+  }
+
+  // Step 2: Resolve owner email — try local DB first (table may not exist in all deploys), then API, then manual mappings
+  try {
+    const localOwner = await storage.getHubspotOwnerByHubspotId(ownerId);
+    if (localOwner?.email) {
+      const ownerName = [localOwner.firstName, localOwner.lastName].filter(Boolean).join(' ') || null;
+      console.log(`[HubSpot] Local hubspot_owners table resolved owner ${ownerId}: name=${ownerName}, email=found`);
+      return { ownerId, ownerName, ownerEmail: localOwner.email };
+    }
+  } catch (localOwnerErr: any) {
+    console.warn(`[HubSpot] hubspot_owners lookup failed (table may not exist): ${localOwnerErr.message?.slice(0, 80)}`);
+  }
+
+  try {
     const accessToken = await getAccessToken();
 
     try {
@@ -548,45 +1233,136 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
       });
       if (ownerResp.ok) {
         const ownerData = await ownerResp.json();
-        return {
-          ownerId,
-          ownerName: `${ownerData.firstName || ''} ${ownerData.lastName || ''}`.trim() || null,
-          ownerEmail: ownerData.email || null,
-        };
+        const ownerEmail = ownerData.email || null;
+        const ownerName = `${ownerData.firstName || ''} ${ownerData.lastName || ''}`.trim() || null;
+        console.log(`[HubSpot] Owner API resolved owner ${ownerId}: name=${ownerName}, email=${ownerEmail ? 'found' : 'missing'}`);
+        if (ownerEmail) {
+          return { ownerId, ownerName, ownerEmail };
+        }
+      } else {
+        console.warn(`[HubSpot] Owner API returned ${ownerResp.status} for owner ${ownerId}`);
       }
-      console.warn(`[HubSpot] Owner lookup returned ${ownerResp.status}, trying owners list...`);
     } catch (ownerErr: any) {
-      console.warn(`[HubSpot] Owner lookup failed: ${ownerErr.message?.slice(0, 80)}`);
+      console.warn(`[HubSpot] Owner API failed for ${ownerId}: ${ownerErr.message?.slice(0, 80)}`);
     }
 
     try {
-      const listResp = await fetch(`https://api.hubapi.com/crm/v3/owners/?limit=100`, {
+      const listResp = await fetch(`https://api.hubapi.com/crm/v3/owners/?limit=500`, {
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
       });
       if (listResp.ok) {
         const listData = await listResp.json();
         const owner = listData.results?.find((o: any) => String(o.id) === String(ownerId));
-        if (owner) {
+        if (owner?.email) {
+          console.log(`[HubSpot] Owner list resolved owner ${ownerId}: email found`);
           return {
             ownerId,
             ownerName: `${owner.firstName || ''} ${owner.lastName || ''}`.trim() || null,
-            ownerEmail: owner.email || null,
+            ownerEmail: owner.email,
           };
         }
+        console.warn(`[HubSpot] Owner list: owner ${ownerId} ${owner ? 'found but has no email' : 'not found in list'}`);
+      } else {
+        console.warn(`[HubSpot] Owner list API returned ${listResp.status}`);
       }
     } catch (listErr: any) {
       console.warn(`[HubSpot] Owner list lookup failed: ${listErr.message?.slice(0, 80)}`);
     }
+  } catch (tokenErr: any) {
+    console.warn(`[HubSpot] Could not get access token for owner lookup: ${tokenErr.message?.slice(0, 80)}`);
+  }
 
-    const localDeal = await storage.getHubspotDealByHubspotId(hubspotDealId);
-    if (localDeal?.ownerName) {
-      return { ownerId, ownerName: localDeal.ownerName || null, ownerEmail: null };
+  const mapping = await storage.getHubspotOwnerMappingByHubspotId(ownerId);
+  if (mapping?.email) {
+    console.log(`[HubSpot] Owner mapping resolved owner ${ownerId}: email=found`);
+    return { ownerId, ownerName: mapping.name || localDeal?.ownerName || null, ownerEmail: mapping.email };
+  }
+
+  console.warn(`[HubSpot] All lookups exhausted for owner ${ownerId} on deal ${hubspotDealId} — no email found`);
+  if (localDeal?.ownerName) {
+    return { ownerId, ownerName: localDeal.ownerName || null, ownerEmail: null };
+  }
+  return { ownerId, ownerName: null, ownerEmail: null };
+}
+
+export interface DealClientData {
+  clientName: string;
+  clientEmail: string;
+  clientPhone: string;
+  clientCompany: string;
+  clientAddress: string;
+  clientCity: string;
+  clientState: string;
+  clientZip: string;
+  contactName: string;
+}
+
+export async function getDealClientData(dealId: string): Promise<DealClientData> {
+  const result: DealClientData = {
+    clientName: '',
+    clientEmail: '',
+    clientPhone: '',
+    clientCompany: '',
+    clientAddress: '',
+    clientCity: '',
+    clientState: '',
+    clientZip: '',
+    contactName: '',
+  };
+
+  try {
+    const client = await getHubSpotClient();
+    const accessToken = await getAccessToken();
+
+    const deal = await client.crm.deals.basicApi.getById(dealId, [
+      'dealname', 'hubspot_owner_id'
+    ], undefined, ['companies', 'contacts']);
+
+    const companyId = deal.associations?.companies?.results?.[0]?.id;
+    const contactId = deal.associations?.contacts?.results?.[0]?.id;
+
+    if (companyId) {
+      const company = await client.crm.companies.basicApi.getById(companyId, [
+        'name', 'domain', 'phone', 'address', 'city', 'state', 'zip'
+      ]);
+      
+      result.clientCompany = company.properties?.name || '';
+      result.clientName = company.properties?.name || '';
+      result.clientPhone = company.properties?.phone || '';
+      result.clientAddress = company.properties?.address || '';
+      result.clientCity = company.properties?.city || '';
+      result.clientState = company.properties?.state || '';
+      result.clientZip = company.properties?.zip || '';
     }
 
-    return { ownerId, ownerName: null, ownerEmail: null };
+    if (contactId) {
+      const contact = await client.crm.contacts.basicApi.getById(contactId, [
+        'firstname', 'lastname', 'email', 'phone'
+      ]);
+      
+      const firstName = contact.properties?.firstname || '';
+      const lastName = contact.properties?.lastname || '';
+      result.contactName = `${firstName} ${lastName}`.trim();
+      result.clientEmail = contact.properties?.email || '';
+      
+      if (!result.clientPhone && contact.properties?.phone) {
+        result.clientPhone = contact.properties.phone;
+      }
+    }
+
+    if (!result.clientCompany && !result.contactName) {
+      const localDeal = await storage.getHubspotDealByHubspotId(dealId);
+      if (localDeal?.associatedCompanyName) {
+        result.clientCompany = localDeal.associatedCompanyName;
+        result.clientName = localDeal.associatedCompanyName;
+      }
+    }
+
+    console.log(`[HubSpot] Got client data for deal ${dealId}: ${result.clientCompany || result.contactName || 'Unknown'}`);
+    return result;
   } catch (e: any) {
-    console.error(`[HubSpot] Failed to get deal owner for ${hubspotDealId}:`, e.message);
-    return { ownerId: null, ownerName: null, ownerEmail: null };
+    console.error(`[HubSpot] Failed to get client data for deal ${dealId}:`, e.message);
+    return result;
   }
 }
 

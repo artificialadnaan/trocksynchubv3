@@ -1,7 +1,128 @@
+/**
+ * Database Schema Definition
+ * ==========================
+ * 
+ * This file defines all database tables using Drizzle ORM for PostgreSQL.
+ * It serves as the single source of truth for the application's data model.
+ * 
+ * Schema Organization:
+ * 
+ * 1. SESSION & AUTH
+ *    - session: Express session storage
+ *    - users: Application authentication
+ * 
+ * 2. SYNC CORE
+ *    - sync_mappings: Links between HubSpot/Procore/CompanyCam entities (CRITICAL)
+ *    - stage_mappings: Procore → HubSpot stage translation rules
+ * 
+ * 3. HUBSPOT DATA (Cached from HubSpot API)
+ *    - hubspot_deals: CRM deals
+ *    - hubspot_companies: Company records
+ *    - hubspot_contacts: Contact records
+ *    - hubspot_pipelines: Pipeline and stage definitions
+ *    - hubspot_change_history: Change tracking
+ * 
+ * 4. PROCORE DATA (Cached from Procore API)
+ *    - procore_projects: Project records
+ *    - procore_vendors: Vendor directory
+ *    - procore_users: User records
+ *    - procore_bid_packages/bids/forms: BidBoard data
+ *    - procore_role_assignments: Project team assignments
+ *    - procore_change_history: Change tracking
+ * 
+ * 5. COMPANYCAM DATA (Cached from CompanyCam API)
+ *    - companycam_projects: Photo documentation projects
+ *    - companycam_users: Team members
+ *    - companycam_photos: Photo records
+ *    - companycam_change_history: Change tracking
+ * 
+ * 6. AUTOMATION & LOGGING
+ *    - automation_config: Feature flags and settings
+ *    - webhook_logs: Incoming webhook tracking
+ *    - audit_logs: System activity history
+ *    - email_templates: Notification templates
+ *    - email_send_log: Email delivery tracking
+ *    - bidboard_automation_logs: Playwright automation logs
+ * 
+ * 7. CLOSEOUT & ARCHIVE
+ *    - closeout_surveys: Client satisfaction surveys
+ *    - archive_progress: Document archiving status
+ * 
+ * Key Table: sync_mappings
+ * This is the core table linking entities across systems:
+ * - hubspotDealId ↔ procoreProjectId ↔ companyCamProjectId
+ * - Tracks BidBoard vs Portfolio phase
+ * - Records sync history and status
+ * 
+ * @module shared/schema
+ */
+
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique, uuid, time } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+
+// ========================================
+// SESSION & AUTHENTICATION
+// ========================================
+
+// Session table for connect-pg-simple
+export const session = pgTable("session", {
+  sid: varchar("sid").primaryKey(),
+  sess: jsonb("sess").notNull(),
+  expire: timestamp("expire", { precision: 6 }).notNull(),
+}, (table) => [
+  index("IDX_session_expire").on(table.expire),
+]);
+
+// BidBoard sync state tracking
+export const bidboardSyncState = pgTable("bidboard_sync_state", {
+  id: serial("id").primaryKey(),
+  projectId: text("project_id").notNull().unique(),
+  projectName: text("project_name"),
+  currentStage: text("current_stage"),
+  lastCheckedAt: timestamp("last_checked_at"),
+  lastChangedAt: timestamp("last_changed_at"),
+  metadata: jsonb("metadata"),
+}, (table) => [
+  index("IDX_bidboard_sync_project").on(table.projectId),
+]);
+
+export type BidboardSyncState = typeof bidboardSyncState.$inferSelect;
+
+// BidBoard stage sync runs (Excel export → HubSpot)
+export const bidboardStageSyncRuns = pgTable("bidboard_stage_sync_runs", {
+  id: serial("id").primaryKey(),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
+  completedAt: timestamp("completed_at"),
+  status: text("status").notNull().default("running"), // running | success | failed | partial
+  totalChanges: integer("total_changes").notNull().default(0),
+  syncedCount: integer("synced_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  changes: jsonb("changes"),
+  errors: jsonb("errors"),
+  exportPath: text("export_path"),
+  options: jsonb("options"),
+}, (table) => [
+  index("IDX_bidboard_stage_sync_started").on(table.startedAt),
+]);
+
+export type BidboardStageSyncRun = typeof bidboardStageSyncRuns.$inferSelect;
+
+// BidBoard automation logs
+export const bidboardAutomationLogs = pgTable("bidboard_automation_logs", {
+  id: serial("id").primaryKey(),
+  projectId: text("project_id"),
+  projectName: text("project_name"),
+  action: text("action").notNull(),
+  status: text("status").notNull().default("pending"),
+  details: jsonb("details"),
+  errorMessage: text("error_message"),
+  screenshotPath: text("screenshot_path"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type BidboardAutomationLog = typeof bidboardAutomationLogs.$inferSelect;
 
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -28,6 +149,13 @@ export const syncMappings = pgTable("sync_mappings", {
   hubspotDealName: text("hubspot_deal_name"),
   procoreProjectName: text("procore_project_name"),
   procoreProjectNumber: text("procore_project_number"),
+  // BidBoard vs Portfolio distinction
+  bidboardProjectId: text("bidboard_project_id"),
+  bidboardProjectName: text("bidboard_project_name"),
+  portfolioProjectId: text("portfolio_project_id"),
+  portfolioProjectName: text("portfolio_project_name"),
+  projectPhase: text("project_phase").default("bidboard"), // 'bidboard' | 'portfolio' | 'both'
+  sentToPortfolioAt: timestamp("sent_to_portfolio_at"),
   lastSyncAt: timestamp("last_sync_at"),
   lastSyncStatus: text("last_sync_status").default("pending"),
   lastSyncDirection: text("last_sync_direction"),
@@ -87,6 +215,7 @@ export const insertWebhookLogSchema = createInsertSchema(webhookLogs).omit({
 export type InsertWebhookLog = z.infer<typeof insertWebhookLogSchema>;
 export type WebhookLog = typeof webhookLogs.$inferSelect;
 
+/** Audit log category: "sync" = meaningful end-to-end sync; "system" = background events (polling, health, webhook acks) */
 export const auditLogs = pgTable("audit_logs", {
   id: serial("id").primaryKey(),
   action: text("action").notNull(),
@@ -100,6 +229,8 @@ export const auditLogs = pgTable("audit_logs", {
   durationMs: integer("duration_ms"),
   userId: varchar("user_id"),
   idempotencyKey: text("idempotency_key"),
+  /** "sync" = end-to-end sync (data created/updated); "system" = polling, health, webhook acks, token refresh */
+  category: text("category").notNull().default("system"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -309,6 +440,35 @@ export const insertHubspotPipelineSchema = createInsertSchema(hubspotPipelines).
 export type InsertHubspotPipeline = z.infer<typeof insertHubspotPipelineSchema>;
 export type HubspotPipeline = typeof hubspotPipelines.$inferSelect;
 
+export const hubspotOwners = pgTable("hubspot_owners", {
+  id: serial("id").primaryKey(),
+  hubspotId: text("hubspot_id").notNull().unique(),
+  email: text("email").notNull(),
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  userId: text("user_id"),
+  teams: text("teams"),
+  archived: boolean("archived").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertHubspotOwnerSchema = createInsertSchema(hubspotOwners).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertHubspotOwner = z.infer<typeof insertHubspotOwnerSchema>;
+export type HubspotOwner = typeof hubspotOwners.$inferSelect;
+
+/** User-provided mappings for HubSpot owner ID → email/name when HubSpot API does not return owner details */
+export const hubspotOwnerMappings = pgTable("hubspot_owner_mappings", {
+  id: serial("id").primaryKey(),
+  hubspotOwnerId: text("hubspot_owner_id").notNull().unique(),
+  email: text("email").notNull(),
+  name: text("name"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+export const insertHubspotOwnerMappingSchema = createInsertSchema(hubspotOwnerMappings).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertHubspotOwnerMapping = z.infer<typeof insertHubspotOwnerMappingSchema>;
+export type HubspotOwnerMapping = typeof hubspotOwnerMappings.$inferSelect;
+
 export const hubspotChangeHistory = pgTable("hubspot_change_history", {
   id: serial("id").primaryKey(),
   entityType: text("entity_type").notNull(),
@@ -353,6 +513,7 @@ export const procoreProjects = pgTable("procore_projects", {
   properties: jsonb("properties"),
   lastSyncedAt: timestamp("last_synced_at").defaultNow(),
   procoreUpdatedAt: timestamp("procore_updated_at"),
+  lastRoleCheckAt: timestamp("last_role_check_at"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -668,7 +829,9 @@ export const procoreRoleAssignments = pgTable("procore_role_assignments", {
   lastSyncedAt: timestamp("last_synced_at").defaultNow(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  uniqueAssignment: unique().on(table.procoreProjectId, table.roleName, table.assigneeId),
+}));
 export const insertProcoreRoleAssignmentSchema = createInsertSchema(procoreRoleAssignments).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertProcoreRoleAssignment = z.infer<typeof insertProcoreRoleAssignmentSchema>;
 export type ProcoreRoleAssignment = typeof procoreRoleAssignments.$inferSelect;
@@ -705,3 +868,90 @@ export const emailSendLog = pgTable("email_send_log", {
 export const insertEmailSendLogSchema = createInsertSchema(emailSendLog).omit({ id: true, createdAt: true });
 export type InsertEmailSendLog = z.infer<typeof insertEmailSendLogSchema>;
 export type EmailSendLog = typeof emailSendLog.$inferSelect;
+
+export const closeoutSurveys = pgTable("closeout_surveys", {
+  id: serial("id").primaryKey(),
+  procoreProjectId: text("procore_project_id").notNull(),
+  procoreProjectName: text("procore_project_name"),
+  hubspotDealId: text("hubspot_deal_id"),
+  surveyToken: text("survey_token").notNull().unique(),
+  clientEmail: text("client_email").notNull(),
+  clientName: text("client_name"),
+  rating: integer("rating"),
+  feedback: text("feedback"),
+  googleReviewLink: text("google_review_link"),
+  googleReviewClicked: boolean("google_review_clicked").default(false),
+  sentAt: timestamp("sent_at").defaultNow(),
+  submittedAt: timestamp("submitted_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const insertCloseoutSurveySchema = createInsertSchema(closeoutSurveys).omit({ id: true, createdAt: true });
+export type InsertCloseoutSurvey = z.infer<typeof insertCloseoutSurveySchema>;
+export type CloseoutSurvey = typeof closeoutSurveys.$inferSelect;
+
+export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
+  id: serial("id").primaryKey(),
+  hubspotDealId: text("hubspot_deal_id").notNull(),
+  token: text("token").notNull().unique(),
+  status: text("status").notNull().default("pending"),
+  dealData: jsonb("deal_data").notNull(),
+  editedFields: jsonb("edited_fields"),
+  /** Final attachment list approved for upload (names, urls) - stored until BidBoard upload completes */
+  approvedAttachments: jsonb("approved_attachments"),
+  approvedBy: text("approved_by"),
+  approvedAt: timestamp("approved_at"),
+  declinedBy: text("declined_by"),
+  declinedAt: timestamp("declined_at"),
+  bidboardProjectId: text("bidboard_project_id"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+export const insertRfpApprovalRequestSchema = createInsertSchema(rfpApprovalRequests).omit({ id: true, createdAt: true });
+export type InsertRfpApprovalRequest = z.infer<typeof insertRfpApprovalRequestSchema>;
+export type RfpApprovalRequest = typeof rfpApprovalRequests.$inferSelect;
+
+// RFP Reporting & Scheduled Email
+export const rfpChangeLog = pgTable("rfp_change_log", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  rfpId: integer("rfp_id").notNull().references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
+  fieldChanged: varchar("field_changed", { length: 255 }).notNull(),
+  oldValue: text("old_value"),
+  newValue: text("new_value").notNull(),
+  changedBy: varchar("changed_by", { length: 255 }),
+  changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type RfpChangeLog = typeof rfpChangeLog.$inferSelect;
+export type InsertRfpChangeLog = typeof rfpChangeLog.$inferInsert;
+
+export const rfpApprovals = pgTable("rfp_approvals", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  rfpId: integer("rfp_id").notNull().references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
+  approverEmail: varchar("approver_email", { length: 255 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending | approved | rejected
+  comments: text("comments"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type RfpApproval = typeof rfpApprovals.$inferSelect;
+export type InsertRfpApproval = typeof rfpApprovals.$inferInsert;
+
+export const reportScheduleConfig = pgTable("report_schedule_config", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  enabled: boolean("enabled").notNull().default(false),
+  frequency: varchar("frequency", { length: 20 }).notNull().default("weekly"), // daily | weekly | biweekly | monthly
+  dayOfWeek: integer("day_of_week"), // 0=Sunday..6=Saturday
+  timeOfDay: time("time_of_day").notNull().default("08:00"),
+  timezone: varchar("timezone", { length: 64 }).notNull().default("America/Chicago"),
+  recipients: text("recipients").array().notNull().default([]),
+  includeRfpLog: boolean("include_rfp_log").notNull().default(true),
+  includeChangeHistory: boolean("include_change_history").notNull().default(true),
+  includeApprovalSummary: boolean("include_approval_summary").notNull().default(true),
+  lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type ReportScheduleConfig = typeof reportScheduleConfig.$inferSelect;
+export type InsertReportScheduleConfig = typeof reportScheduleConfig.$inferInsert;
+
+// ============================================================
+// RECONCILIATION (Data Health)
+// ============================================================
+export * from "./reconciliation-schema";

@@ -90,6 +90,28 @@ export function CompanyCamDataContent() {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm text-muted-foreground">
+          Browse and manage CompanyCam data synced to the local database
+        </p>
+        <Button 
+          onClick={handleSync} 
+          disabled={syncing}
+          data-testid="button-sync-from-companycam"
+        >
+          {syncing ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Syncing...
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Sync from CompanyCam
+            </>
+          )}
+        </Button>
+      </div>
       <div className="flex gap-2 border-b pb-0 flex-wrap">
         {tabs.map((tab) => (
           <button
@@ -228,7 +250,22 @@ function ProjectsTab() {
                             </a>
                           </div>
                         )}
-                        <div><span className="text-muted-foreground">Notepad:</span> <span className="ml-1">{project.notepad || "—"}</span></div>
+                        <div>
+                          <span className="text-muted-foreground">Notepad:</span>
+                          <span className="ml-1">
+                            {project.notepad
+                              ? (() => {
+                                  const lines = project.notepad
+                                    .replace(/<br\s*\/?>/gi, '\n')
+                                    .replace(/<[^>]*>/g, '')
+                                    .split('\n');
+                                  return lines.map((line, i) => (
+                                    <span key={i}>{line}{i < lines.length - 1 && <br />}</span>
+                                  ));
+                                })()
+                              : "—"}
+                          </span>
+                        </div>
                         {project.featureImageUrl && (
                           <div><span className="text-muted-foreground">Feature Image:</span> <span className="ml-1 text-xs font-mono truncate">{project.featureImageUrl}</span></div>
                         )}

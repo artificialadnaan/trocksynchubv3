@@ -166,7 +166,7 @@ export default function AuditLogsPage() {
                             </div>
                           )}
                         </div>
-                        {log.details && (
+                        {log.details != null && (
                           <div>
                             <p className="text-sm font-medium mb-1">Details</p>
                             <ScrollArea className="h-32 rounded border bg-card p-2">

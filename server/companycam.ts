@@ -1,3 +1,45 @@
+/**
+ * CompanyCam Integration Module
+ * =============================
+ * 
+ * This module handles all interactions with the CompanyCam Photo Documentation API.
+ * CompanyCam is used by T-Rock for jobsite photo documentation and progress tracking.
+ * 
+ * Key Features:
+ * - API token authentication (bearer token)
+ * - Full sync of projects, users, and photos
+ * - Integration detection (links to Procore/HubSpot via integrations field)
+ * - Change detection and history tracking
+ * 
+ * CompanyCam Data Model:
+ * - Projects: Jobsite locations with photos
+ * - Photos: Timestamped images with metadata
+ * - Users: Team members who can upload/view photos
+ * - Integrations: Native links to Procore/HubSpot projects
+ * 
+ * Integration Matching:
+ * CompanyCam projects may have native integrations that link them to
+ * Procore projects or HubSpot deals. The companycam-automation module
+ * extracts these IDs for automatic matching.
+ * 
+ * Integration Data Structure (from CompanyCam API):
+ * ```json
+ * {
+ *   "integrations": [
+ *     { "type": "procore", "relation_id": "12345" },
+ *     { "type": "hubspot", "relation_id": "67890" }
+ *   ]
+ * }
+ * ```
+ * 
+ * Key Functions:
+ * - runFullCompanycamSync(): Syncs all CompanyCam data to local database
+ * - getCompanycamToken(): Gets API token from database or env
+ * - companycamApiFetch(): Authenticated API request helper
+ * 
+ * @module companycam
+ */
+
 import { storage } from './storage';
 import type { InsertCompanycamProject, InsertCompanycamUser, InsertCompanycamPhoto, InsertCompanycamChangeHistory } from '@shared/schema';
 
@@ -196,6 +238,47 @@ export async function syncCompanycamProjects(): Promise<{ synced: number; create
   return { synced, created, updated, changes };
 }
 
+/**
+ * Fetch and sync a single CompanyCam project by ID.
+ * Called by webhook handlers for real-time project updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleCompanycamProject(projectId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted' | 'error'; error?: string }> {
+  try {
+    const token = await getCompanycamToken();
+    
+    let project;
+    try {
+      project = await companycamApiFetch(`/projects/${projectId}`, token);
+    } catch (fetchErr: any) {
+      if (fetchErr.message?.includes('404')) {
+        await storage.deleteCompanycamProject(projectId);
+        console.log(`[companycam] Project ${projectId} deleted (not found in CompanyCam)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const data = mapProjectData(project);
+    const existing = await storage.getCompanycamProjectByCompanycamId(data.companycamId);
+    const action = existing ? 'updated' : 'created';
+    
+    const changeEntries = detectChanges(existing as any, data as any, 'project', data.companycamId, PROJECT_FIELDS);
+    
+    await storage.upsertCompanycamProject(data);
+    
+    for (const entry of changeEntries) {
+      await storage.createCompanycamChangeHistory(entry);
+    }
+    
+    console.log(`[companycam] Project ${data.companycamId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[companycam] Failed to sync project ${projectId}:`, err.message);
+    return { success: false, action: 'error', error: err.message };
+  }
+}
+
 export async function syncCompanycamUsers(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
   const token = await getCompanycamToken();
   let page = 1;
@@ -232,6 +315,47 @@ export async function syncCompanycamUsers(): Promise<{ synced: number; created: 
   }
 
   return { synced, created, updated, changes };
+}
+
+/**
+ * Fetch and sync a single CompanyCam user by ID.
+ * Called by webhook handlers for real-time user updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleCompanycamUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted' | 'error'; error?: string }> {
+  try {
+    const token = await getCompanycamToken();
+    
+    let user;
+    try {
+      user = await companycamApiFetch(`/users/${userId}`, token);
+    } catch (fetchErr: any) {
+      if (fetchErr.message?.includes('404')) {
+        await storage.deleteCompanycamUser(userId);
+        console.log(`[companycam] User ${userId} deleted (not found in CompanyCam)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const data = mapUserData(user);
+    const existing = await storage.getCompanycamUserByCompanycamId(data.companycamId);
+    const action = existing ? 'updated' : 'created';
+    
+    const changeEntries = detectChanges(existing as any, data as any, 'user', data.companycamId, USER_FIELDS);
+    
+    await storage.upsertCompanycamUser(data);
+    
+    for (const entry of changeEntries) {
+      await storage.createCompanycamChangeHistory(entry);
+    }
+    
+    console.log(`[companycam] User ${data.companycamId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[companycam] Failed to sync user ${userId}:`, err.message);
+    return { success: false, action: 'error', error: err.message };
+  }
 }
 
 export async function syncCompanycamPhotos(): Promise<{ synced: number; created: number; updated: number; changes: number }> {
@@ -305,6 +429,7 @@ export async function runFullCompanycamSync(): Promise<any> {
     await storage.createAuditLog({
       action: 'companycam_full_sync',
       entityType: 'companycam',
+      source: 'companycam',
       status: 'success',
       details: { projects: projectStats, users: userStats, photos: photoStats, duration: `${duration}s` } as any,
     });

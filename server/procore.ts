@@ -1,5 +1,48 @@
+/**
+ * Procore Integration Module
+ * ==========================
+ * 
+ * This module handles all interactions with the Procore Construction Management API.
+ * It manages OAuth authentication, project data synchronization, and BidBoard operations.
+ * 
+ * Key Features:
+ * - OAuth 2.0 authentication with automatic token refresh
+ * - Full sync of projects, vendors, users, and bid packages
+ * - BidBoard (estimating) data synchronization
+ * - Role assignment tracking and notifications
+ * - Change detection for stage transitions
+ * 
+ * Procore Project Lifecycle:
+ * 1. BidBoard Phase: Projects in estimating (pre-award)
+ *    - Synced via syncProcoreBidBoard()
+ *    - Stage changes trigger HubSpot updates
+ * 
+ * 2. Portfolio Phase: Active projects (post-award)
+ *    - Transitioned via Playwright automation
+ *    - Documents, budgets, change orders tracked
+ * 
+ * API Endpoints Used:
+ * - /rest/v1.0/projects: Project CRUD
+ * - /rest/v1.0/companies/{id}/vendors: Vendor directory
+ * - /rest/v1.0/companies/{id}/users: User management
+ * - /rest/v1.1/projects/{id}/bid_packages: BidBoard data
+ * 
+ * Key Functions:
+ * - getProcoreClient(): Returns authenticated API client
+ * - runFullProcoreSync(): Syncs all Procore data to local database
+ * - syncProcoreBidBoard(): Syncs BidBoard/estimating projects
+ * - syncProcoreRoleAssignments(): Tracks project role changes
+ * - getCompanyId(): Gets configured Procore company ID
+ * 
+ * @module procore
+ */
+
 import { storage } from './storage';
 
+/**
+ * Gets Procore configuration from database.
+ * Falls back to default company ID if not configured.
+ */
 async function getProcoreConfig(): Promise<{ companyId: string; environment: string; clientId: string; clientSecret: string }> {
   const config = await storage.getAutomationConfig("procore_config");
   if (!config?.value) {
@@ -22,7 +65,10 @@ function getLoginUrl(environment: string): string {
   return environment === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
 }
 
-async function getAccessToken(): Promise<string> {
+// Mutex: only one Procore token refresh at a time (refresh tokens are single-use)
+let refreshPromise: Promise<string> | null = null;
+
+export async function getAccessToken(): Promise<string> {
   const token = await storage.getOAuthToken("procore");
   if (!token?.accessToken) {
     throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
@@ -39,38 +85,52 @@ async function getAccessToken(): Promise<string> {
 }
 
 async function refreshAccessToken(refreshToken: string): Promise<string> {
-  const config = await getProcoreConfig();
-  const loginUrl = getLoginUrl(config.environment);
-
-  const response = await fetch(`${loginUrl}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      grant_type: 'refresh_token',
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      refresh_token: refreshToken,
-    }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to refresh Procore token: ${response.status} ${errText}`);
+  if (refreshPromise) {
+    return refreshPromise;
   }
 
-  const data = await response.json();
-  const expiresAt = new Date(Date.now() + (data.expires_in || 7200) * 1000);
+  const doRefresh = async (): Promise<string> => {
+    const config = await getProcoreConfig();
+    const loginUrl = getLoginUrl(config.environment);
 
-  await storage.upsertOAuthToken({
-    provider: "procore",
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || refreshToken,
-    tokenType: "Bearer",
-    expiresAt,
-  });
+    const response = await fetch(`${loginUrl}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        refresh_token: refreshToken,
+      }),
+    });
 
-  console.log("Procore token refreshed successfully");
-  return data.access_token;
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Failed to refresh Procore token: ${response.status} ${errText}`);
+    }
+
+    const data = await response.json();
+    const expiresAt = new Date(Date.now() + (data.expires_in || 7200) * 1000);
+
+    await storage.upsertOAuthToken({
+      provider: "procore",
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || refreshToken,
+      tokenType: "Bearer",
+      expiresAt,
+    });
+
+    console.log("Procore token refreshed successfully");
+    return data.access_token;
+  };
+
+  const promise = doRefresh();
+  refreshPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    refreshPromise = null;
+  }
 }
 
 async function fetchProcorePages<T>(endpoint: string, companyId: string): Promise<T[]> {
@@ -179,6 +239,78 @@ function projectDataFromApi(project: any): any {
     companyName: project.company?.name || null,
     properties: project,
     procoreUpdatedAt: project.updated_at ? new Date(project.updated_at) : null,
+  };
+}
+
+// Export helper functions for external use (e.g., procore-documents.ts)
+export async function getCompanyId(): Promise<string> {
+  const config = await getProcoreConfig();
+  return config.companyId;
+}
+
+/** For debug endpoints: returns raw auth used by working Procore calls */
+export async function getProcoreAuthForDebug(): Promise<{
+  accessToken: string;
+  companyId: string;
+  baseUrl: string;
+  environment: string;
+}> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  return {
+    accessToken,
+    companyId: config.companyId,
+    baseUrl,
+    environment: config.environment,
+  };
+}
+
+export async function getProcoreClient(): Promise<{
+  get: (endpoint: string, options?: { params?: Record<string, any>; responseType?: string }) => Promise<{ data: any; headers?: any }>;
+}> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  return {
+    async get(endpoint: string, options?: { params?: Record<string, any>; responseType?: string }) {
+      // Handle both full URLs and relative endpoints
+      const isFullUrl = endpoint.startsWith('http://') || endpoint.startsWith('https://');
+      const url = isFullUrl ? new URL(endpoint) : new URL(`${baseUrl}${endpoint}`);
+      
+      // Add query params
+      if (options?.params) {
+        for (const [key, value] of Object.entries(options.params)) {
+          if (value !== undefined && value !== null) {
+            url.searchParams.set(key, String(value));
+          }
+        }
+      }
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+          'Procore-Company-Id': companyId,
+        },
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Procore API error ${response.status}: ${errText}`);
+      }
+
+      // Handle different response types
+      if (options?.responseType === 'arraybuffer') {
+        const buffer = await response.arrayBuffer();
+        return { data: Buffer.from(buffer), headers: Object.fromEntries(response.headers.entries()) };
+      }
+
+      const data = await response.json();
+      return { data, headers: Object.fromEntries(response.headers.entries()) };
+    },
   };
 }
 
@@ -411,12 +543,101 @@ export async function syncProcoreUsers(): Promise<{ synced: number; created: num
   return { synced: allUsers.length, created, updated, changes };
 }
 
-async function fetchProcoreJson(endpoint: string, companyId: string): Promise<any> {
+/**
+ * Fetch and sync a single Procore user by ID.
+ * Called by webhook handlers for real-time user updates.
+ * Uses upsert to handle both create and update cases.
+ */
+export async function syncSingleProcoreUser(userId: string): Promise<{ success: boolean; action: 'created' | 'updated' | 'deleted' | 'error'; error?: string }> {
+  try {
+    const config = await getProcoreConfig();
+    const companyId = config.companyId;
+    const client = await getProcoreClient();
+    
+    let user;
+    try {
+      const response = await client.get(`/rest/v1.0/companies/${companyId}/users/${userId}`);
+      user = response.data;
+    } catch (fetchErr: any) {
+      if (fetchErr.message?.includes('404')) {
+        await storage.deleteProcoreUser(userId);
+        console.log(`[procore] User ${userId} deleted (not found in Procore)`);
+        return { success: true, action: 'deleted' };
+      }
+      throw fetchErr;
+    }
+    
+    const procoreId = String(user.id);
+    const existing = await storage.getProcoreUserByProcoreId(procoreId);
+    
+    const data = {
+      procoreId,
+      name: user.name || null,
+      firstName: user.first_name || null,
+      lastName: user.last_name || null,
+      emailAddress: user.email_address || null,
+      jobTitle: user.job_title || null,
+      businessPhone: user.business_phone || null,
+      mobilePhone: user.mobile_phone || null,
+      address: user.address || null,
+      city: user.city || null,
+      stateCode: user.state_code || null,
+      zip: user.zip || null,
+      countryCode: user.country_code || null,
+      isActive: user.is_active ?? null,
+      isEmployee: user.is_employee ?? null,
+      lastLoginAt: user.last_login_at || null,
+      employeeId: user.employee_id ? String(user.employee_id) : null,
+      vendorId: user.vendor?.id ? String(user.vendor.id) : null,
+      vendorName: user.vendor?.name || null,
+      companyId: companyId,
+      properties: user,
+      procoreUpdatedAt: user.updated_at ? new Date(user.updated_at) : null,
+    };
+    
+    const action = existing ? 'updated' : 'created';
+    const trackFields = ['name', 'firstName', 'lastName', 'emailAddress', 'jobTitle', 'businessPhone', 'mobilePhone', 'address', 'city', 'stateCode', 'zip', 'isActive', 'isEmployee', 'vendorName'];
+    
+    if (existing) {
+      const changedFields = detectChanges(existing, data, trackFields);
+      for (const change of changedFields) {
+        await storage.createProcoreChangeHistory({
+          entityType: 'user',
+          entityProcoreId: procoreId,
+          changeType: 'field_update',
+          fieldName: change.field,
+          oldValue: change.oldValue,
+          newValue: change.newValue,
+          fullSnapshot: user,
+          syncedAt: new Date(),
+        });
+      }
+    } else {
+      await storage.createProcoreChangeHistory({
+        entityType: 'user',
+        entityProcoreId: procoreId,
+        changeType: 'created',
+        fullSnapshot: user,
+        syncedAt: new Date(),
+      });
+    }
+    
+    await storage.upsertProcoreUser(data);
+    console.log(`[procore] User ${procoreId} ${action} via webhook`);
+    return { success: true, action };
+  } catch (err: any) {
+    console.error(`[procore] Failed to sync user ${userId}:`, err.message);
+    return { success: false, action: 'error', error: err.message };
+  }
+}
+
+async function fetchProcoreJson(endpoint: string, companyId: string, options?: { signal?: AbortSignal }): Promise<any> {
   const accessToken = await getAccessToken();
   const config = await getProcoreConfig();
   const baseUrl = getBaseUrl(config.environment);
   const url = `${baseUrl}${endpoint}`;
   const response = await fetch(url, {
+    signal: options?.signal,
     headers: {
       'Authorization': `Bearer ${accessToken}`,
       'Accept': 'application/json',
@@ -429,6 +650,28 @@ async function fetchProcoreJson(endpoint: string, companyId: string): Promise<an
     throw new Error(`Procore API error ${response.status}: ${errText}`);
   }
   return response.json();
+}
+
+/** Run async tasks in parallel with a concurrency limit. */
+async function parallelWithLimit<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  concurrency: number
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let index = 0;
+  async function worker(): Promise<void> {
+    while (index < items.length) {
+      const i = index++;
+      try {
+        results[i] = await fn(items[i]);
+      } catch (err) {
+        throw err;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) || 1 }, () => worker()));
+  return results;
 }
 
 export async function fetchProcoreProjectStages(): Promise<any[]> {
@@ -452,6 +695,80 @@ export async function fetchProcoreProjectDetail(projectId: string): Promise<any>
   const config = await getProcoreConfig();
   const companyId = config.companyId;
   return fetchProcoreJson(`/rest/v1.0/projects/${projectId}?company_id=${companyId}`, companyId);
+}
+
+export async function getProjectTeamMembers(projectId: string): Promise<Array<{
+  name: string;
+  email: string;
+  role: string;
+}>> {
+  const config = await getProcoreConfig();
+  const companyId = config.companyId;
+
+  try {
+    const raw = await fetchProcoreJson(
+      `/rest/v1.0/project_roles?project_id=${projectId}&company_id=${companyId}&per_page=100`,
+      companyId
+    );
+    const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
+
+    const teamMembers: Array<{ name: string; email: string; role: string }> = [];
+
+    for (const assignment of assignments) {
+      const roleName = assignment.role || 'Unknown Role';
+      const assigneeId = assignment.user_id ? String(assignment.user_id) : (assignment.contact_id ? String(assignment.contact_id) : null);
+      if (!assigneeId) continue;
+
+      const nameParts = (assignment.name || '').split(' (');
+      const assigneeName = nameParts[0] || '';
+      let assigneeEmail = assignment.email_address || assignment.email || '';
+
+      if (!assigneeEmail) {
+        const user = await storage.getProcoreUserByProcoreId(assigneeId);
+        assigneeEmail = user?.emailAddress || '';
+      }
+
+      teamMembers.push({
+        name: assigneeName,
+        email: assigneeEmail,
+        role: roleName,
+      });
+    }
+
+    return teamMembers;
+  } catch (err: any) {
+    console.error(`[procore] Error fetching team members for project ${projectId}:`, err.message);
+    return [];
+  }
+}
+
+export async function deactivateProject(projectId: string): Promise<boolean> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  const response = await fetch(
+    `${baseUrl}/rest/v1.0/projects/${projectId}?company_id=${companyId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Procore-Company-Id': companyId,
+      },
+      body: JSON.stringify({ project: { active: false } }),
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to deactivate project: ${response.status} ${errText}`);
+  }
+
+  console.log(`[procore] Project ${projectId} deactivated successfully`);
+  return true;
 }
 
 export async function updateProcoreProject(
@@ -683,11 +1000,36 @@ export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids
   return { bidPackages: allPackages.length, bids: totalBids, bidForms: totalForms };
 }
 
-export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
+// Mutex to prevent concurrent role assignment syncs
+let roleAssignmentSyncInProgress = false;
+const roleAssignmentSyncQueue: string[] = [];
+
+export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }>; skipped?: boolean }> {
+  // Prevent concurrent syncs to avoid duplicate emails
+  if (roleAssignmentSyncInProgress) {
+    console.log('[procore] Role assignment sync already in progress, skipping to prevent duplicates');
+    return { synced: 0, newAssignments: [], skipped: true };
+  }
+  
+  roleAssignmentSyncInProgress = true;
+  
+  try {
+    return await performRoleAssignmentSync(projectIds);
+  } finally {
+    roleAssignmentSyncInProgress = false;
+  }
+}
+
+const ROLE_SYNC_CONCURRENCY = 5; // Stay within 3600 req/hr (~1 req/sec sustained)
+const ROLE_SYNC_PER_REQUEST_TIMEOUT_MS = 10000; // 10s per API call
+
+async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 
-  let projectsToSync: Array<{ procoreId: string; name: string }> = [];
+  type ProjectEntry = { procoreId: string; name: string };
+  let projectsToSync: ProjectEntry[] = [];
+  let projectsWithMeta: Array<{ procoreId: string; name: string; lastRoleCheckAt?: Date | null; procoreUpdatedAt?: Date | null }> = [];
 
   if (projectIds && projectIds.length > 0) {
     for (const pid of projectIds) {
@@ -696,23 +1038,73 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
     }
   } else {
     const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
-    projectsToSync = allProjects
+    const activeWithMeta = allProjects
       .filter(p => p.active !== false)
-      .map(p => ({ procoreId: p.procoreId, name: p.name || '' }));
+      .map(p => ({
+        procoreId: p.procoreId,
+        name: p.name || '',
+        lastRoleCheckAt: p.lastRoleCheckAt,
+        procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+      }));
+    const byId = new Map(activeWithMeta.map(p => [p.procoreId, p]));
+    const mappings = await storage.getSyncMappings();
+    for (const m of mappings) {
+      for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
+        if (pid && !byId.has(pid)) {
+          const p = await storage.getProcoreProjectByProcoreId(pid);
+          if (p) {
+            byId.set(pid, {
+              procoreId: pid,
+              name: p.name || '',
+              lastRoleCheckAt: p.lastRoleCheckAt,
+              procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+            });
+          }
+        }
+      }
+    }
+    projectsWithMeta = Array.from(byId.values());
+    // Check all active projects every cycle; role assignments can change without project-level updates
+    projectsToSync = projectsWithMeta.map(p => ({ procoreId: p.procoreId, name: p.name }));
   }
 
-  console.log(`[procore] Syncing role assignments for ${projectsToSync.length} active projects...`);
+  console.log(`[procore] Syncing role assignments for ${projectsToSync.length} projects (${ROLE_SYNC_CONCURRENCY} concurrent)...`);
   let synced = 0;
   const newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> = [];
 
-  for (const project of projectsToSync) {
+  async function processProject(project: ProjectEntry): Promise<void> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
     try {
-      const assignments = await fetchProcoreJson(
-        `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}`,
-        companyId
-      ) as any[];
-
-      if (!Array.isArray(assignments)) continue;
+      let raw: any;
+      try {
+        raw = await fetchProcoreJson(
+          `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+          companyId,
+          { signal: controller.signal }
+        );
+      } catch (rateErr: any) {
+        clearTimeout(timeout);
+        if (rateErr.message?.includes('429')) {
+          console.log('[procore] Rate limited (429), waiting 60s before retrying project', project.procoreId);
+          await new Promise(r => setTimeout(r, 60000));
+          const c2 = new AbortController();
+          const t2 = setTimeout(() => c2.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
+          raw = await fetchProcoreJson(
+            `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+            companyId,
+            { signal: c2.signal }
+          );
+          clearTimeout(t2);
+        } else if (rateErr.name === 'AbortError') {
+          console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+          return;
+        } else {
+          throw rateErr;
+        }
+      }
+      clearTimeout(timeout);
+      const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
 
       const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
       const existingKeys = new Set(existingAssignments.map(a => `${a.roleName}||${a.assigneeId}`));
@@ -759,16 +1151,261 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
 
         synced++;
       }
+      await storage.updateProcoreProjectLastRoleCheck(project.procoreId);
     } catch (err: any) {
-      if (err.message?.includes('403') || err.message?.includes('404')) {
-        continue;
+      clearTimeout(timeout);
+      if (err.name === 'AbortError') {
+        console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+        return;
       }
-      console.error(`[procore] Error fetching role assignments for project ${project.procoreId}:`, err.message);
+      if (err.message?.includes('403') || err.message?.includes('404')) {
+        return;
+      }
+      throw err;
     }
   }
 
+  await parallelWithLimit(projectsToSync, async (project) => {
+    try {
+      await processProject(project);
+    } catch (err: any) {
+      console.error(`[procore] Error fetching role assignments for project ${project.procoreId}:`, err.message);
+    }
+  }, ROLE_SYNC_CONCURRENCY);
+
   console.log(`[procore] Synced ${synced} role assignments, ${newAssignments.length} new assignments`);
   return { synced, newAssignments };
+}
+
+const ROLE_SYNC_BATCH_DELAY_MS = 200; // Smooth API rate between projects
+
+export async function syncProcoreRoleAssignmentsBatch(
+  batchSize: number,
+  cursor: number
+): Promise<{
+  synced: number;
+  newAssignments: Array<{
+    procoreProjectId: string;
+    projectName: string;
+    roleName: string;
+    assigneeId: string;
+    assigneeName: string;
+    assigneeEmail: string;
+    assigneeCompany: string;
+  }>;
+  nextCursor: number;
+  totalProjects: number;
+  batchProcessed: number;
+  skipped?: boolean;
+}> {
+  if (roleAssignmentSyncInProgress) {
+    console.log('[procore] Role assignment sync already in progress, skipping batch');
+    return {
+      synced: 0,
+      newAssignments: [],
+      nextCursor: cursor,
+      totalProjects: 0,
+      batchProcessed: 0,
+      skipped: true,
+    };
+  }
+
+  roleAssignmentSyncInProgress = true;
+
+  try {
+    const config = await getProcoreConfig();
+    const companyId = config.companyId;
+
+    type ProjectEntry = { procoreId: string; name: string };
+    const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
+    const activeWithMeta = allProjects
+      .filter(p => p.active !== false)
+      .map(p => ({
+        procoreId: p.procoreId,
+        name: p.name || '',
+        lastRoleCheckAt: p.lastRoleCheckAt,
+        procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+      }));
+    const byId = new Map(activeWithMeta.map(p => [p.procoreId, p]));
+    const mappings = await storage.getSyncMappings();
+    for (const m of mappings) {
+      for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
+        if (pid && !byId.has(pid)) {
+          const p = await storage.getProcoreProjectByProcoreId(pid);
+          if (p) {
+            byId.set(pid, {
+              procoreId: pid,
+              name: p.name || '',
+              lastRoleCheckAt: p.lastRoleCheckAt,
+              procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+            });
+          }
+        }
+      }
+    }
+    const fullList: ProjectEntry[] = Array.from(byId.values())
+      .map(p => ({ procoreId: p.procoreId, name: p.name }))
+      .sort((a, b) => String(a.procoreId).localeCompare(String(b.procoreId), undefined, { numeric: true }));
+
+    const totalProjects = fullList.length;
+    if (totalProjects === 0) {
+      return {
+        synced: 0,
+        newAssignments: [],
+        nextCursor: 0,
+        totalProjects: 0,
+        batchProcessed: 0,
+      };
+    }
+
+    const effectiveCursor = cursor >= totalProjects ? 0 : cursor;
+    const batch = fullList.slice(effectiveCursor, effectiveCursor + batchSize);
+    const batchProcessed = batch.length;
+
+    if (batchProcessed === 0) {
+      return {
+        synced: 0,
+        newAssignments: [],
+        nextCursor: 0,
+        totalProjects,
+        batchProcessed: 0,
+      };
+    }
+
+    const batchNum = Math.floor(effectiveCursor / batchSize) + 1;
+    const totalBatches = Math.ceil(totalProjects / batchSize);
+    console.log(`[procore] Syncing role assignments for ${batchProcessed} projects (batch ${batchNum}/${totalBatches}, cursor ${effectiveCursor})...`);
+
+    let synced = 0;
+    const newAssignments: Array<{
+      procoreProjectId: string;
+      projectName: string;
+      roleName: string;
+      assigneeId: string;
+      assigneeName: string;
+      assigneeEmail: string;
+      assigneeCompany: string;
+    }> = [];
+
+    async function processProject(project: ProjectEntry): Promise<void> {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
+      try {
+        let raw: any;
+        try {
+          raw = await fetchProcoreJson(
+            `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+            companyId,
+            { signal: controller.signal }
+          );
+        } catch (rateErr: any) {
+          clearTimeout(timeout);
+          if (rateErr.message?.includes('429')) {
+            console.log('[procore] Rate limited (429), waiting 60s before retrying project', project.procoreId);
+            await new Promise(r => setTimeout(r, 60000));
+            const c2 = new AbortController();
+            const t2 = setTimeout(() => c2.abort(), ROLE_SYNC_PER_REQUEST_TIMEOUT_MS);
+            raw = await fetchProcoreJson(
+              `/rest/v1.0/project_roles?project_id=${project.procoreId}&company_id=${companyId}&per_page=100`,
+              companyId,
+              { signal: c2.signal }
+            );
+            clearTimeout(t2);
+          } else if (rateErr.name === 'AbortError') {
+            console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+            return;
+          } else {
+            throw rateErr;
+          }
+        }
+        clearTimeout(timeout);
+        const assignments = Array.isArray(raw) ? raw : (raw?.data ?? []);
+
+        const existingAssignments = await storage.getProcoreRoleAssignmentsByProject(project.procoreId);
+        const existingKeys = new Set(existingAssignments.map(a => `${a.roleName}||${a.assigneeId}`));
+
+        for (const assignment of assignments) {
+          const roleName = assignment.role || 'Unknown Role';
+          const assigneeId = assignment.user_id ? String(assignment.user_id) : (assignment.contact_id ? String(assignment.contact_id) : null);
+          if (!assigneeId) continue;
+          const nameParts = (assignment.name || '').split(' (');
+          const assigneeName = nameParts[0] || '';
+          const assigneeCompany = nameParts[1] ? nameParts[1].replace(')', '') : '';
+          let assigneeEmail = assignment.email_address || assignment.email || '';
+          if (!assigneeEmail) {
+            const user = await storage.getProcoreUserByProcoreId(assigneeId);
+            assigneeEmail = user?.emailAddress || '';
+          }
+
+          const isNew = !existingKeys.has(`${roleName}||${assigneeId}`);
+
+          await storage.upsertProcoreRoleAssignment({
+            procoreProjectId: project.procoreId,
+            projectName: project.name,
+            roleId: assignment.id ? String(assignment.id) : null,
+            roleName,
+            assigneeId,
+            assigneeName,
+            assigneeEmail,
+            assigneeCompany,
+            properties: assignment,
+            lastSyncedAt: new Date(),
+          });
+
+          if (isNew) {
+            newAssignments.push({
+              procoreProjectId: project.procoreId,
+              projectName: project.name,
+              roleName,
+              assigneeId,
+              assigneeName,
+              assigneeEmail,
+              assigneeCompany,
+            });
+          }
+
+          synced++;
+        }
+        await storage.updateProcoreProjectLastRoleCheck(project.procoreId);
+      } catch (err: any) {
+        clearTimeout(timeout);
+        if (err.name === 'AbortError') {
+          console.warn(`[procore] Timeout fetching roles for project ${project.procoreId}, skipping`);
+          return;
+        }
+        if (err.message?.includes('403') || err.message?.includes('404')) {
+          return;
+        }
+        throw err;
+      }
+    }
+
+    await parallelWithLimit(batch, async (project) => {
+      try {
+        await processProject(project);
+      } catch (err: any) {
+        console.error(`[procore] Error fetching role assignments for project ${project.procoreId}:`, err.message);
+      }
+      await new Promise(r => setTimeout(r, ROLE_SYNC_BATCH_DELAY_MS));
+    }, ROLE_SYNC_CONCURRENCY);
+
+    const nextCursor = effectiveCursor + batchSize >= totalProjects ? 0 : effectiveCursor + batchSize;
+    if (nextCursor === 0) {
+      console.log(`[procore] Full rotation complete. Synced ${synced} role assignments, ${newAssignments.length} new assignments`);
+    } else {
+      console.log(`[procore] Synced ${synced} role assignments, ${newAssignments.length} new assignments (batch ${effectiveCursor}-${effectiveCursor + batchProcessed} of ${totalProjects})`);
+    }
+
+    return {
+      synced,
+      newAssignments,
+      nextCursor,
+      totalProjects,
+      batchProcessed,
+    };
+  } finally {
+    roleAssignmentSyncInProgress = false;
+  }
 }
 
 export async function runFullProcoreSync(): Promise<{
@@ -798,8 +1435,9 @@ export async function runFullProcoreSync(): Promise<{
 
   if (roleAssignmentResult.newAssignments.length > 0) {
     try {
-      const { sendRoleAssignmentEmails } = await import('./email-notifications');
+      const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('./email-notifications');
       await sendRoleAssignmentEmails(roleAssignmentResult.newAssignments);
+      await triggerKickoffForNewPmOnPortfolio(roleAssignmentResult.newAssignments);
     } catch (err: any) {
       console.error(`[procore] Email notifications failed:`, err.message);
     }
@@ -807,53 +1445,74 @@ export async function runFullProcoreSync(): Promise<{
 
   if (projects.stageChanges && projects.stageChanges.length > 0) {
     console.log(`[procore] Detected ${projects.stageChanges.length} stage change(s) during polling, processing...`);
-    try {
-      const { sendStageChangeEmail } = await import('./email-notifications');
-      const { mapProcoreStageToHubspot } = await import('./procore-hubspot-sync');
-      const { updateHubSpotDealStage } = await import('./hubspot');
+    
+    // Check if stage sync automation is enabled (disabled by default)
+    const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
+    const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
+    
+    if (!stageSyncEnabled) {
+      console.log(`[procore] Stage sync disabled - skipping HubSpot updates for ${projects.stageChanges.length} stage change(s)`);
+    } else {
+      try {
+        const { sendStageChangeEmail } = await import('./email-notifications');
+        const { mapProcoreStageToHubspot, resolveHubspotStageId } = await import('./procore-hubspot-sync');
+        const { updateHubSpotDealStage } = await import('./hubspot');
 
-      for (const sc of projects.stageChanges) {
-        const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
-        if (mapping?.hubspotDealId) {
-          const hubspotStageId = mapProcoreStageToHubspot(sc.newStage);
+        for (const sc of projects.stageChanges) {
+          const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
+          if (mapping?.hubspotDealId) {
+            const hubspotStageLabel = mapProcoreStageToHubspot(sc.newStage);
+            const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+            
+            if (!resolvedStage) {
+              console.log(`[procore] Could not resolve HubSpot stage for label: ${hubspotStageLabel}`);
+              continue;
+            }
+            
+            const hubspotStageId = resolvedStage.stageId;
+            const hubspotStageName = resolvedStage.stageName;
 
-          const hubspotPipelines = await storage.getHubspotPipelines();
-          let hubspotStageName = hubspotStageId;
-          for (const pipeline of hubspotPipelines) {
-            const stages = (pipeline.stages as any[]) || [];
-            const found = stages.find((s: any) => s.stageId === hubspotStageId);
-            if (found) { hubspotStageName = found.label || found.stageName || hubspotStageId; break; }
+            const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
+            console.log(`[procore] Polling stage change: HubSpot deal ${mapping.hubspotDealId} updated to ${hubspotStageName}: ${updateResult.message}`);
+
+            const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+            await sendStageChangeEmail({
+              hubspotDealId: mapping.hubspotDealId,
+              dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
+              procoreProjectId: sc.procoreId,
+              procoreProjectName: sc.projectName,
+              oldStage: sc.oldStage,
+              newStage: sc.newStage,
+              hubspotStageName,
+            });
+
+            await storage.createAuditLog({
+              action: 'polling_stage_change_processed',
+              entityType: 'project_stage',
+              entityId: sc.procoreId,
+              source: 'polling',
+              status: 'success',
+              details: { procoreId: sc.procoreId, projectName: sc.projectName, oldStage: sc.oldStage, newStage: sc.newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName },
+            });
+          } else {
+            console.log(`[procore] Stage change for ${sc.projectName} (${sc.procoreId}) has no HubSpot mapping, skipping email`);
           }
-
-          const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
-          console.log(`[procore] Polling stage change: HubSpot deal ${mapping.hubspotDealId} updated to ${hubspotStageName}: ${updateResult.message}`);
-
-          const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
-          await sendStageChangeEmail({
-            hubspotDealId: mapping.hubspotDealId,
-            dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
-            procoreProjectId: sc.procoreId,
-            procoreProjectName: sc.projectName,
-            oldStage: sc.oldStage,
-            newStage: sc.newStage,
-            hubspotStageName,
-          });
-
-          await storage.createAuditLog({
-            action: 'polling_stage_change_processed',
-            entityType: 'project_stage',
-            entityId: sc.procoreId,
-            source: 'polling',
-            status: 'success',
-            details: { procoreId: sc.procoreId, projectName: sc.projectName, oldStage: sc.oldStage, newStage: sc.newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName },
-          });
-        } else {
-          console.log(`[procore] Stage change for ${sc.projectName} (${sc.procoreId}) has no HubSpot mapping, skipping email`);
         }
+      } catch (err: any) {
+        console.error(`[procore] Stage change email processing failed:`, err.message);
       }
-    } catch (err: any) {
-      console.error(`[procore] Stage change email processing failed:`, err.message);
     }
+  }
+
+  // Sync change orders and prime contracts to HubSpot deal amounts (respects sync_change_orders config)
+  try {
+    const { syncAllProjectChangeOrders } = await import('./change-order-sync');
+    const changeOrderResult = await syncAllProjectChangeOrders();
+    if (changeOrderResult.projectsUpdated > 0) {
+      console.log(`[procore] Change order sync: ${changeOrderResult.projectsUpdated} deal amount(s) updated`);
+    }
+  } catch (err: any) {
+    console.error(`[procore] Change order sync failed:`, err.message);
   }
 
   const purgedHistory = await storage.purgeProcoreChangeHistory(14);
