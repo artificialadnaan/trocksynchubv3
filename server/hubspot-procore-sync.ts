@@ -1,4 +1,5 @@
 import { storage } from './storage';
+import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { getAccessToken } from './procore';
 import type { HubspotCompany, HubspotContact, ProcoreVendor } from '@shared/schema';
 
@@ -7,7 +8,7 @@ async function getProcoreConfig(): Promise<{ companyId: string; environment: str
   if (!config?.value) throw new Error("Procore not configured.");
   const val = config.value as any;
   return {
-    companyId: val.companyId || "598134325683880",
+    companyId: val.companyId || DEFAULT_PROCORE_COMPANY_ID,
     environment: val.environment || "production",
   };
 }

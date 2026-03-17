@@ -3,6 +3,9 @@
  * Project numbers follow format DFW-{typeDigit}-{sequence}-{suffix} (e.g. DFW-2-06426-ah).
  */
 
+/** Default Procore company ID — used as fallback when not configured in automation_config */
+export const DEFAULT_PROCORE_COMPANY_ID = "598134325683880";
+
 export const PROJECT_TYPES: Record<string, string> = {
   "1": "Exterior Renovation",
   "2": "Interior Renovation",

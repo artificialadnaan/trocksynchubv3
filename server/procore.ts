@@ -38,6 +38,7 @@
  */
 
 import { storage } from './storage';
+import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 
 /**
  * Gets Procore configuration from database.
@@ -50,7 +51,7 @@ async function getProcoreConfig(): Promise<{ companyId: string; environment: str
   }
   const val = config.value as any;
   return {
-    companyId: val.companyId || "598134325683880",
+    companyId: val.companyId || DEFAULT_PROCORE_COMPANY_ID,
     environment: val.environment || "production",
     clientId: val.clientId || "",
     clientSecret: val.clientSecret || "",

@@ -47,6 +47,7 @@
 import { storage } from './storage';
 import { sendEmail, renderTemplate } from './email-service';
 import { getDealOwnerInfo } from './hubspot';
+import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchProcoreProjectDetail, getProjectTeamMembers } from './procore';
 
 /**
@@ -96,8 +97,8 @@ export async function sendRoleAssignmentEmails(
       roleName: assignment.roleName,
       assigneeEmail: assignment.assigneeEmail,
       projectId: assignment.procoreProjectId,
-      companyId: '598134325683880',
-      procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${assignment.procoreProjectId}/tools/projecthome`,
+      companyId: DEFAULT_PROCORE_COMPANY_ID,
+      procoreUrl: `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${assignment.procoreProjectId}/tools/projecthome`,
       hubspotUrl: mapping?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${mapping.hubspotDealId}?eschref=%2Fcontacts%2F45644695%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp` : 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3',
       companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
     };
@@ -377,11 +378,10 @@ export async function sendStageChangeEmail(params: {
     : (params.dealName || 'Unknown Deal');
 
   // Procore: Before RFP approval, project doesn't exist in Procore/BidBoard yet - use portfolio link
-  const PROCORE_COMPANY_ID = '598134325683880';
-  const PROCORE_PORTFOLIO_URL = `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/tools/hubs/company-hub/views/portfolio`;
+  const PROCORE_PORTFOLIO_URL = `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/tools/hubs/company-hub/views/portfolio`;
   const trimmedProcoreId = params.procoreProjectId?.trim();
   const procoreUrl = trimmedProcoreId
-    ? `https://us02.procore.com/webclients/host/companies/${PROCORE_COMPANY_ID}/projects/${trimmedProcoreId}/tools/projecthome`
+    ? `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${trimmedProcoreId}/tools/projecthome`
     : PROCORE_PORTFOLIO_URL;
 
   // HubSpot: Use correct portal ID 45644695 with eschref for RFP deals list
@@ -577,7 +577,7 @@ export async function sendKickoffEmails(params: {
       preferredMethod: params.preferredMethod || 'Email',
       statusFrequency: params.statusFrequency || 'Weekly',
       nextStep: params.nextStep || 'scheduling the project kickoff meeting',
-      procoreUrl: `https://us02.procore.com/webclients/host/companies/598134325683880/projects/${params.projectId}/tools/projecthome`,
+      procoreUrl: `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${params.projectId}/tools/projecthome`,
       hubspotUrl: hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${hubspotDealId}?eschref=%2Fcontacts%2F45644695%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp` : 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3',
       companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
     };
@@ -699,7 +699,7 @@ export async function sendBidBoardSyncSummary(params: {
       portfolioTransitions: String(params.portfolioTransitions),
       hubspotUpdates: String(params.hubspotUpdates),
       changedProjects: changedProjectsHtml,
-      bidboardUrl: 'https://us02.procore.com/webclients/host/companies/598134325683880/projects',
+      bidboardUrl: `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects`,
       hubspotDealsUrl: 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3/views/all/list',
       syncHubUrl: appUrl,
       nextSyncTime: '1 hour',

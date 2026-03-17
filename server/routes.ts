@@ -74,7 +74,7 @@ import { sendRoleAssignmentEmails, sendStageChangeEmail } from "./email-notifica
 import { sendEmail } from "./email-service";
 import { isGmailConnected } from "./gmail";
 import { assignProjectNumber, processNewDealWebhook, getProjectNumberRegistry } from "./deal-project-number";
-import { parseProjectTypeFromNumber } from "./constants";
+import { parseProjectTypeFromNumber, DEFAULT_PROCORE_COMPANY_ID } from "./constants";
 import { syncProcoreToHubspot, getSyncOverview, unlinkMapping, createManualMapping, getUnmatchedProjects, mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber } from "./procore-hubspot-sync";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation, manualSyncProject, onBidBoardProjectCreated, detectAndProcessNewProjects } from "./bidboard-automation";
 import { testLogin as testProcoreLogin, saveProcoreCredentials, logout as logoutProcore } from "./playwright/auth";
@@ -5814,8 +5814,8 @@ export async function registerRoutes(
         projectName: 'Sample Project - Test',
         roleName: 'Project Manager',
         projectId: '12345678',
-        companyId: '598134325683880',
-        procoreUrl: 'https://us02.procore.com/webclients/host/companies/598134325683880/projects/12345678/tools/projecthome',
+        companyId: DEFAULT_PROCORE_COMPANY_ID,
+        procoreUrl: `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/12345678/tools/projecthome`,
         hubspotUrl: 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3',
         companycamUrl: 'https://app.companycam.com/projects',
         previousStage: 'Estimating',
@@ -5832,7 +5832,7 @@ export async function registerRoutes(
         stageChanges: '3',
         portfolioTransitions: '1',
         hubspotUpdates: '2',
-        bidboardUrl: 'https://us02.procore.com/webclients/host/companies/598134325683880/projects',
+        bidboardUrl: `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects`,
         hubspotDealsUrl: 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3/views/all/list',
         syncHubUrl: process.env.APP_URL || 'http://localhost:5000',
         nextSyncTime: '1 hour',
@@ -5998,7 +5998,7 @@ export async function registerRoutes(
       // Navigate to BidBoard (Estimating)
       // Procore URL structure: /webclients/host/companies/{companyId}/tools/bid-board for BidBoard list
       // or /webclients/host/companies/{companyId}/projects/{projectId}/tools/estimating for specific project
-      const companyId = '598134325683880';
+      const companyId = DEFAULT_PROCORE_COMPANY_ID;
       const bidboardUrl = projectId
         ? `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/estimating`
         : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board`;
@@ -6160,7 +6160,7 @@ export async function registerRoutes(
       // Navigate to Portfolio/Project Home
       // Procore URL structure: /webclients/host/companies/{companyId}/tools/hubs/company-hub/views/portfolio for list
       // or /webclients/host/companies/{companyId}/projects/{projectId}/tools/projecthome for specific project
-      const companyId = '598134325683880';
+      const companyId = DEFAULT_PROCORE_COMPANY_ID;
       const portfolioUrl = projectId
         ? `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/projecthome`
         : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/hubs/company-hub/views/portfolio`;
@@ -6205,7 +6205,7 @@ export async function registerRoutes(
 
       // Get company ID from config
       const config = await storage.getAutomationConfig("procore_config");
-      const companyId = (config?.value as any)?.companyId || '598134325683880';
+      const companyId = (config?.value as any)?.companyId || DEFAULT_PROCORE_COMPANY_ID;
       const credentials = await storage.getAutomationConfig("procore_browser_credentials");
       const sandbox = (credentials?.value as any)?.sandbox || false;
       
