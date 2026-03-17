@@ -657,7 +657,7 @@ export function registerWebhookRoutes(app: Express) {
         }
       }
 
-      const changeOrderResources = ['change_order', 'change_order_package', 'change_orders', 'change_order_packages'];
+      const changeOrderResources = ['change_order', 'change_order_package', 'change_orders', 'change_order_packages', 'change_events', 'change_event'];
       if (changeOrderResources.includes(resourceName) && ['create', 'update', 'delete'].includes(eventType)) {
         try {
           const projectId = String(event.project_id || "");

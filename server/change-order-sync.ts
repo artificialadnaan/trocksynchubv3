@@ -267,7 +267,9 @@ export async function handleChangeOrderWebhook(payload: {
   user_id?: string;
   metadata?: any;
 }): Promise<{ processed: boolean; result?: any; error?: string }> {
-  if (payload.resource_name !== 'Change Order' && payload.resource_name !== 'Change Order Package') {
+  const validResources = ['Change Order', 'Change Order Package', 'Change Orders', 'Change Order Packages', 'Change Events', 'Change Event',
+    'change_order', 'change_order_package', 'change_orders', 'change_order_packages', 'change_events', 'change_event'];
+  if (!validResources.includes(payload.resource_name)) {
     return { processed: false, error: 'Not a change order event' };
   }
 
