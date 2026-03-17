@@ -40,6 +40,12 @@ let bidboardStageSyncTimer: ReturnType<typeof setInterval> | null = null;
 let bidboardStageSyncRunning = false;
 let lastBidboardStageSyncAt: Date | null = null;
 
+// ─── Change order polling state ──────────────────────────────────────────────
+let changeOrderPollingTimer: ReturnType<typeof setInterval> | null = null;
+let changeOrderPollingRunning = false;
+let lastChangeOrderPollAt: Date | null = null;
+let lastChangeOrderPollResult: any = null;
+
 // ─── Webhook role event tracking (used by webhooks.ts) ───────────────────────
 let lastWebhookRoleEventAt: Date | null = null;
 
@@ -417,6 +423,35 @@ async function runBidBoardStageSyncCycle() {
   }
 }
 
+// ─── Change order polling cycle ──────────────────────────────────────────────
+async function runChangeOrderPollingCycle() {
+  if (changeOrderPollingRunning) {
+    console.log('[ChangeOrderPolling] Skipping — previous cycle still running');
+    return;
+  }
+  changeOrderPollingRunning = true;
+  console.log('[ChangeOrderPolling] Starting change order sync cycle...');
+  try {
+    const { syncAllProjectChangeOrders } = await import('../change-order-sync');
+    const result = await syncAllProjectChangeOrders();
+    lastChangeOrderPollAt = new Date();
+    lastChangeOrderPollResult = result;
+    console.log(`[ChangeOrderPolling] Complete: ${result.projectsChecked} checked, ${result.projectsUpdated} updated, ${result.errors.length} errors`);
+  } catch (e: any) {
+    console.error('[ChangeOrderPolling] Error:', e.message);
+    lastChangeOrderPollResult = { error: e.message };
+  } finally {
+    changeOrderPollingRunning = false;
+  }
+}
+
+function startChangeOrderPolling(intervalMinutes: number) {
+  if (changeOrderPollingTimer) clearInterval(changeOrderPollingTimer);
+  changeOrderPollingTimer = setInterval(() => runChangeOrderPollingCycle(), intervalMinutes * 60 * 1000);
+  setTimeout(runChangeOrderPollingCycle, 30000); // first run 30s after startup
+  console.log(`[ChangeOrderPolling] Scheduled every ${intervalMinutes} minutes`);
+}
+
 // ─── Startup: read persisted config and start pollers that were enabled ───────
 export async function initPolling() {
   // HubSpot polling
@@ -478,6 +513,18 @@ export async function initPolling() {
     }
   } catch (e) {
     console.log('[BidBoardStageSync] No saved config, stage sync disabled by default');
+  }
+
+  // Change order polling
+  try {
+    const config = await storage.getAutomationConfig("sync_change_orders");
+    const val = (config?.value as any);
+    if (val?.enabled) {
+      const interval = Math.min(60, Math.max(5, val.intervalMinutes || 15));
+      startChangeOrderPolling(interval);
+    }
+  } catch (e) {
+    console.log('[ChangeOrderPolling] No saved config, change order polling disabled by default');
   }
 }
 
@@ -862,6 +909,59 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e.message, errors: [e.message] });
+    }
+  });
+
+  // ── Change order polling routes ────────────────────────────────────────────
+  app.get("/api/automation/change-order-polling/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("sync_change_orders");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 15,
+        isRunning: changeOrderPollingTimer !== null,
+        lastPollAt: lastChangeOrderPollAt?.toISOString() || null,
+        lastPollResult: lastChangeOrderPollResult,
+        currentlyPolling: changeOrderPollingRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/change-order-polling/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes } = req.body;
+      const interval = Math.min(60, Math.max(5, parseInt(String(intervalMinutes)) || 15));
+      await storage.upsertAutomationConfig({
+        key: "sync_change_orders",
+        value: { enabled: !!enabled, intervalMinutes: interval },
+        description: "Sync approved Procore change order amounts back to HubSpot deals",
+      });
+      if (enabled) {
+        startChangeOrderPolling(interval);
+      } else {
+        if (changeOrderPollingTimer) {
+          clearInterval(changeOrderPollingTimer);
+          changeOrderPollingTimer = null;
+        }
+      }
+      res.json({ success: true, enabled: !!enabled, intervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/change-order-polling/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (changeOrderPollingRunning) {
+        return res.json({ message: "Change order sync already in progress", running: true });
+      }
+      runChangeOrderPollingCycle();
+      res.json({ message: "Change order sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 }
