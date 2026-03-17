@@ -65,60 +65,50 @@ export interface ContractValue {
 }
 
 export async function getProjectChangeOrders(projectId: string): Promise<ChangeOrder[]> {
-  try {
-    const client = await getProcoreClient();
-    const companyId = await getCompanyId();
+  const client = await getProcoreClient();
+  const companyId = await getCompanyId();
 
-    const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
-      params: { company_id: companyId },
+  const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
+    params: { company_id: companyId },
+  });
+  const packages = response.data || [];
+
+  const changeOrders: ChangeOrder[] = [];
+
+  for (const pkg of packages) {
+    const status = (pkg.status || 'pending').toLowerCase();
+    const amount = parseFloat(pkg.grand_total || pkg.amount || 0);
+    changeOrders.push({
+      id: String(pkg.id),
+      number: pkg.number || '',
+      title: pkg.title || pkg.description || '',
+      status: pkg.status || 'pending',
+      approvedAmount: status === 'approved' ? amount : 0,
+      pendingAmount: status !== 'approved' ? amount : 0,
+      createdAt: pkg.created_at || '',
+      updatedAt: pkg.updated_at || '',
     });
-    const packages = response.data || [];
-
-    const changeOrders: ChangeOrder[] = [];
-
-    for (const pkg of packages) {
-      const status = (pkg.status || 'pending').toLowerCase();
-      const amount = parseFloat(pkg.grand_total || pkg.amount || 0);
-      changeOrders.push({
-        id: String(pkg.id),
-        number: pkg.number || '',
-        title: pkg.title || pkg.description || '',
-        status: pkg.status || 'pending',
-        approvedAmount: status === 'approved' ? amount : 0,
-        pendingAmount: status !== 'approved' ? amount : 0,
-        createdAt: pkg.created_at || '',
-        updatedAt: pkg.updated_at || '',
-      });
-    }
-
-    return changeOrders;
-  } catch (error: any) {
-    console.error(`[ChangeOrder] Error fetching change orders for project ${projectId}:`, error.message);
-    return [];
   }
+
+  return changeOrders;
 }
 
 export async function getPrimeContractAmount(projectId: string): Promise<number> {
-  try {
-    const client = await getProcoreClient();
-    const companyId = await getCompanyId();
-    
-    const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
-      params: { company_id: companyId },
-    });
-    const contracts = response.data || [];
+  const client = await getProcoreClient();
+  const companyId = await getCompanyId();
 
-    if (contracts.length === 0) return 0;
+  const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
+    params: { company_id: companyId },
+  });
+  const contracts = response.data || [];
 
-    const totalAmount = contracts.reduce((sum: number, contract: any) => {
-      return sum + parseFloat(contract.signed_contract_value || contract.contract_amount || 0);
-    }, 0);
+  if (contracts.length === 0) return 0;
 
-    return totalAmount;
-  } catch (error: any) {
-    console.error(`[ChangeOrder] Error fetching prime contract for project ${projectId}:`, error.message);
-    return 0;
-  }
+  const totalAmount = contracts.reduce((sum: number, contract: any) => {
+    return sum + parseFloat(contract.signed_contract_value || contract.contract_amount || 0);
+  }, 0);
+
+  return totalAmount;
 }
 
 export async function calculateTotalContractValue(projectId: string): Promise<ContractValue> {
@@ -211,6 +201,12 @@ export async function syncChangeOrdersToHubSpot(procoreProjectId: string): Promi
         newAmount: contractValue.totalContractValue,
         contractValue,
       };
+    }
+
+    // Safety: never overwrite a real amount with $0 (likely a 404 or API issue)
+    if (contractValue.totalContractValue === 0 && previousAmount > 0) {
+      console.warn(`[ChangeOrder] Refusing to zero out deal ${mapping.hubspotDealId} (was $${previousAmount.toLocaleString()}) for project ${procoreProjectId} — likely API error`);
+      return { success: false, error: 'Refusing to zero out deal amount — possible API error' };
     }
 
     const updateResult = await updateHubSpotDealAmount(
