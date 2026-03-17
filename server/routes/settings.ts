@@ -1,0 +1,867 @@
+import type { Express } from "express";
+import { storage } from "../storage";
+import { syncProcoreRoleAssignments, syncProcoreRoleAssignmentsBatch, runFullProcoreSync } from "../procore";
+import { runFullHubSpotSync } from "../hubspot";
+import { triggerPostSyncProcoreUpdates } from "../hubspot-procore-sync";
+import { processNewDealWebhook } from "../deal-project-number";
+import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation } from "../bidboard-automation";
+import { runBidBoardStageSync } from "../sync";
+
+// ─── HubSpot polling state ────────────────────────────────────────────────────
+let pollingTimer: ReturnType<typeof setInterval> | null = null;
+let pollingRunning = false;
+let lastPollAt: Date | null = null;
+let lastPollResult: any = null;
+
+// ─── Procore polling state ────────────────────────────────────────────────────
+let procorePollingTimer: ReturnType<typeof setInterval> | null = null;
+let procorePollingRunning = false;
+let lastProcorePollAt: Date | null = null;
+let lastProcorePollResult: any = null;
+let lastRolePollAt: Date | null = null;
+let lastRolePollResult: any = null;
+
+// ─── Role polling state ───────────────────────────────────────────────────────
+let rolePollingTimer: ReturnType<typeof setInterval> | null = null;
+let rolePollingRunning = false;
+let lastPollStartedAt: number | null = null;
+const ROLE_SYNC_TIMEOUT_MS = 5 * 60 * 1000;
+let rolePollingBatchCursor = 0;
+let ROLE_POLLING_BATCH_SIZE = 50;
+
+// ─── BidBoard polling state ───────────────────────────────────────────────────
+let bidboardPollingTimer: ReturnType<typeof setInterval> | null = null;
+let lastBidboardPollAt: Date | null = null;
+let lastBidboardPollResult: any = null;
+let bidboardPollingRunning = false;
+
+// ─── BidBoard stage sync state ────────────────────────────────────────────────
+let bidboardStageSyncTimer: ReturnType<typeof setInterval> | null = null;
+let bidboardStageSyncRunning = false;
+let lastBidboardStageSyncAt: Date | null = null;
+
+// ─── Webhook role event tracking (used by webhooks.ts) ───────────────────────
+let lastWebhookRoleEventAt: Date | null = null;
+
+export function recordWebhookRoleEvent() {
+  lastWebhookRoleEventAt = new Date();
+}
+
+// ─── HubSpot polling cycle ────────────────────────────────────────────────────
+async function runPollingCycle() {
+  if (pollingRunning) {
+    console.log('[Polling] Skipping — previous cycle still running');
+    return;
+  }
+  pollingRunning = true;
+  console.log('[Polling] Starting HubSpot sync cycle...');
+  try {
+    const result = await runFullHubSpotSync();
+    let procoreAutoSync = null;
+    try {
+      procoreAutoSync = await triggerPostSyncProcoreUpdates({
+        companies: result.companies,
+        contacts: result.contacts,
+      });
+    } catch (autoErr: any) {
+      console.error('[Polling] Procore auto-sync failed:', autoErr.message);
+      procoreAutoSync = { error: autoErr.message };
+    }
+
+    let projectNumberResults: any[] = [];
+    if (result.deals.newDealIds && result.deals.newDealIds.length > 0) {
+      console.log(`[Polling] ${result.deals.newDealIds.length} new deal(s) detected, assigning project numbers...`);
+      for (const dealId of result.deals.newDealIds) {
+        try {
+          const pnResult = await processNewDealWebhook(dealId);
+          projectNumberResults.push({ dealId, result: pnResult });
+        } catch (pnErr: any) {
+          console.error(`[Polling] Project number assignment failed for deal ${dealId}:`, pnErr.message);
+          projectNumberResults.push({ dealId, error: pnErr.message });
+        }
+      }
+    }
+
+    lastPollAt = new Date();
+    lastPollResult = {
+      companies: result.companies,
+      contacts: result.contacts,
+      deals: result.deals,
+      procoreAutoSync,
+      projectNumberResults: projectNumberResults.length > 0 ? projectNumberResults : undefined,
+      duration: result.duration,
+    };
+
+    const hasChanges = result.companies.created > 0 || result.companies.updated > 0 ||
+      result.contacts.created > 0 || result.contacts.updated > 0;
+
+    if (hasChanges) {
+      await storage.createAuditLog({
+        action: 'hubspot_polling_sync',
+        entityType: 'all',
+        source: 'polling',
+        status: 'success',
+        details: lastPollResult as any,
+        durationMs: result.duration,
+      });
+    }
+
+    console.log(`[Polling] Complete in ${(result.duration / 1000).toFixed(1)}s — Companies: ${result.companies.created} new, ${result.companies.updated} updated | Contacts: ${result.contacts.created} new, ${result.contacts.updated} updated`);
+  } catch (e: any) {
+    const isAuthError = e.message?.includes('expired') || e.message?.includes('401') || e.message?.includes('Unauthorized') || e.message?.includes('EXPIRED_AUTHENTICATION');
+    if (isAuthError) {
+      console.error('[Polling] HubSpot auth failed (token expired or invalid) — disabling polling. Please reconnect HubSpot.');
+      stopPolling();
+      try {
+        await storage.upsertAutomationConfig({
+          key: "hubspot_polling",
+          value: { enabled: false, intervalMinutes: 10, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
+          description: "Automatic HubSpot polling sync configuration",
+        });
+      } catch (err) {
+        console.warn('[Polling] Failed to disable HubSpot polling config on auth expiry:', err);
+      }
+    }
+    console.error('[Polling] HubSpot sync failed:', e.message);
+    lastPollAt = new Date();
+    lastPollResult = { error: e.message };
+  } finally {
+    pollingRunning = false;
+  }
+}
+
+function startPolling(intervalMinutes: number) {
+  stopPolling();
+  console.log(`[Polling] Starting automatic HubSpot sync every ${intervalMinutes} minutes`);
+  pollingTimer = setInterval(() => runPollingCycle(), intervalMinutes * 60 * 1000);
+  setTimeout(() => runPollingCycle(), 5000);
+}
+
+function stopPolling() {
+  if (pollingTimer) {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
+    console.log('[Polling] Stopped automatic HubSpot sync');
+  }
+}
+
+// ─── Procore polling cycle ────────────────────────────────────────────────────
+async function runProcorePollingCycle() {
+  if (procorePollingRunning) {
+    console.log('[ProcorePolling] Skipping — previous cycle still running');
+    return;
+  }
+  procorePollingRunning = true;
+  const startTime = Date.now();
+  console.log('[ProcorePolling] Starting Procore data sync cycle...');
+  try {
+    const result = await runFullProcoreSync();
+    const duration = Date.now() - startTime;
+    lastProcorePollAt = new Date();
+    lastProcorePollResult = { ...result, duration };
+    lastRolePollAt = new Date();
+    lastRolePollResult = { synced: result.roleAssignments.synced, newAssignments: result.roleAssignments.newAssignments, emails: { sent: 0, skipped: 0, failed: 0 }, duration: 0 };
+
+    const hasChanges = result.projects.created > 0 || result.projects.updated > 0 ||
+      result.vendors.created > 0 || result.vendors.updated > 0 ||
+      result.users.created > 0 || result.users.updated > 0;
+
+    if (hasChanges) {
+      await storage.createAuditLog({
+        action: 'procore_polling_sync',
+        entityType: 'all',
+        source: 'polling',
+        status: 'success',
+        details: lastProcorePollResult as any,
+        durationMs: duration,
+      });
+    }
+
+    console.log(`[ProcorePolling] Complete in ${(duration / 1000).toFixed(1)}s — Projects: ${result.projects.created} new, ${result.projects.updated} updated | Vendors: ${result.vendors.created} new, ${result.vendors.updated} updated | Users: ${result.users.created} new, ${result.users.updated} updated`);
+  } catch (e: any) {
+    const isAuthError = e.message?.includes('expired') || e.message?.includes('401') || e.message?.includes('Unauthorized');
+    if (isAuthError) {
+      console.error('[ProcorePolling] Procore auth failed — disabling polling. Please re-authenticate Procore.');
+      stopProcorePolling();
+      try {
+        await storage.upsertAutomationConfig({
+          key: "procore_polling",
+          value: { enabled: false, intervalMinutes: 15, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
+          description: "Automatic Procore data polling sync configuration",
+        });
+      } catch (err) {
+        console.warn('[ProcorePolling] Failed to disable Procore polling config on auth expiry:', err);
+      }
+    }
+    console.error('[ProcorePolling] Procore sync failed:', e.message);
+    lastProcorePollAt = new Date();
+    lastProcorePollResult = { error: e.message };
+  } finally {
+    procorePollingRunning = false;
+  }
+}
+
+function startProcorePolling(intervalMinutes: number) {
+  stopProcorePolling();
+  console.log(`[ProcorePolling] Starting automatic Procore sync every ${intervalMinutes} minutes`);
+  procorePollingTimer = setInterval(() => runProcorePollingCycle(), intervalMinutes * 60 * 1000);
+  setTimeout(() => runProcorePollingCycle(), 15000);
+}
+
+function stopProcorePolling() {
+  if (procorePollingTimer) {
+    clearInterval(procorePollingTimer);
+    procorePollingTimer = null;
+    console.log('[ProcorePolling] Stopped automatic Procore sync');
+  }
+}
+
+// ─── Role polling cycle ───────────────────────────────────────────────────────
+async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
+  // Stale lock cleanup: if stuck longer than timeout, force-clear
+  if (rolePollingRunning && lastPollStartedAt) {
+    const staleLockMs = Date.now() - lastPollStartedAt;
+    if (staleLockMs > ROLE_SYNC_TIMEOUT_MS) {
+      console.warn(`[RolePolling] Clearing stale lock (stuck for ${Math.round(staleLockMs / 1000)}s)`);
+      rolePollingRunning = false;
+    }
+  }
+  if (rolePollingRunning) {
+    console.log('[RolePolling] Skipping — previous cycle still running');
+    return;
+  }
+  rolePollingRunning = true;
+  lastPollStartedAt = Date.now();
+  const startTime = Date.now();
+  const fullSync = opts?.fullSync ?? false;
+  try {
+    const result = fullSync
+      ? await Promise.race([
+          syncProcoreRoleAssignments(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Role sync timed out after 5 minutes')), ROLE_SYNC_TIMEOUT_MS)
+          ),
+        ])
+      : await Promise.race([
+          syncProcoreRoleAssignmentsBatch(ROLE_POLLING_BATCH_SIZE, rolePollingBatchCursor),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Role sync timed out after 5 minutes')), ROLE_SYNC_TIMEOUT_MS)
+          ),
+        ]);
+
+    if (result.skipped) {
+      console.log('[RolePolling] Skipped — Procore sync in progress, keeping previous result');
+      return;
+    }
+
+    if (!fullSync && 'nextCursor' in result) {
+      rolePollingBatchCursor = result.nextCursor;
+      if (result.nextCursor === 0) {
+        console.log('[RolePolling] Full sweep rotation complete');
+      }
+    }
+
+    let emailResult = { sent: 0, skipped: 0, failed: 0 };
+    if (result.newAssignments.length > 0) {
+      try {
+        const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('../email-notifications');
+        emailResult = await sendRoleAssignmentEmails(result.newAssignments);
+        await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
+      } catch (emailErr: any) {
+        console.error('[RolePolling] Email notifications failed:', emailErr.message);
+      }
+    }
+    const duration = Date.now() - startTime;
+    lastRolePollAt = new Date();
+    lastRolePollResult = {
+      synced: result.synced,
+      newAssignments: result.newAssignments.length,
+      emails: emailResult,
+      duration,
+      ...(fullSync
+        ? {}
+        : 'batchProcessed' in result && 'totalProjects' in result && 'nextCursor' in result
+          ? {
+              batchProcessed: result.batchProcessed,
+              totalProjects: result.totalProjects,
+              nextCursor: result.nextCursor,
+              fullRotationComplete: result.nextCursor === 0,
+            }
+          : {}),
+    };
+    if (result.newAssignments.length > 0) {
+      await storage.createAuditLog({
+        action: 'role_assignment_polling_sync',
+        entityType: 'project_role_assignment',
+        source: 'polling',
+        status: 'success',
+        details: lastRolePollResult as any,
+        durationMs: duration,
+      });
+      const batchInfo = !fullSync && 'batchProcessed' in result ? ` batch ${result.batchProcessed} projects` : '';
+      console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s${batchInfo} — ${result.newAssignments.length} new assignments, ${emailResult.sent} emails sent`);
+    } else {
+      const batchInfo = !fullSync && 'batchProcessed' in result && 'totalProjects' in result
+        ? ` — batch ${result.batchProcessed} of ${result.totalProjects}`
+        : '';
+      console.log(`[RolePolling] Complete in ${(duration / 1000).toFixed(1)}s${batchInfo} — no new assignments`);
+    }
+  } catch (e: any) {
+    console.error('[RolePolling] Role assignment sync failed:', e.message);
+    lastRolePollAt = new Date();
+    lastRolePollResult = { error: e.message };
+  } finally {
+    rolePollingRunning = false;
+    lastPollStartedAt = null;
+  }
+}
+
+function startRolePolling(intervalMinutes: number) {
+  stopRolePolling();
+  console.log(`[RolePolling] Starting automatic role assignment sync every ${intervalMinutes} minutes`);
+  rolePollingTimer = setInterval(() => runRolePollingCycle(), intervalMinutes * 60 * 1000);
+}
+
+function stopRolePolling() {
+  if (rolePollingTimer) {
+    clearInterval(rolePollingTimer);
+    rolePollingTimer = null;
+    console.log('[RolePolling] Stopped automatic role assignment sync');
+  }
+}
+
+// ─── BidBoard polling cycle ───────────────────────────────────────────────────
+async function runBidboardPollingCycle() {
+  if (bidboardPollingRunning) {
+    console.log('[BidBoardPolling] Already running, skipping');
+    return;
+  }
+
+  bidboardPollingRunning = true;
+  console.log('[BidBoardPolling] Starting polling cycle');
+  const startTime = Date.now();
+
+  try {
+    const result = await runBidBoardPolling();
+    lastBidboardPollAt = new Date();
+    lastBidboardPollResult = result;
+
+    const duration = Date.now() - startTime;
+    console.log(`[BidBoardPolling] Complete in ${(duration / 1000).toFixed(1)}s — ${result.projectsScraped} projects, ${result.stageChanges.length} changes`);
+  } catch (e: any) {
+    console.error('[BidBoardPolling] Polling failed:', e.message);
+    lastBidboardPollAt = new Date();
+    lastBidboardPollResult = { error: e.message };
+  } finally {
+    bidboardPollingRunning = false;
+  }
+}
+
+function startBidboardPolling(intervalMinutes: number) {
+  stopBidboardPolling();
+  console.log(`[BidBoardPolling] Starting automatic polling every ${intervalMinutes} minutes`);
+  bidboardPollingTimer = setInterval(() => runBidboardPollingCycle(), intervalMinutes * 60 * 1000);
+}
+
+function stopBidboardPolling() {
+  if (bidboardPollingTimer) {
+    clearInterval(bidboardPollingTimer);
+    bidboardPollingTimer = null;
+    console.log('[BidBoardPolling] Stopped automatic polling');
+  }
+}
+
+// ─── BidBoard stage sync cycle ────────────────────────────────────────────────
+async function safeCreateBidboardStageSyncRun(data: Parameters<typeof storage.createBidboardStageSyncRun>[0]): Promise<void> {
+  try {
+    await storage.createBidboardStageSyncRun(data);
+  } catch (e: any) {
+    console.warn("[BidBoardStageSync] Could not persist run to bidboard_stage_sync_runs (table may not exist):", e.message);
+  }
+}
+
+async function runBidBoardStageSyncCycle() {
+  if (bidboardStageSyncRunning) {
+    console.log("[BidBoardStageSync] Already running, skipping");
+    return;
+  }
+  bidboardStageSyncRunning = true;
+  console.log("[BidBoardStageSync] Starting sync cycle");
+  try {
+    const config = await storage.getAutomationConfig("bidboard_stage_sync");
+    const val = (config?.value as any) || {};
+    const dryRun = val.dryRun !== false;
+    const result = await runBidBoardStageSync({ dryRun });
+    lastBidboardStageSyncAt = new Date();
+    const runStatus = result.initialized
+      ? "initialized"
+      : dryRun
+        ? "dry_run"
+        : (result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success");
+    await safeCreateBidboardStageSyncRun({
+      status: runStatus,
+      totalChanges: result.total,
+      syncedCount: result.changed,
+      failedCount: result.failed,
+      changes: result.changes,
+      errors: result.errors,
+      exportPath: result.exportPath,
+    });
+    console.log(`[BidBoardStageSync] Complete — ${dryRun ? "[DRY RUN] " : ""}${result.changed} synced, ${result.failed} failed`);
+  } catch (e: any) {
+    lastBidboardStageSyncAt = new Date();
+    await safeCreateBidboardStageSyncRun({ status: "failed", errors: [e.message] });
+    console.error("[BidBoardStageSync] Failed:", e.message);
+  } finally {
+    bidboardStageSyncRunning = false;
+  }
+}
+
+// ─── Startup: read persisted config and start pollers that were enabled ───────
+export async function initPolling() {
+  // HubSpot polling
+  try {
+    const config = await storage.getAutomationConfig("hubspot_polling");
+    const val = (config?.value as any);
+    if (val?.enabled) {
+      startPolling(val.intervalMinutes || 10);
+    }
+  } catch (e) {
+    console.log('[Polling] No saved config, polling disabled by default');
+  }
+
+  // Procore polling
+  try {
+    const config = await storage.getAutomationConfig("procore_polling");
+    const val = (config?.value as any);
+    if (val?.enabled) {
+      startProcorePolling(val.intervalMinutes || 15);
+    }
+  } catch (e) {
+    console.log('[ProcorePolling] No saved config, Procore polling disabled by default');
+  }
+
+  // Role polling
+  try {
+    const config = await storage.getAutomationConfig("role_assignment_polling");
+    const val = (config?.value as any);
+    if (val?.enabled) {
+      if (val.batchSize != null) {
+        ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(val.batchSize) || 50));
+      }
+      startRolePolling(val.intervalMinutes ?? 30);
+    }
+  } catch (e) {
+    console.log('[RolePolling] No saved config, role polling disabled by default');
+  }
+
+  // BidBoard polling
+  try {
+    const config = await storage.getAutomationConfig("bidboard_automation");
+    const val = (config?.value as any);
+    if (val?.enabled) {
+      startBidboardPolling(val.pollingIntervalMinutes || 60);
+    }
+  } catch (e) {
+    console.log('[BidBoardPolling] No saved config, BidBoard polling disabled by default');
+  }
+
+  // BidBoard stage sync
+  try {
+    const config = await storage.getAutomationConfig("bidboard_stage_sync");
+    const val = (config?.value as any);
+    if (val?.enabled) {
+      const interval = Math.min(60, Math.max(5, val.intervalMinutes || 15));
+      bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, interval * 60 * 1000);
+      setTimeout(runBidBoardStageSyncCycle, 15000);
+      console.log(`[BidBoardStageSync] Scheduled every ${interval} minutes`);
+    }
+  } catch (e) {
+    console.log('[BidBoardStageSync] No saved config, stage sync disabled by default');
+  }
+}
+
+// ─── Route registration ───────────────────────────────────────────────────────
+export function registerSettingsRoutes(app: Express, requireAuth: any) {
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString(), version: "2.0.0" });
+  });
+
+  app.get("/api/automation-config", requireAuth, async (_req, res) => {
+    try {
+      const configs = await storage.getAutomationConfigs();
+      res.json(configs);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.put("/api/automation-config", requireAuth, async (req, res) => {
+    try {
+      const config = await storage.upsertAutomationConfig(req.body);
+      res.json(config);
+    } catch (e: any) {
+      res.status(400).json({ message: e.message });
+    }
+  });
+
+  app.get("/api/poll-jobs", requireAuth, async (_req, res) => {
+    try {
+      const jobs = await storage.getPollJobs();
+      res.json(jobs);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.patch("/api/poll-jobs/:jobName", requireAuth, async (req, res) => {
+    try {
+      const job = await storage.updatePollJob(req.params.jobName, req.body);
+      if (!job) return res.status(404).json({ message: "Not found" });
+      res.json(job);
+    } catch (e: any) {
+      res.status(400).json({ message: e.message });
+    }
+  });
+
+  // ── HubSpot polling routes ──────────────────────────────────────────────────
+  app.get("/api/automation/polling/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("hubspot_polling");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 10,
+        isRunning: pollingTimer !== null,
+        lastPollAt: lastPollAt?.toISOString() || null,
+        lastPollResult,
+        currentlyPolling: pollingRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/polling/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes } = req.body;
+      const interval = intervalMinutes || 10;
+      await storage.upsertAutomationConfig({
+        key: "hubspot_polling",
+        value: { enabled, intervalMinutes: interval },
+        description: "Automatic HubSpot polling sync configuration",
+      });
+
+      if (enabled) {
+        startPolling(interval);
+      } else {
+        stopPolling();
+      }
+
+      res.json({ success: true, enabled, intervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/polling/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (pollingRunning) {
+        return res.json({ message: "Sync already in progress", running: true });
+      }
+      runPollingCycle();
+      res.json({ message: "Sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Procore polling routes ──────────────────────────────────────────────────
+  app.get("/api/automation/procore-polling/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("procore_polling");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 15,
+        isRunning: procorePollingTimer !== null,
+        lastPollAt: lastProcorePollAt?.toISOString() || null,
+        lastPollResult: lastProcorePollResult,
+        currentlyPolling: procorePollingRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/procore-polling/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes } = req.body;
+      const interval = intervalMinutes || 15;
+      await storage.upsertAutomationConfig({
+        key: "procore_polling",
+        value: { enabled, intervalMinutes: interval },
+        description: "Automatic Procore data polling sync configuration",
+      });
+      if (enabled) {
+        startProcorePolling(interval);
+      } else {
+        stopProcorePolling();
+      }
+      res.json({ success: true, enabled, intervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/procore-polling/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (procorePollingRunning) {
+        return res.json({ message: "Procore sync already in progress", running: true });
+      }
+      runProcorePollingCycle();
+      res.json({ message: "Procore sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Role polling routes ─────────────────────────────────────────────────────
+  app.get("/api/automation/role-polling/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("role_assignment_polling");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes ?? 30,
+        isRunning: rolePollingTimer !== null,
+        lastPollAt: lastRolePollAt?.toISOString() || null,
+        lastPollResult: lastRolePollResult,
+        currentlyPolling: rolePollingRunning,
+        lastWebhookEventAt: lastWebhookRoleEventAt?.toISOString() || null,
+        webhookActive: lastWebhookRoleEventAt
+          ? (Date.now() - lastWebhookRoleEventAt.getTime()) < 30 * 60 * 1000
+          : false,
+        batchSize: ROLE_POLLING_BATCH_SIZE,
+        batchCursor: rolePollingBatchCursor,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/automation/role-polling/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes, batchSize: reqBatchSize } = req.body;
+      const interval = intervalMinutes ?? 30;
+      if (reqBatchSize !== undefined) {
+        ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(reqBatchSize) || 50));
+      }
+      const stored = { enabled, intervalMinutes: interval, batchSize: ROLE_POLLING_BATCH_SIZE };
+      await storage.upsertAutomationConfig({
+        key: "role_assignment_polling",
+        value: stored,
+        description: "Automatic Procore role assignment polling configuration",
+      });
+      if (enabled) {
+        startRolePolling(interval);
+      } else {
+        stopRolePolling();
+      }
+      res.json({ success: true, enabled, intervalMinutes: interval, batchSize: ROLE_POLLING_BATCH_SIZE });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Manual "Sync Now" uses full sync (all projects) — user expects complete check. Scheduled polling uses batched sync.
+  app.post("/api/automation/role-polling/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (rolePollingRunning) {
+        return res.json({ message: "Role assignment sync already in progress", running: true });
+      }
+      runRolePollingCycle({ fullSync: true });
+      res.json({ message: "Role assignment sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── BidBoard polling routes ─────────────────────────────────────────────────
+  app.get("/api/bidboard/status", requireAuth, async (_req, res) => {
+    try {
+      const status = await getAutomationStatus();
+      res.json({
+        ...status,
+        isPolling: bidboardPollingTimer !== null,
+        lastPollAt: lastBidboardPollAt?.toISOString() || null,
+        lastPollResult: lastBidboardPollResult,
+        currentlyPolling: bidboardPollingRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/bidboard/config", requireAuth, async (_req, res) => {
+    try {
+      const automationConfig = await storage.getAutomationConfig("bidboard_automation");
+      const credentialsConfig = await storage.getAutomationConfig("procore_browser_credentials");
+
+      res.json({
+        enabled: (automationConfig?.value as any)?.enabled || false,
+        pollingIntervalMinutes: (automationConfig?.value as any)?.pollingIntervalMinutes || 60,
+        hasCredentials: !!credentialsConfig?.value,
+        sandbox: (credentialsConfig?.value as any)?.sandbox || false,
+        email: (credentialsConfig?.value as any)?.email || null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, pollingIntervalMinutes } = req.body;
+      const interval = pollingIntervalMinutes || 60;
+
+      await storage.upsertAutomationConfig({
+        key: "bidboard_automation",
+        value: { enabled, pollingIntervalMinutes: interval },
+        description: "BidBoard Playwright automation configuration",
+      });
+
+      await enableBidBoardAutomation(enabled);
+
+      if (enabled) {
+        startBidboardPolling(interval);
+      } else {
+        stopBidboardPolling();
+      }
+
+      res.json({ success: true, enabled, pollingIntervalMinutes: interval });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/poll", requireAuth, async (_req, res) => {
+    try {
+      if (bidboardPollingRunning) {
+        return res.json({ message: "BidBoard polling already in progress", running: true });
+      }
+      runBidboardPollingCycle();
+      res.json({ message: "BidBoard polling triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── BidBoard stage sync routes ──────────────────────────────────────────────
+  app.get("/api/bidboard/stage-sync/config", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig("bidboard_stage_sync");
+      const val = (config?.value as any) || {};
+      res.json({
+        enabled: val.enabled || false,
+        intervalMinutes: val.intervalMinutes || 15,
+        dryRun: val.dryRun !== false,
+        isRunning: bidboardStageSyncTimer !== null,
+        lastSyncAt: lastBidboardStageSyncAt?.toISOString() || null,
+        currentlySyncing: bidboardStageSyncRunning,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/stage-sync/config", requireAuth, async (req, res) => {
+    try {
+      const { enabled, intervalMinutes, dryRun } = req.body;
+      const interval = Math.min(60, Math.max(5, parseInt(String(intervalMinutes)) || 15));
+      const config = await storage.getAutomationConfig("bidboard_stage_sync");
+      const val = (config?.value as any) || {};
+      const nextDryRun = dryRun !== undefined ? dryRun !== false : (val.dryRun !== false);
+      await storage.upsertAutomationConfig({
+        key: "bidboard_stage_sync",
+        value: { enabled: !!enabled, intervalMinutes: interval, dryRun: nextDryRun },
+        description: "BidBoard Excel → HubSpot stage sync schedule",
+      });
+      if (enabled) {
+        bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, interval * 60 * 1000);
+        setTimeout(runBidBoardStageSyncCycle, 10000);
+      } else {
+        if (bidboardStageSyncTimer) {
+          clearInterval(bidboardStageSyncTimer);
+          bidboardStageSyncTimer = null;
+        }
+      }
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/bidboard/stage-sync/history", requireAuth, async (req, res) => {
+    try {
+      const limit = Math.min(100, parseInt(req.query.limit as string) || 50);
+      const runs = await storage.getBidboardStageSyncRuns(limit);
+      res.json(runs);
+    } catch (e: any) {
+      if (e?.code === "42P01" || e?.message?.includes("does not exist") || e?.message?.includes("relation")) {
+        res.json([]);
+        return;
+      }
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/stage-sync/trigger", requireAuth, async (_req, res) => {
+    try {
+      if (bidboardStageSyncRunning) {
+        return res.json({ message: "Stage sync already in progress", running: true });
+      }
+      runBidBoardStageSyncCycle();
+      res.json({ message: "Stage sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/stage-sync/reset-baseline", requireAuth, async (_req, res) => {
+    try {
+      const deleted = await storage.deleteAllBidboardStageSyncRuns();
+      console.log(`[BidBoardStageSync] Reset baseline: deleted ${deleted} sync run(s)`);
+      res.json({ success: true, deleted, message: `Cleared ${deleted} sync run(s). Next trigger will re-initialize baseline.` });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.post("/api/bidboard/stage-sync", requireAuth, async (req, res) => {
+    try {
+      const { dryRun, forceExport, initialize } = req.body || {};
+      const result = await runBidBoardStageSync({
+        dryRun: dryRun === undefined ? true : !!dryRun,
+        forceExport: typeof forceExport === "string" ? forceExport : undefined,
+        initialize: !!initialize,
+      });
+      const usedDryRun = dryRun === undefined ? true : !!dryRun;
+      if (!initialize) {
+        const runStatus = usedDryRun ? "dry_run" : (result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success");
+        await safeCreateBidboardStageSyncRun({
+          status: runStatus,
+          totalChanges: result.total,
+          syncedCount: result.changed,
+          failedCount: result.failed,
+          changes: result.changes,
+          errors: result.errors,
+          exportPath: result.exportPath,
+        });
+      }
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message, errors: [e.message] });
+    }
+  });
+}

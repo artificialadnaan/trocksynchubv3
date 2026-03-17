@@ -43,6 +43,7 @@
 
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken } from './hubspot';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import { db } from './db';
 import { syncMappings, hubspotDeals, procoreProjects, type SyncMapping } from '@shared/schema';
 import { eq, and, ilike, or, isNull, sql, desc, ne } from 'drizzle-orm';
@@ -386,7 +387,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
         const BATCH_SIZE = 100;
         for (let i = 0; i < pendingHubspotUpdates.length; i += BATCH_SIZE) {
           const batch = pendingHubspotUpdates.slice(i, i + BATCH_SIZE);
-          const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals/batch/update', {
+          const response = await fetchWithTimeout('https://api.hubapi.com/crm/v3/objects/deals/batch/update', {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${accessToken}`,
@@ -440,7 +441,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
               console.warn(`[procore-hubspot-sync] Could not resolve stage "${stageLabel}" for project ${project.name}, using label as-is`);
             }
             
-            const response = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
+            const response = await fetchWithTimeout('https://api.hubapi.com/crm/v3/objects/deals', {
               method: 'POST',
               headers: {
                 'Authorization': `Bearer ${accessToken}`,
@@ -495,7 +496,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
                 JSON.stringify(errBody).includes('CONFLICTING_UNIQUE_VALUE');
               if (isUniqueConflict && item.properties.project_number) {
                 delete item.properties.project_number;
-                const retryResponse = await fetch('https://api.hubapi.com/crm/v3/objects/deals', {
+                const retryResponse = await fetchWithTimeout('https://api.hubapi.com/crm/v3/objects/deals', {
                   method: 'POST',
                   headers: {
                     'Authorization': `Bearer ${accessToken}`,

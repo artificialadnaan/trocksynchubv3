@@ -39,6 +39,7 @@
 
 import { storage } from './storage';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 /**
  * Gets Procore configuration from database.
@@ -94,7 +95,7 @@ async function refreshAccessToken(refreshToken: string): Promise<string> {
     const config = await getProcoreConfig();
     const loginUrl = getLoginUrl(config.environment);
 
-    const response = await fetch(`${loginUrl}/oauth/token`, {
+    const response = await fetchWithTimeout(`${loginUrl}/oauth/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -145,7 +146,7 @@ async function fetchProcorePages<T>(endpoint: string, companyId: string): Promis
     const separator = endpoint.includes('?') ? '&' : '?';
     const url = `${baseUrl}${endpoint}${separator}per_page=100&page=${page}`;
 
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Accept': 'application/json',
@@ -290,7 +291,7 @@ export async function getProcoreClient(): Promise<{
         }
       }
 
-      const response = await fetch(url.toString(), {
+      const response = await fetchWithTimeout(url.toString(), {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
           'Accept': 'application/json',
@@ -637,7 +638,7 @@ async function fetchProcoreJson(endpoint: string, companyId: string, options?: {
   const config = await getProcoreConfig();
   const baseUrl = getBaseUrl(config.environment);
   const url = `${baseUrl}${endpoint}`;
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     signal: options?.signal,
     headers: {
       'Authorization': `Bearer ${accessToken}`,
@@ -749,7 +750,7 @@ export async function deactivateProject(projectId: string): Promise<boolean> {
   const baseUrl = getBaseUrl(config.environment);
   const companyId = config.companyId;
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `${baseUrl}/rest/v1.0/projects/${projectId}?company_id=${companyId}`,
     {
       method: 'PATCH',
@@ -783,7 +784,7 @@ export async function updateProcoreProject(
 
   const body: any = { project: fields };
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `${baseUrl}/rest/v1.0/projects/${projectId}?company_id=${companyId}`,
     {
       method: 'PATCH',
@@ -816,7 +817,7 @@ export async function updateProcoreBid(
   const baseUrl = getBaseUrl(config.environment);
   const companyId = config.companyId;
 
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `${baseUrl}/rest/v1.0/projects/${projectId}/bid_packages/${bidPackageId}/bids/${bidId}`,
     {
       method: 'PATCH',
@@ -852,7 +853,7 @@ export async function fetchProcoreBidDetail(
 }
 
 export async function proxyProcoreAttachment(url: string): Promise<{ buffer: Buffer; contentType: string; filename: string }> {
-  const response = await fetch(url, { redirect: 'follow' });
+  const response = await fetchWithTimeout(url, { redirect: 'follow' });
   if (!response.ok) {
     throw new Error(`Failed to fetch attachment: ${response.status}`);
   }

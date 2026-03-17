@@ -38,6 +38,7 @@
  */
 
 import { storage } from './storage';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 const BASE_URL = 'https://api.companycam.com/v2';
 
@@ -69,7 +70,7 @@ async function companycamApiRequest(
     options.body = JSON.stringify(body);
   }
   
-  const response = await fetch(url, options);
+  const response = await fetchWithTimeout(url, options);
   
   if (!response.ok) {
     const text = await response.text();

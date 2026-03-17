@@ -35,6 +35,7 @@
 
 import { Client } from '@hubspot/api-client';
 import { storage } from './storage';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 // HubSpot OAuth configuration
 const HUBSPOT_AUTH_URL = 'https://app.hubspot.com/oauth/authorize';
@@ -74,7 +75,7 @@ export async function exchangeHubSpotCode(code: string): Promise<{ accessToken: 
   
   console.log('[hubspot-oauth] Exchanging authorization code for tokens...');
   
-  const response = await fetch(HUBSPOT_TOKEN_URL, {
+  const response = await fetchWithTimeout(HUBSPOT_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -107,7 +108,7 @@ export async function refreshHubSpotToken(refreshToken: string): Promise<{ acces
   
   console.log('[hubspot-oauth] Refreshing access token...');
   
-  const response = await fetch(HUBSPOT_TOKEN_URL, {
+  const response = await fetchWithTimeout(HUBSPOT_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -442,7 +443,7 @@ export async function fetchRecentHubSpotCompanyIds(modifiedWithinMinutes: number
   const accessToken = await getAccessToken();
   const since = new Date(Date.now() - modifiedWithinMinutes * 60 * 1000).toISOString();
 
-  const response = await fetch('https://api.hubapi.com/crm/v3/objects/companies/search', {
+  const response = await fetchWithTimeout('https://api.hubapi.com/crm/v3/objects/companies/search', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${accessToken}`,
@@ -478,7 +479,7 @@ async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   const accessToken = await getAccessToken();
 
   try {
-    const response = await fetch('https://api.hubapi.com/crm/v3/owners?limit=500', {
+    const response = await fetchWithTimeout('https://api.hubapi.com/crm/v3/owners?limit=500', {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
     });
     if (response.ok) {
@@ -498,7 +499,7 @@ async function fetchHubSpotOwners(): Promise<Map<string, string>> {
   }
 
   try {
-    const tokenInfoRes = await fetch(`https://api.hubapi.com/oauth/v1/access-tokens/${accessToken}`);
+    const tokenInfoRes = await fetchWithTimeout(`https://api.hubapi.com/oauth/v1/access-tokens/${accessToken}`);
     if (tokenInfoRes.ok) {
       const tokenInfo = await tokenInfoRes.json();
       if (tokenInfo.user_id && tokenInfo.user) {
@@ -530,7 +531,7 @@ export async function syncHubSpotOwners(): Promise<{ synced: number; created: nu
   let updated = 0;
 
   try {
-    const response = await fetch('https://api.hubapi.com/crm/v3/owners?limit=500', {
+    const response = await fetchWithTimeout('https://api.hubapi.com/crm/v3/owners?limit=500', {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
     });
 
@@ -589,7 +590,7 @@ async function fetchContactCompanyAssociations(contactIds: string[]): Promise<Ma
     const batchSize = 100;
     for (let i = 0; i < contactIds.length; i += batchSize) {
       const batch = contactIds.slice(i, i + batchSize);
-      const response = await fetch('https://api.hubapi.com/crm/v4/associations/contact/company/batch/read', {
+      const response = await fetchWithTimeout('https://api.hubapi.com/crm/v4/associations/contact/company/batch/read', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -624,7 +625,7 @@ async function fetchDealCompanyAssociations(dealIds: string[]): Promise<Map<stri
     const batchSize = 100;
     for (let i = 0; i < dealIds.length; i += batchSize) {
       const batch = dealIds.slice(i, i + batchSize);
-      const response = await fetch('https://api.hubapi.com/crm/v4/associations/deal/company/batch/read', {
+      const response = await fetchWithTimeout('https://api.hubapi.com/crm/v4/associations/deal/company/batch/read', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -1228,7 +1229,7 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
     const accessToken = await getAccessToken();
 
     try {
-      const ownerResp = await fetch(`https://api.hubapi.com/crm/v3/owners/${ownerId}?idProperty=id`, {
+      const ownerResp = await fetchWithTimeout(`https://api.hubapi.com/crm/v3/owners/${ownerId}?idProperty=id`, {
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
       });
       if (ownerResp.ok) {
@@ -1247,7 +1248,7 @@ export async function getDealOwnerInfo(hubspotDealId: string): Promise<{ ownerId
     }
 
     try {
-      const listResp = await fetch(`https://api.hubapi.com/crm/v3/owners/?limit=500`, {
+      const listResp = await fetchWithTimeout(`https://api.hubapi.com/crm/v3/owners/?limit=500`, {
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
       });
       if (listResp.ok) {

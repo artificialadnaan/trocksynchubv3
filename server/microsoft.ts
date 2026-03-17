@@ -1,4 +1,5 @@
 import { storage } from './storage';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 const MICROSOFT_AUTH_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0';
 const GRAPH_API_URL = 'https://graph.microsoft.com/v1.0';
@@ -55,7 +56,7 @@ export function getMicrosoftAuthUrl(): string {
 export async function exchangeMicrosoftCode(code: string): Promise<MicrosoftTokens> {
   const { clientId, clientSecret, redirectUri } = getConfig();
 
-  const response = await fetch(`${MICROSOFT_AUTH_URL}/token`, {
+  const response = await fetchWithTimeout(`${MICROSOFT_AUTH_URL}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -104,7 +105,7 @@ export async function exchangeMicrosoftCode(code: string): Promise<MicrosoftToke
 async function refreshMicrosoftTokens(refreshToken: string): Promise<MicrosoftTokens> {
   const { clientId, clientSecret } = getConfig();
 
-  const response = await fetch(`${MICROSOFT_AUTH_URL}/token`, {
+  const response = await fetchWithTimeout(`${MICROSOFT_AUTH_URL}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -160,7 +161,7 @@ export async function getMicrosoftTokens(): Promise<MicrosoftTokens | null> {
 }
 
 async function getMicrosoftUserInfo(accessToken: string): Promise<any> {
-  const response = await fetch(`${GRAPH_API_URL}/me`, {
+  const response = await fetchWithTimeout(`${GRAPH_API_URL}/me`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
@@ -220,7 +221,7 @@ export async function sendOutlookEmail(params: {
       ],
     };
 
-    const response = await fetch(`${GRAPH_API_URL}/me/sendMail`, {
+    const response = await fetchWithTimeout(`${GRAPH_API_URL}/me/sendMail`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${tokens.accessToken}`,
@@ -259,7 +260,7 @@ export async function listOneDriveFolder(folderPath: string): Promise<any[]> {
     ? `${GRAPH_API_URL}/me/drive/root:/${folderPath}:/children`
     : `${GRAPH_API_URL}/me/drive/root/children`;
 
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     headers: { Authorization: `Bearer ${tokens.accessToken}` },
   });
 
@@ -315,7 +316,7 @@ export async function getSharePointSiteId(): Promise<string | null> {
 
   try {
     // Get site by hostname and site name
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${GRAPH_API_URL}/sites/${config.siteUrl}:/sites/${config.siteName}`,
       {
         headers: { Authorization: `Bearer ${tokens.accessToken}` },
@@ -324,7 +325,7 @@ export async function getSharePointSiteId(): Promise<string | null> {
 
     if (!response.ok) {
       // Try alternative format for root site or different path
-      const altResponse = await fetch(
+      const altResponse = await fetchWithTimeout(
         `${GRAPH_API_URL}/sites/${config.siteUrl}:/${config.siteName}`,
         {
           headers: { Authorization: `Bearer ${tokens.accessToken}` },
@@ -360,7 +361,7 @@ export async function getSharePointDriveId(): Promise<string | null> {
 
   try {
     // Get drives (document libraries) for the site
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${GRAPH_API_URL}/sites/${siteId}/drives`,
       {
         headers: { Authorization: `Bearer ${tokens.accessToken}` },
@@ -393,7 +394,7 @@ export async function listSharePointSites(): Promise<Array<{ id: string; name: s
   if (!tokens) return [];
 
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${GRAPH_API_URL}/sites?search=*`,
       {
         headers: { Authorization: `Bearer ${tokens.accessToken}` },
@@ -425,7 +426,7 @@ export async function listSharePointDrives(siteId?: string): Promise<Array<{ id:
   if (!targetSiteId) return [];
 
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${GRAPH_API_URL}/sites/${targetSiteId}/drives`,
       {
         headers: { Authorization: `Bearer ${tokens.accessToken}` },
@@ -480,7 +481,7 @@ export async function createSharePointFolder(folderPath: string): Promise<{ id: 
       ? `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${currentPath}/${part}`
       : `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${part}`;
 
-    const checkResponse = await fetch(checkEndpoint, {
+    const checkResponse = await fetchWithTimeout(checkEndpoint, {
       headers: { Authorization: `Bearer ${tokens.accessToken}` },
     });
 
@@ -491,7 +492,7 @@ export async function createSharePointFolder(folderPath: string): Promise<{ id: 
     }
 
     // Create folder
-    const createResponse = await fetch(endpoint, {
+    const createResponse = await fetchWithTimeout(endpoint, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${tokens.accessToken}`,
@@ -508,7 +509,7 @@ export async function createSharePointFolder(folderPath: string): Promise<{ id: 
       const error = await createResponse.text();
       // If conflict (folder exists), try to get it
       if (createResponse.status === 409) {
-        const getResponse = await fetch(checkEndpoint, {
+        const getResponse = await fetchWithTimeout(checkEndpoint, {
           headers: { Authorization: `Bearer ${tokens.accessToken}` },
         });
         if (getResponse.ok) {
@@ -553,7 +554,7 @@ export async function uploadFileToSharePoint(
 
   // For small files (< 4MB), use simple upload
   if (fileBuffer.length < 4 * 1024 * 1024) {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${filePath}:/content`,
       {
         method: 'PUT',
@@ -576,7 +577,7 @@ export async function uploadFileToSharePoint(
   }
 
   // For larger files, use upload session (chunked upload)
-  const sessionResponse = await fetch(
+  const sessionResponse = await fetchWithTimeout(
     `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${filePath}:/createUploadSession`,
     {
       method: 'POST',
@@ -589,7 +590,8 @@ export async function uploadFileToSharePoint(
           '@microsoft.graph.conflictBehavior': 'replace',
         },
       }),
-    }
+    },
+    60000
   );
 
   if (!sessionResponse.ok) {
@@ -609,14 +611,14 @@ export async function uploadFileToSharePoint(
     const end = Math.min(offset + chunkSize, fileBuffer.length);
     const chunk = fileBuffer.slice(offset, end);
 
-    const chunkResponse = await fetch(uploadUrl, {
+    const chunkResponse = await fetchWithTimeout(uploadUrl, {
       method: 'PUT',
       headers: {
         'Content-Length': String(chunk.length),
         'Content-Range': `bytes ${offset}-${end - 1}/${fileBuffer.length}`,
       },
       body: chunk,
-    });
+    }, 60000);
 
     if (!chunkResponse.ok && chunkResponse.status !== 202) {
       const error = await chunkResponse.text();
@@ -661,7 +663,7 @@ export async function listSharePointFolder(folderPath: string): Promise<any[]> {
     ? `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root:/${folderPath}:/children`
     : `${GRAPH_API_URL}/sites/${siteId}/drives/${driveId}/root/children`;
 
-  const response = await fetch(endpoint, {
+  const response = await fetchWithTimeout(endpoint, {
     headers: { Authorization: `Bearer ${tokens.accessToken}` },
   });
 

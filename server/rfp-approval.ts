@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import path from 'path';
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
@@ -23,7 +24,7 @@ async function uploadFileToHubSpotAndAttachToDeal(
   formData.append('options', JSON.stringify({ access: 'PRIVATE' }));
   formData.append('folderPath', '/rfp-attachments');
 
-  const uploadRes = await fetch(`${base}/files/v3/files`, {
+  const uploadRes = await fetchWithTimeout(`${base}/files/v3/files`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: formData,
@@ -169,13 +170,13 @@ async function fetchDealAttachmentsFromFiles(dealId: string): Promise<Array<{ na
     const token = await getAccessToken();
     const base = 'https://api.hubapi.com';
     const headers = { Authorization: `Bearer ${token}` };
-    const assocRes = await fetch(`${base}/crm/v4/objects/deal/${dealId}/associations/files`, { headers });
+    const assocRes = await fetchWithTimeout(`${base}/crm/v4/objects/deal/${dealId}/associations/files`, { headers });
     if (!assocRes.ok) return list;
     const assoc = (await assocRes.json()) as { results?: Array<{ id?: string; type?: string }> };
     const fileIds = (assoc.results || []).map((r) => r.id).filter(Boolean) as string[];
     for (const fileId of fileIds) {
       try {
-        const fileRes = await fetch(`${base}/files/v3/files/${fileId}`, { headers });
+        const fileRes = await fetchWithTimeout(`${base}/files/v3/files/${fileId}`, { headers });
         if (!fileRes.ok) continue;
         const file = (await fileRes.json()) as { url?: string; defaultHostingUrl?: string; name?: string; extension?: string; size?: number };
         const url = file.url || file.defaultHostingUrl;
@@ -213,19 +214,19 @@ async function fetchDealAttachmentsFromNotes(dealId: string): Promise<Array<{ na
     const token = await getAccessToken();
     const base = 'https://api.hubapi.com';
     const headers = { Authorization: `Bearer ${token}` };
-    const assocRes = await fetch(`${base}/crm/v4/objects/deal/${dealId}/associations/notes`, { headers });
+    const assocRes = await fetchWithTimeout(`${base}/crm/v4/objects/deal/${dealId}/associations/notes`, { headers });
     if (!assocRes.ok) return list;
     const assoc = (await assocRes.json()) as { results?: Array<{ id?: string; toObjectId?: string } | string> };
     const noteIds = (assoc.results || []).map((r) => (typeof r === 'string' ? r : r?.id || r?.toObjectId)).filter(Boolean) as string[];
     for (const noteId of noteIds) {
-      const noteRes = await fetch(`${base}/crm/v3/objects/notes/${noteId}?properties=hs_attachment_ids`, { headers });
+      const noteRes = await fetchWithTimeout(`${base}/crm/v3/objects/notes/${noteId}?properties=hs_attachment_ids`, { headers });
       if (!noteRes.ok) continue;
       const note = (await noteRes.json()) as { properties?: { hs_attachment_ids?: string } };
       const idsStr = note.properties?.hs_attachment_ids || '';
       const ids = idsStr.split(';').map((s) => s.trim()).filter(Boolean);
       for (const fileId of ids) {
         try {
-          const fileRes = await fetch(`${base}/files/v3/files/${fileId}`, { headers });
+          const fileRes = await fetchWithTimeout(`${base}/files/v3/files/${fileId}`, { headers });
           if (!fileRes.ok) continue;
           const file = (await fileRes.json()) as { url?: string; defaultHostingUrl?: string; name?: string; extension?: string; size?: number };
           const url = file.url || file.defaultHostingUrl;

@@ -1,5 +1,6 @@
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken } from './hubspot';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import { sendEmail, renderTemplate } from './email-service';
 import { db } from './db';
 import { projectNumberRegistry } from '@shared/schema';
@@ -60,7 +61,7 @@ async function getOwnerDetails(ownerId: string): Promise<{ name: string; email: 
   if (!ownerId) return null;
   try {
     const accessToken = await getAccessToken();
-    const response = await fetch(`https://api.hubapi.com/crm/v3/owners/${ownerId}`, {
+    const response = await fetchWithTimeout(`https://api.hubapi.com/crm/v3/owners/${ownerId}`, {
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }
     });
     if (!response.ok) return null;

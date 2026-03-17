@@ -41,6 +41,7 @@
 
 import { google } from 'googleapis';
 import { storage } from './storage';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -92,7 +93,7 @@ export function getGmailAuthUrl(): string {
 export async function exchangeGoogleCode(code: string): Promise<GmailTokens> {
   const { clientId, clientSecret, redirectUri } = getGoogleConfig();
 
-  const response = await fetch(GOOGLE_TOKEN_URL, {
+  const response = await fetchWithTimeout(GOOGLE_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -140,7 +141,7 @@ export async function exchangeGoogleCode(code: string): Promise<GmailTokens> {
 async function refreshGmailTokens(refreshToken: string): Promise<GmailTokens> {
   const { clientId, clientSecret } = getGoogleConfig();
 
-  const response = await fetch(GOOGLE_TOKEN_URL, {
+  const response = await fetchWithTimeout(GOOGLE_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -165,7 +166,7 @@ async function refreshGmailTokens(refreshToken: string): Promise<GmailTokens> {
 }
 
 async function getGoogleUserInfo(accessToken: string): Promise<any> {
-  const response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+  const response = await fetchWithTimeout('https://www.googleapis.com/oauth2/v2/userinfo', {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 

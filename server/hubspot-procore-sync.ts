@@ -1,6 +1,7 @@
 import { storage } from './storage';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { getAccessToken } from './procore';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import type { HubspotCompany, HubspotContact, ProcoreVendor } from '@shared/schema';
 
 async function getProcoreConfig(): Promise<{ companyId: string; environment: string }> {
@@ -30,7 +31,7 @@ async function procoreApiCall(method: string, endpoint: string, body?: any): Pro
   };
   if (body) headers['Content-Type'] = 'application/json';
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,

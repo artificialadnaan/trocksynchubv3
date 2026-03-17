@@ -42,6 +42,7 @@
 
 import { storage } from './storage';
 import type { InsertCompanycamProject, InsertCompanycamUser, InsertCompanycamPhoto, InsertCompanycamChangeHistory } from '@shared/schema';
+import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 const BASE_URL = 'https://api.companycam.com/v2';
 
@@ -54,7 +55,7 @@ async function getCompanycamToken(): Promise<string> {
 
 async function companycamApiFetch(path: string, token: string): Promise<any> {
   const url = path.startsWith('http') ? path : `${BASE_URL}${path}`;
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     headers: {
       'Authorization': `Bearer ${token}`,
       'Accept': 'application/json',

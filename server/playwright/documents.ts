@@ -51,6 +51,7 @@ import { navigateToProject } from "./bidboard";
 import { navigateToPortfolioProject } from "./portfolio";
 import { log } from "../index";
 import { storage } from "../storage";
+import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import fs from "fs/promises";
 import path from "path";
 import https from "https";
@@ -166,10 +167,10 @@ async function downloadFile(
       if (options.fileName) {
         log(`Downloading HubSpot file: ${options.fileName} from ${url}`, "playwright");
       }
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         headers: { Authorization: `Bearer ${options.accessToken}` },
         redirect: "follow",
-      });
+      }, 60000);
       if (!response.ok) return { success: false, finalPath: destPath };
 
       const contentType = response.headers.get("content-type") || "";
