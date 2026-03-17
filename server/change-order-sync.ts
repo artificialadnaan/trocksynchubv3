@@ -13,10 +13,10 @@
  * - Rejected: Denied changes
  * 
  * Contract Value Calculation:
- * totalContractValue = primeContractAmount + approvedChangeOrders + pendingChangeOrders
- * 
- * This includes pending because pending changes represent work expected
- * to be performed and should be visible in pipeline reporting.
+ * totalContractValue = primeContractAmount + approvedChangeOrders
+ *
+ * Only approved change orders affect the deal amount. Pending change
+ * orders are tracked separately in the change_order_pending field.
  * 
  * Data Flow:
  * 1. Fetch change order packages from Procore API
@@ -117,8 +117,8 @@ export async function calculateTotalContractValue(projectId: string): Promise<Co
 
   const approvedChangeOrders = changeOrders.reduce((sum, co) => sum + co.approvedAmount, 0);
   const pendingChangeOrders = changeOrders.reduce((sum, co) => sum + co.pendingAmount, 0);
-  // Include both approved and pending change orders in total (pending represents expected work)
-  const totalContractValue = primeContractAmount + approvedChangeOrders + pendingChangeOrders;
+  // Only include approved change orders in the deal amount (per T-Rock confirmation)
+  const totalContractValue = primeContractAmount + approvedChangeOrders;
 
   return {
     primeContractAmount,
