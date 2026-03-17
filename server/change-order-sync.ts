@@ -294,11 +294,14 @@ export async function syncAllProjectChangeOrders(): Promise<{
 
   try {
     const mappings = await storage.getSyncMappings();
-    const projectsWithHubspot = mappings.filter(m => (m.procoreProjectId || m.portfolioProjectId) && m.hubspotDealId);
+    // Only sync projects that have a Portfolio project ID — change orders and prime contracts
+    // live on Portfolio projects, not Bid Board projects. Bid Board IDs return 404 from Procore API.
+    const projectsWithPortfolio = mappings.filter(m => m.portfolioProjectId && m.hubspotDealId);
 
-    for (const mapping of projectsWithHubspot) {
-      // Use Portfolio project ID when available (change orders live on Portfolio projects)
-      const projectId = mapping.portfolioProjectId || mapping.procoreProjectId;
+    console.log(`[ChangeOrder] Found ${projectsWithPortfolio.length} Portfolio projects to check (skipping ${mappings.length - projectsWithPortfolio.length} without Portfolio ID)`);
+
+    for (const mapping of projectsWithPortfolio) {
+      const projectId = mapping.portfolioProjectId!;
       if (!projectId) continue;
       
       result.projectsChecked++;
