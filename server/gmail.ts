@@ -54,8 +54,6 @@ interface GmailTokens {
   userName?: string;
 }
 
-let connectionSettings: any;
-
 function getGoogleConfig() {
   return {
     clientId: process.env.GOOGLE_CLIENT_ID || '',
@@ -223,40 +221,7 @@ async function getAccessToken(): Promise<string> {
     return process.env.GMAIL_ACCESS_TOKEN;
   }
 
-  // Fall back to Replit connector
-  if (connectionSettings?.settings?.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-    const cachedToken = connectionSettings.settings?.access_token || connectionSettings.settings?.oauth?.credentials?.access_token;
-    if (cachedToken) return cachedToken;
-  }
-  connectionSettings = null;
-
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY
-    ? 'repl ' + process.env.REPL_IDENTITY
-    : process.env.WEB_REPL_RENEWAL
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL
-    : null;
-
-  if (!xReplitToken || !hostname) {
-    throw new Error('Gmail not connected. Configure Gmail OAuth in Settings or set GMAIL_ACCESS_TOKEN env var.');
-  }
-
-  connectionSettings = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=google-mail',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X-Replit-Token': xReplitToken
-      }
-    }
-  ).then(res => res.json()).then(data => data.items?.[0]);
-
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings?.settings?.oauth?.credentials?.access_token;
-
-  if (!connectionSettings || !accessToken) {
-    throw new Error('Gmail not connected. Configure Gmail OAuth in Settings or set GMAIL_ACCESS_TOKEN env var.');
-  }
-  return accessToken;
+  throw new Error('Gmail not connected. Configure Gmail OAuth in Settings or set GMAIL_ACCESS_TOKEN env var.');
 }
 
 async function getUncachableGmailClient() {
@@ -288,13 +253,7 @@ export async function getGmailConnectionStatus(): Promise<{ connected: boolean; 
     return { connected: true, method: 'env' };
   }
 
-  // Check Replit connector
-  try {
-    await getAccessToken();
-    return { connected: true, method: 'replit' };
-  } catch {
-    return { connected: false };
-  }
+  return { connected: false };
 }
 
 /** MIME-encode subject for UTF-8 (emoji, em dash, etc.) to prevent Gmail garbling */

@@ -457,94 +457,11 @@ export async function testLogin(email: string, password: string, sandbox: boolea
  */
 export async function loginToProcore(page: Page): Promise<boolean> {
   const credentials = await getProcoreCredentials();
-  
-  if (!credentials) {
-    log("No Procore credentials configured", "playwright");
-    return false;
-  }
-  
-  const loginUrl = credentials.sandbox ? PROCORE_URLS.loginSandbox : PROCORE_URLS.login;
-  
+  if (!credentials) return false;
   try {
-    log(`Navigating to Procore login: ${loginUrl}`, "playwright");
-    // Use 'load' instead of 'networkidle' — Procore's login page has persistent connections
-    await page.goto(loginUrl, { waitUntil: "load", timeout: 30000 });
-    
-    // Wait a moment for page to stabilize
-    await page.waitForTimeout(1500);
-    
-    // STEP 1: Enter email
-    log("Step 1: Entering email", "playwright");
-    await page.waitForSelector(PROCORE_SELECTORS.login.emailInput, { timeout: 15000 });
-    await page.fill(PROCORE_SELECTORS.login.emailInput, credentials.email);
-    
-    await page.waitForTimeout(500);
-    
-    // Check if password field is already visible (old login flow)
-    let passwordVisible = await page.$(PROCORE_SELECTORS.login.passwordInput);
-    
-    if (!passwordVisible) {
-      // Two-step login: Click Continue button
-      log("Clicking Continue to proceed to password step", "playwright");
-      try {
-        const continueButton = await page.waitForSelector(PROCORE_SELECTORS.login.continueButton, { timeout: 5000 });
-        await continueButton.click();
-        
-        // Wait for password field
-        log("Waiting for password field...", "playwright");
-        await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
-      } catch {
-        // Try generic submit button
-        log("Trying submit button for email step", "playwright");
-        const submitBtn = await page.$('button[type="submit"]');
-        if (submitBtn) {
-          await submitBtn.click();
-          await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 15000, state: "visible" });
-        } else {
-          log("Could not find Continue button or password field", "playwright");
-          return false;
-        }
-      }
-    }
-    
-    await page.waitForTimeout(500);
-    
-    // STEP 2: Enter password
-    log("Step 2: Entering password", "playwright");
-    await page.waitForSelector(PROCORE_SELECTORS.login.passwordInput, { timeout: 10000 });
-    await page.fill(PROCORE_SELECTORS.login.passwordInput, credentials.password);
-    
-    await page.waitForTimeout(500);
-    
-    // Click Sign In
-    log("Clicking Sign In", "playwright");
-    await page.click(PROCORE_SELECTORS.login.submitButton);
-    
-    // Wait for navigation
-    try {
-      await page.waitForURL(/app\.procore\.com|sandbox\.procore\.com|us02\.procore\.com/, { timeout: 30000 });
-      log("Successfully logged into Procore", "playwright");
-      return true;
-    } catch {
-      // Check for MFA or error
-      const mfaInput = await page.$(PROCORE_SELECTORS.login.mfaInput);
-      if (mfaInput) {
-        log("MFA required - cannot proceed", "playwright");
-        return false;
-      }
-      
-      const errorElement = await page.$(PROCORE_SELECTORS.login.errorMessage);
-      if (errorElement) {
-        const errorText = await errorElement.textContent();
-        log(`Login failed: ${errorText}`, "playwright");
-        return false;
-      }
-      
-      log("Login navigation timed out", "playwright");
-      return false;
-    }
-  } catch (error: any) {
-    log(`Login error: ${error.message}`, "playwright");
+    const result = await performLogin(page, credentials);
+    return result.success;
+  } catch {
     return false;
   }
 }

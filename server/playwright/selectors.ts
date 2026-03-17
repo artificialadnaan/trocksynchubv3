@@ -279,16 +279,6 @@ export function getBidBoardUrlNew(companyId: string, sandbox: boolean = false, p
   return url;
 }
 
-export function getProjectUrl(companyId: string, projectId: string, sandbox: boolean = false): string {
-  const baseUrl = sandbox ? PROCORE_URLS.appSandbox : PROCORE_URLS.app;
-  return `${baseUrl}${companyId}/company/bidding/${projectId}`;
-}
-
-export function getProjectUrlNew(companyId: string, projectId: string, sandbox: boolean = false): string {
-  const baseUrl = sandbox ? PROCORE_URLS.appNewSandbox : PROCORE_URLS.appNew;
-  return `${baseUrl}webclients/host/companies/${companyId}/bidding/${projectId}`;
-}
-
 export function getPortfolioProjectUrl(projectId: string, sandbox: boolean = false): string {
   const baseUrl = sandbox ? PROCORE_URLS.appSandbox : PROCORE_URLS.app;
   return `${baseUrl}projects/${projectId}`;

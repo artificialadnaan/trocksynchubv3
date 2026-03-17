@@ -610,7 +610,7 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
             HubSpot CRM Configuration
           </DialogTitle>
           <DialogDescription>
-            HubSpot is connected via the Replit integration. Sync Now pulls all companies, contacts, deals, and custom deal stages into your local database with 2-week version history.
+            HubSpot is connected via OAuth. Sync Now pulls all companies, contacts, deals, and custom deal stages into your local database with 2-week version history.
           </DialogDescription>
         </DialogHeader>
 
@@ -618,7 +618,7 @@ function HubSpotConfigDialog({ open, onOpenChange, existingConfig }: {
           <div className="p-3 rounded-lg bg-muted/50 border">
             <p className="text-sm font-medium mb-1">Connection Method</p>
             <p className="text-xs text-muted-foreground">
-              Managed automatically via Replit integration with OAuth. Token refresh is handled for you.
+              Managed automatically via OAuth. Token refresh is handled for you.
             </p>
           </div>
 
@@ -1284,7 +1284,7 @@ function GmailConfigDialog({ open, onOpenChange, status }: {
             <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20">
               <p className="text-sm font-medium text-green-700 dark:text-green-400">Connected</p>
               {status.email && <p className="text-xs text-muted-foreground mt-1">Account: {status.email}</p>}
-              {status.method && <p className="text-xs text-muted-foreground">Method: {status.method === 'oauth' ? 'OAuth' : status.method === 'env' ? 'Environment Variable' : 'Replit Integration'}</p>}
+              {status.method && <p className="text-xs text-muted-foreground">Method: {status.method === 'oauth' ? 'OAuth' : status.method === 'env' ? 'Environment Variable' : 'OAuth Integration'}</p>}
             </div>
           ) : (
             <div className="p-3 rounded-lg bg-muted/50 border">
@@ -1300,7 +1300,7 @@ function GmailConfigDialog({ open, onOpenChange, status }: {
             <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
               <li>OAuth authentication (recommended)</li>
               <li>GMAIL_ACCESS_TOKEN environment variable</li>
-              <li>Replit Google Mail integration</li>
+              <li>Google Mail OAuth</li>
             </ol>
           </div>
 
