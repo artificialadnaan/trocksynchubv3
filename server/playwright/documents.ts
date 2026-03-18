@@ -573,6 +573,7 @@ export async function uploadDocumentToBidBoard(
     return success;
   } catch (error) {
     const names = documents.map((d) => d.name).join(", ");
+    await takeScreenshot(page, "error-upload-bidboard").catch(() => {});
     log(`Error uploading document(s) to BidBoard: ${error}`, "playwright");
     await logDocumentAction(projectId, "upload_to_bidboard", "failed", { documentNames: names }, String(error));
     return false;
@@ -631,12 +632,14 @@ export async function downloadBidBoardDocuments(
         
         await randomDelay(1000, 2000);
       } catch (error) {
+        await takeScreenshot(page, "error-download-document").catch(() => {});
         log(`Error downloading document: ${error}`, "playwright");
       }
     }
-    
+
     log(`Downloaded ${documents.length} documents from BidBoard project ${projectId}`, "playwright");
   } catch (error) {
+    await takeScreenshot(page, "error-download-bidboard-documents").catch(() => {});
     log(`Error downloading BidBoard documents: ${error}`, "playwright");
   }
   
@@ -736,6 +739,7 @@ export async function uploadDocumentToPortfolio(
     await logDocumentAction(projectId, "upload_to_portfolio", "failed", { documentName: document.name }, "Document not found in list after upload");
     return false;
   } catch (error) {
+    await takeScreenshot(page, "error-upload-portfolio").catch(() => {});
     log(`Error uploading document to Portfolio: ${error}`, "playwright");
     await logDocumentAction(projectId, "upload_to_portfolio", "failed", { documentName: document.name }, String(error));
     return false;
@@ -963,6 +967,7 @@ export async function exportSpecificationsViaUI(
     log(`Downloaded ${result.files.length} specification files for project ${projectId}`, "playwright");
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    await takeScreenshot(page, "error-export-specifications").catch(() => {});
     result.errors.push(errorMessage);
     log(`Error exporting specifications: ${errorMessage}`, "playwright");
   }
@@ -1016,6 +1021,7 @@ export async function exportDrawingSetPdfsViaUI(
     result.success = result.files.length > 0;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    await takeScreenshot(page, "error-export-drawings").catch(() => {});
     result.errors.push(errorMessage);
     log(`Error exporting drawings via UI: ${errorMessage}`, "playwright");
   }
@@ -1107,6 +1113,7 @@ export async function exportProjectReportViaUI(
     result.success = result.files.length > 0;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    await takeScreenshot(page, `error-export-report-${reportType}`).catch(() => {});
     result.errors.push(errorMessage);
     log(`Error exporting ${reportType} report: ${errorMessage}`, "playwright");
   }

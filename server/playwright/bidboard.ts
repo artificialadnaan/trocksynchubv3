@@ -423,6 +423,7 @@ export async function getProjectDetails(page: Page, projectId: string): Promise<
     
     return project;
   } catch (error) {
+    await takeScreenshot(page, "error-get-project-details").catch(() => {});
     log(`Error getting project details: ${error}`, "playwright");
     return null;
   }
@@ -458,6 +459,7 @@ export async function changeProjectStage(page: Page, projectId: string, newStage
     log(`Stage option "${newStage}" not found`, "playwright");
     return false;
   } catch (error) {
+    await takeScreenshot(page, "error-change-stage").catch(() => {});
     log(`Error changing stage: ${error}`, "playwright");
     return false;
   }
@@ -554,6 +556,7 @@ export async function fillClientData(page: Page, projectId: string, clientData: 
     log(`Filled client data for project ${projectId}`, "playwright");
     return true;
   } catch (error) {
+    await takeScreenshot(page, "error-fill-client-data").catch(() => {});
     log(`Error filling client data: ${error}`, "playwright");
     return false;
   }

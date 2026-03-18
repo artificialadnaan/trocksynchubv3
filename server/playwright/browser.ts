@@ -219,6 +219,23 @@ export async function takeScreenshot(page: Page, name: string): Promise<string> 
   return screenshotPath;
 }
 
+/**
+ * Wraps an async operation with automatic screenshot capture on failure.
+ * Use this around key Playwright operations to ensure screenshots are always taken on errors.
+ */
+export async function withScreenshot<T>(page: Page, stepName: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    try {
+      await takeScreenshot(page, `error-${stepName}`);
+    } catch (screenshotErr) {
+      log(`Failed to take error screenshot for ${stepName}: ${screenshotErr}`, "playwright");
+    }
+    throw e;
+  }
+}
+
 export async function withRetry<T>(
   fn: () => Promise<T>,
   maxRetries: number = 3,

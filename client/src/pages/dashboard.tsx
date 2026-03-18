@@ -1,42 +1,8 @@
-/**
- * Dashboard Page
- * ===============
- *
- * Main landing page showing system health, sync statistics, and recent activity.
- * This is the first page users see after logging in.
- *
- * Dashboard Sections:
- *
- * 1. Stat Cards:
- *    - Total syncs in last 24 hours
- *    - Successful/failed sync counts
- *    - Pending webhook count
- *
- * 2. Connection Status:
- *    - HubSpot connection health
- *    - Procore connection health
- *    - CompanyCam connection health
- *
- * 3. Sync Activity Chart:
- *    - Bar chart showing sync volume over time
- *    - Success vs failure breakdown
- *
- * 4. Recent Activity Feed:
- *    - Latest sync operations
- *    - Stage changes and updates
- *    - Error notifications
- *
- * Data Sources:
- * - GET /api/dashboard/stats: Sync statistics
- * - GET /api/dashboard/connections: Service connection status
- *
- * @page Dashboard
- */
-
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { InfoTooltip } from "@/components/ui/info-tooltip";
 import {
@@ -45,15 +11,17 @@ import {
   XCircle,
   ArrowLeftRight,
   TrendingUp,
-  Wifi,
-  WifiOff,
+  AlertTriangle,
+  RefreshCw,
+  Gauge,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { format } from "date-fns";
+import { format, formatDistanceToNow } from "date-fns";
+import { useState } from "react";
 
-/** Main dashboard page component */
 export default function DashboardPage() {
   const [, setLocation] = useLocation();
+  const queryClient = useQueryClient();
 
   const { data: stats, isLoading: statsLoading } = useQuery<any>({
     queryKey: ["/api/dashboard/stats"],
@@ -63,10 +31,24 @@ export default function DashboardPage() {
     queryKey: ["/api/dashboard/connections"],
   });
 
+  const { data: failures, isLoading: failuresLoading } = useQuery<any>({
+    queryKey: ["/api/dashboard/recent-failures"],
+    refetchInterval: 60000,
+  });
+
+  const { data: lastSync } = useQuery<any>({
+    queryKey: ["/api/dashboard/last-sync"],
+  });
+
+  const { data: rateLimits } = useQuery<any>({
+    queryKey: ["/api/dashboard/rate-limits"],
+    refetchInterval: 30000,
+  });
+
   const syncTotal = stats?.syncs?.total ?? 0;
   const successRate = stats?.syncs?.successRate ?? 0;
   const successRateColor = successRate >= 95 ? "text-emerald-600" : successRate >= 80 ? "text-amber-500" : "text-destructive";
-  const successRateDisplay = syncTotal === 0 ? "—" : `${successRate}%`;
+  const successRateDisplay = syncTotal === 0 ? "\u2014" : `${successRate}%`;
 
   const primaryCards = [
     { label: "Sync Operations", sublabel: "Last 24h", value: syncTotal, icon: ArrowLeftRight, accentColor: "border-l-primary", iconColor: "text-primary", tooltip: "End-to-end sync operations between HubSpot, Procore, and other integrated systems in the last 24 hours.", clickable: true },
@@ -82,7 +64,6 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-end justify-between">
         <div>
           <h2 className="text-2xl font-bold font-display tracking-tight" data-testid="text-dashboard-title">Dashboard</h2>
@@ -90,7 +71,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Primary stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         {primaryCards.map((card) => (
           <Card
@@ -123,7 +103,6 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {/* Secondary row: System events (muted) */}
       <div className="grid grid-cols-2 gap-3 md:gap-4">
         {secondaryCards.map((card) => (
           <Card key={card.label} className="bg-muted/30 border-muted">
@@ -148,7 +127,6 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {/* Connections + Chart */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card>
           <CardHeader className="pb-3">
@@ -159,9 +137,9 @@ export default function DashboardPage() {
               <Skeleton className="h-20 w-full" />
             ) : (
               <>
-                <ConnectionRow name="HubSpot" connected={connections?.hubspot?.connected} />
-                <ConnectionRow name="Procore" connected={connections?.procore?.connected} />
-                <ConnectionRow name="CompanyCam" connected={connections?.companycam?.connected} />
+                <ConnectionRow name="HubSpot" connected={connections?.hubspot?.connected} lastSync={lastSync?.hubspot} />
+                <ConnectionRow name="Procore" connected={connections?.procore?.connected} lastSync={lastSync?.procore} />
+                <ConnectionRow name="CompanyCam" connected={connections?.companycam?.connected} lastSync={lastSync?.companycam} />
               </>
             )}
           </CardContent>
@@ -214,7 +192,43 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      {/* Recent Activity */}
+      {rateLimits && (rateLimits.hubspot?.limit || rateLimits.procore?.limit) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold font-display flex items-center gap-2">
+              <Gauge className="w-4 h-4 text-muted-foreground" />
+              API Rate Limits
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {["hubspot", "procore"].map((provider) => {
+              const state = rateLimits?.[provider];
+              if (!state?.limit) return null;
+              const ratio = state.remaining != null ? state.remaining / state.limit : 1;
+              const barColor = ratio < 0.05 ? "bg-red-500" : ratio < 0.1 ? "bg-amber-500" : "bg-emerald-500";
+              return (
+                <div key={provider}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium capitalize">{provider}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {state.remaining ?? "?"} / {state.limit} remaining
+                    </span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all ${barColor}`}
+                      style={{ width: `${Math.max(ratio * 100, 1)}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
+
+      <RecentFailuresCard failures={failures} isLoading={failuresLoading} queryClient={queryClient} />
+
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-semibold font-display flex items-center gap-2">
@@ -263,12 +277,103 @@ export default function DashboardPage() {
   );
 }
 
-function ConnectionRow({ name, connected }: { name: string; connected?: boolean }) {
+function RecentFailuresCard({ failures, isLoading, queryClient }: { failures: any; isLoading: boolean; queryClient: any }) {
+  const [replayingId, setReplayingId] = useState<number | null>(null);
+  const totalFailures = (failures?.auditFailures?.length ?? 0) + (failures?.webhookFailures?.length ?? 0);
+
+  const handleReplay = async (webhookId: number) => {
+    setReplayingId(webhookId);
+    try {
+      const res = await fetch(`/api/webhooks/replay/${webhookId}`, { method: "POST", credentials: "include" });
+      const data = await res.json();
+      if (data.success) {
+        queryClient.invalidateQueries({ queryKey: ["/api/dashboard/recent-failures"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+      }
+    } catch {
+    } finally {
+      setReplayingId(null);
+    }
+  };
+
+  if (!isLoading && totalFailures === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold font-display flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400" />
+          Recent Failures
+          {totalFailures > 0 && (
+            <Badge variant="destructive" className="text-[10px] px-1.5 py-0">{totalFailures}</Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : (
+          <div className="space-y-1">
+            {failures?.webhookFailures?.map((wh: any) => (
+              <div key={`wh-${wh.id}`} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-muted/40 transition-colors gap-2">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <StatusDot status="error" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">Webhook: {wh.source} {wh.eventType}</p>
+                    <p className="text-xs text-muted-foreground truncate mt-0.5">
+                      {wh.errorMessage || "Unknown error"} &middot; Retry {wh.retryCount}/{wh.maxRetries}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="text-xs text-muted-foreground/60 tabular-nums">
+                    {wh.createdAt ? format(new Date(wh.createdAt), "h:mm a") : ""}
+                  </span>
+                  {wh.retryCount < wh.maxRetries && (
+                    <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={replayingId === wh.id} onClick={() => handleReplay(wh.id)}>
+                      <RefreshCw className={`w-3 h-3 mr-1 ${replayingId === wh.id ? "animate-spin" : ""}`} />
+                      Retry
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ))}
+            {failures?.auditFailures?.map((log: any) => (
+              <div key={`audit-${log.id}`} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-muted/40 transition-colors gap-3">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <StatusDot status="error" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{log.action}</p>
+                    <p className="text-xs text-muted-foreground truncate mt-0.5">
+                      {log.entityType} {log.entityId ? `#${log.entityId}` : ""} &middot; {log.errorMessage || "Unknown error"}
+                    </p>
+                  </div>
+                </div>
+                <span className="text-xs text-muted-foreground/60 flex-shrink-0 tabular-nums">
+                  {log.createdAt ? format(new Date(log.createdAt), "h:mm a") : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ConnectionRow({ name, connected, lastSync }: { name: string; connected?: boolean; lastSync?: string | null }) {
   return (
     <div className="flex items-center justify-between py-2.5 px-1" data-testid={`status-${name.toLowerCase()}`}>
       <div className="flex items-center gap-2.5">
         <div className={`w-2 h-2 rounded-full ${connected ? "bg-emerald-500" : "bg-muted-foreground/30"}`} />
-        <span className="text-sm font-medium">{name}</span>
+        <div>
+          <span className="text-sm font-medium">{name}</span>
+          {lastSync && (
+            <p className="text-[10px] text-muted-foreground/60">
+              Last sync {formatDistanceToNow(new Date(lastSync), { addSuffix: true })}
+            </p>
+          )}
+        </div>
       </div>
       <Badge
         variant={connected ? "default" : "secondary"}

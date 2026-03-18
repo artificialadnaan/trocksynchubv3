@@ -315,6 +315,7 @@ export interface IStorage {
   getRfpApprovals(rfpId: number): Promise<RfpApproval[]>;
   getReportScheduleConfig(): Promise<ReportScheduleConfig | undefined>;
   upsertReportScheduleConfig(data: Partial<InsertReportScheduleConfig>): Promise<ReportScheduleConfig>;
+  cleanupOldLogs(auditDays: number, webhookDays: number, emailDays: number): Promise<{ auditDeleted: number; webhookDeleted: number; emailDeleted: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -2373,6 +2374,18 @@ export class DatabaseStorage implements IStorage {
         console.log(`[seed] Updated email template: ${template.templateKey}`);
       }
     }
+  }
+
+  async cleanupOldLogs(auditDays: number, webhookDays: number, emailDays: number): Promise<{ auditDeleted: number; webhookDeleted: number; emailDeleted: number }> {
+    const auditCutoff = new Date(Date.now() - auditDays * 24 * 60 * 60 * 1000);
+    const webhookCutoff = new Date(Date.now() - webhookDays * 24 * 60 * 60 * 1000);
+    const emailCutoff = new Date(Date.now() - emailDays * 24 * 60 * 60 * 1000);
+
+    const auditRows = await db.delete(auditLogs).where(lte(auditLogs.createdAt, auditCutoff)).returning({ id: auditLogs.id });
+    const webhookRows = await db.delete(webhookLogs).where(lte(webhookLogs.createdAt, webhookCutoff)).returning({ id: webhookLogs.id });
+    const emailRows = await db.delete(emailSendLog).where(lte(emailSendLog.createdAt, emailCutoff)).returning({ id: emailSendLog.id });
+
+    return { auditDeleted: auditRows.length, webhookDeleted: webhookRows.length, emailDeleted: emailRows.length };
   }
 }
 

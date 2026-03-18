@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, RequestHandler } from "express";
 import { storage } from "../storage";
 import { syncProcoreRoleAssignments } from "../procore";
 import { updateHubSpotDealStage } from "../hubspot";
@@ -8,8 +8,12 @@ import { processHubspotWebhookForProcore } from "../hubspot-procore-sync";
 import { mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber } from "../procore-hubspot-sync";
 import { handleProcoreProjectWebhook } from "../webhooks/procore-webhook";
 import { recordWebhookRoleEvent } from "./settings";
+import { asyncHandler } from "../lib/async-handler";
+import { db } from "../db";
+import { webhookLogs } from "@shared/schema";
+import { eq, and, lt, desc } from "drizzle-orm";
 
-export function registerWebhookRoutes(app: Express) {
+export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
   // ── HubSpot webhook ─────────────────────────────────────────────────────────
   app.post("/webhooks/hubspot", async (req, res) => {
     try {
@@ -46,8 +50,9 @@ export function registerWebhookRoutes(app: Express) {
           idempotencyKey,
         });
 
-        await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
+        await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
 
+        let hubspotProcessingError: string | null = null;
         const eventType = event.subscriptionType || event.eventType || "";
         const objectType = event.objectType || (eventType.startsWith("deal.") ? "deal" : eventType.startsWith("contact.") ? "contact" : eventType.startsWith("company.") ? "company" : "");
         const objectId = String(event.objectId || "");
@@ -196,6 +201,13 @@ export function registerWebhookRoutes(app: Express) {
             }
           });
         }
+
+        // Mark webhook as processed (or failed if any critical error was caught)
+        await storage.updateWebhookLog(webhookLog.id, {
+          status: hubspotProcessingError ? "failed" : "processed",
+          processedAt: new Date(),
+          errorMessage: hubspotProcessingError,
+        });
       }
       res.status(200).json({ received: true });
     } catch (e: any) {
@@ -209,13 +221,14 @@ export function registerWebhookRoutes(app: Express) {
 
   // ── Procore main webhook ────────────────────────────────────────────────────
   app.post("/webhooks/procore", async (req, res) => {
+    let webhookLog: any = null;
     try {
       const event = req.body;
       const idempotencyKey = `pc_${event.id || event.resource_id}_${event.timestamp || Date.now()}`;
       const existing = await storage.checkIdempotencyKey(idempotencyKey);
       if (existing) return res.status(200).json({ received: true });
 
-      const webhookLog = await storage.createWebhookLog({
+      webhookLog = await storage.createWebhookLog({
         source: "procore",
         eventType: event.event_type || "unknown",
         resourceId: String(event.resource_id || ""),
@@ -243,6 +256,8 @@ export function registerWebhookRoutes(app: Express) {
       });
 
       res.status(200).json({ received: true });
+
+      await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
 
       // Procore may send resource_type/reason (e.g. v4.0) instead of resource_name/event_type
       const resourceName = ((event.resource_name || event.resource_type || "").toString()).toLowerCase().replace(/\s+/g, '_');
@@ -328,7 +343,7 @@ export function registerWebhookRoutes(app: Express) {
                       webhookReason: webhookPayload.reason,
                       portfolioProjectId,
                       bidboardProjectId: pending.bidboardProjectId,
-                      automationSteps: result.steps.map((s) => ({ step: s.step, status: s.status })),
+                      automationSteps: result.steps.map((s: any) => ({ step: s.step, status: s.status })),
                     },
                   });
                   console.log(`[webhook] Phase 2 completed: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
@@ -387,7 +402,7 @@ export function registerWebhookRoutes(app: Express) {
                       webhookReason: webhookPayload.reason,
                       portfolioProjectId,
                       bidboardProjectId: pending.bidboardProjectId,
-                      automationSteps: result.steps.map((s) => ({ step: s.step, status: s.status })),
+                      automationSteps: result.steps.map((s: any) => ({ step: s.step, status: s.status })),
                     },
                   });
                   console.log(`[webhook] Phase 2 completed: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
@@ -746,19 +761,26 @@ export function registerWebhookRoutes(app: Express) {
 
       await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
     } catch (e: any) {
-      res.status(200).json({ received: true });
+      // Mark webhook as failed if unhandled error occurred during processing
+      try {
+        if (webhookLog?.id) {
+          await storage.updateWebhookLog(webhookLog.id, { status: "failed", errorMessage: e.message, processedAt: new Date() });
+        }
+      } catch { /* ignore logging errors */ }
+      if (!res.headersSent) res.status(200).json({ received: true });
     }
   });
 
   // ── CompanyCam webhook ──────────────────────────────────────────────────────
   app.post("/webhooks/companycam", async (req, res) => {
+    let webhookLog: any = null;
     try {
       const event = req.body;
       const idempotencyKey = `cc_${event.data?.id || Date.now()}`;
       const existing = await storage.checkIdempotencyKey(idempotencyKey);
       if (existing) return res.status(200).json({ received: true });
 
-      const webhookLog = await storage.createWebhookLog({
+      webhookLog = await storage.createWebhookLog({
         source: "companycam",
         eventType: event.event_type || "unknown",
         resourceId: String(event.data?.id || ""),
@@ -774,6 +796,8 @@ export function registerWebhookRoutes(app: Express) {
         eventType: event.event_type || "unknown",
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       });
+
+      await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
 
       const resourceType = event.resource_type || event.event_type?.split('.')[0] || "unknown";
       const eventType = event.event_type || "unknown";
@@ -846,7 +870,83 @@ export function registerWebhookRoutes(app: Express) {
       await storage.updateWebhookLog(webhookLog.id, { status: "processed", processedAt: new Date() });
       res.status(200).json({ received: true });
     } catch (e: any) {
+      try {
+        if (webhookLog?.id) {
+          await storage.updateWebhookLog(webhookLog.id, { status: "failed", errorMessage: e.message, processedAt: new Date() });
+        }
+      } catch { /* ignore logging errors */ }
       res.status(500).json({ message: e.message });
     }
   });
+
+  // ── Webhook Admin Endpoints (DLQ) ──────────────────────────────────────────
+  const auth = requireAuth || ((_req: any, _res: any, next: any) => next());
+
+  // GET /api/webhooks/failed — list failed webhooks for dashboard/replay
+  app.get("/api/webhooks/failed", auth, asyncHandler(async (req, res) => {
+    const limit = parseInt(req.query.limit as string) || 50;
+    const offset = parseInt(req.query.offset as string) || 0;
+    const result = await storage.getWebhookLogs({ status: "failed", limit, offset });
+    res.json(result);
+  }));
+
+  // POST /api/webhooks/replay/:id — re-process a failed webhook from stored payload
+  app.post("/api/webhooks/replay/:id", auth, asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: "Invalid webhook ID" });
+
+    // Get the webhook log by ID
+    const [log] = await db.select().from(webhookLogs).where(eq(webhookLogs.id, id)).limit(1);
+    if (!log) return res.status(404).json({ error: "Webhook log not found" });
+    if (log.status !== "failed") return res.status(400).json({ error: `Webhook is in '${log.status}' status, only 'failed' webhooks can be replayed` });
+    if (!log.payload) return res.status(400).json({ error: "No payload stored for this webhook" });
+    if (log.retryCount >= log.maxRetries) return res.status(400).json({ error: `Max retries (${log.maxRetries}) exceeded` });
+
+    // Increment retry count and reset to processing
+    await storage.updateWebhookLog(id, {
+      status: "processing",
+      retryCount: log.retryCount + 1,
+      errorMessage: null,
+    });
+
+    // Re-process based on source
+    try {
+      if (log.source === "hubspot") {
+        const event = log.payload as any;
+        const eventType = event.subscriptionType || event.eventType || "";
+        const objectType = event.objectType || "";
+        const objectId = String(event.objectId || "");
+
+        if (objectType === "deal") {
+          try { await processHubspotWebhookForProcore(eventType, objectType, objectId); } catch {}
+          try {
+            const { syncSingleHubSpotDeal } = await import("../hubspot");
+            await syncSingleHubSpotDeal(objectId);
+          } catch {}
+        }
+      } else if (log.source === "procore") {
+        const event = log.payload as any;
+        const resourceName = ((event.resource_name || event.resource_type || "").toString()).toLowerCase().replace(/\s+/g, '_');
+        const eventType = ((event.event_type || event.reason || "").toString()).toLowerCase();
+
+        if (resourceName === "projects" && eventType === "update") {
+          const projectId = String(event.project_id || event.resource_id || "");
+          if (projectId) {
+            const { fetchProcoreProjectDetail } = await import("../procore");
+            await fetchProcoreProjectDetail(projectId);
+          }
+        }
+        if (["project_role_assignments", "project_roles", "project_users"].includes(resourceName)) {
+          const projectId = String(event.project_id || "");
+          if (projectId) await syncProcoreRoleAssignments([projectId]);
+        }
+      }
+
+      await storage.updateWebhookLog(id, { status: "processed", processedAt: new Date(), errorMessage: null });
+      res.json({ success: true, message: "Webhook replayed successfully" });
+    } catch (replayErr: any) {
+      await storage.updateWebhookLog(id, { status: "failed", errorMessage: replayErr.message, processedAt: new Date() });
+      res.status(500).json({ success: false, error: replayErr.message });
+    }
+  }));
 }

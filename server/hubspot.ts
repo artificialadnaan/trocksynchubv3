@@ -36,6 +36,7 @@
 import { Client } from '@hubspot/api-client';
 import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
+import { updateRateLimits, applyBackpressure } from './lib/rate-limit-tracker';
 
 // HubSpot OAuth configuration
 const HUBSPOT_AUTH_URL = 'https://app.hubspot.com/oauth/authorize';
@@ -443,6 +444,7 @@ export async function fetchRecentHubSpotCompanyIds(modifiedWithinMinutes: number
   const accessToken = await getAccessToken();
   const since = new Date(Date.now() - modifiedWithinMinutes * 60 * 1000).toISOString();
 
+  await applyBackpressure("hubspot");
   const response = await fetchWithTimeout('https://api.hubapi.com/crm/v3/objects/companies/search', {
     method: 'POST',
     headers: {
@@ -463,6 +465,7 @@ export async function fetchRecentHubSpotCompanyIds(modifiedWithinMinutes: number
       sorts: [{ propertyName: 'hs_lastmodifieddate', direction: 'DESCENDING' }],
     }),
   });
+  updateRateLimits("hubspot", response.headers);
 
   if (!response.ok) {
     const err = await response.text();

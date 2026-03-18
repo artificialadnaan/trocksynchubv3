@@ -40,6 +40,7 @@
 import { storage } from './storage';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
+import { updateRateLimits, applyBackpressure } from './lib/rate-limit-tracker';
 
 /**
  * Gets Procore configuration from database.
@@ -143,6 +144,7 @@ async function fetchProcorePages<T>(endpoint: string, companyId: string): Promis
   let page = 1;
 
   while (true) {
+    await applyBackpressure("procore");
     const separator = endpoint.includes('?') ? '&' : '?';
     const url = `${baseUrl}${endpoint}${separator}per_page=100&page=${page}`;
 
@@ -153,6 +155,7 @@ async function fetchProcorePages<T>(endpoint: string, companyId: string): Promis
         'Procore-Company-Id': companyId,
       },
     });
+    updateRateLimits("procore", response.headers);
 
     if (!response.ok) {
       if (response.status === 401) {
@@ -638,6 +641,7 @@ async function fetchProcoreJson(endpoint: string, companyId: string, options?: {
   const config = await getProcoreConfig();
   const baseUrl = getBaseUrl(config.environment);
   const url = `${baseUrl}${endpoint}`;
+  await applyBackpressure("procore");
   const response = await fetchWithTimeout(url, {
     signal: options?.signal,
     headers: {
@@ -646,6 +650,7 @@ async function fetchProcoreJson(endpoint: string, companyId: string, options?: {
       'Procore-Company-Id': companyId,
     },
   });
+  updateRateLimits("procore", response.headers);
   if (!response.ok) {
     if (response.status === 401) throw new Error("Procore token expired or invalid.");
     const errText = await response.text();

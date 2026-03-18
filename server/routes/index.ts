@@ -42,6 +42,9 @@ import { registerArchiveRoutes } from "../archive-routes";
 // Schedulers
 import { startRfpReportScheduler } from "../cron/reportScheduler";
 import { startReconciliationScheduler } from "../cron/reconciliationScheduler";
+import { startCleanupScheduler } from "../cron/cleanupScheduler";
+import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
+import { startAlertScheduler } from "../cron/alertScheduler";
 
 const PgSession = connectPgSimple(session);
 
@@ -105,6 +108,9 @@ export async function registerRoutes(
   // Start schedulers
   startRfpReportScheduler();
   startReconciliationScheduler();
+  startCleanupScheduler();
+  startWebhookRetryScheduler();
+  startAlertScheduler();
 
   // Initialize polling systems from saved config
   initPolling().catch((err: any) => {
