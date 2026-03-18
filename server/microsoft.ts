@@ -1,9 +1,9 @@
 import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
-function getMicrosoftAuthBaseUrl(): string {
-  const tenantId = process.env.MICROSOFT_TENANT_ID || 'common';
-  return `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0`;
+function getMicrosoftAuthBaseUrl(tenantId?: string): string {
+  const tid = tenantId || process.env.MICROSOFT_TENANT_ID || 'common';
+  return `https://login.microsoftonline.com/${tid}/oauth2/v2.0`;
 }
 const GRAPH_API_URL = 'https://graph.microsoft.com/v1.0';
 
@@ -16,22 +16,52 @@ interface MicrosoftTokens {
   userName?: string;
 }
 
-function getConfig() {
-  const clientId = process.env.MICROSOFT_CLIENT_ID || '';
-  const clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
-  console.log(`[Microsoft] getConfig called - CLIENT_ID present: ${!!clientId} (length: ${clientId.length}), CLIENT_SECRET present: ${!!clientSecret}, TENANT_ID: ${process.env.MICROSOFT_TENANT_ID || 'not set'}`);
+// Read Microsoft config from DB first, fall back to env vars (same pattern as Procore)
+async function getConfigFromDb(): Promise<{ clientId: string; clientSecret: string; tenantId: string; redirectUri: string }> {
+  const config = await storage.getAutomationConfig('microsoft_config');
+  const dbClientId = (config?.value as any)?.clientId || '';
+  const dbClientSecret = (config?.value as any)?.clientSecret || '';
+  const dbTenantId = (config?.value as any)?.tenantId || '';
+
+  const clientId = dbClientId || process.env.MICROSOFT_CLIENT_ID || '';
+  const clientSecret = dbClientSecret || process.env.MICROSOFT_CLIENT_SECRET || '';
+  const tenantId = dbTenantId || process.env.MICROSOFT_TENANT_ID || 'common';
+
+  console.log(`[Microsoft] config resolved - CLIENT_ID present: ${!!clientId} (source: ${dbClientId ? 'db' : 'env'}), TENANT_ID: ${tenantId}`);
+
   return {
     clientId,
     clientSecret,
+    tenantId,
     redirectUri: `${process.env.APP_URL || 'http://localhost:5000'}/api/oauth/microsoft/callback`,
   };
 }
 
-export function getMicrosoftAuthUrl(): string {
-  const { clientId, redirectUri } = getConfig();
+// Sync version for backward compat - env vars only
+function getConfig() {
+  return {
+    clientId: process.env.MICROSOFT_CLIENT_ID || '',
+    clientSecret: process.env.MICROSOFT_CLIENT_SECRET || '',
+    redirectUri: `${process.env.APP_URL || 'http://localhost:5000'}/api/oauth/microsoft/callback`,
+  };
+}
+
+// Save Microsoft credentials to database
+export async function saveMicrosoftConfig(config: { clientId: string; clientSecret: string; tenantId: string }): Promise<void> {
+  await storage.upsertAutomationConfig({
+    key: 'microsoft_config',
+    value: config,
+    description: 'Microsoft OAuth client credentials',
+    isActive: true,
+  });
+  console.log('[Microsoft] Config saved to database');
+}
+
+export async function getMicrosoftAuthUrl(): Promise<string> {
+  const { clientId, redirectUri, tenantId } = await getConfigFromDb();
 
   if (!clientId) {
-    throw new Error('MICROSOFT_CLIENT_ID not configured');
+    throw new Error('MICROSOFT_CLIENT_ID not configured. Set env vars or save credentials via API.');
   }
 
   const scopes = [
@@ -56,13 +86,13 @@ export function getMicrosoftAuthUrl(): string {
     prompt: 'consent',
   });
 
-  return `${getMicrosoftAuthBaseUrl()}/authorize?${params.toString()}`;
+  return `${getMicrosoftAuthBaseUrl(tenantId)}/authorize?${params.toString()}`;
 }
 
 export async function exchangeMicrosoftCode(code: string): Promise<MicrosoftTokens> {
-  const { clientId, clientSecret, redirectUri } = getConfig();
+  const { clientId, clientSecret, redirectUri, tenantId } = await getConfigFromDb();
 
-  const response = await fetchWithTimeout(`${getMicrosoftAuthBaseUrl()}/token`, {
+  const response = await fetchWithTimeout(`${getMicrosoftAuthBaseUrl(tenantId)}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -109,9 +139,9 @@ export async function exchangeMicrosoftCode(code: string): Promise<MicrosoftToke
 }
 
 async function refreshMicrosoftTokens(refreshToken: string): Promise<MicrosoftTokens> {
-  const { clientId, clientSecret } = getConfig();
+  const { clientId, clientSecret, tenantId } = await getConfigFromDb();
 
-  const response = await fetchWithTimeout(`${getMicrosoftAuthBaseUrl()}/token`, {
+  const response = await fetchWithTimeout(`${getMicrosoftAuthBaseUrl(tenantId)}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({

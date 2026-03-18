@@ -113,9 +113,20 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   }));
 
   // ============= Microsoft OAuth (OneDrive + Outlook) =============
+  // Save Microsoft client credentials to database (bypasses env var issues)
+  app.post("/api/integrations/microsoft/config", requireAuth, asyncHandler(async (req, res) => {
+    const { clientId, clientSecret, tenantId } = req.body;
+    if (!clientId || !clientSecret) {
+      return res.status(400).json({ message: "Client ID and Client Secret are required" });
+    }
+    const { saveMicrosoftConfig } = await import("../microsoft");
+    await saveMicrosoftConfig({ clientId, clientSecret, tenantId: tenantId || 'common' });
+    res.json({ success: true });
+  }));
+
   app.get("/api/oauth/microsoft/authorize", asyncHandler(async (_req, res) => {
     const { getMicrosoftAuthUrl } = await import("../microsoft");
-    const url = getMicrosoftAuthUrl();
+    const url = await getMicrosoftAuthUrl();
     res.json({ url });
   }));
 
