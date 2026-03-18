@@ -1,3 +1,9 @@
+// Startup env debug - log all MICROSOFT env vars immediately
+const msEnvVars = Object.keys(process.env).filter(k => k.includes('MICROSOFT'));
+console.log(`[startup-debug] MICROSOFT env vars found: ${msEnvVars.length > 0 ? msEnvVars.join(', ') : 'NONE'}`);
+msEnvVars.forEach(k => console.log(`[startup-debug]   ${k} = ${process.env[k]?.substring(0, 8)}...`));
+console.log(`[startup-debug] Total env var count: ${Object.keys(process.env).length}`);
+
 /**
  * T-Rock Sync Hub - Main Server Entry Point
  * ==========================================
