@@ -1,7 +1,11 @@
 import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
-const MICROSOFT_AUTH_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0';
+function getMicrosoftAuthBaseUrl(): string {
+  const tenantId = process.env.MICROSOFT_TENANT_ID || 'common';
+  return `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0`;
+}
+const MICROSOFT_AUTH_URL = getMicrosoftAuthBaseUrl();
 const GRAPH_API_URL = 'https://graph.microsoft.com/v1.0';
 
 interface MicrosoftTokens {
@@ -23,8 +27,11 @@ function getConfig() {
 
 export function getMicrosoftAuthUrl(): string {
   const { clientId, redirectUri } = getConfig();
-  
+
+  console.log(`[microsoft] Auth URL requested. clientId=${clientId ? clientId.substring(0, 8) + '...' : 'EMPTY'}, redirectUri=${redirectUri}, tenantId=${process.env.MICROSOFT_TENANT_ID || 'NOT SET'}`);
+
   if (!clientId) {
+    console.error('[error] MICROSOFT_CLIENT_ID not configured. Env keys available:', Object.keys(process.env).filter(k => k.includes('MICROSOFT')).join(', ') || 'NONE');
     throw new Error('MICROSOFT_CLIENT_ID not configured');
   }
 
