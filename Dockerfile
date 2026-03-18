@@ -12,7 +12,7 @@ RUN npm install --include=dev
 # Copy source code
 COPY . .
 
-# Build the application
+# Build the application (cache-bust: 2026-03-18)
 RUN npm run build
 
 # Production stage
