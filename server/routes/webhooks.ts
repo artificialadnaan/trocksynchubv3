@@ -444,6 +444,17 @@ export function registerWebhookRoutes(app: Express) {
                         });
                       }
                     }
+
+                    // Auto-archive trigger for projects not in local DB
+                    try {
+                      const { handleProjectStageChange } = await import('../project-archive');
+                      const archiveResult = await handleProjectStageChange(projectId, freshProject?.name || 'Unknown Project', newStage);
+                      if (archiveResult.triggered) {
+                        console.log(`[webhook] Auto-archive triggered for project ${projectId} (not in local DB) at stage "${newStage}" — archiveId: ${archiveResult.archiveId}`);
+                      }
+                    } catch (archiveErr: any) {
+                      console.error(`[webhook] Auto-archive check failed for project ${projectId}:`, archiveErr.message);
+                    }
                   }
                 } catch (err: any) {
                   console.error(`[webhook] Error syncing stage for project ${projectId} (not in local DB):`, err.message);
@@ -618,6 +629,23 @@ export function registerWebhookRoutes(app: Express) {
                   console.log(`[webhook] Closeout survey triggered (Procore closed): project ${projectId}`, surveyResult.success ? 'sent' : surveyResult.error);
                 } catch (surveyErr: any) {
                   console.error(`[webhook] Closeout survey error for project ${projectId}:`, surveyErr.message);
+                }
+              }
+
+              // Auto-archive trigger: check if stage change matches configured archive trigger stage
+              if (newStage) {
+                try {
+                  const { handleProjectStageChange } = await import('../project-archive');
+                  const archiveResult = await handleProjectStageChange(
+                    projectId,
+                    project?.name || freshProject?.name || 'Unknown Project',
+                    newStage
+                  );
+                  if (archiveResult.triggered) {
+                    console.log(`[webhook] Auto-archive triggered for project ${projectId} at stage "${newStage}" — archiveId: ${archiveResult.archiveId}`);
+                  }
+                } catch (archiveErr: any) {
+                  console.error(`[webhook] Auto-archive check failed for project ${projectId}:`, archiveErr.message);
                 }
               }
 
