@@ -88,6 +88,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { RfpAutomationCard } from "@/components/rfp-automation-card";
 import { PortfolioAutomationCard } from "@/components/portfolio-automation-card";
 import StorageSettings from "@/components/settings/StorageSettings";
@@ -113,6 +114,9 @@ import {
   Upload,
   FileText,
   RotateCcw,
+  ChevronDown,
+  ChevronRight,
+  Copy,
 } from "lucide-react";
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
@@ -121,6 +125,10 @@ import type { PollJob } from "@shared/schema";
 /** Main settings page component with all configuration options */
 export default function SettingsPage() {
   const { toast } = useToast();
+  const [connectionsOpen, setConnectionsOpen] = useState(true);
+  const [syncPollingOpen, setSyncPollingOpen] = useState(true);
+  const [automationsOpen, setAutomationsOpen] = useState(true);
+  const [systemOpen, setSystemOpen] = useState(false);
   const [hubspotDialogOpen, setHubspotDialogOpen] = useState(false);
   const [procoreDialogOpen, setProcoreDialogOpen] = useState(false);
   const [companycamDialogOpen, setCompanycamDialogOpen] = useState(false);
@@ -1359,13 +1367,27 @@ function RateLimitBar({ name, limit, usage }: { name: string; limit: string; usa
 }
 
 function EndpointRow({ name, url, method }: { name: string; url: string; method: string }) {
+  const { toast } = useToast();
   return (
     <div className="flex items-center justify-between py-2 px-3 rounded-lg border" data-testid={`endpoint-${name.toLowerCase().replace(/\s+/g, "-")}`}>
       <div className="flex items-center gap-3">
         <Badge variant="outline" className="font-mono text-xs">{method}</Badge>
         <span className="text-sm">{name}</span>
       </div>
-      <code className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded">{url}</code>
+      <div className="flex items-center gap-2">
+        <code className="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded">{url}</code>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 w-6 p-0"
+          onClick={() => {
+            navigator.clipboard.writeText(window.location.origin + url);
+            toast({ title: "Copied to clipboard" });
+          }}
+        >
+          <Copy className="w-3 h-3" />
+        </Button>
+      </div>
     </div>
   );
 }

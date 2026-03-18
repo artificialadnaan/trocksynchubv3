@@ -34,6 +34,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -52,6 +53,8 @@ import { format } from "date-fns";
 
 /** Main dashboard page component */
 export default function DashboardPage() {
+  const [, setLocation] = useLocation();
+
   const { data: stats, isLoading: statsLoading } = useQuery<any>({
     queryKey: ["/api/dashboard/stats"],
   });
@@ -66,9 +69,9 @@ export default function DashboardPage() {
   const successRateDisplay = syncTotal === 0 ? "—" : `${successRate}%`;
 
   const primaryCards = [
-    { label: "Sync Operations", sublabel: "Last 24h", value: syncTotal, icon: ArrowLeftRight, accentColor: "border-l-primary", iconColor: "text-primary", tooltip: "End-to-end sync operations between HubSpot, Procore, and other integrated systems in the last 24 hours." },
-    { label: "Successful", sublabel: "Completed", value: stats?.syncs?.successful ?? 0, icon: CheckCircle2, accentColor: "border-l-emerald-500", iconColor: "text-emerald-500", tooltip: "Sync operations that completed without errors and data was successfully written to the target system." },
-    { label: "Failed", sublabel: "Errors", value: stats?.syncs?.failed ?? 0, icon: XCircle, accentColor: "border-l-red-400", iconColor: "text-red-400", tooltip: "Sync operations that encountered an error. Check the activity log for details." },
+    { label: "Sync Operations", sublabel: "Last 24h", value: syncTotal, icon: ArrowLeftRight, accentColor: "border-l-primary", iconColor: "text-primary", tooltip: "End-to-end sync operations between HubSpot, Procore, and other integrated systems in the last 24 hours.", clickable: true },
+    { label: "Successful", sublabel: "Completed", value: stats?.syncs?.successful ?? 0, icon: CheckCircle2, accentColor: "border-l-emerald-500", iconColor: "text-emerald-500", tooltip: "Sync operations that completed without errors and data was successfully written to the target system.", clickable: true },
+    { label: "Failed", sublabel: "Errors", value: stats?.syncs?.failed ?? 0, icon: XCircle, accentColor: "border-l-red-400", iconColor: "text-red-400", tooltip: "Sync operations that encountered an error. Check the activity log for details.", clickable: true },
     { label: "Success Rate", sublabel: "Reliability", value: successRateDisplay, icon: TrendingUp, accentColor: "border-l-amber-400", iconColor: successRateColor, tooltip: "Percentage of sync operations that completed successfully in the last 24 hours.", isRate: true },
   ];
 
@@ -90,7 +93,11 @@ export default function DashboardPage() {
       {/* Primary stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         {primaryCards.map((card) => (
-          <Card key={card.label} className={`border-l-[3px] ${card.accentColor} overflow-hidden`}>
+          <Card
+            key={card.label}
+            className={`border-l-[3px] ${card.accentColor} overflow-hidden${card.clickable ? " cursor-pointer hover:shadow-md transition-shadow" : ""}`}
+            onClick={card.clickable ? () => setLocation("/audit-logs") : undefined}
+          >
             <CardContent className="pt-4 pb-4 px-4 md:pt-5 md:pb-4 md:px-5">
               {statsLoading ? (
                 <Skeleton className="h-16 w-full" />

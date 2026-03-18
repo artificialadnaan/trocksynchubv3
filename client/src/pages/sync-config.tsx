@@ -137,11 +137,7 @@ export default function SyncConfigPage() {
 
   const automationToggles = [
     { key: "sync_client_data", label: "Auto-sync client data to Bid Board", description: "Push HubSpot deal/company/contact data to Procore project overview" },
-    { key: "transfer_attachments", label: "Transfer attachments on project creation", description: "Copy HubSpot deal attachments to Procore Bid Board documents" },
-    { key: "send_to_portfolio", label: "Send to Portfolio on stage change", description: "Auto-push project to Procore Portfolio at configured stage" },
     { key: "sync_change_orders", label: "Update HubSpot deal amount on Change Orders", description: "Sync approved Procore change order amounts back to HubSpot deals" },
-    { key: "companycam_dedup", label: "CompanyCam deduplication enabled", description: "Prevent duplicate CompanyCam projects across HubSpot and Procore" },
-    { key: "auto_number_contracts", label: "Auto-number Prime Contracts & Commitments", description: "Generate contract numbers using project number prefix (e.g., 05926-aa-01)" },
   ];
 
   return (
@@ -149,21 +145,26 @@ export default function SyncConfigPage() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold" data-testid="text-sync-config-title">Sync Configuration</h2>
-          <p className="text-muted-foreground text-sm mt-1">Configure stage mappings and automation rules</p>
+          <p className="text-muted-foreground text-sm mt-1">Configure webhook-based stage sync rules between HubSpot and Procore</p>
         </div>
       </div>
 
       <Card>
         <CardHeader className="pb-3 flex flex-row items-center justify-between">
-          <CardTitle className="text-base font-semibold flex items-center gap-2">
-            <MoveHorizontal className="w-4 h-4" />
-            Stage Mappings
-            {hubspotStages.length > 0 && (
-              <Badge variant="secondary" className="text-xs font-normal">
-                {hubspotStages.length} HubSpot stages
-              </Badge>
-            )}
-          </CardTitle>
+          <div>
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <MoveHorizontal className="w-4 h-4" />
+              Stage Mappings
+              {hubspotStages.length > 0 && (
+                <Badge variant="secondary" className="text-xs font-normal">
+                  {hubspotStages.length} HubSpot stages
+                </Badge>
+              )}
+            </CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              These mappings are used by webhooks and API polling to translate stages between HubSpot and Procore in real-time.
+            </p>
+          </div>
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
@@ -204,7 +205,7 @@ export default function SyncConfigPage() {
             <Skeleton className="h-32 w-full" />
           ) : !mappings || mappings.length === 0 ? (
             <p className="text-sm text-muted-foreground py-8 text-center">
-              No stage mappings configured yet. Add your first mapping to start syncing stages between HubSpot and Procore.
+              No stage mappings configured. Add a mapping to start syncing stages between HubSpot and Procore.
             </p>
           ) : (
             <div className="space-y-2">

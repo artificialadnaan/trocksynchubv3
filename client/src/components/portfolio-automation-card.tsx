@@ -238,7 +238,7 @@ export function PortfolioAutomationCard() {
                 {runs.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
-                      No runs yet
+                      No automation runs yet. Use the manual trigger below to run your first portfolio automation.
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -256,7 +256,7 @@ export function PortfolioAutomationCard() {
         <div>
           <h4 className="text-sm font-medium mb-2">Exported Documents</h4>
           {documents.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-4">No documents yet</p>
+            <p className="text-sm text-muted-foreground py-4">No exported documents yet. Documents appear here after successful automation runs.</p>
           ) : (
             <div className="space-y-2 max-h-40 overflow-y-auto">
               {documents.map((doc) => (
