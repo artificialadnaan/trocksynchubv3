@@ -17,9 +17,12 @@ interface MicrosoftTokens {
 }
 
 function getConfig() {
+  const clientId = process.env.MICROSOFT_CLIENT_ID || '';
+  const clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
+  console.log(`[Microsoft] getConfig called - CLIENT_ID present: ${!!clientId} (length: ${clientId.length}), CLIENT_SECRET present: ${!!clientSecret}, TENANT_ID: ${process.env.MICROSOFT_TENANT_ID || 'not set'}`);
   return {
-    clientId: process.env.MICROSOFT_CLIENT_ID || '',
-    clientSecret: process.env.MICROSOFT_CLIENT_SECRET || '',
+    clientId,
+    clientSecret,
     redirectUri: `${process.env.APP_URL || 'http://localhost:5000'}/api/oauth/microsoft/callback`,
   };
 }
