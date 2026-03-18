@@ -1201,3 +1201,416 @@ export async function generateArchiveCoverSheetPdf(
   addFooter(doc);
   return bufferFromDoc(doc);
 }
+
+
+// ---------------------------------------------------------------------------
+// Additional PDF generators
+// ---------------------------------------------------------------------------
+
+export async function generateEmailsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Email Communications', 'emails');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Email Communications', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Email Communications', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 180, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Subject', width: 200 },
+    { label: 'From', width: 120 },
+    { label: 'Date', width: 80 },
+    { label: 'Attachments', width: 60 },
+    { label: 'Status', width: 52 },
+  ];
+  const rows = items.map((item: any) => [
+    truncate(String(item.subject ?? ''), 50),
+    truncate(String(item.from ?? item.sender_name ?? item.sender ?? ''), 30),
+    fmtDate(item.created_at),
+    String(Array.isArray(item.attachments) ? item.attachments.length : (item.attachments ?? 0)),
+    truncate(String(item.status ?? ''), 15),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Email Communications' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateIncidentsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Incidents Report', 'incidents');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Incidents Report', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Incidents', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 80, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Title', width: 180 },
+    { label: 'Date', width: 80 },
+    { label: 'Status', width: 70 },
+    { label: 'Severity', width: 70 },
+    { label: 'Location', width: 112 },
+  ];
+  const rows = items.map((item: any) => [
+    truncate(String(item.title ?? item.description ?? ''), 45),
+    fmtDate(item.created_at ?? item.incident_date),
+    truncate(String(item.status ?? ''), 20),
+    truncate(String(item.severity ?? item.harm_source ?? ''), 20),
+    truncate(String(item.location ?? ''), 30),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Incidents Report' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generatePunchListPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Punch List', 'punch list');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Punch List', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Punch List', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 80, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: '#', width: 40 },
+    { label: 'Description', width: 160 },
+    { label: 'Location', width: 100 },
+    { label: 'Status', width: 70 },
+    { label: 'Assignee', width: 80 },
+    { label: 'Due Date', width: 62 },
+  ];
+  const rows = items.map((item: any) => [
+    truncate(String(item.number ?? item.position ?? ''), 10),
+    truncate(String(item.name ?? item.description ?? ''), 40),
+    truncate(String(item.location?.node_name ?? item.location ?? ''), 25),
+    truncate(String(item.status ?? ''), 20),
+    truncate(String(item.assignee?.name ?? item.ball_in_court?.name ?? ''), 25),
+    fmtDate(item.due_date),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Punch List' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateMeetingsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Meetings', 'meetings');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Meetings', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Meetings', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 70, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Title', width: 200 },
+    { label: 'Date', width: 80 },
+    { label: 'Location', width: 120 },
+    { label: 'Attendees', width: 60 },
+    { label: 'Attachments', width: 52 },
+  ];
+  const rows = items.map((item: any) => [
+    truncate(String(item.title ?? ''), 50),
+    fmtDate(item.meeting_date ?? item.created_at),
+    truncate(String(item.location ?? ''), 30),
+    String(Array.isArray(item.attendees) ? item.attendees.length : (item.attendees ?? 0)),
+    String(Array.isArray(item.attachments) ? item.attachments.length : (item.attachments ?? 0)),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Meetings' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateSpecificationsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Specifications', 'specifications');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Specifications', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Specifications', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 110, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Section #', width: 80 },
+    { label: 'Title', width: 220 },
+    { label: 'Division', width: 120 },
+    { label: 'Attachments', width: 92 },
+  ];
+  const rows = items.map((item: any) => [
+    truncate(String(item.number ?? ''), 20),
+    truncate(String(item.title ?? item.description ?? ''), 55),
+    truncate(String(item.division ?? item.parent_id ?? ''), 30),
+    String(Array.isArray(item.attachments) ? item.attachments.length : (item.attachments ?? 0)),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Specifications' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateObservationsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Observations', 'observations');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Observations', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Observations', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 100, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Name', width: 160 },
+    { label: 'Type', width: 80 },
+    { label: 'Status', width: 70 },
+    { label: 'Assignee', width: 100 },
+    { label: 'Due Date', width: 62 },
+    { label: 'Priority', width: 40 },
+  ];
+  const rows = items.map((item: any) => [
+    truncate(String(item.name ?? item.title ?? ''), 40),
+    truncate(String(item.type?.name ?? item.type ?? ''), 20),
+    truncate(String(item.status ?? ''), 20),
+    truncate(String(item.assignee?.name ?? ''), 25),
+    fmtDate(item.due_date),
+    truncate(String(item.priority ?? ''), 12),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Observations' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateActionPlansPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Action Plans', 'action plans');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Action Plans', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Action Plans', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 95, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Plan Name', width: 180 },
+    { label: 'Status', width: 80 },
+    { label: 'Manager', width: 120 },
+    { label: 'Created', width: 80 },
+    { label: 'Items', width: 52 },
+  ];
+  const rows = items.map((item: any) => [
+    truncate(String(item.title ?? item.name ?? ''), 45),
+    truncate(String(item.status ?? ''), 20),
+    truncate(String(item.manager?.name ?? item.plan_manager?.name ?? ''), 30),
+    fmtDate(item.created_at),
+    String(
+      item.plan_items_count != null
+        ? item.plan_items_count
+        : Array.isArray(item.plan_items) ? item.plan_items.length : 0
+    ),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Action Plans' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateWeatherLogsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Weather Logs', 'weather logs');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Weather Logs', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Weather Logs', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 100, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Date', width: 80 },
+    { label: 'Conditions', width: 150 },
+    { label: 'Temp High', width: 65 },
+    { label: 'Temp Low', width: 65 },
+    { label: 'Wind', width: 70 },
+    { label: 'Precip', width: 82 },
+  ];
+  const rows = items.map((item: any) => [
+    fmtDate(item.date ?? item.log_date),
+    truncate(String(item.weather_conditions ?? item.description ?? ''), 38),
+    truncate(String(item.high_temp ?? item.temperature_high ?? ''), 15),
+    truncate(String(item.low_temp ?? item.temperature_low ?? ''), 15),
+    truncate(String(item.wind ?? item.wind_conditions ?? ''), 18),
+    truncate(String(item.precipitation ?? item.rain ?? ''), 20),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Weather Logs' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateSafetyViolationsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Safety Violations', 'safety violations');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Safety Violations', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Safety Violations', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 140, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Date', width: 80 },
+    { label: 'Description', width: 200 },
+    { label: 'Severity', width: 80 },
+    { label: 'Status', width: 70 },
+    { label: 'Person', width: 82 },
+  ];
+  const rows = items.map((item: any) => [
+    fmtDate(item.date ?? item.log_date),
+    truncate(String(item.description ?? ''), 50),
+    truncate(String(item.severity ?? ''), 20),
+    truncate(String(item.status ?? ''), 20),
+    truncate(String(item.person_responsible ?? item.affected_person ?? ''), 22),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Safety Violations' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}
+
+export async function generateAccidentLogsPdf(data: any[], projectName: string): Promise<Buffer> {
+  const items = Array.isArray(data) ? data : [];
+  if (items.length === 0) return createEmptyPdf(projectName, 'Accident Logs', 'accident logs');
+
+  const doc = new PDFDocument({
+    size: 'LETTER',
+    margins: { top: MARGIN, bottom: BOTTOM_MARGIN, left: MARGIN, right: MARGIN },
+  });
+  let y = addPageHeader(doc, projectName, 'Accident Logs', true);
+
+  doc.fontSize(13).font('Helvetica-Bold').fillColor(BRAND_RED);
+  doc.text('Accident Logs', MARGIN, y);
+  doc.strokeColor(BRAND_RED).lineWidth(1).moveTo(MARGIN, y + 14).lineTo(MARGIN + 105, y + 14).stroke();
+  doc.fillColor(BRAND_DARK);
+  y += 34;
+
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(BRAND_DARK)
+    .text(`Total: ${items.length}`, MARGIN, y);
+  y += 22;
+
+  const headers = [
+    { label: 'Date', width: 80 },
+    { label: 'Description', width: 200 },
+    { label: 'Type', width: 80 },
+    { label: 'Workers', width: 70 },
+    { label: 'Status', width: 82 },
+  ];
+  const rows = items.map((item: any) => [
+    fmtDate(item.date ?? item.log_date),
+    truncate(String(item.description ?? item.summary ?? ''), 50),
+    truncate(String(item.type ?? item.accident_type ?? ''), 20),
+    truncate(String(item.workers_involved ?? item.number_of_workers ?? ''), 18),
+    truncate(String(item.status ?? item.recordable ?? ''), 22),
+  ]);
+
+  drawTable(doc, headers, rows, y, { projectName, reportTitle: 'Accident Logs' });
+  addFooter(doc);
+  return bufferFromDoc(doc);
+}

@@ -120,6 +120,11 @@ interface ArchivePreview {
     invoicing: number;
     directory: number;
     estimating: number;
+    observations: number;
+    actionPlans: number;
+    weatherLogs: number;
+    safetyViolations: number;
+    accidentLogs: number;
     total: number;
   };
 }
@@ -474,6 +479,11 @@ function ArchiveDialog({
     includeInvoicing: true,
     includeDirectory: true,
     includeEstimating: true,
+    includeObservations: true,
+    includeActionPlans: true,
+    includeWeatherLogs: true,
+    includeSafetyViolations: true,
+    includeAccidentLogs: true,
     baseFolderPath: baseFolderName,
   });
 
@@ -491,6 +501,8 @@ function ArchiveDialog({
       "includePrimeContracts", "includeCommitments", "includeChangeOrders",
       "includeChangeEvents", "includeDirectCosts", "includeInvoicing",
       "includeDirectory", "includeEstimating",
+      "includeObservations", "includeActionPlans", "includeWeatherLogs",
+      "includeSafetyViolations", "includeAccidentLogs",
     ].forEach((k) => p.set(k, String(options[k as keyof typeof options] ?? true)));
     return p.toString();
   }, [options]);
@@ -532,7 +544,9 @@ function ArchiveDialog({
     documents: 0, drawings: 0, submittals: 0, rfis: 0, bidPackages: 0, photos: 0, budget: 0,
     emails: 0, incidents: 0, punchList: 0, meetings: 0, schedule: 0, dailyLogs: 0,
     specifications: 0, primeContracts: 0, commitments: 0, changeOrders: 0, changeEvents: 0,
-    directCosts: 0, invoicing: 0, directory: 0, estimating: 0, total: 0,
+    directCosts: 0, invoicing: 0, directory: 0, estimating: 0,
+    observations: 0, actionPlans: 0, weatherLogs: 0, safetyViolations: 0, accidentLogs: 0,
+    total: 0,
   };
   const breakdown = preview?.fileCounts ?? emptyCounts;
 
@@ -670,6 +684,11 @@ function ArchiveDialog({
                   { key: "includeSchedule", label: "Schedule" },
                   { key: "includeDailyLogs", label: "Daily Logs" },
                   { key: "includeSpecifications", label: "Specifications" },
+                  { key: "includeObservations", label: "Observations" },
+                  { key: "includeActionPlans", label: "Action Plans" },
+                  { key: "includeWeatherLogs", label: "Weather Logs" },
+                  { key: "includeSafetyViolations", label: "Safety Violations" },
+                  { key: "includeAccidentLogs", label: "Accident Logs" },
                 ].map(({ key, label }) => (
                   <div key={key} className="flex items-center gap-2">
                     <Checkbox

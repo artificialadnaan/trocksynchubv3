@@ -137,6 +137,11 @@ export async function startProjectArchive(
     includeInvoicing?: boolean;
     includeDirectory?: boolean;
     includeEstimating?: boolean;
+    includeObservations?: boolean;
+    includeActionPlans?: boolean;
+    includeWeatherLogs?: boolean;
+    includeSafetyViolations?: boolean;
+    includeAccidentLogs?: boolean;
     baseFolderPath?: string;
   } = {}
 ): Promise<{ archiveId: string }> {
@@ -168,6 +173,11 @@ export async function startProjectArchive(
     includeInvoicing: options.includeInvoicing ?? DEFAULT_INCLUDE,
     includeDirectory: options.includeDirectory ?? DEFAULT_INCLUDE,
     includeEstimating: options.includeEstimating ?? DEFAULT_INCLUDE,
+    includeObservations: options.includeObservations ?? DEFAULT_INCLUDE,
+    includeActionPlans: options.includeActionPlans ?? DEFAULT_INCLUDE,
+    includeWeatherLogs: options.includeWeatherLogs ?? DEFAULT_INCLUDE,
+    includeSafetyViolations: options.includeSafetyViolations ?? DEFAULT_INCLUDE,
+    includeAccidentLogs: options.includeAccidentLogs ?? DEFAULT_INCLUDE,
     baseFolderPath,
   };
 
@@ -221,6 +231,11 @@ export interface ArchivePreviewOptions {
   includeInvoicing?: boolean;
   includeDirectory?: boolean;
   includeEstimating?: boolean;
+  includeObservations?: boolean;
+  includeActionPlans?: boolean;
+  includeWeatherLogs?: boolean;
+  includeSafetyViolations?: boolean;
+  includeAccidentLogs?: boolean;
 }
 
 export interface ArchivePreviewResult {
@@ -250,6 +265,11 @@ export interface ArchivePreviewResult {
     invoicing: number;
     directory: number;
     estimating: number;
+    observations: number;
+    actionPlans: number;
+    weatherLogs: number;
+    safetyViolations: number;
+    accidentLogs: number;
     total: number;
   };
 }
@@ -285,6 +305,11 @@ export async function previewArchive(
     includeInvoicing: options.includeInvoicing ?? DEFAULT_INCLUDE,
     includeDirectory: options.includeDirectory ?? DEFAULT_INCLUDE,
     includeEstimating: options.includeEstimating ?? DEFAULT_INCLUDE,
+    includeObservations: options.includeObservations ?? DEFAULT_INCLUDE,
+    includeActionPlans: options.includeActionPlans ?? DEFAULT_INCLUDE,
+    includeWeatherLogs: options.includeWeatherLogs ?? DEFAULT_INCLUDE,
+    includeSafetyViolations: options.includeSafetyViolations ?? DEFAULT_INCLUDE,
+    includeAccidentLogs: options.includeAccidentLogs ?? DEFAULT_INCLUDE,
   };
 
   const docs = await extractProjectDocuments(projectId);
@@ -316,12 +341,18 @@ export async function previewArchive(
   const invoicingCount = opts.includeInvoicing ? (docs.invoicingData?.length ?? docs.invoicing.length) : 0;
   const directoryCountForTotal = opts.includeDirectory && docs.directory.length > 0 ? 1 : 0;
   const estimatingCountForTotal = opts.includeEstimating && docs.estimating.length > 0 ? 1 : 0;
+  const observationsCount = opts.includeObservations && (docs.observationsData?.length ?? 0) > 0 ? 1 : 0;
+  const actionPlansCount = opts.includeActionPlans && (docs.actionPlansData?.length ?? 0) > 0 ? 1 : 0;
+  const weatherLogsCount = opts.includeWeatherLogs && (docs.weatherLogsData?.length ?? 0) > 0 ? 1 : 0;
+  const safetyViolationsCount = opts.includeSafetyViolations && (docs.safetyViolationsData?.length ?? 0) > 0 ? 1 : 0;
+  const accidentLogsCount = opts.includeAccidentLogs && (docs.accidentLogsData?.length ?? 0) > 0 ? 1 : 0;
 
   const total =
     docCount + drawingsCount + submittalsCount + rfisCount + bidPackagesCount + photosCount +
     budgetCount + emailsCount + incidentsCount + punchListCount + meetingsCount + scheduleCount +
     dailyLogsCount + specCount + primeCount + commitCount + changeOrdersCount + changeEventsCount +
-    directCostsCount + invoicingCount + directoryCountForTotal + estimatingCountForTotal;
+    directCostsCount + invoicingCount + directoryCountForTotal + estimatingCountForTotal +
+    observationsCount + actionPlansCount + weatherLogsCount + safetyViolationsCount + accidentLogsCount;
 
   const projectFolderName = sanitizeFolderName(`${docs.projectName} (${projectId})`);
   const cfg = await getStorageConfig();
@@ -358,6 +389,11 @@ export async function previewArchive(
     folderStructure.push(`${basePath}/Invoicing`);
   if (opts.includeDirectory && docs.directory.length > 0) folderStructure.push(`${basePath}/Directory`);
   if (opts.includeEstimating && docs.estimating.length > 0) folderStructure.push(`${basePath}/Estimating`);
+  if (opts.includeObservations && (docs.observationsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Observations`);
+  if (opts.includeActionPlans && (docs.actionPlansData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Action Plans`);
+  if (opts.includeWeatherLogs && (docs.weatherLogsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Weather Logs`);
+  if (opts.includeSafetyViolations && (docs.safetyViolationsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Safety Violations`);
+  if (opts.includeAccidentLogs && (docs.accidentLogsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Accident Logs`);
 
   return {
     projectId,
@@ -386,6 +422,11 @@ export async function previewArchive(
       invoicing: invoicingCount,
       directory: opts.includeDirectory ? docs.directory.length : 0,
       estimating: opts.includeEstimating ? docs.estimating.length : 0,
+      observations: observationsCount,
+      actionPlans: actionPlansCount,
+      weatherLogs: weatherLogsCount,
+      safetyViolations: safetyViolationsCount,
+      accidentLogs: accidentLogsCount,
       total,
     },
   };
@@ -452,6 +493,11 @@ type ArchiveOptions = {
   includeInvoicing: boolean;
   includeDirectory: boolean;
   includeEstimating: boolean;
+  includeObservations?: boolean;
+  includeActionPlans?: boolean;
+  includeWeatherLogs?: boolean;
+  includeSafetyViolations?: boolean;
+  includeAccidentLogs?: boolean;
   baseFolderPath: string;
 };
 
@@ -651,10 +697,118 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       }
     };
 
-    if (options.includeEmails) await uploadDocList(docs.emails, `${basePath}/Emails`, 'Uploading emails...');
-    if (options.includeIncidents) await uploadDocList(docs.incidents, `${basePath}/Incidents`, 'Uploading incidents...');
-    if (options.includePunchList) await uploadDocList(docs.punchList, `${basePath}/Punch List`, 'Uploading punch list...');
-    if (options.includeMeetings) await uploadDocList(docs.meetings, `${basePath}/Meetings`, 'Uploading meetings...');
+    if (options.includeEmails && (docs.emailsData?.length > 0 || docs.emails.length > 0)) {
+      progress.currentStep = 'Uploading emails...';
+      await provider.createFolder(`${basePath}/Emails`);
+      if (docs.emailsData?.length > 0) {
+        try {
+          const { generateEmailsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateEmailsPdf(docs.emailsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Emails`, 'emails_report.pdf', pdfBuffer, 'application/pdf');
+          filesUploaded++;
+        } catch (e: any) {
+          console.warn(`[Archive] PDF generation failed for emails, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.emailsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Emails`, 'emails_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Emails export: ${e2.message}`);
+          }
+        }
+      }
+      for (const doc of docs.emails) {
+        if (!doc.url && !doc.downloadUrl) continue;
+        const res = await uploadDocument(provider, `${basePath}/Emails`, doc, progress);
+        if (res.success) filesUploaded++;
+        else errors.push(res.error!);
+      }
+    }
+
+    if (options.includeIncidents && (docs.incidentsData?.length > 0 || docs.incidents.length > 0)) {
+      progress.currentStep = 'Uploading incidents...';
+      await provider.createFolder(`${basePath}/Incidents`);
+      if (docs.incidentsData?.length > 0) {
+        try {
+          const { generateIncidentsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateIncidentsPdf(docs.incidentsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Incidents`, 'incidents_report.pdf', pdfBuffer, 'application/pdf');
+          filesUploaded++;
+        } catch (e: any) {
+          console.warn(`[Archive] PDF generation failed for incidents, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.incidentsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Incidents`, 'incidents_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Incidents export: ${e2.message}`);
+          }
+        }
+      }
+      for (const doc of docs.incidents) {
+        if (!doc.url && !doc.downloadUrl) continue;
+        const res = await uploadDocument(provider, `${basePath}/Incidents`, doc, progress);
+        if (res.success) filesUploaded++;
+        else errors.push(res.error!);
+      }
+    }
+
+    if (options.includePunchList && (docs.punchListData?.length > 0 || docs.punchList.length > 0)) {
+      progress.currentStep = 'Uploading punch list...';
+      await provider.createFolder(`${basePath}/Punch List`);
+      if (docs.punchListData?.length > 0) {
+        try {
+          const { generatePunchListPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generatePunchListPdf(docs.punchListData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Punch List`, 'punch_list_report.pdf', pdfBuffer, 'application/pdf');
+          filesUploaded++;
+        } catch (e: any) {
+          console.warn(`[Archive] PDF generation failed for punch list, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.punchListData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Punch List`, 'punch_list_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Punch list export: ${e2.message}`);
+          }
+        }
+      }
+      for (const doc of docs.punchList) {
+        if (!doc.url && !doc.downloadUrl) continue;
+        const res = await uploadDocument(provider, `${basePath}/Punch List`, doc, progress);
+        if (res.success) filesUploaded++;
+        else errors.push(res.error!);
+      }
+    }
+
+    if (options.includeMeetings && (docs.meetingsData?.length > 0 || docs.meetings.length > 0)) {
+      progress.currentStep = 'Uploading meetings...';
+      await provider.createFolder(`${basePath}/Meetings`);
+      if (docs.meetingsData?.length > 0) {
+        try {
+          const { generateMeetingsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateMeetingsPdf(docs.meetingsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Meetings`, 'meetings_report.pdf', pdfBuffer, 'application/pdf');
+          filesUploaded++;
+        } catch (e: any) {
+          console.warn(`[Archive] PDF generation failed for meetings, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.meetingsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Meetings`, 'meetings_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Meetings export: ${e2.message}`);
+          }
+        }
+      }
+      for (const doc of docs.meetings) {
+        if (!doc.url && !doc.downloadUrl) continue;
+        const res = await uploadDocument(provider, `${basePath}/Meetings`, doc, progress);
+        if (res.success) filesUploaded++;
+        else errors.push(res.error!);
+      }
+    }
+
     if (options.includeSchedule) await uploadDocList(docs.schedule, `${basePath}/Schedule`, 'Uploading schedule...');
 
     if (options.includeDailyLogs && (docs.dailyLogs.items.length > 0 || docs.dailyLogs.attachments.length > 0)) {
@@ -686,7 +840,33 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       }
     }
 
-    if (options.includeSpecifications) await uploadDocList(docs.specifications, `${basePath}/Specifications`, 'Uploading specifications...');
+    if (options.includeSpecifications && (docs.specificationsData?.length > 0 || docs.specifications.length > 0)) {
+      progress.currentStep = 'Uploading specifications...';
+      await provider.createFolder(`${basePath}/Specifications`);
+      if (docs.specificationsData?.length > 0) {
+        try {
+          const { generateSpecificationsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateSpecificationsPdf(docs.specificationsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Specifications`, 'specifications_report.pdf', pdfBuffer, 'application/pdf');
+          filesUploaded++;
+        } catch (e: any) {
+          console.warn(`[Archive] PDF generation failed for specifications, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.specificationsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Specifications`, 'specifications_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Specifications export: ${e2.message}`);
+          }
+        }
+      }
+      for (const doc of docs.specifications) {
+        if (!doc.url && !doc.downloadUrl) continue;
+        const res = await uploadDocument(provider, `${basePath}/Specifications`, doc, progress);
+        if (res.success) filesUploaded++;
+        else errors.push(res.error!);
+      }
+    }
     if (options.includePrimeContracts && (docs.primeContractsData?.length > 0 || docs.primeContracts.length > 0)) {
       progress.currentStep = 'Uploading prime contracts...';
       await provider.createFolder(`${basePath}/Prime Contracts`);
@@ -924,6 +1104,122 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
           filesUploaded++;
         } catch (e2: any) {
           errors.push(`Estimating export: ${e2.message}`);
+        }
+      }
+    }
+
+    if (options.includeObservations && (docs.observationsData?.length > 0 || docs.observations?.length > 0)) {
+      progress.currentStep = 'Uploading observations...';
+      await provider.createFolder(`${basePath}/Observations`);
+      if (docs.observationsData?.length > 0) {
+        try {
+          const { generateObservationsPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateObservationsPdf(docs.observationsData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Observations`, 'observations_report.pdf', pdfBuffer, 'application/pdf');
+          filesUploaded++;
+        } catch (e: any) {
+          console.warn(`[Archive] PDF generation failed for observations, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.observationsData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Observations`, 'observations_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Observations export: ${e2.message}`);
+          }
+        }
+      }
+      for (const d of docs.observations || []) {
+        if (!d.url && !d.downloadUrl) continue;
+        const res = await uploadDocument(provider, `${basePath}/Observations`, d, progress);
+        if (res.success) filesUploaded++;
+        else errors.push(res.error!);
+      }
+    }
+
+    if (options.includeActionPlans && (docs.actionPlansData?.length > 0 || docs.actionPlans?.length > 0)) {
+      progress.currentStep = 'Uploading action plans...';
+      await provider.createFolder(`${basePath}/Action Plans`);
+      if (docs.actionPlansData?.length > 0) {
+        try {
+          const { generateActionPlansPdf } = await import('./archive-pdf-generator');
+          const pdfBuffer = await generateActionPlansPdf(docs.actionPlansData, docs.projectName);
+          await uploadDocumentWithRetry(provider, `${basePath}/Action Plans`, 'action_plans_report.pdf', pdfBuffer, 'application/pdf');
+          filesUploaded++;
+        } catch (e: any) {
+          console.warn(`[Archive] PDF generation failed for action plans, falling back to JSON: ${e.message}`);
+          try {
+            const json = JSON.stringify(docs.actionPlansData, null, 2);
+            await uploadDocumentWithRetry(provider, `${basePath}/Action Plans`, 'action_plans_data.json', Buffer.from(json), 'application/json');
+            filesUploaded++;
+          } catch (e2: any) {
+            errors.push(`Action plans export: ${e2.message}`);
+          }
+        }
+      }
+      for (const d of docs.actionPlans || []) {
+        if (!d.url && !d.downloadUrl) continue;
+        const res = await uploadDocument(provider, `${basePath}/Action Plans`, d, progress);
+        if (res.success) filesUploaded++;
+        else errors.push(res.error!);
+      }
+    }
+
+    if (options.includeWeatherLogs && docs.weatherLogsData?.length > 0) {
+      progress.currentStep = 'Uploading weather logs...';
+      await provider.createFolder(`${basePath}/Weather Logs`);
+      try {
+        const { generateWeatherLogsPdf } = await import('./archive-pdf-generator');
+        const pdfBuffer = await generateWeatherLogsPdf(docs.weatherLogsData, docs.projectName);
+        await uploadDocumentWithRetry(provider, `${basePath}/Weather Logs`, 'weather_logs_report.pdf', pdfBuffer, 'application/pdf');
+        filesUploaded++;
+      } catch (e: any) {
+        console.warn(`[Archive] PDF generation failed for weather logs, falling back to JSON: ${e.message}`);
+        try {
+          const json = JSON.stringify(docs.weatherLogsData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Weather Logs`, 'weather_logs_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e2: any) {
+          errors.push(`Weather logs export: ${e2.message}`);
+        }
+      }
+    }
+
+    if (options.includeSafetyViolations && docs.safetyViolationsData?.length > 0) {
+      progress.currentStep = 'Uploading safety violations...';
+      await provider.createFolder(`${basePath}/Safety Violations`);
+      try {
+        const { generateSafetyViolationsPdf } = await import('./archive-pdf-generator');
+        const pdfBuffer = await generateSafetyViolationsPdf(docs.safetyViolationsData, docs.projectName);
+        await uploadDocumentWithRetry(provider, `${basePath}/Safety Violations`, 'safety_violations_report.pdf', pdfBuffer, 'application/pdf');
+        filesUploaded++;
+      } catch (e: any) {
+        console.warn(`[Archive] PDF generation failed for safety violations, falling back to JSON: ${e.message}`);
+        try {
+          const json = JSON.stringify(docs.safetyViolationsData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Safety Violations`, 'safety_violations_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e2: any) {
+          errors.push(`Safety violations export: ${e2.message}`);
+        }
+      }
+    }
+
+    if (options.includeAccidentLogs && docs.accidentLogsData?.length > 0) {
+      progress.currentStep = 'Uploading accident logs...';
+      await provider.createFolder(`${basePath}/Accident Logs`);
+      try {
+        const { generateAccidentLogsPdf } = await import('./archive-pdf-generator');
+        const pdfBuffer = await generateAccidentLogsPdf(docs.accidentLogsData, docs.projectName);
+        await uploadDocumentWithRetry(provider, `${basePath}/Accident Logs`, 'accident_logs_report.pdf', pdfBuffer, 'application/pdf');
+        filesUploaded++;
+      } catch (e: any) {
+        console.warn(`[Archive] PDF generation failed for accident logs, falling back to JSON: ${e.message}`);
+        try {
+          const json = JSON.stringify(docs.accidentLogsData, null, 2);
+          await uploadDocumentWithRetry(provider, `${basePath}/Accident Logs`, 'accident_logs_data.json', Buffer.from(json), 'application/json');
+          filesUploaded++;
+        } catch (e2: any) {
+          errors.push(`Accident logs export: ${e2.message}`);
         }
       }
     }
