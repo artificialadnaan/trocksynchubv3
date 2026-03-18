@@ -214,6 +214,62 @@ router.post('/api/webhooks/procore/project-stage', async (req: Request, res: Res
 // ---------------------------------------------------------------------------
 
 const SAMPLE_DATA: Record<string, { data: any[]; generator: string; title: string }> = {
+  budget: { title: 'Budget Report', generator: 'generateBudgetPdf', data: {
+    summary: { total_budget: 2500000, approved_changes: 125000, revised_budget: 2625000, pending_changes: 45000 },
+    lineItems: [
+      { cost_code: '03-300', description: 'Cast-in-Place Concrete', original_budget_amount: 450000, approved_cos: 25000, revised_budget: 475000, committed_costs: 460000, direct_costs: 5000 },
+      { cost_code: '05-120', description: 'Structural Steel', original_budget_amount: 680000, approved_cos: 50000, revised_budget: 730000, committed_costs: 715000, direct_costs: 8000 },
+      { cost_code: '09-910', description: 'Painting', original_budget_amount: 120000, approved_cos: 0, revised_budget: 120000, committed_costs: 95000, direct_costs: 2000 },
+      { cost_code: '23-050', description: 'HVAC', original_budget_amount: 350000, approved_cos: 30000, revised_budget: 380000, committed_costs: 370000, direct_costs: 4000 },
+      { cost_code: '26-050', description: 'Electrical', original_budget_amount: 280000, approved_cos: 20000, revised_budget: 300000, committed_costs: 285000, direct_costs: 3000 },
+    ],
+  } as any},
+  dailyLogs: { title: 'Daily Logs Report', generator: 'generateDailyLogsPdf', data: [
+    { date: '2025-11-01', weather_conditions: 'Clear, 78F', work_performed: 'Poured slab-on-grade Section A. Installed rebar for Section B.', workers_on_site: 24, visitors: 'Owner rep, architect', equipment: 'Concrete pump, boom truck' },
+    { date: '2025-11-02', weather_conditions: 'Partly cloudy, 72F', work_performed: 'Stripped forms Section A. Continued rebar Section B. MEP rough-in 2nd floor.', workers_on_site: 28, visitors: 'None', equipment: 'Crane, forklift' },
+    { date: '2025-11-03', weather_conditions: 'Rain - work suspended PM', work_performed: 'Interior framing 1st floor AM only. Site secured at 1pm due to weather.', workers_on_site: 15, visitors: 'Safety inspector', equipment: 'None' },
+  ]},
+  primeContracts: { title: 'Prime Contracts', generator: 'generatePrimeContractsPdf', data: [
+    { id: 1, number: 'PC-001', title: 'General Construction Contract', status: 'approved', vendor: { name: 'T-Rock Construction' }, executed_date: '2025-06-15', value: 2500000, description: 'Lump sum general construction contract' },
+  ]},
+  subcontracts: { title: 'Subcontracts', generator: 'generateSubcontractsPdf', data: [
+    { id: 1, number: 'SC-001', title: 'Concrete Work', status: 'approved', vendor: { name: 'DFW Concrete LLC' }, executed_date: '2025-07-01', value: 450000 },
+    { id: 2, number: 'SC-002', title: 'Steel Erection', status: 'approved', vendor: { name: 'Lone Star Steel' }, executed_date: '2025-07-15', value: 680000 },
+    { id: 3, number: 'SC-003', title: 'Electrical', status: 'pending', vendor: { name: 'Spark Electric Inc' }, executed_date: '2025-08-01', value: 280000 },
+  ]},
+  purchaseOrders: { title: 'Purchase Orders', generator: 'generatePurchaseOrdersPdf', data: [
+    { id: 1, number: 'PO-001', title: 'Structural Steel Materials', status: 'approved', vendor: { name: 'US Steel Supply' }, value: 185000, created_at: '2025-07-20' },
+    { id: 2, number: 'PO-002', title: 'HVAC Equipment', status: 'approved', vendor: { name: 'Carrier HVAC' }, value: 95000, created_at: '2025-08-10' },
+  ]},
+  changeOrders: { title: 'Change Orders', generator: 'generateChangeOrdersPdf', data: [
+    { id: 1, number: 'CO-001', title: 'Additional Structural Support', status: 'approved', amount: 50000, created_at: '2025-09-01', description: 'Added steel bracing per revised structural engineering' },
+    { id: 2, number: 'CO-002', title: 'Owner-Requested Finish Upgrade', status: 'approved', amount: 30000, created_at: '2025-09-20', description: 'Upgraded lobby finishes from VCT to porcelain tile' },
+    { id: 3, number: 'CO-003', title: 'Unforeseen Site Conditions', status: 'pending', amount: 45000, created_at: '2025-10-15', description: 'Rock excavation required at foundation' },
+  ]},
+  changeEvents: { title: 'Change Events', generator: 'generateChangeEventsPdf', data: [
+    { id: 1, number: 'CE-001', title: 'Structural Redesign', status: 'open', origin: 'Design Error', created_at: '2025-08-28', estimated_amount: 55000 },
+    { id: 2, number: 'CE-002', title: 'Owner Scope Addition', status: 'closed', origin: 'Owner Request', created_at: '2025-09-15', estimated_amount: 30000 },
+  ]},
+  directCosts: { title: 'Direct Costs', generator: 'generateDirectCostsPdf', data: [
+    { id: 1, description: 'Temporary power installation', vendor: 'City Electric', amount: 8500, created_at: '2025-07-05', cost_code: '01-500' },
+    { id: 2, description: 'Dumpster rental - Month 1', vendor: 'Waste Mgmt', amount: 2400, created_at: '2025-07-15', cost_code: '01-500' },
+    { id: 3, description: 'Survey and layout', vendor: 'Precision Survey', amount: 4200, created_at: '2025-07-01', cost_code: '01-400' },
+  ]},
+  invoicing: { title: 'Invoicing / Requisitions', generator: 'generateInvoicingPdf', data: [
+    { id: 1, number: 'INV-001', period: 'July 2025', status: 'paid', amount: 312000, submitted_date: '2025-08-01', paid_date: '2025-08-15' },
+    { id: 2, number: 'INV-002', period: 'August 2025', status: 'paid', amount: 445000, submitted_date: '2025-09-01', paid_date: '2025-09-18' },
+    { id: 3, number: 'INV-003', period: 'September 2025', status: 'approved', amount: 380000, submitted_date: '2025-10-01' },
+  ]},
+  directory: { title: 'Project Directory', generator: 'generateDirectoryPdf', data: [
+    { name: 'Adnaan Iqbal', email: 'adnaan@trock.com', role: 'Project Manager', company: 'T-Rock Construction', phone: '(972) 555-0100' },
+    { name: 'Sarah Johnson', email: 'sarah@trock.com', role: 'Superintendent', company: 'T-Rock Construction', phone: '(972) 555-0101' },
+    { name: 'Mike Davis', email: 'mike@dfwconcrete.com', role: 'Foreman', company: 'DFW Concrete LLC', phone: '(214) 555-0200' },
+    { name: 'Lisa Chen', email: 'lisa@owner.com', role: 'Owner Representative', company: 'Asset Management Co', phone: '(469) 555-0300' },
+  ]},
+  estimating: { title: 'Estimating', generator: 'generateEstimatingPdf', data: [
+    { id: 1, title: 'Original Estimate', status: 'final', total: 2500000, created_at: '2025-05-15', estimator: 'Tom Engineer' },
+    { id: 2, title: 'VE Estimate Rev 1', status: 'final', total: 2350000, created_at: '2025-06-01', estimator: 'Tom Engineer' },
+  ]},
   emails: { title: 'Email Communications', generator: 'generateEmailsPdf', data: [
     { subject: 'RFP Response - Exterior Renovation', sender_name: 'John Smith', created_at: '2025-11-15', status: 'sent', attachments: [{},{}] },
     { subject: 'Budget Approval Q4', from: 'sarah@trock.com', created_at: '2025-11-20', status: 'delivered', attachments: [{}] },
