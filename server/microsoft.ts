@@ -2,7 +2,7 @@ import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 function getMicrosoftAuthBaseUrl(): string {
-  const tenantId = process.env.MICROSOFT_TENANT_ID || 'common';
+  const tenantId = env.MICROSOFT_TENANT_ID || 'common';
   return `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0`;
 }
 const MICROSOFT_AUTH_URL = getMicrosoftAuthBaseUrl();
@@ -17,21 +17,24 @@ interface MicrosoftTokens {
   userName?: string;
 }
 
+// Use indirect access to prevent esbuild from inlining process.env at build time
+const env = process['env'];
+
 function getConfig() {
   return {
-    clientId: process.env.MICROSOFT_CLIENT_ID || '',
-    clientSecret: process.env.MICROSOFT_CLIENT_SECRET || '',
-    redirectUri: `${process.env.APP_URL || 'http://localhost:5000'}/api/oauth/microsoft/callback`,
+    clientId: env.MICROSOFT_CLIENT_ID || '',
+    clientSecret: env.MICROSOFT_CLIENT_SECRET || '',
+    redirectUri: `${env.APP_URL || 'http://localhost:5000'}/api/oauth/microsoft/callback`,
   };
 }
 
 export function getMicrosoftAuthUrl(): string {
   const { clientId, redirectUri } = getConfig();
 
-  console.log(`[microsoft] Auth URL requested. clientId=${clientId ? clientId.substring(0, 8) + '...' : 'EMPTY'}, redirectUri=${redirectUri}, tenantId=${process.env.MICROSOFT_TENANT_ID || 'NOT SET'}`);
+  console.log(`[microsoft] Auth URL requested. clientId=${clientId ? clientId.substring(0, 8) + '...' : 'EMPTY'}, redirectUri=${redirectUri}, tenantId=${env.MICROSOFT_TENANT_ID || 'NOT SET'}`);
 
   if (!clientId) {
-    console.error('[error] MICROSOFT_CLIENT_ID not configured. Env keys available:', Object.keys(process.env).filter(k => k.includes('MICROSOFT')).join(', ') || 'NONE');
+    console.error('[error] MICROSOFT_CLIENT_ID not configured. Env keys available:', Object.keys(env).filter(k => k.includes('MICROSOFT')).join(', ') || 'NONE');
     throw new Error('MICROSOFT_CLIENT_ID not configured');
   }
 
