@@ -2,10 +2,10 @@ import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 
 function getMicrosoftAuthBaseUrl(): string {
-  const tenantId = env.MICROSOFT_TENANT_ID || 'common';
+  const e = process['env'];
+  const tenantId = e.MICROSOFT_TENANT_ID || 'common';
   return `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0`;
 }
-const MICROSOFT_AUTH_URL = getMicrosoftAuthBaseUrl();
 const GRAPH_API_URL = 'https://graph.microsoft.com/v1.0';
 
 interface MicrosoftTokens {
@@ -17,10 +17,11 @@ interface MicrosoftTokens {
   userName?: string;
 }
 
-// Use indirect access to prevent esbuild from inlining process.env at build time
-const env = process['env'];
+// Use indirect access inside functions to prevent esbuild from inlining process.env at build time
+function getEnv() { return process['env']; }
 
 function getConfig() {
+  const env = getEnv();
   return {
     clientId: env.MICROSOFT_CLIENT_ID || '',
     clientSecret: env.MICROSOFT_CLIENT_SECRET || '',
@@ -31,10 +32,10 @@ function getConfig() {
 export function getMicrosoftAuthUrl(): string {
   const { clientId, redirectUri } = getConfig();
 
-  console.log(`[microsoft] Auth URL requested. clientId=${clientId ? clientId.substring(0, 8) + '...' : 'EMPTY'}, redirectUri=${redirectUri}, tenantId=${env.MICROSOFT_TENANT_ID || 'NOT SET'}`);
+  console.log(`[microsoft] Auth URL requested. clientId=${clientId ? clientId.substring(0, 8) + '...' : 'EMPTY'}, redirectUri=${redirectUri}`);
 
   if (!clientId) {
-    console.error('[error] MICROSOFT_CLIENT_ID not configured. Env keys available:', Object.keys(env).filter(k => k.includes('MICROSOFT')).join(', ') || 'NONE');
+    console.error('[error] MICROSOFT_CLIENT_ID not configured. Env keys available:', Object.keys(getEnv()).filter(k => k.includes('MICROSOFT')).join(', ') || 'NONE');
     throw new Error('MICROSOFT_CLIENT_ID not configured');
   }
 
@@ -60,13 +61,13 @@ export function getMicrosoftAuthUrl(): string {
     prompt: 'consent',
   });
 
-  return `${MICROSOFT_AUTH_URL}/authorize?${params.toString()}`;
+  return `${getMicrosoftAuthBaseUrl()}/authorize?${params.toString()}`;
 }
 
 export async function exchangeMicrosoftCode(code: string): Promise<MicrosoftTokens> {
   const { clientId, clientSecret, redirectUri } = getConfig();
 
-  const response = await fetchWithTimeout(`${MICROSOFT_AUTH_URL}/token`, {
+  const response = await fetchWithTimeout(`${getMicrosoftAuthBaseUrl()}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -115,7 +116,7 @@ export async function exchangeMicrosoftCode(code: string): Promise<MicrosoftToke
 async function refreshMicrosoftTokens(refreshToken: string): Promise<MicrosoftTokens> {
   const { clientId, clientSecret } = getConfig();
 
-  const response = await fetchWithTimeout(`${MICROSOFT_AUTH_URL}/token`, {
+  const response = await fetchWithTimeout(`${getMicrosoftAuthBaseUrl()}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
