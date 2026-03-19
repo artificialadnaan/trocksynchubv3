@@ -442,7 +442,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   const newStage = freshProject?.project_stage?.name || freshProject?.stage_name || freshProject?.stage || freshProject?.status_name || null;
                   if (newStage) {
                     const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
-                    const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled !== false;
+                  const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
                     if (stageSyncEnabled) {
                       const hubspotStageLabel = mapProcoreStageToHubspot(newStage);
                       const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
@@ -563,7 +563,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                 if (mapping?.hubspotDealId) {
                   // Stage sync enabled by default; set procore_hubspot_stage_sync.enabled = false to disable
                   const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");
-                  const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled !== false;
+                  const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
 
                   if (!stageSyncEnabled) {
                     console.log(`[webhook] Stage sync disabled - skipping HubSpot update for deal ${mapping.hubspotDealId}`);
