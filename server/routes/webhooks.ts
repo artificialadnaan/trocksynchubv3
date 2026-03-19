@@ -16,6 +16,10 @@ import { eq, and, lt, desc } from "drizzle-orm";
 export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
   // ── HubSpot webhook ─────────────────────────────────────────────────────────
   app.post("/webhooks/hubspot", async (req, res) => {
+    if (process.env.DISABLE_ALL_AUTOMATIONS === 'true') {
+      console.log('[webhook] All automations disabled via DISABLE_ALL_AUTOMATIONS — ignoring HubSpot webhook');
+      return res.status(200).json({ received: true, skipped: true });
+    }
     try {
       const events = Array.isArray(req.body) ? req.body : [req.body];
       for (const event of events) {
@@ -221,6 +225,10 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
   // ── Procore main webhook ────────────────────────────────────────────────────
   app.post("/webhooks/procore", async (req, res) => {
+    if (process.env.DISABLE_ALL_AUTOMATIONS === 'true') {
+      console.log('[webhook] All automations disabled via DISABLE_ALL_AUTOMATIONS — ignoring Procore webhook');
+      return res.status(200).json({ received: true, skipped: true });
+    }
     let webhookLog: any = null;
     try {
       const event = req.body;

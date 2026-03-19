@@ -14,6 +14,10 @@ export class PollingManager<TResult = any> {
   ) {}
 
   async runCycle(): Promise<TResult | null> {
+    if (process.env.DISABLE_ALL_AUTOMATIONS === 'true') {
+      console.log(`[${this.name}] All automations disabled via DISABLE_ALL_AUTOMATIONS — skipping`);
+      return null;
+    }
     if (this.running) {
       console.log(`[${this.name}] Already running, skipping`);
       return null;
