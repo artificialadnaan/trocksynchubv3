@@ -1554,6 +1554,7 @@ export async function createBidBoardProjectFromDeal(
         hubspotDealName: deal.dealName,
         bidboardProjectId: result.projectId,
         bidboardProjectName: projectData.name,
+        procoreProjectNumber: projectNumber || null,
         projectPhase: "bidboard",
         lastSyncAt: new Date(),
         lastSyncStatus: "created_from_hubspot",
