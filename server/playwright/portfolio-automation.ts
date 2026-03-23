@@ -405,18 +405,17 @@ async function waitForProcoreSpaLoaded(
     // Check again after reload
     const errorAfterReload = await detectProcoreErrorPage(page);
     if (errorAfterReload) {
-      // Try navigating to /details variant of the URL
+      // Try /details? (bare, no proposalId) — Procore auto-fills proposalId on redirect
       const currentUrl = page.url();
-      if (!currentUrl.includes("/details")) {
-        const detailsUrl = currentUrl.split("?")[0] + "/details";
-        log(`[portfolio-auto] Error persists after reload — trying /details URL: ${detailsUrl}`, "playwright");
-        await page.goto(detailsUrl, { waitUntil: "load", timeout: 60000 });
-        await randomDelay(3000, 5000);
-      }
+      const baseUrl = currentUrl.split("?")[0];
+      const detailsUrl = baseUrl.endsWith("/details") ? `${baseUrl}?` : `${baseUrl}/details?`;
+      log(`[portfolio-auto] Error persists after reload — trying bare details URL: ${detailsUrl}`, "playwright");
+      await page.goto(detailsUrl, { waitUntil: "load", timeout: 60000 });
+      await randomDelay(3000, 5000);
 
       const errorAfterNav = await detectProcoreErrorPage(page);
       if (errorAfterNav) {
-        log(`[portfolio-auto] Error persists after /details nav: "${errorAfterNav}" — will attempt to proceed`, "playwright");
+        log(`[portfolio-auto] Error persists after bare details nav: "${errorAfterNav}" — will attempt to proceed`, "playwright");
       }
     }
   }
@@ -520,26 +519,39 @@ export async function runPhase1BidBoardActions(
   ];
   await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project");
 
-  // If error page persists, try navigating via BidBoard list view as last resort
+  // If error page persists, try fallback URLs then BidBoard list as last resort
   const postLoadError = await detectProcoreErrorPage(page);
   if (postLoadError) {
-    log(`[portfolio-auto] Error page still showing after recovery: "${postLoadError}" — trying BidBoard list navigation`, "playwright");
-    // Extract project ID from the URL to find it in the list
     const projectIdMatch = bidboardProjectUrl.match(/\/project\/(\d+)/);
-    if (projectIdMatch) {
-      const companyMatch = bidboardProjectUrl.match(/\/companies\/(\d+)/);
-      const companyId = companyMatch?.[1] || "";
+    const companyMatch = bidboardProjectUrl.match(/\/companies\/(\d+)/);
+    const companyId = companyMatch?.[1] || "";
+    const projectId = projectIdMatch?.[1] || "";
+
+    // Fallback 1: Try /details? without proposalId (Procore auto-fills it on redirect)
+    if (projectId) {
+      const bareDetailsUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${projectId}/details?`;
+      log(`[portfolio-auto] Error page: "${postLoadError}" — trying bare /details? URL`, "playwright");
+      await page.goto(bareDetailsUrl, { waitUntil: "load", timeout: 60000 });
+      await randomDelay(3000, 5000);
+    }
+
+    const errorAfterBare = await detectProcoreErrorPage(page);
+    if (errorAfterBare && projectId) {
+      // Fallback 2: Navigate via BidBoard list view
+      log(`[portfolio-auto] Still error after bare URL: "${errorAfterBare}" — trying BidBoard list navigation`, "playwright");
       const listUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board`;
       await page.goto(listUrl, { waitUntil: "load", timeout: 60000 });
       await randomDelay(5000, 7000);
-      // Click into the project from the list — Procore resolves proposalId automatically
-      const projectLink = page.locator(`a[href*="/project/${projectIdMatch[1]}"]`).first();
+      const projectLink = page.locator(`a[href*="/project/${projectId}"]`).first();
       if (await projectLink.count() > 0) {
         await projectLink.click({ timeout: 10000 });
         await page.waitForLoadState("load").catch(() => {});
         await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project (list nav)");
         log(`[portfolio-auto] Successfully navigated to project via BidBoard list`, "playwright");
       }
+    } else if (!errorAfterBare) {
+      await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project (bare details)");
+      log(`[portfolio-auto] Bare /details? URL loaded successfully`, "playwright");
     }
   }
 
