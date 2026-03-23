@@ -16,8 +16,8 @@ import type {
 } from "./playwright/portfolio-automation";
 
 const MAX_RETRIES = 3; // Total attempts (1 original + 2 retries)
-const RETRY_DELAY_MS = 3 * 60 * 1000; // 3 minutes between retries
-const RETRY_BACKOFF_MULTIPLIER = 1.5; // Each retry waits longer: 3min, 4.5min, 6.75min
+const RETRY_DELAY_MS = 30 * 1000; // 30 seconds between retries
+const RETRY_BACKOFF_MULTIPLIER = 1.5; // Each retry waits longer: 30s, 45s, 67s
 
 const DEFAULT_RECIPIENTS: string[] = [];
 
