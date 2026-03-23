@@ -18,11 +18,6 @@ export class PollingManager<TResult = any> {
       console.log(`[${this.name}] All automations disabled via DISABLE_ALL_AUTOMATIONS — skipping`);
       return null;
     }
-    if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-      console.log(`[${this.name}] [DRY RUN] Cycle would execute — skipped`);
-      this.lastRunAt = new Date();
-      return null;
-    }
     if (this.running) {
       console.log(`[${this.name}] Already running, skipping`);
       return null;

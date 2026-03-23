@@ -61,13 +61,6 @@ async function runPollingCycle() {
   }
   pollingRunning = true;
   console.log('[Polling] Starting HubSpot sync cycle...');
-  if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-    console.log('[DRY RUN] HubSpot polling — would sync companies, contacts, deals. Skipped.');
-    lastPollAt = new Date();
-    lastPollResult = { dryRun: true };
-    pollingRunning = false;
-    return;
-  }
   try {
     const result = await runFullHubSpotSync();
     let procoreAutoSync = null;
@@ -167,13 +160,6 @@ async function runProcorePollingCycle() {
   procorePollingRunning = true;
   const startTime = Date.now();
   console.log('[ProcorePolling] Starting Procore data sync cycle...');
-  if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-    console.log('[DRY RUN] Procore polling — would sync projects, vendors, users, roles. Skipped.');
-    lastProcorePollAt = new Date();
-    lastProcorePollResult = { dryRun: true };
-    procorePollingRunning = false;
-    return;
-  }
   try {
     const result = await runFullProcoreSync();
     const duration = Date.now() - startTime;
@@ -254,13 +240,6 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
   lastPollStartedAt = Date.now();
   const startTime = Date.now();
   const fullSync = opts?.fullSync ?? false;
-  if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-    console.log('[DRY RUN] Role polling — would sync PM/Superintendent role assignments. Skipped.');
-    lastRolePollAt = new Date();
-    lastRolePollResult = { dryRun: true };
-    rolePollingRunning = false;
-    return;
-  }
   try {
     const result = fullSync
       ? await Promise.race([
@@ -366,13 +345,6 @@ async function runBidboardPollingCycle() {
 
   bidboardPollingRunning = true;
   console.log('[BidBoardPolling] Starting polling cycle');
-  if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-    console.log('[DRY RUN] BidBoard polling — would scrape Procore BidBoard projects. Skipped.');
-    lastBidboardPollAt = new Date();
-    lastBidboardPollResult = { dryRun: true };
-    bidboardPollingRunning = false;
-    return;
-  }
   const startTime = Date.now();
 
   try {
@@ -421,12 +393,6 @@ async function runBidBoardStageSyncCycle() {
   }
   bidboardStageSyncRunning = true;
   console.log("[BidBoardStageSync] Starting sync cycle");
-  if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-    console.log('[DRY RUN] BidBoard stage sync — would export Excel and sync stage changes to HubSpot. Skipped.');
-    lastBidboardStageSyncAt = new Date();
-    bidboardStageSyncRunning = false;
-    return;
-  }
   try {
     const config = await storage.getAutomationConfig("bidboard_stage_sync");
     const val = (config?.value as any) || {};
@@ -465,13 +431,6 @@ async function runChangeOrderPollingCycle() {
   }
   changeOrderPollingRunning = true;
   console.log('[ChangeOrderPolling] Starting change order sync cycle...');
-  if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-    console.log('[DRY RUN] Change order polling — would fetch approved COs from Procore and update HubSpot. Skipped.');
-    lastChangeOrderPollAt = new Date();
-    lastChangeOrderPollResult = { dryRun: true };
-    changeOrderPollingRunning = false;
-    return;
-  }
   try {
     const { syncAllProjectChangeOrders } = await import('../change-order-sync');
     const result = await syncAllProjectChangeOrders();
@@ -587,11 +546,11 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       const getEnabled = (key: string) => (configMap[key] as any)?.enabled === true;
 
       res.json({
-        globalMode: process.env.DRY_RUN_AUTOMATIONS === 'true' ? 'dry_run' : 'live',
         automations: {
-          hubspot_webhook: { type: 'webhook', status: process.env.DRY_RUN_AUTOMATIONS === 'true' ? 'dry_run' : 'live', description: 'HubSpot deal/contact/company webhooks' },
-          procore_webhook: { type: 'webhook', status: process.env.DRY_RUN_AUTOMATIONS === 'true' ? 'dry_run' : 'live', description: 'Procore project/role/budget webhooks' },
-          procore_project_webhook: { type: 'webhook', status: process.env.DRY_RUN_AUTOMATIONS === 'true' ? 'dry_run' : 'live', description: 'Procore project-events (Phase 2 trigger)' },
+          hubspot_webhook_processing: { type: 'webhook', enabled: getEnabled('hubspot_webhook_processing'), description: 'HubSpot deal/contact/company webhook processing' },
+          procore_webhook_processing: { type: 'webhook', enabled: getEnabled('procore_webhook_processing'), description: 'Procore project/role/budget webhook processing' },
+          procore_project_webhook_processing: { type: 'webhook', enabled: getEnabled('procore_project_webhook_processing'), description: 'Procore project-events webhook (Phase 2 trigger)' },
+          deal_project_number: { type: 'feature', enabled: getEnabled('deal_project_number'), description: 'Auto-assign project numbers on new HubSpot deals' },
           hubspot_polling: { type: 'polling', enabled: getEnabled('hubspot_polling'), active: pollingTimer !== null, lastRunAt: lastPollAt?.toISOString() || null, description: 'HubSpot companies/contacts/deals sync' },
           procore_polling: { type: 'polling', enabled: getEnabled('procore_polling'), active: procorePollingTimer !== null, lastRunAt: lastProcorePollAt?.toISOString() || null, description: 'Procore projects/vendors/users sync' },
           role_assignment_polling: { type: 'polling', enabled: getEnabled('role_assignment_polling'), active: rolePollingTimer !== null, lastRunAt: lastRolePollAt?.toISOString() || null, description: 'PM/Superintendent role assignment sync' },
@@ -601,9 +560,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
           portfolio_auto_trigger: { type: 'config', enabled: getEnabled('portfolio_auto_trigger'), description: 'Auto-trigger Phase 2 on Procore project webhook (no Phase 1 required)' },
           procore_hubspot_stage_sync: { type: 'config', enabled: getEnabled('procore_hubspot_stage_sync'), description: 'Bi-directional Procore↔HubSpot stage sync' },
         },
-        hint: process.env.DRY_RUN_AUTOMATIONS === 'true'
-          ? 'DRY_RUN_AUTOMATIONS is ON — webhooks are received and logged but not processed. Polling cycles log but skip execution. Set DRY_RUN_AUTOMATIONS=false and redeploy to go live.'
-          : 'System is LIVE — all enabled automations are processing normally.',
+        hint: 'Each automation is independently controlled. Enable webhook processing first, then individual features within it.',
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message });

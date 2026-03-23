@@ -56,11 +56,12 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
         await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
 
-        // Dry-run mode: event is logged above, skip all processing
-        if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
+        // Per-automation gate: if hubspot_webhook_processing is not enabled, log only
+        const hsProcessingConfig = await storage.getAutomationConfig('hubspot_webhook_processing');
+        if (!(hsProcessingConfig?.value as any)?.enabled) {
           const evtType = event.subscriptionType || event.eventType || "unknown";
           const objType = event.objectType || "unknown";
-          console.log(`[DRY RUN] HubSpot ${evtType} for ${objType} ${event.objectId} — logged, processing skipped`);
+          console.log(`[webhook] HubSpot ${evtType} for ${objType} ${event.objectId} — logged, processing disabled`);
           await storage.updateWebhookLog(webhookLog.id, { status: "dry_run", processedAt: new Date() });
           continue;
         }
@@ -276,11 +277,12 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
       await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
 
-      // Dry-run mode: event is logged above, skip all processing
-      if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
+      // Per-automation gate: if procore_webhook_processing is not enabled, log only
+      const pcProcessingConfig = await storage.getAutomationConfig('procore_webhook_processing');
+      if (!(pcProcessingConfig?.value as any)?.enabled) {
         const rn = ((event.resource_name || event.resource_type || "").toString()).toLowerCase();
         const et = ((event.event_type || event.reason || "").toString()).toLowerCase();
-        console.log(`[DRY RUN] Procore ${rn} ${et} (resource ${event.resource_id}) — logged, processing skipped`);
+        console.log(`[webhook] Procore ${rn} ${et} (resource ${event.resource_id}) — logged, processing disabled`);
         await storage.updateWebhookLog(webhookLog.id, { status: "dry_run", processedAt: new Date() });
         return;
       }

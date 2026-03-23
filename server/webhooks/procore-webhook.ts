@@ -90,9 +90,10 @@ export async function handleProcoreProjectWebhook(
       details: payload,
     });
 
-    // Dry-run mode: event is logged above, skip Phase 2 trigger
-    if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
-      log(`[DRY RUN] Procore Projects ${payload.reason} event: resource_id=${payload.resource_id} — logged, Phase 2 trigger skipped`, "webhook");
+    // Per-automation gate: if procore_project_webhook_processing is not enabled, log only
+    const projProcessingConfig = await storage.getAutomationConfig('procore_project_webhook_processing');
+    if (!(projProcessingConfig?.value as any)?.enabled) {
+      log(`[webhook] Procore Projects ${payload.reason} event: resource_id=${payload.resource_id} — logged, processing disabled`, "webhook");
       return;
     }
 
