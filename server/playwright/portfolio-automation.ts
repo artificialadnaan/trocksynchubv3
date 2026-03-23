@@ -580,6 +580,30 @@ export async function runPhase1BidBoardActions(
       }
     }
 
+    // Try to extract portfolio project ID since we skipped portfolio creation
+    // Click Estimating tab — it redirects to /projects/{portfolioId}/tools/estimating/
+    if (!result.portfolioProjectId) {
+      try {
+        const estTab = page.locator('.aid-projBarEstimation.aid-tab, a[href*="/estimate"]').first();
+        if (await estTab.count() > 0) {
+          await estTab.click({ timeout: 10000 });
+          await page.waitForLoadState("load").catch(() => {});
+          await randomDelay(3000, 5000);
+          const navUrl = page.url();
+          const pid = extractPortfolioProjectIdFromUrl(navUrl);
+          if (pid) {
+            result.portfolioProjectId = pid;
+            log(`[portfolio-auto] Extracted portfolio project ID from Estimating nav: ${pid}`, "playwright");
+          }
+          // Navigate back to details page for subsequent steps
+          await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
+          await randomDelay(2000, 3000);
+        }
+      } catch (err) {
+        log(`[portfolio-auto] Could not extract portfolio project ID after skip: ${err instanceof Error ? err.message : String(err)}`, "playwright");
+      }
+    }
+
     for (const step of PHASE1_ADD_TO_PORTFOLIO_STEPS) {
       await logStep(page, result, step, "skipped", 0, {
         metadata: { reason: "Resuming from failed step; project already in Portfolio" },
