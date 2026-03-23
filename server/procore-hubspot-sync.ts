@@ -117,6 +117,7 @@ const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
   'Service – sent to production': 'Service – Won',
   'Service - sent to production': 'Service – Won',
   'Sent to production': 'Closed Won',
+  'Buy Out': 'Closed Won',
   'Closed': 'Closed Won',
 
   // Lost stages

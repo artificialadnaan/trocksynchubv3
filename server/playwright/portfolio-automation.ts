@@ -658,6 +658,43 @@ export async function runPhase1BidBoardActions(
       if (portfolioProjectId) {
         result.portfolioProjectId = portfolioProjectId;
         log(`[portfolio-auto] Extracted portfolio project ID: ${portfolioProjectId}`, "playwright");
+
+        // Set portfolio project stage to "Buy Out" via Procore API
+        try {
+          const { getAccessToken } = await import("../procore");
+          const procoreConfigRaw = await storage.getAutomationConfig("procore_config");
+          const procoreConfig = procoreConfigRaw?.value as { companyId?: string } | undefined;
+          const cid = procoreConfig?.companyId;
+          if (!cid) throw new Error("Procore company ID not configured");
+          const accessToken = await getAccessToken();
+          const stagesRes = await fetch(
+            `https://api.procore.com/rest/v1.0/companies/${cid}/project_stages`,
+            { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": cid } }
+          );
+          if (stagesRes.ok) {
+            const stages = await stagesRes.json() as Array<{ id: number; name: string }>;
+            const buyOutStage = stages.find((s) => s.name === "Buy Out");
+            if (buyOutStage) {
+              const updateRes = await fetch(
+                `https://api.procore.com/rest/v1.0/projects/${portfolioProjectId}?company_id=${cid}`,
+                {
+                  method: "PATCH",
+                  headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Procore-Company-Id": cid },
+                  body: JSON.stringify({ project: { project_stage_id: buyOutStage.id } }),
+                }
+              );
+              if (updateRes.ok) {
+                log(`[portfolio-auto] Set portfolio project stage to "Buy Out" (stage ID: ${buyOutStage.id})`, "playwright");
+              } else {
+                log(`[portfolio-auto] WARNING: Failed to set stage to Buy Out: ${updateRes.status}`, "playwright");
+              }
+            } else {
+              log(`[portfolio-auto] WARNING: "Buy Out" stage not found in Procore project stages`, "playwright");
+            }
+          }
+        } catch (stageErr: any) {
+          log(`[portfolio-auto] WARNING: Could not set portfolio stage to Buy Out: ${stageErr.message}`, "playwright");
+        }
       }
 
       await logStep(page, result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
@@ -1069,11 +1106,11 @@ function deriveContractNumber(projectNumber: string | null): string | null {
   if (!projectNumber) return null;
   const parts = projectNumber.split("-");
   if (parts.length >= 4) {
-    return `${parts[2]}-${parts[3]}-PO-01`;
+    return `${parts[2]}-${parts[3]}-PC-01`;
   } else if (parts.length >= 3) {
-    return `${parts[parts.length - 2]}-${parts[parts.length - 1]}-PO-01`;
+    return `${parts[parts.length - 2]}-${parts[parts.length - 1]}-PC-01`;
   }
-  return `${projectNumber}-PO-01`;
+  return `${projectNumber}-PC-01`;
 }
 
 export async function scrapeBidBoardData(
