@@ -564,13 +564,20 @@ export async function runPhase1BidBoardActions(
       "playwright"
     );
 
-    // Ensure we're on the actual project page, not stuck on the BidBoard list
+    // Ensure we're on the actual project page, not stuck on the BidBoard list or error page
     const currentUrl = page.url();
-    const isOnListPage = currentUrl.includes("/tools/bid-board") && !currentUrl.includes("/project/");
-    if (isOnListPage) {
-      log(`[portfolio-auto] On BidBoard list, navigating into project before proceeding`, "playwright");
+    const isOnProjectPage = currentUrl.includes("/project/") && !await detectProcoreErrorPage(page);
+    if (!isOnProjectPage) {
+      log(`[portfolio-auto] Not on project page (url: ${currentUrl}), navigating into project before proceeding`, "playwright");
       await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
       await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project (re-entry)");
+
+      // Verify we actually made it to the project page
+      const reEntryUrl = page.url();
+      const reEntryError = await detectProcoreErrorPage(page);
+      if (reEntryError || (!reEntryUrl.includes("/project/"))) {
+        throw new Error(`Could not navigate to project page after re-entry (url: ${reEntryUrl}, error: ${reEntryError || 'not on project page'})`);
+      }
     }
 
     for (const step of PHASE1_ADD_TO_PORTFOLIO_STEPS) {
