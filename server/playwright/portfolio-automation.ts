@@ -1974,12 +1974,40 @@ function normalizeKey(s: string | null | undefined): string {
 export async function triggerPortfolioAutomationFromStageChange(
   projectName: string,
   projectNumber: string | null,
-  customerName: string
+  customerName: string,
+  hubspotDealId?: string
 ): Promise<PortfolioAutomationResult | null> {
   let mapping = null;
 
-  if (projectNumber?.trim()) {
+  // Try by HubSpot deal ID first (most reliable — passed from stage sync)
+  if (hubspotDealId) {
+    mapping = await storage.getSyncMappingByHubspotDealId(hubspotDealId);
+  }
+
+  if (!mapping && projectNumber?.trim()) {
     mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber.trim());
+  }
+
+  // Try finding deal by project number — if found but no mapping exists, create one
+  if (!mapping && projectNumber?.trim()) {
+    const deal = await storage.getHubspotDealByProjectNumber(projectNumber.trim());
+    if (deal?.hubspotId) {
+      mapping = await storage.getSyncMappingByHubspotDealId(deal.hubspotId);
+      if (!mapping) {
+        // Auto-create mapping so the automation can proceed
+        log(`[portfolio-auto] No sync mapping for deal ${deal.hubspotId} — creating from project number ${projectNumber}`, "playwright");
+        mapping = await storage.createSyncMapping({
+          hubspotDealId: deal.hubspotId,
+          hubspotDealName: deal.dealName,
+          bidboardProjectName: projectName,
+          procoreProjectNumber: projectNumber.trim(),
+          projectPhase: "bidboard",
+          lastSyncAt: new Date(),
+          lastSyncStatus: "auto_created_from_stage_sync",
+          lastSyncDirection: "procore_to_hubspot",
+        });
+      }
+    }
   }
 
   if (!mapping) {
@@ -2007,7 +2035,6 @@ export async function triggerPortfolioAutomationFromStageChange(
             m.procoreProjectName || m.bidboardProjectName || m.hubspotDealName || ""
           );
           if (!n || n.length < 3) return false;
-          // Only match if one is a "copy of" variant of the other, or names are very similar (>80% length overlap)
           const shorter = nameLower.length <= n.length ? nameLower : n;
           const longer = nameLower.length > n.length ? nameLower : n;
           if (shorter.length / longer.length < 0.8) return false;
@@ -2024,18 +2051,19 @@ export async function triggerPortfolioAutomationFromStageChange(
   }
 
   const bidboardProjectId = mapping?.bidboardProjectId || mapping?.procoreProjectId;
-  if (!bidboardProjectId) {
-    log(
-      `[portfolio-auto] No sync mapping found for project (name: ${projectName}, #: ${projectNumber}, customer: ${customerName}) — skipping automation`,
-      "playwright"
-    );
-    return null;
-  }
 
   const config = await storage.getAutomationConfig("procore_config");
   const companyId = (config?.value as { companyId?: string })?.companyId;
   if (!companyId) {
     log("[portfolio-auto] Procore company ID not configured — skipping automation", "playwright");
+    return null;
+  }
+
+  if (!bidboardProjectId) {
+    log(
+      `[portfolio-auto] No bidboard project ID found for project (name: ${projectName}, #: ${projectNumber}, customer: ${customerName}) — skipping automation`,
+      "playwright"
+    );
     return null;
   }
 

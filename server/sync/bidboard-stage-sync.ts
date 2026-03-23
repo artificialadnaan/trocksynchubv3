@@ -364,7 +364,8 @@ export async function syncStagesToHubSpot(
           await triggerPortfolioAutomationFromStageChange(
             change.projectName,
             change.projectNumber,
-            change.customerName
+            change.customerName,
+            change.hubspotDealId
           );
         } catch (err) {
           log(
