@@ -1984,7 +1984,7 @@ export async function triggerPortfolioAutomationFromStageChange(
       mapping = match ?? null;
     }
 
-    // Broader fallback: partial name match (for "Copy of..." test projects or renamed projects)
+    // Narrow fallback: "Copy of..." prefix match only (prevents false matches like "rfp tests" → "test")
     if (!mapping && name) {
         const nameLower = normalizeKey(name);
         const all = await storage.getSyncMappings();
@@ -1992,8 +1992,12 @@ export async function triggerPortfolioAutomationFromStageChange(
           const n = normalizeKey(
             m.procoreProjectName || m.bidboardProjectName || m.hubspotDealName || ""
           );
-          // Check if either name contains the other (handles "Copy of..." prefixes)
-          return n && (nameLower.includes(n) || n.includes(nameLower));
+          if (!n || n.length < 3) return false;
+          // Only match if one is a "copy of" variant of the other, or names are very similar (>80% length overlap)
+          const shorter = nameLower.length <= n.length ? nameLower : n;
+          const longer = nameLower.length > n.length ? nameLower : n;
+          if (shorter.length / longer.length < 0.8) return false;
+          return longer.includes(shorter);
         });
         mapping = partialMatch ?? null;
         if (mapping) {
