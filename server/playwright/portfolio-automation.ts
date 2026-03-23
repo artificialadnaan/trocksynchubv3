@@ -520,6 +520,29 @@ export async function runPhase1BidBoardActions(
   ];
   await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project");
 
+  // If error page persists, try navigating via BidBoard list view as last resort
+  const postLoadError = await detectProcoreErrorPage(page);
+  if (postLoadError) {
+    log(`[portfolio-auto] Error page still showing after recovery: "${postLoadError}" — trying BidBoard list navigation`, "playwright");
+    // Extract project ID from the URL to find it in the list
+    const projectIdMatch = bidboardProjectUrl.match(/\/project\/(\d+)/);
+    if (projectIdMatch) {
+      const companyMatch = bidboardProjectUrl.match(/\/companies\/(\d+)/);
+      const companyId = companyMatch?.[1] || "";
+      const listUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board`;
+      await page.goto(listUrl, { waitUntil: "load", timeout: 60000 });
+      await randomDelay(5000, 7000);
+      // Click into the project from the list — Procore resolves proposalId automatically
+      const projectLink = page.locator(`a[href*="/project/${projectIdMatch[1]}"]`).first();
+      if (await projectLink.count() > 0) {
+        await projectLink.click({ timeout: 10000 });
+        await page.waitForLoadState("load").catch(() => {});
+        await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project (list nav)");
+        log(`[portfolio-auto] Successfully navigated to project via BidBoard list`, "playwright");
+      }
+    }
+  }
+
   const alreadyInPortfolio = await isProjectAlreadyInPortfolio(page);
   const shouldSkipAddToPortfolio = skipAddToPortfolio || alreadyInPortfolio;
 
@@ -1988,10 +2011,14 @@ export async function triggerPortfolioAutomationFromStageChange(
     return null;
   }
 
-  const bidboardProjectUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details`;
+  // Build URL with proposalId if available (Procore crashes without it)
+  const proposalId = (mapping?.metadata as any)?.proposalId;
+  const bidboardProjectUrl = proposalId
+    ? `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details?proposalId=${proposalId}`
+    : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details`;
 
   log(
-    `[portfolio-auto] Triggering Phase 1 for bidboard project ${bidboardProjectId} (${projectName})`,
+    `[portfolio-auto] Triggering Phase 1 for bidboard project ${bidboardProjectId} (${projectName})${proposalId ? ` [proposalId=${proposalId}]` : ' [no proposalId]'}`,
     "playwright"
   );
 

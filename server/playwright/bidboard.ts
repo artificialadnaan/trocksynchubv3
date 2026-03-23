@@ -841,6 +841,7 @@ function formatDateForProcore(val: string): string {
 export interface CreateBidBoardProjectResult {
   success: boolean;
   projectId?: string;
+  proposalId?: string;
   projectName?: string;
   error?: string;
   screenshotPath?: string;
@@ -1422,7 +1423,12 @@ export async function createBidBoardProject(
     if (projectIdFromUrl) {
       result.projectId = projectIdFromUrl;
       result.success = true;
-      log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId})`, "playwright");
+      // Extract proposalId from URL (e.g., ?proposalId=3731331)
+      const proposalIdMatch = currentUrl.match(/proposalId=(\d+)/);
+      if (proposalIdMatch) {
+        result.proposalId = proposalIdMatch[1];
+      }
+      log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId}${result.proposalId ? `, proposalId: ${result.proposalId}` : ''})`, "playwright");
       await takeScreenshot(page, "bidboard-project-created");
     }
     if (!result.success) {
@@ -1552,6 +1558,7 @@ export async function createBidBoardProjectFromDeal(
         lastSyncAt: new Date(),
         lastSyncStatus: "created_from_hubspot",
         lastSyncDirection: "hubspot_to_procore",
+        metadata: result.proposalId ? { proposalId: result.proposalId } : undefined,
       });
       log(`Created sync mapping for deal ${dealId} → BidBoard ${result.projectId}`, "playwright");
     } catch (err: any) {
