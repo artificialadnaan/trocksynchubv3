@@ -1828,8 +1828,10 @@ export async function runPhase1(
     estimateExcelPath = phase1Out.estimateExcelPath;
     proposalPdfPath = phase1Out.proposalPdfPath;
 
+    // Non-critical steps that should not block success or trigger retries
+    const NON_CRITICAL_STEPS = new Set(["send_to_documents_tool"]);
     result.success = result.steps.every(
-      (s) => s.status === "success" || s.status === "skipped"
+      (s) => s.status === "success" || s.status === "skipped" || (s.status === "failed" && NON_CRITICAL_STEPS.has(s.step))
     );
   } catch (err: unknown) {
     result.error = err instanceof Error ? err.message : String(err);
