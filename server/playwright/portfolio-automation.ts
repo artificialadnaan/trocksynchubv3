@@ -2029,11 +2029,22 @@ export async function triggerPortfolioAutomationFromStageChange(
   }
 
   if (!mapping && projectNumber?.trim()) {
-    mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber.trim());
+    // Prefer mapping with bidboardProjectId — we need it for the URL
+    const pnMapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber.trim());
+    if (pnMapping?.bidboardProjectId) {
+      mapping = pnMapping;
+    } else {
+      // Search all mappings with this project number for one that has a bidboardProjectId
+      const allMappings = await storage.getSyncMappings();
+      const withBidboard = allMappings.find(
+        (m) => m.procoreProjectNumber === projectNumber.trim() && m.bidboardProjectId
+      );
+      mapping = withBidboard ?? pnMapping;
+    }
   }
 
   // Try finding deal by project number — if found but no mapping exists, create one
-  if (!mapping && projectNumber?.trim()) {
+  if (!mapping?.bidboardProjectId && projectNumber?.trim()) {
     const deal = await storage.getHubspotDealByProjectNumber(projectNumber.trim());
     if (deal?.hubspotId) {
       mapping = await storage.getSyncMappingByHubspotDealId(deal.hubspotId);
@@ -2094,7 +2105,8 @@ export async function triggerPortfolioAutomationFromStageChange(
     }
   }
 
-  const bidboardProjectId = mapping?.bidboardProjectId || mapping?.procoreProjectId;
+  // Only use bidboardProjectId — procoreProjectId is a portfolio project ID and cannot be used for BidBoard URLs
+  const bidboardProjectId = mapping?.bidboardProjectId;
 
   const config = await storage.getAutomationConfig("procore_config");
   const companyId = (config?.value as { companyId?: string })?.companyId;
