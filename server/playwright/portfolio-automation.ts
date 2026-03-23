@@ -551,6 +551,16 @@ export async function runPhase1BidBoardActions(
       `[portfolio-auto] Skipping add-to-portfolio (already in Portfolio or completed in previous attempt)`,
       "playwright"
     );
+
+    // Ensure we're on the actual project page, not stuck on the BidBoard list
+    const currentUrl = page.url();
+    const isOnListPage = currentUrl.includes("/tools/bid-board") && !currentUrl.includes("/project/");
+    if (isOnListPage) {
+      log(`[portfolio-auto] On BidBoard list, navigating into project before proceeding`, "playwright");
+      await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
+      await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project (re-entry)");
+    }
+
     for (const step of PHASE1_ADD_TO_PORTFOLIO_STEPS) {
       await logStep(page, result, step, "skipped", 0, {
         metadata: { reason: "Resuming from failed step; project already in Portfolio" },
