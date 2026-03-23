@@ -377,12 +377,50 @@ async function clickMenuItem(
 // page.goto waitUntil: "load" fires before SPA renders. Use this after
 // navigation to wait for meaningful UI elements before interacting.
 
+async function detectProcoreErrorPage(page: Page): Promise<string | null> {
+  try {
+    const errorText = await page.locator('text="Something went wrong"').first().textContent({ timeout: 2000 }).catch(() => null);
+    if (errorText) {
+      const detail = await page.locator('body').textContent().catch(() => "") || "";
+      const match = detail.match(/(Active proposal is not set|Please try again|contact support)/i);
+      return match ? match[0] : "Something went wrong";
+    }
+  } catch { /* no error page */ }
+  return null;
+}
+
 async function waitForProcoreSpaLoaded(
   page: Page,
   selectors: string[],
   logContext: string,
   fallbackDelay: [number, number] = [15000, 18000]
 ): Promise<void> {
+  // Check for Procore error page first (e.g. "Active proposal is not set")
+  const errorMsg = await detectProcoreErrorPage(page);
+  if (errorMsg) {
+    log(`[portfolio-auto] Procore error page detected: "${errorMsg}" — reloading`, "playwright");
+    await page.reload({ waitUntil: "load", timeout: 60000 });
+    await randomDelay(3000, 5000);
+
+    // Check again after reload
+    const errorAfterReload = await detectProcoreErrorPage(page);
+    if (errorAfterReload) {
+      // Try navigating to /details variant of the URL
+      const currentUrl = page.url();
+      if (!currentUrl.includes("/details")) {
+        const detailsUrl = currentUrl.split("?")[0] + "/details";
+        log(`[portfolio-auto] Error persists after reload — trying /details URL: ${detailsUrl}`, "playwright");
+        await page.goto(detailsUrl, { waitUntil: "load", timeout: 60000 });
+        await randomDelay(3000, 5000);
+      }
+
+      const errorAfterNav = await detectProcoreErrorPage(page);
+      if (errorAfterNav) {
+        log(`[portfolio-auto] Error persists after /details nav: "${errorAfterNav}" — will attempt to proceed`, "playwright");
+      }
+    }
+  }
+
   let spaLoaded = false;
   for (const sel of selectors) {
     try {
@@ -1950,7 +1988,7 @@ export async function triggerPortfolioAutomationFromStageChange(
     return null;
   }
 
-  const bidboardProjectUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}`;
+  const bidboardProjectUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details`;
 
   log(
     `[portfolio-auto] Triggering Phase 1 for bidboard project ${bidboardProjectId} (${projectName})`,
