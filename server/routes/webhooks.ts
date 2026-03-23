@@ -56,6 +56,15 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
         await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
 
+        // Dry-run mode: event is logged above, skip all processing
+        if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
+          const evtType = event.subscriptionType || event.eventType || "unknown";
+          const objType = event.objectType || "unknown";
+          console.log(`[DRY RUN] HubSpot ${evtType} for ${objType} ${event.objectId} — logged, processing skipped`);
+          await storage.updateWebhookLog(webhookLog.id, { status: "dry_run", processedAt: new Date() });
+          continue;
+        }
+
         let hubspotProcessingError: string | null = null;
         const eventType = event.subscriptionType || event.eventType || "";
         const objectType = event.objectType || (eventType.startsWith("deal.") ? "deal" : eventType.startsWith("contact.") ? "contact" : eventType.startsWith("company.") ? "company" : "");
@@ -266,6 +275,15 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
       res.status(200).json({ received: true });
 
       await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
+
+      // Dry-run mode: event is logged above, skip all processing
+      if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
+        const rn = ((event.resource_name || event.resource_type || "").toString()).toLowerCase();
+        const et = ((event.event_type || event.reason || "").toString()).toLowerCase();
+        console.log(`[DRY RUN] Procore ${rn} ${et} (resource ${event.resource_id}) — logged, processing skipped`);
+        await storage.updateWebhookLog(webhookLog.id, { status: "dry_run", processedAt: new Date() });
+        return;
+      }
 
       // Procore may send resource_type/reason (e.g. v4.0) instead of resource_name/event_type
       const resourceName = ((event.resource_name || event.resource_type || "").toString()).toLowerCase().replace(/\s+/g, '_');

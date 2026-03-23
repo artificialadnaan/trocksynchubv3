@@ -90,6 +90,12 @@ export async function handleProcoreProjectWebhook(
       details: payload,
     });
 
+    // Dry-run mode: event is logged above, skip Phase 2 trigger
+    if (process.env.DRY_RUN_AUTOMATIONS === 'true') {
+      log(`[DRY RUN] Procore Projects ${payload.reason} event: resource_id=${payload.resource_id} — logged, Phase 2 trigger skipped`, "webhook");
+      return;
+    }
+
     const resourceId = String(payload.resource_id);
     const companyId = String(payload.company_id);
     const reason = payload.reason;
