@@ -483,12 +483,11 @@ export function isProcoreClosedStage(procoreStageName: string | null): boolean {
   if (!procoreStageName) return false;
   const s = procoreStageName.trim().toLowerCase();
   return (
-    s.includes('closeout') ||
-    s.includes('closed') ||
-    s.includes('completed') ||
-    s === 'sent to production' ||
-    s.includes('production – lost') ||
-    s.includes('production - lost')
+    s.includes('close out') ||
+    s === 'closed' ||
+    s.includes('completed')
+    // NOT "Sent to Production" (project entering production, not closing)
+    // NOT "Production Lost" (deal lost, not closeout)
   );
 }
 
