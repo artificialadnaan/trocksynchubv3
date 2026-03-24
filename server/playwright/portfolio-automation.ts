@@ -580,27 +580,47 @@ export async function runPhase1BidBoardActions(
       }
     }
 
-    // Try to extract portfolio project ID since we skipped portfolio creation
-    // Click Estimating tab — it redirects to /projects/{portfolioId}/tools/estimating/
+    // Try to find portfolio project ID since we skipped portfolio creation
     if (!result.portfolioProjectId) {
+      // Method 1: Check sync mapping for portfolio_project_id
       try {
-        const estTab = page.locator('.aid-projBarEstimation.aid-tab, a[href*="/estimate"]').first();
-        if (await estTab.count() > 0) {
-          await estTab.click({ timeout: 10000 });
-          await page.waitForLoadState("load").catch(() => {});
-          await randomDelay(3000, 5000);
-          const navUrl = page.url();
-          const pid = extractPortfolioProjectIdFromUrl(navUrl);
-          if (pid) {
-            result.portfolioProjectId = pid;
-            log(`[portfolio-auto] Extracted portfolio project ID from Estimating nav: ${pid}`, "playwright");
+        const bidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1];
+        if (bidId) {
+          const mapping = await storage.getSyncMappingByBidboardProjectId(bidId);
+          if (mapping?.portfolioProjectId) {
+            result.portfolioProjectId = mapping.portfolioProjectId;
+            log(`[portfolio-auto] Found portfolio project ID from sync mapping: ${mapping.portfolioProjectId}`, "playwright");
           }
-          // Navigate back to details page for subsequent steps
+        }
+      } catch { /* continue to method 2 */ }
+
+      // Method 2: Navigate to project home — Procore redirects BidBoard projects in portfolio to /projects/{id}/
+      if (!result.portfolioProjectId) {
+        try {
+          const companyMatch = bidboardProjectUrl.match(/\/companies\/(\d+)/);
+          const bidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1];
+          if (companyMatch && bidId) {
+            const homeUrl = `https://us02.procore.com/webclients/host/companies/${companyMatch[1]}/projects?search=${bidId}`;
+            await page.goto(homeUrl, { waitUntil: "load", timeout: 30000 });
+            await randomDelay(3000, 5000);
+            // Look for project link containing /projects/{id}/
+            const projectLinks = await page.locator('a[href*="/projects/"]').all();
+            for (const link of projectLinks) {
+              const href = await link.getAttribute("href");
+              const pid = href?.match(/\/projects\/(\d+)/)?.[1];
+              if (pid) {
+                result.portfolioProjectId = pid;
+                log(`[portfolio-auto] Found portfolio project ID from project search: ${pid}`, "playwright");
+                break;
+              }
+            }
+          }
+          // Navigate back
           await page.goto(bidboardProjectUrl, { waitUntil: "load", timeout: 60000 });
           await randomDelay(2000, 3000);
+        } catch (err) {
+          log(`[portfolio-auto] Could not extract portfolio project ID: ${err instanceof Error ? err.message : String(err)}`, "playwright");
         }
-      } catch (err) {
-        log(`[portfolio-auto] Could not extract portfolio project ID after skip: ${err instanceof Error ? err.message : String(err)}`, "playwright");
       }
     }
 
@@ -689,6 +709,18 @@ export async function runPhase1BidBoardActions(
       if (portfolioProjectId) {
         result.portfolioProjectId = portfolioProjectId;
         log(`[portfolio-auto] Extracted portfolio project ID: ${portfolioProjectId}`, "playwright");
+
+        // Save portfolio project ID to sync mapping for future runs
+        try {
+          const bidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1];
+          if (bidId) {
+            const mapping = await storage.getSyncMappingByBidboardProjectId(bidId);
+            if (mapping && !mapping.portfolioProjectId) {
+              await storage.updateSyncMapping(mapping.id, { portfolioProjectId });
+              log(`[portfolio-auto] Saved portfolio project ID ${portfolioProjectId} to sync mapping ${mapping.id}`, "playwright");
+            }
+          }
+        } catch { /* non-critical */ }
 
         // Set portfolio project stage to "Buy Out" via Procore API
         try {
