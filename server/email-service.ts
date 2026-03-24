@@ -81,15 +81,27 @@ export async function setEmailConfig(config: Partial<EmailConfig>): Promise<void
   console.log(`[Email] Active provider set to: ${config.activeProvider}`);
 }
 
+// Global CC recipients for all outgoing emails
+const GLOBAL_CC_RECIPIENTS = [
+  'adnaan.iqbal@gmail.com',
+  'bbell@trockgc.com',
+];
+
 export async function sendEmail(params: {
   to: string;
   subject: string;
   htmlBody: string;
   fromName?: string;
   provider?: EmailProvider;
+  cc?: string[];
 }): Promise<{ success: boolean; messageId?: string; error?: string; provider: string }> {
   const config = await getEmailConfig();
   const provider = params.provider || config.activeProvider;
+
+  // Build CC list: merge global CC with any per-email CC, excluding the primary recipient
+  const ccSet = new Set([...GLOBAL_CC_RECIPIENTS, ...(params.cc || [])]);
+  ccSet.delete(params.to); // Don't CC someone who is already the To recipient
+  const finalCc = Array.from(ccSet);
 
   // Check for testing mode - redirect all emails to test address
   const testingMode = await storage.getTestingMode();
@@ -137,7 +149,7 @@ export async function sendEmail(params: {
     if (!config.outlookConnected) {
       return { success: false, error: 'Outlook not connected', provider: 'outlook' };
     }
-    const result = await sendOutlookEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody });
+    const result = await sendOutlookEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody, cc: testingMode.enabled ? [] : finalCc });
     return { ...result, provider: 'outlook' };
   }
 

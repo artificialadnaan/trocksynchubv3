@@ -235,6 +235,7 @@ export async function sendOutlookEmail(params: {
   subject: string;
   htmlBody: string;
   fromName?: string;
+  cc?: string[];
 }): Promise<{ success: boolean; messageId?: string; error?: string }> {
   try {
     const tokens = await getMicrosoftTokens();
@@ -242,7 +243,7 @@ export async function sendOutlookEmail(params: {
       throw new Error('Microsoft/Outlook not connected');
     }
 
-    const message = {
+    const message: Record<string, any> = {
       subject: params.subject,
       body: {
         contentType: 'HTML',
@@ -256,6 +257,12 @@ export async function sendOutlookEmail(params: {
         },
       ],
     };
+
+    if (params.cc && params.cc.length > 0) {
+      message.ccRecipients = params.cc.map((email) => ({
+        emailAddress: { address: email },
+      }));
+    }
 
     const response = await fetchWithTimeout(`${GRAPH_API_URL}/me/sendMail`, {
       method: 'POST',
