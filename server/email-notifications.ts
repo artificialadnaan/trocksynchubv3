@@ -491,10 +491,37 @@ export async function sendKickoffEmails(params: {
   const superEmail = superMember?.email || 'TBD';
   const superPhone = superMember?.phone || 'TBD';
 
-  // Send kickoff only to the project manager (recipient email from Procore)
+  // Send kickoff to the project manager AND the HubSpot deal owner
   const recipients = pm ? [pm] : [];
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.projectId);
+
+  // Add HubSpot deal owner as a recipient
+  if (mapping?.hubspotDealId) {
+    try {
+      const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
+      const ownerIdRaw = (deal?.properties as any)?.hubspot_owner_id;
+      if (ownerIdRaw) {
+        const { getAccessToken } = await import('./hubspot');
+        const accessToken = await getAccessToken();
+        const { fetchWithTimeout } = await import('./lib/fetch-with-timeout');
+        const ownerRes = await fetchWithTimeout(`https://api.hubapi.com/crm/v3/owners/${ownerIdRaw}`, {
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+        });
+        if (ownerRes.ok) {
+          const owner = await ownerRes.json();
+          const ownerEmail = owner.email;
+          const ownerName = [owner.firstName, owner.lastName].filter(Boolean).join(' ') || owner.email;
+          // Only add if not already the PM
+          if (ownerEmail && (!pm || pm.email?.toLowerCase() !== ownerEmail.toLowerCase())) {
+            recipients.push({ name: ownerName, email: ownerEmail, role: 'Deal Owner' });
+          }
+        }
+      }
+    } catch (ownerErr: any) {
+      console.error(`[email] Could not fetch deal owner for kickoff: ${ownerErr.message}`);
+    }
+  }
 
   // Log when no PM so it appears in Send History as failed/skipped
   if (recipients.length === 0) {
