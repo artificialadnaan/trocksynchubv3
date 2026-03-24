@@ -729,22 +729,25 @@ export async function runPhase1BidBoardActions(
           const procoreConfig = procoreConfigRaw?.value as { companyId?: string } | undefined;
           const cid = procoreConfig?.companyId;
           if (!cid) throw new Error("Procore company ID not configured");
+          const { fetchWithRateLimitRetry } = await import("../lib/rate-limit-tracker");
           const accessToken = await getAccessToken();
-          const stagesRes = await fetch(
+          const stagesRes = await fetchWithRateLimitRetry(
             `https://api.procore.com/rest/v1.0/companies/${cid}/project_stages`,
-            { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": cid } }
+            { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": cid } },
+            "procore"
           );
           if (stagesRes.ok) {
             const stages = await stagesRes.json() as Array<{ id: number; name: string }>;
             const buyOutStage = stages.find((s) => s.name === "Buy Out");
             if (buyOutStage) {
-              const updateRes = await fetch(
+              const updateRes = await fetchWithRateLimitRetry(
                 `https://api.procore.com/rest/v1.0/projects/${portfolioProjectId}?company_id=${cid}`,
                 {
                   method: "PATCH",
                   headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Procore-Company-Id": cid },
                   body: JSON.stringify({ project: { project_stage_id: buyOutStage.id } }),
-                }
+                },
+                "procore"
               );
               if (updateRes.ok) {
                 log(`[portfolio-auto] Set portfolio project stage to "Buy Out" (stage ID: ${buyOutStage.id})`, "playwright");
@@ -1067,22 +1070,25 @@ export async function runPhase2PortfolioActions(
   // Set portfolio project stage to "Buy Out" via Procore API
   try {
     const { getAccessToken } = await import("../procore");
+    const { fetchWithRateLimitRetry } = await import("../lib/rate-limit-tracker");
     const accessToken = await getAccessToken();
-    const stagesRes = await fetch(
+    const stagesRes = await fetchWithRateLimitRetry(
       `https://api.procore.com/rest/v1.0/companies/${companyId}/project_stages`,
-      { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } }
+      { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } },
+      "procore"
     );
     if (stagesRes.ok) {
       const stages = await stagesRes.json() as Array<{ id: number; name: string }>;
       const buyOutStage = stages.find((s) => s.name === "Buy Out");
       if (buyOutStage) {
-        const updateRes = await fetch(
+        const updateRes = await fetchWithRateLimitRetry(
           `https://api.procore.com/rest/v1.0/projects/${portfolioProjectId}?company_id=${companyId}`,
           {
             method: "PATCH",
             headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Procore-Company-Id": companyId },
             body: JSON.stringify({ project: { project_stage_id: buyOutStage.id } }),
-          }
+          },
+          "procore"
         );
         if (updateRes.ok) {
           log(`[portfolio-auto] Set portfolio project ${portfolioProjectId} stage to "Buy Out"`, "playwright");
