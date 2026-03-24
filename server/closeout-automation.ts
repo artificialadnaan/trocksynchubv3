@@ -482,13 +482,7 @@ async function getHubSpotCloseoutStageId(): Promise<string | null> {
 export function isProcoreClosedStage(procoreStageName: string | null): boolean {
   if (!procoreStageName) return false;
   const s = procoreStageName.trim().toLowerCase();
-  return (
-    s.includes('close out') ||
-    s === 'closed' ||
-    s.includes('completed')
-    // NOT "Sent to Production" (project entering production, not closing)
-    // NOT "Production Lost" (deal lost, not closeout)
-  );
+  return s === 'close out';
 }
 
 /** Check if a HubSpot stage ID corresponds to a closed/closeout stage */
