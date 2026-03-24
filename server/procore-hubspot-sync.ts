@@ -118,7 +118,7 @@ const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
   'Service - sent to production': 'Service – Won',
   'Sent to production': 'Closed Won',
   'Buy Out': 'Closed Won',
-  'Closed': 'Closed Won',
+  // 'Closed' deliberately NOT mapped — Closed in Procore does not write back to HubSpot
 
   // Lost stages
   'Service – lost': 'Service – Lost',
