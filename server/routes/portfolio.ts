@@ -234,18 +234,23 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
     }
 
     let bidboardId: string | null = null;
+    let proposalId: string | null = null;
 
     // 15+ digit numeric string → treat as Bid Board project ID directly
     if (/^\d{15,}$/.test(input)) {
       bidboardId = input;
+      const mapping = await storage.getSyncMappingByBidboardProjectId(input);
+      proposalId = (mapping?.metadata as any)?.proposalId || null;
     } else {
-      // Contains letters/dashes → project number; look up in sync mappings (by projectNumber or bidboardProjectId)
-      let mapping = await storage.getSyncMappingByProcoreProjectNumber(input);
-      if (!mapping) {
-        mapping = (await storage.getSyncMappingByBidboardProjectId(input)) ?? undefined;
-      }
-      if (mapping) {
-        bidboardId = mapping.bidboardProjectId || mapping.procoreProjectId || null;
+      // Contains letters/dashes → project number; look up in sync mappings
+      const allMappings = await storage.getSyncMappings();
+      // Prefer mapping with bidboardProjectId
+      const match = allMappings.find(
+        (m) => m.procoreProjectNumber === input && m.bidboardProjectId
+      ) || allMappings.find((m) => m.procoreProjectNumber === input);
+      if (match?.bidboardProjectId) {
+        bidboardId = match.bidboardProjectId;
+        proposalId = (match.metadata as any)?.proposalId || null;
       }
     }
 
@@ -255,9 +260,11 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
       });
     }
 
-    const url = `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardId}`;
+    const url = proposalId
+      ? `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardId}/details?proposalId=${proposalId}`
+      : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardId}/details`;
     const jobId = `portfolio-auto-${Date.now()}`;
-    res.json({ jobId, message: "Automation started" });
+    res.json({ jobId, message: "Automation started", bidboardId, proposalId, url });
 
     setImmediate(async () => {
       try {
@@ -265,6 +272,41 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
         await runPhase1WithRetry(url, bidboardId!, { triggerSource: "manual" });
       } catch (err) {
         console.error("[portfolio-auto] Manual trigger failed:", (err as Error).message);
+      }
+    });
+  }));
+
+  // ═══ Internal test trigger (no auth, secured by secret) ─────────────────────
+  app.post("/api/internal/portfolio-trigger", asyncHandler(async (req, res) => {
+    const secret = req.headers["x-internal-secret"] || req.body?.secret;
+    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
+      return res.status(403).json({ error: "Invalid secret" });
+    }
+
+    const { bidboardProjectId } = req.body || {};
+    if (!bidboardProjectId) return res.status(400).json({ error: "bidboardProjectId required" });
+
+    const config = await storage.getAutomationConfig("procore_config");
+    const companyId = (config?.value as { companyId?: string })?.companyId;
+    if (!companyId) return res.status(400).json({ error: "Procore not configured" });
+
+    const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
+    const proposalId = (mapping?.metadata as any)?.proposalId || null;
+    const url = proposalId
+      ? `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details?proposalId=${proposalId}`
+      : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details`;
+
+    res.json({ message: "Automation started", bidboardProjectId, proposalId, url });
+
+    setImmediate(async () => {
+      try {
+        const { runPhase1WithRetry } = await import("../portfolio-automation-runner");
+        await runPhase1WithRetry(url, bidboardProjectId, {
+          projectName: mapping?.hubspotDealName || mapping?.bidboardProjectName || undefined,
+          triggerSource: "manual",
+        });
+      } catch (err) {
+        console.error("[portfolio-auto] Internal trigger failed:", (err as Error).message);
       }
     });
   }));
