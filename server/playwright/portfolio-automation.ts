@@ -1064,6 +1064,37 @@ export async function runPhase2PortfolioActions(
 ): Promise<void> {
   result.portfolioProjectId = portfolioProjectId;
 
+  // Set portfolio project stage to "Buy Out" via Procore API
+  try {
+    const { getAccessToken } = await import("../procore");
+    const accessToken = await getAccessToken();
+    const stagesRes = await fetch(
+      `https://api.procore.com/rest/v1.0/companies/${companyId}/project_stages`,
+      { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } }
+    );
+    if (stagesRes.ok) {
+      const stages = await stagesRes.json() as Array<{ id: number; name: string }>;
+      const buyOutStage = stages.find((s) => s.name === "Buy Out");
+      if (buyOutStage) {
+        const updateRes = await fetch(
+          `https://api.procore.com/rest/v1.0/projects/${portfolioProjectId}?company_id=${companyId}`,
+          {
+            method: "PATCH",
+            headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Procore-Company-Id": companyId },
+            body: JSON.stringify({ project: { project_stage_id: buyOutStage.id } }),
+          }
+        );
+        if (updateRes.ok) {
+          log(`[portfolio-auto] Set portfolio project ${portfolioProjectId} stage to "Buy Out"`, "playwright");
+        } else {
+          log(`[portfolio-auto] WARNING: Failed to set stage to Buy Out: ${updateRes.status}`, "playwright");
+        }
+      }
+    }
+  } catch (stageErr: any) {
+    log(`[portfolio-auto] WARNING: Could not set portfolio stage to Buy Out: ${stageErr.message}`, "playwright");
+  }
+
   const estimatingUrl = `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${portfolioProjectId}/tools/estimating/estimate`;
 
   const navStart = Date.now();
