@@ -68,10 +68,20 @@ export async function getProjectChangeOrders(projectId: string): Promise<ChangeO
   const client = await getProcoreClient();
   const companyId = await getCompanyId();
 
-  const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
-    params: { company_id: companyId },
-  });
-  const packages = response.data || [];
+  let packages: any[] = [];
+  try {
+    const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
+      params: { company_id: companyId },
+    });
+    packages = response.data || [];
+  } catch (err: any) {
+    // Procore returns 404 when Change Orders tool isn't enabled on the project
+    if (err?.message?.includes('404')) {
+      console.log(`[ChangeOrder] Change orders not available for project ${projectId} (404 — tool may not be enabled)`);
+      return [];
+    }
+    throw err;
+  }
 
   const changeOrders: ChangeOrder[] = [];
 
@@ -97,10 +107,20 @@ export async function getPrimeContractAmount(projectId: string): Promise<number>
   const client = await getProcoreClient();
   const companyId = await getCompanyId();
 
-  const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
-    params: { company_id: companyId },
-  });
-  const contracts = response.data || [];
+  let contracts: any[] = [];
+  try {
+    const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
+      params: { company_id: companyId },
+    });
+    contracts = response.data || [];
+  } catch (err: any) {
+    // Procore returns 404 when Prime Contracts tool isn't enabled on the project
+    if (err?.message?.includes('404')) {
+      console.log(`[ChangeOrder] Prime contracts not available for project ${projectId} (404 — tool may not be enabled)`);
+      return 0;
+    }
+    throw err;
+  }
 
   if (contracts.length === 0) return 0;
 
