@@ -1188,6 +1188,19 @@ export async function runPhase2PortfolioActions(
     await randomDelay(3000, 5000);
 
     await logStep(page, result, "create_prime_contract", "success", Date.now() - primeStart);
+
+    // Immediately sync prime contract amount to HubSpot (non-blocking)
+    try {
+      const { syncChangeOrdersToHubSpot } = await import("../change-order-sync");
+      const syncResult = await syncChangeOrdersToHubSpot(portfolioProjectId);
+      if (syncResult.success) {
+        log(`[portfolio-auto] Prime contract amount synced to HubSpot: $${(syncResult.newAmount ?? 0).toLocaleString()} (deal ${syncResult.dealId})`, "playwright");
+      } else {
+        log(`[portfolio-auto] Prime contract amount sync skipped: ${syncResult.error}`, "playwright");
+      }
+    } catch (syncErr: any) {
+      log(`[portfolio-auto] WARNING: Could not sync prime contract amount to HubSpot: ${syncErr.message}`, "playwright");
+    }
   } catch (err: unknown) {
     const { screenshotPath, diagnostics } = await captureFailureContext(page, "phase2-create-prime-contract");
     await logStep(page, result, "create_prime_contract", "failed", Date.now() - primeStart, {
