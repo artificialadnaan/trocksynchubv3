@@ -318,9 +318,18 @@ export async function syncAllProjectChangeOrders(): Promise<{
     // live on Portfolio projects, not Bid Board projects. Bid Board IDs return 404 from Procore API.
     const projectsWithPortfolio = mappings.filter(m => m.portfolioProjectId && m.hubspotDealId);
 
-    console.log(`[ChangeOrder] Found ${projectsWithPortfolio.length} Portfolio projects to check (skipping ${mappings.length - projectsWithPortfolio.length} without Portfolio ID)`);
+    // Filter to active projects only — skip closed/inactive projects to reduce API calls
+    const activeProjects = [];
+    for (const m of projectsWithPortfolio) {
+      const project = await storage.getProcoreProjectByProcoreId(m.portfolioProjectId!);
+      if (!project || project.active !== false) {
+        activeProjects.push(m);
+      }
+    }
 
-    for (const mapping of projectsWithPortfolio) {
+    console.log(`[ChangeOrder] Found ${activeProjects.length} active Portfolio projects to check (skipped ${projectsWithPortfolio.length - activeProjects.length} inactive, ${mappings.length - projectsWithPortfolio.length} without Portfolio ID)`);
+
+    for (const mapping of activeProjects) {
       const projectId = mapping.portfolioProjectId!;
       if (!projectId) continue;
       

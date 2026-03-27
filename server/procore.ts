@@ -354,15 +354,15 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
   const syncStartedAt = new Date().toISOString();
 
   const companyProjectsEndpoint = updatedAtFilter
-    ? `/rest/v1.0/companies/${companyId}/projects?per_page=500&updated_at=${encodeURIComponent(updatedAtFilter)}`
-    : `/rest/v1.0/companies/${companyId}/projects?per_page=500`;
+    ? `/rest/v1.0/companies/${companyId}/projects?per_page=500&active=true&updated_at=${encodeURIComponent(updatedAtFilter)}`
+    : `/rest/v1.0/companies/${companyId}/projects?per_page=500&active=true`;
 
   const companyProjects = await fetchProcoreJson(companyProjectsEndpoint, companyId) as any[];
-  console.log(`[procore] Company-level projects: ${companyProjects.length}${isIncrementalSync ? ' (incremental)' : ''}`);
+  console.log(`[procore] Company-level projects (active only): ${companyProjects.length}${isIncrementalSync ? ' (incremental)' : ''}`);
 
   const detailedEndpoint = updatedAtFilter
-    ? `/rest/v1.0/projects?company_id=${companyId}&updated_at=${encodeURIComponent(updatedAtFilter)}`
-    : `/rest/v1.0/projects?company_id=${companyId}`;
+    ? `/rest/v1.0/projects?company_id=${companyId}&active=true&updated_at=${encodeURIComponent(updatedAtFilter)}`
+    : `/rest/v1.0/projects?company_id=${companyId}&active=true`;
 
   const detailedProjects = await fetchProcorePages<any>(detailedEndpoint, companyId);
   console.log(`[procore] Detailed projects (user-level): ${detailedProjects.length}${isIncrementalSync ? ' (incremental)' : ''}`);
