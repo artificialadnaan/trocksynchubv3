@@ -1509,6 +1509,63 @@ export async function runFullProcoreSync(): Promise<{
         console.error(`[procore] Stage change email processing failed:`, err.message);
       }
     }
+
+    // Send final invoice notification when stage reaches "Close Out - Final Invoice"
+    for (const sc of projects.stageChanges) {
+      const normalizedStage = sc.newStage?.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (normalizedStage === 'close out - final invoice') {
+        try {
+          const { sendEmail } = await import('./email-service');
+          const FINAL_INVOICE_RECIPIENTS = [
+            'jhelms@trockgc.com',
+            'kscheidegger@trockgc.com',
+            'sbohen@trockgc.com',
+          ];
+          const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
+          const deal = mapping?.hubspotDealId ? await storage.getHubspotDealByHubspotId(mapping.hubspotDealId) : null;
+          const dealName = deal?.dealName || mapping?.hubspotDealName || sc.projectName || 'Unknown Project';
+
+          const htmlBody = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <div style="background: #1a1a2e; padding: 20px; text-align: center;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 20px;">T-Rock Sync Hub</h1>
+              </div>
+              <div style="padding: 24px; background: #ffffff;">
+                <h2 style="color: #1a1a2e; margin-top: 0;">Final Invoice Stage Reached</h2>
+                <p>The following project has moved to <strong>Close Out - Final Invoice</strong>:</p>
+                <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
+                  <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">Project</td><td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">${dealName}</td></tr>
+                  <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">Previous Stage</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${sc.oldStage || 'Unknown'}</td></tr>
+                  <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">New Stage</td><td style="padding: 8px; border-bottom: 1px solid #eee; color: #16a34a; font-weight: bold;">Close Out - Final Invoice</td></tr>
+                  <tr><td style="padding: 8px; border-bottom: 1px solid #eee; color: #666;">Procore ID</td><td style="padding: 8px; border-bottom: 1px solid #eee;">${sc.procoreId}</td></tr>
+                </table>
+                <p style="color: #666; font-size: 13px;">This is an automated notification from SyncHub.</p>
+              </div>
+            </div>`;
+
+          for (const recipient of FINAL_INVOICE_RECIPIENTS) {
+            await sendEmail({
+              to: recipient,
+              subject: `Final Invoice: ${dealName}`,
+              htmlBody,
+              fromName: 'T-Rock Sync Hub',
+            });
+            console.log(`[procore] Final invoice email sent to ${recipient} for ${dealName}`);
+          }
+
+          await storage.createAuditLog({
+            action: 'final_invoice_notification',
+            entityType: 'project_stage',
+            entityId: sc.procoreId,
+            source: 'polling',
+            status: 'success',
+            details: { procoreId: sc.procoreId, projectName: dealName, recipients: FINAL_INVOICE_RECIPIENTS },
+          });
+        } catch (err: any) {
+          console.error(`[procore] Final invoice email failed for ${sc.projectName}:`, err.message);
+        }
+      }
+    }
   }
 
   // Sync change orders and prime contracts to HubSpot deal amounts (respects sync_change_orders config)
