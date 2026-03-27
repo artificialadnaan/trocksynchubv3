@@ -1224,13 +1224,21 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         rawPrimeContracts = pcResponse.data;
       } catch (e: any) {
         rawError = (rawError ? rawError + ' | ' : '') + `Prime contracts v1.0: ${e.message}`;
-        // Fallback: try v1.1
+        // Fallback: try project-level prime_contract (singular)
         try {
-          const pcResponse2 = await client.get(`/rest/v1.1/projects/${projectId}/prime_contracts`, { params: { company_id: compId } });
+          const pcResponse2 = await client.get(`/rest/v1.0/projects/${projectId}/prime_contract`, { params: { company_id: compId } });
           rawPrimeContracts = pcResponse2.data;
-          rawError = (rawError || '') + ' | v1.1 worked!';
+          rawError = (rawError || '') + ' | singular endpoint worked!';
         } catch (e2: any) {
-          rawError = (rawError || '') + ` | Prime contracts v1.1: ${e2.message}`;
+          rawError = (rawError || '') + ` | Prime contract singular: ${e2.message}`;
+          // Try direct prime contract by known ID
+          try {
+            const pcResponse3 = await client.get(`/rest/v1.0/prime_contracts`, { params: { project_id: projectId, company_id: compId } });
+            rawPrimeContracts = pcResponse3.data;
+            rawError = (rawError || '') + ' | top-level endpoint worked!';
+          } catch (e3: any) {
+            rawError = (rawError || '') + ` | Top-level: ${e3.message}`;
+          }
         }
       }
 
