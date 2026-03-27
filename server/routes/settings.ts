@@ -997,4 +997,120 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── Internal: enable all automations (secret-gated, no session auth) ──────
+  app.post("/api/internal/enable-all-automations", async (req, res) => {
+    const secret = req.headers["x-internal-secret"] || req.body?.secret;
+    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
+      return res.status(403).json({ error: "Invalid secret" });
+    }
+
+    const results: Record<string, string> = {};
+
+    try {
+      // Webhook processing gates
+      for (const key of [
+        "hubspot_webhook_processing",
+        "procore_webhook_processing",
+        "procore_project_webhook_processing",
+      ]) {
+        await storage.upsertAutomationConfig({ key, value: { enabled: true }, description: `${key} (auto-enabled)` });
+        results[key] = "enabled";
+      }
+
+      // Feature flags
+      for (const key of ["deal_project_number", "hubspot_procore_auto_sync"]) {
+        await storage.upsertAutomationConfig({ key, value: { enabled: true }, description: `${key} (auto-enabled)` });
+        results[key] = "enabled";
+      }
+
+      // Config flags
+      for (const key of ["portfolio_auto_trigger", "procore_hubspot_stage_sync"]) {
+        await storage.upsertAutomationConfig({ key, value: { enabled: true }, description: `${key} (auto-enabled)` });
+        results[key] = "enabled";
+      }
+
+      // HubSpot polling — 15 min
+      await storage.upsertAutomationConfig({ key: "hubspot_polling", value: { enabled: true, intervalMinutes: 15 }, description: "HubSpot polling (auto-enabled)" });
+      if (!pollingTimer) {
+        pollingTimer = setInterval(async () => {
+          if (pollingRunning) return;
+          pollingRunning = true;
+          try {
+            const result = await runFullHubSpotSync();
+            lastPollAt = new Date();
+            lastPollResult = result;
+          } catch (e: any) { console.error("[HubSpotPolling] Error:", e.message); }
+          finally { pollingRunning = false; }
+        }, 15 * 60 * 1000);
+        setTimeout(async () => {
+          if (pollingRunning) return;
+          pollingRunning = true;
+          try { const r = await runFullHubSpotSync(); lastPollAt = new Date(); lastPollResult = r; }
+          catch (e: any) { console.error("[HubSpotPolling] Error:", e.message); }
+          finally { pollingRunning = false; }
+        }, 30000);
+      }
+      results["hubspot_polling"] = "enabled (15 min)";
+
+      // Procore polling — 15 min
+      await storage.upsertAutomationConfig({ key: "procore_polling", value: { enabled: true, intervalMinutes: 15 }, description: "Procore polling (auto-enabled)" });
+      if (!procorePollingTimer) {
+        procorePollingTimer = setInterval(async () => {
+          if (procorePollingRunning) return;
+          procorePollingRunning = true;
+          try {
+            const result = await runFullProcoreSync();
+            lastProcorePollAt = new Date();
+            lastProcorePollResult = result;
+          } catch (e: any) { console.error("[ProcorePolling] Error:", e.message); }
+          finally { procorePollingRunning = false; }
+        }, 15 * 60 * 1000);
+        setTimeout(async () => {
+          if (procorePollingRunning) return;
+          procorePollingRunning = true;
+          try { const r = await runFullProcoreSync(); lastProcorePollAt = new Date(); lastProcorePollResult = r; }
+          catch (e: any) { console.error("[ProcorePolling] Error:", e.message); }
+          finally { procorePollingRunning = false; }
+        }, 30000);
+      }
+      results["procore_polling"] = "enabled (15 min)";
+
+      // Role assignment polling — 30 min
+      await storage.upsertAutomationConfig({ key: "role_assignment_polling", value: { enabled: true, intervalMinutes: 30 }, description: "Role assignment polling (auto-enabled)" });
+      if (!rolePollingTimer) {
+        startRolePolling(30);
+      }
+      results["role_assignment_polling"] = "enabled (30 min)";
+
+      // BidBoard stage sync — 15 min
+      await storage.upsertAutomationConfig({ key: "bidboard_stage_sync", value: { enabled: true, intervalMinutes: 15, mode: "live" }, description: "BidBoard stage sync (auto-enabled)" });
+      if (!bidboardStageSyncTimer) {
+        bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, 15 * 60 * 1000);
+        setTimeout(runBidBoardStageSyncCycle, 15000);
+      }
+      results["bidboard_stage_sync"] = "enabled (15 min, live)";
+
+      // BidBoard automation — 60 min
+      await storage.upsertAutomationConfig({ key: "bidboard_automation", value: { enabled: true, pollingIntervalMinutes: 60 }, description: "BidBoard Playwright automation (auto-enabled)" });
+      await enableBidBoardAutomation(true);
+      if (!bidboardPollingTimer) {
+        startBidboardPolling(60);
+      }
+      results["bidboard_automation"] = "enabled (60 min)";
+
+      // Change order polling — 15 min
+      await storage.upsertAutomationConfig({ key: "sync_change_orders", value: { enabled: true, intervalMinutes: 15 }, description: "Change order sync (auto-enabled)" });
+      if (!changeOrderPollingTimer) {
+        startChangeOrderPolling(15);
+      }
+      results["sync_change_orders"] = "enabled (15 min)";
+
+      console.log("[EnableAll] All automations enabled:", results);
+      res.json({ success: true, automations: results });
+    } catch (e: any) {
+      console.error("[EnableAll] Error:", e.message);
+      res.status(500).json({ error: e.message, partial: results });
+    }
+  });
 }
