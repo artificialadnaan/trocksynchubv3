@@ -1158,4 +1158,48 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── Internal: trigger change order sync for a specific project ────────────
+  app.post("/api/internal/sync-change-orders", async (req, res) => {
+    const secret = req.headers["x-internal-secret"] || req.body?.secret;
+    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
+      return res.status(403).json({ error: "Invalid secret" });
+    }
+
+    try {
+      const { projectNumber, portfolioProjectId } = req.body || {};
+      let projectId = portfolioProjectId;
+
+      // Look up by project number if no direct ID provided
+      if (!projectId && projectNumber) {
+        const mappings = await storage.getSyncMappings();
+        const match = mappings.find(m =>
+          m.projectNumber?.toLowerCase() === projectNumber.toLowerCase() ||
+          m.hubspotDealName?.toLowerCase().includes(projectNumber.toLowerCase())
+        );
+        if (!match) {
+          return res.json({ error: `No sync mapping found for project number: ${projectNumber}`, mappingsChecked: mappings.length });
+        }
+        projectId = match.portfolioProjectId || match.procoreProjectId;
+        res.locals.mapping = match;
+      }
+
+      if (!projectId) {
+        return res.status(400).json({ error: "Provide portfolioProjectId or projectNumber" });
+      }
+
+      const { syncChangeOrdersToHubSpot, calculateTotalContractValue } = await import('../change-order-sync');
+      const contractValue = await calculateTotalContractValue(projectId);
+      const syncResult = await syncChangeOrdersToHubSpot(projectId);
+
+      res.json({
+        projectId,
+        contractValue,
+        syncResult,
+        mapping: res.locals.mapping || null,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 }
