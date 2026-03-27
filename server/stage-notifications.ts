@@ -87,6 +87,15 @@ export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
     includeDealOwner: false,
   },
   {
+    key: 'pf_contract_executed',
+    stage: 'Contract Executed',
+    source: 'portfolio',
+    label: 'Contract Executed',
+    staticRecipients: ['jhelms@trockgc.com'],
+    includeDealOwner: false,
+    includeProjectRoles: ['Account Manager'],
+  },
+  {
     key: 'pf_in_production',
     stage: 'In Production',
     source: 'portfolio',
