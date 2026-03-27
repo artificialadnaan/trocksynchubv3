@@ -1199,12 +1199,39 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         return res.status(400).json({ error: "Provide portfolioProjectId or projectNumber" });
       }
 
-      const { syncChangeOrdersToHubSpot, calculateTotalContractValue } = await import('../change-order-sync');
+      const { syncChangeOrdersToHubSpot, calculateTotalContractValue, getPrimeContractAmount, getProjectChangeOrders } = await import('../change-order-sync');
+      const { getProcoreClient, getCompanyId } = await import('../procore');
+
+      // Raw API debug
+      const client = await getProcoreClient();
+      const compId = await getCompanyId();
+      let rawPrimeContracts: any = null;
+      let rawChangeOrders: any = null;
+      let rawError: string | null = null;
+
+      try {
+        const pcResponse = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, { params: { company_id: compId } });
+        rawPrimeContracts = pcResponse.data;
+      } catch (e: any) {
+        rawError = e.message;
+      }
+
+      try {
+        const coResponse = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, { params: { company_id: compId } });
+        rawChangeOrders = coResponse.data;
+      } catch (e: any) {
+        rawError = (rawError ? rawError + ' | ' : '') + e.message;
+      }
+
       const contractValue = await calculateTotalContractValue(projectId);
       const syncResult = await syncChangeOrdersToHubSpot(projectId);
 
       res.json({
         projectId,
+        companyId: compId,
+        rawPrimeContracts,
+        rawChangeOrders,
+        rawError,
         contractValue,
         syncResult,
         mapping: res.locals.mapping || null,
