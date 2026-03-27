@@ -61,11 +61,15 @@ async function uploadFileToHubSpotAndAttachToDeal(
   }
 }
 
-const RFP_REVIEW_RECIPIENTS = [
-  'sgibson@trockgc.com',
-  'jhelms@trockgc.com',
-  'bbell@trockgc.com',
-];
+function getRfpReviewRecipients(projectType: string | null | undefined): string[] {
+  const type = String(projectType || '').trim();
+  if (type === '4') {
+    // Project type 4: James + Colby
+    return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+  }
+  // All other project types: Sidney + James
+  return ['sgibson@trockgc.com', 'jhelms@trockgc.com'];
+}
 
 const RFP_DEAL_PROPERTIES = [
   'dealname', 'amount', 'dealstage', 'pipeline', 'closedate',
@@ -344,7 +348,9 @@ export async function createRfpApprovalRequest(
     const subject = renderTemplate(template.subject, variables);
     const htmlBody = renderTemplate(template.bodyHtml, variables);
 
-    for (const recipient of RFP_REVIEW_RECIPIENTS) {
+    const rfpRecipients = getRfpReviewRecipients(dealData.project_types);
+    console.log(`[rfp-approval] Project type: ${dealData.project_types || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
+    for (const recipient of rfpRecipients) {
       try {
         const result = await sendEmail({
           to: recipient,
@@ -377,7 +383,7 @@ export async function createRfpApprovalRequest(
       entityId: hubspotDealId,
       source: 'rfp-approval',
       status: 'success',
-      details: { token, recipients: RFP_REVIEW_RECIPIENTS, dealName: dealData.dealname },
+      details: { token, recipients: rfpRecipients, dealName: dealData.dealname },
     });
 
     return { success: true, token };

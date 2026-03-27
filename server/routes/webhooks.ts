@@ -120,8 +120,8 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             const resolvedNewStage = await resolveHubspotStageId(newValue);
             const stageName = (resolvedNewStage?.stageName || newValue).toLowerCase();
             const stageId = newValue.toLowerCase();
-            const isRfpStage = ['rfp', 'service rfp', 'service_rfp'].includes(stageName) ||
-                               ['rfp', 'service_rfp'].includes(stageId);
+            console.log(`[hubspot-webhook] Deal ${objectId} stage change: stageId="${stageId}", resolved="${stageName}", changeSource="${changeSource || 'unknown'}"`);
+            const isRfpStage = stageName.includes('rfp') || stageId.includes('rfp');
             if (isRfpStage) {
               try {
                 const { createRfpApprovalRequest } = await import("../rfp-approval");
