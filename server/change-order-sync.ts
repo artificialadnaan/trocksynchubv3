@@ -109,23 +109,35 @@ export async function getPrimeContractAmount(projectId: string): Promise<number>
 
   let contracts: any[] = [];
   try {
-    const response = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
-      params: { company_id: companyId },
+    // Use top-level endpoint — project-level endpoint returns 404 on many projects
+    const response = await client.get(`/rest/v1.0/prime_contracts`, {
+      params: { project_id: projectId, company_id: companyId },
     });
     contracts = response.data || [];
   } catch (err: any) {
-    // Procore returns 404 when Prime Contracts tool isn't enabled on the project
     if (err?.message?.includes('404')) {
-      console.log(`[ChangeOrder] Prime contracts not available for project ${projectId} (404 — tool may not be enabled)`);
-      return 0;
+      // Fallback: try project-level endpoint
+      try {
+        const response2 = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, {
+          params: { company_id: companyId },
+        });
+        contracts = response2.data || [];
+      } catch (err2: any) {
+        if (err2?.message?.includes('404')) {
+          console.log(`[ChangeOrder] Prime contracts not available for project ${projectId} (404)`);
+          return 0;
+        }
+        throw err2;
+      }
+    } else {
+      throw err;
     }
-    throw err;
   }
 
   if (contracts.length === 0) return 0;
 
   const totalAmount = contracts.reduce((sum: number, contract: any) => {
-    return sum + parseFloat(contract.signed_contract_value || contract.contract_amount || 0);
+    return sum + parseFloat(contract.grand_total || contract.revised_contract_amount || contract.signed_contract_value || contract.contract_amount || 0);
   }, 0);
 
   return totalAmount;
