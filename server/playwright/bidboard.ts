@@ -591,10 +591,10 @@ export async function getClientDataFromHubSpot(hubspotDealId: string): Promise<C
     // Get primary contact using contact lookup (use first contact from comma-separated list)
     if (deal.associatedContactIds) {
       const contactIds = deal.associatedContactIds.split(",");
-      const contact = contactIds.length > 0 
+      const contact = contactIds.length > 0
         ? await storage.getHubspotContactByHubspotId(contactIds[0].trim())
         : null;
-      
+
       if (contact) {
         clientData.contactName = [contact.firstName, contact.lastName].filter(Boolean).join(" ") || undefined;
         clientData.contactEmail = contact.email || undefined;
@@ -603,7 +603,30 @@ export async function getClientDataFromHubSpot(hubspotDealId: string): Promise<C
         }
       }
     }
-    
+
+    // Fallback: fetch contact directly from HubSpot API if local lookup returned no contact
+    if (!clientData.contactName) {
+      try {
+        const { getHubSpotClient } = await import('../hubspot');
+        const client = await getHubSpotClient();
+        const dealWithAssoc = await client.crm.deals.basicApi.getById(hubspotDealId, [], undefined, ['contacts']);
+        const contactAssoc = (dealWithAssoc as any).associations?.contacts?.results;
+        if (contactAssoc && contactAssoc.length > 0) {
+          const contactId = String(contactAssoc[0].id);
+          const contact = await client.crm.contacts.basicApi.getById(contactId, ['firstname', 'lastname', 'email', 'phone']);
+          const cProps = contact.properties || {};
+          clientData.contactName = [cProps.firstname, cProps.lastname].filter(Boolean).join(' ') || undefined;
+          clientData.contactEmail = clientData.contactEmail || cProps.email || undefined;
+          if (!clientData.contactPhone) {
+            clientData.contactPhone = cProps.phone || undefined;
+          }
+          log(`[bidboard] Fetched contact from HubSpot API: ${clientData.contactName}`, "playwright");
+        }
+      } catch (e: any) {
+        log(`[bidboard] HubSpot API contact fallback failed: ${e.message}`, "playwright");
+      }
+    }
+
     return clientData;
   } catch (error) {
     log(`Error getting client data from HubSpot: ${error}`, "playwright");
