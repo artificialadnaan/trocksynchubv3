@@ -354,20 +354,22 @@ export async function syncStagesToHubSpot(
         },
       });
 
-      // Send stage-specific notifications (BidBoard)
-      try {
-        const { processStageNotification } = await import('../stage-notifications');
-        const mapping = await storage.getSyncMappingByHubspotDealId(change.hubspotDealId);
-        await processStageNotification({
-          stage: change.newStage,
-          source: 'bidboard',
-          projectName: change.projectName,
-          oldStage: change.previousStage,
-          procoreProjectId: mapping?.procoreProjectId || change.hubspotDealId,
-          hubspotDealId: change.hubspotDealId,
-        });
-      } catch (notifyErr: any) {
-        log(`[sync] Stage notification failed for ${change.projectName}: ${notifyErr.message}`, "sync");
+      // Send stage-specific notifications (BidBoard) — only on real transitions, not first-time baseline
+      if (change.previousStage && change.previousStage !== '(new)') {
+        try {
+          const { processStageNotification } = await import('../stage-notifications');
+          const mapping = await storage.getSyncMappingByHubspotDealId(change.hubspotDealId);
+          await processStageNotification({
+            stage: change.newStage,
+            source: 'bidboard',
+            projectName: change.projectName,
+            oldStage: change.previousStage,
+            procoreProjectId: mapping?.procoreProjectId || change.hubspotDealId,
+            hubspotDealId: change.hubspotDealId,
+          });
+        } catch (notifyErr: any) {
+          log(`[sync] Stage notification failed for ${change.projectName}: ${notifyErr.message}`, "sync");
+        }
       }
 
       // Trigger portfolio automation when stage is "Sent to Production" or "Service - Sent to Production"

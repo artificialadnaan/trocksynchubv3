@@ -215,6 +215,14 @@ export async function processStageNotification(params: {
     return { sent: 0, skipped: true, route: route.key };
   }
 
+  // Dedup: prevent same notification from being sent twice for same project + stage transition
+  const dedupeKey = `stage_notify:${route.key}:${params.procoreProjectId}:${params.oldStage}:${params.stage}`;
+  const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
+  if (alreadySent) {
+    console.log(`[stage-notify] Duplicate skipped: ${dedupeKey}`);
+    return { sent: 0, skipped: true, route: route.key };
+  }
+
   const recipients = new Set<string>(route.staticRecipients);
 
   // Add deal owner if required
@@ -271,6 +279,23 @@ export async function processStageNotification(params: {
       console.log(`[stage-notify] ${route.key} email sent to ${recipient} for ${params.projectName}`);
     } catch (err: any) {
       console.error(`[stage-notify] Failed to send to ${recipient}:`, err.message);
+    }
+  }
+
+  // Record dedup key so this exact transition won't fire again
+  if (sent > 0) {
+    try {
+      await storage.createEmailSendLog({
+        templateKey: `stage_notify_${route.key}`,
+        recipientEmail: Array.from(recipients).join(', '),
+        subject: `Stage Update: ${params.projectName} → ${params.stage}`,
+        dedupeKey,
+        status: 'sent',
+        metadata: { route: route.key, stage: params.stage, oldStage: params.oldStage, projectId: params.procoreProjectId },
+        sentAt: new Date(),
+      });
+    } catch (logErr: any) {
+      console.error(`[stage-notify] Failed to log dedup key: ${logErr.message}`);
     }
   }
 

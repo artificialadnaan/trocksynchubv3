@@ -1565,8 +1565,9 @@ export async function runFullProcoreSync(): Promise<{
       }
     }
 
-    // Send stage-specific notifications (portfolio stages)
+    // Send stage-specific notifications (portfolio stages) — only on real transitions
     for (const sc of projects.stageChanges) {
+      if (!sc.oldStage) continue; // Skip first-time baseline entries
       try {
         const { processStageNotification } = await import('./stage-notifications');
         const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
