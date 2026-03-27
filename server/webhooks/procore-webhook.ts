@@ -50,11 +50,6 @@ export async function handleProcoreProjectWebhook(
 ): Promise<void> {
   res.status(200).json({ received: true });
 
-  if (process.env.DISABLE_ALL_AUTOMATIONS === 'true') {
-    console.log('[webhook] All automations disabled via DISABLE_ALL_AUTOMATIONS — ignoring Procore project webhook');
-    return;
-  }
-
   try {
     const payload = req.body;
 
