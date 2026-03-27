@@ -447,6 +447,83 @@ export async function sendStageChangeEmail(params: {
   return { sent: result.success, ownerEmail: ownerInfo.ownerEmail, error: result.error };
 }
 
+export function buildFinalInvoiceEmail(dealName: string, oldStage: string | null, procoreId: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Final Invoice Notification</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f4f4f5; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f4f4f5;">
+    <tr>
+      <td style="padding: 40px 20px;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="margin: 0 auto; max-width: 600px;">
+          <tr>
+            <td style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 30px 40px; border-radius: 12px 12px 0 0; text-align: center;">
+              <img src="https://trockgc.com/wp-content/uploads/2020/12/TRock-CONTRACTING_Icon-dark-1-150x150.png" alt="T-Rock Construction" width="50" style="max-width: 50px; height: auto; display: block; margin: 0 auto 10px auto;">
+              <span style="color: #ffffff; font-size: 20px; font-weight: 700; letter-spacing: 1px;">T-ROCK CONSTRUCTION</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="background: linear-gradient(90deg, #d11921 0%, #e53935 100%); height: 4px;"></td>
+          </tr>
+          <tr>
+            <td style="background-color: #ffffff; padding: 40px;">
+              <div style="text-align: center; margin-bottom: 24px;">
+                <div style="display: inline-block; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); width: 64px; height: 64px; border-radius: 50%; line-height: 64px;">
+                  <span style="font-size: 28px;">&#128203;</span>
+                </div>
+              </div>
+              <h2 style="color: #1a1a2e; margin: 0 0 8px 0; font-size: 22px; text-align: center;">Final Invoice Stage Reached</h2>
+              <p style="color: #6b7280; font-size: 14px; text-align: center; margin: 0 0 24px 0;">The following project is ready for final invoicing</p>
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background: #f8fafc; border-radius: 8px; overflow: hidden;">
+                <tr>
+                  <td style="padding: 14px 20px; border-bottom: 1px solid #e2e8f0; color: #64748b; font-size: 13px; width: 140px;">Project</td>
+                  <td style="padding: 14px 20px; border-bottom: 1px solid #e2e8f0; color: #1a1a2e; font-weight: 600; font-size: 14px;">${dealName}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 14px 20px; border-bottom: 1px solid #e2e8f0; color: #64748b; font-size: 13px;">Previous Stage</td>
+                  <td style="padding: 14px 20px; border-bottom: 1px solid #e2e8f0; color: #374151; font-size: 14px;">${oldStage || 'Unknown'}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 14px 20px; border-bottom: 1px solid #e2e8f0; color: #64748b; font-size: 13px;">New Stage</td>
+                  <td style="padding: 14px 20px; border-bottom: 1px solid #e2e8f0; color: #d11921; font-weight: 700; font-size: 14px;">Close Out - Final Invoice</td>
+                </tr>
+                <tr>
+                  <td style="padding: 14px 20px; color: #64748b; font-size: 13px;">Procore ID</td>
+                  <td style="padding: 14px 20px; color: #374151; font-size: 14px;">${procoreId}</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="background-color: #1e293b; padding: 30px 40px; border-radius: 0 0 12px 12px; text-align: center;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr>
+                  <td style="text-align: center;">
+                    <p style="color: #94a3b8; font-size: 13px; margin: 0 0 10px 0; line-height: 1.5;">
+                      T-Rock Construction, LLC<br>
+                      3001 Long Prairie Rd. Ste. 200, Flower Mound, TX 75022
+                    </p>
+                    <p style="color: #64748b; font-size: 12px; margin: 0;">
+                      <a href="tel:2145484733" style="color: #d11921; text-decoration: none;">(214) 548-4733</a> &nbsp;|&nbsp;
+                      <a href="https://trockgc.com" style="color: #d11921; text-decoration: none;">trockgc.com</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
 export async function sendKickoffEmails(params: {
   projectId: string;
   projectName: string;

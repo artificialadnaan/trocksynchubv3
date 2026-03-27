@@ -1113,4 +1113,23 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       res.status(500).json({ error: e.message, partial: results });
     }
   });
+
+  // ── Internal: send test final invoice email ───────────────────────────────
+  app.post("/api/internal/test-final-invoice-email", async (req, res) => {
+    const secret = req.headers["x-internal-secret"] || req.body?.secret;
+    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
+      return res.status(403).json({ error: "Invalid secret" });
+    }
+
+    try {
+      const { sendEmail } = await import('../email-service');
+      const { buildFinalInvoiceEmail } = await import('../email-notifications');
+      const to = req.body?.to || 'adnaan.iqbal@gmail.com';
+      const htmlBody = buildFinalInvoiceEmail('Test Project - DFW-4-08226-aa', 'Close Out', '562949955661621');
+      const result = await sendEmail({ to, subject: 'Final Invoice: Test Project - DFW-4-08226-aa', htmlBody, fromName: 'T-Rock Sync Hub' });
+      res.json({ success: result.success, provider: result.provider, error: result.error });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 }

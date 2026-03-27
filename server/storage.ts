@@ -1778,7 +1778,8 @@ export class DatabaseStorage implements IStorage {
           <!-- Header with Logo -->
           <tr>
             <td style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 30px 40px; border-radius: 12px 12px 0 0; text-align: center;">
-              <img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock Construction" width="180" style="max-width: 180px; height: auto; display: block; margin: 0 auto;" referrerpolicy="no-referrer">
+              <img src="https://trockgc.com/wp-content/uploads/2020/12/TRock-CONTRACTING_Icon-dark-1-150x150.png" alt="T-Rock Construction" width="50" style="max-width: 50px; height: auto; display: block; margin: 0 auto 10px auto;">
+              <span style="color: #ffffff; font-size: 20px; font-weight: 700; letter-spacing: 1px;">T-ROCK CONSTRUCTION</span>
             </td>
           </tr>
           
