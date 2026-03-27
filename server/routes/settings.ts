@@ -1269,4 +1269,47 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // ── Internal: debug webhook + RFP status for a deal ───────────────────────
+  app.post("/api/internal/debug-deal", async (req, res) => {
+    const secret = req.headers["x-internal-secret"] || req.body?.secret;
+    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
+      return res.status(403).json({ error: "Invalid secret" });
+    }
+
+    try {
+      const { dealId } = req.body || {};
+      if (!dealId) return res.status(400).json({ error: "Provide dealId" });
+
+      // Check webhook logs for this deal
+      const { logs } = await storage.getWebhookLogs({ source: 'hubspot', limit: 200 });
+      const dealWebhooks = logs.filter(l => l.resourceId === dealId).slice(0, 10).map(l => ({
+        id: l.id,
+        eventType: l.eventType,
+        status: l.status,
+        createdAt: l.createdAt,
+        payload: l.payload,
+      }));
+
+      // Check for existing RFP approval
+      const existingRfp = await storage.getRfpApprovalRequestByDealId(dealId);
+
+      // Check deal in local cache
+      const deal = await storage.getHubspotDealByHubspotId(dealId);
+
+      // Check automation config
+      const hsConfig = await storage.getAutomationConfig('hubspot_webhook_processing');
+
+      res.json({
+        dealId,
+        webhookProcessingEnabled: (hsConfig?.value as any)?.enabled === true,
+        localDeal: deal ? { dealName: deal.dealName, stage: deal.dealStage, stageName: deal.dealStageName } : null,
+        existingRfpApproval: existingRfp ? { id: existingRfp.id, status: existingRfp.status, token: existingRfp.token, createdAt: existingRfp.createdAt } : null,
+        recentWebhooks: dealWebhooks,
+        webhookCount: dealWebhooks.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 }
