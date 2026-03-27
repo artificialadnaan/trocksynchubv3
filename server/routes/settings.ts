@@ -1207,20 +1207,31 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       const compId = await getCompanyId();
       let rawPrimeContracts: any = null;
       let rawChangeOrders: any = null;
+      let rawProjectDetail: any = null;
       let rawError: string | null = null;
 
+      // Check if we can access the project at all
       try {
-        const pcResponse = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`, { params: { company_id: compId } });
-        rawPrimeContracts = pcResponse.data;
+        const projResponse = await client.get(`/rest/v1.0/projects/${projectId}`);
+        rawProjectDetail = { id: projResponse.data?.id, name: projResponse.data?.name, stage: projResponse.data?.project_stage?.name || projResponse.data?.stage_name };
       } catch (e: any) {
-        rawError = e.message;
+        rawError = `Project access: ${e.message}`;
       }
 
+      // Try prime contracts without company_id param
       try {
-        const coResponse = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, { params: { company_id: compId } });
+        const pcResponse = await client.get(`/rest/v1.0/projects/${projectId}/prime_contracts`);
+        rawPrimeContracts = pcResponse.data;
+      } catch (e: any) {
+        rawError = (rawError ? rawError + ' | ' : '') + `Prime contracts: ${e.message}`;
+      }
+
+      // Try change order packages
+      try {
+        const coResponse = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`);
         rawChangeOrders = coResponse.data;
       } catch (e: any) {
-        rawError = (rawError ? rawError + ' | ' : '') + e.message;
+        rawError = (rawError ? rawError + ' | ' : '') + `Change orders: ${e.message}`;
       }
 
       const contractValue = await calculateTotalContractValue(projectId);
@@ -1229,6 +1240,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       res.json({
         projectId,
         companyId: compId,
+        rawProjectDetail,
         rawPrimeContracts,
         rawChangeOrders,
         rawError,
