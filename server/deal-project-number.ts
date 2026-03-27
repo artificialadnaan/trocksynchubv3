@@ -4,7 +4,7 @@ import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import { sendEmail, renderTemplate } from './email-service';
 import { db } from './db';
 import { projectNumberRegistry } from '@shared/schema';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, like } from 'drizzle-orm';
 
 /** Julian date format: DDDYY (e.g. 06326 = 63rd day of 2026) */
 function generateJulianDate(createDate: Date): string {
@@ -47,12 +47,15 @@ function getNextSuffix(existingSuffix: string | null): string {
   return 'a' + chars.join('');
 }
 
-async function findHighestSuffix(baseNumber: string): Promise<string | null> {
+async function findHighestSuffixForDate(julianDate: string, office: string): Promise<string | null> {
+  // Find the highest suffix across ALL project types for this date+office combo
+  // e.g., search for DFW-%-08326 so DFW-4-08326-aa and DFW-5-08326-ab share the same sequence
+  const pattern = `${office}-%-${julianDate}`;
   const existing = await db.select({ suffix: projectNumberRegistry.suffix })
     .from(projectNumberRegistry)
-    .where(eq(projectNumberRegistry.baseNumber, baseNumber))
+    .where(like(projectNumberRegistry.baseNumber, pattern))
     .orderBy(desc(projectNumberRegistry.suffix));
-  
+
   if (existing.length === 0) return null;
   return existing[0].suffix;
 }
@@ -115,7 +118,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   const projectType = resolveProjectTypeCode(props.project_types);
   const julianDate = generateJulianDate(createDate);
   const baseNumber = `${office}-${projectType}-${julianDate}`;
-  const highestSuffix = await findHighestSuffix(baseNumber);
+  const highestSuffix = await findHighestSuffixForDate(julianDate, office);
   const suffix = getNextSuffix(highestSuffix);
   const fullProjectNumber = `${baseNumber}-${suffix}`;
 
