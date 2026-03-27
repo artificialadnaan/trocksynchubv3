@@ -41,6 +41,7 @@ import { storage } from './storage';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import { updateRateLimits, applyBackpressure } from './lib/rate-limit-tracker';
+import { acquireRateLimitToken, wasProjectWebhookUpdated, clearWebhookUpdatedProjects } from './procore-rate-limiter';
 
 /**
  * Gets Procore configuration from database.
@@ -294,6 +295,7 @@ export async function getProcoreClient(): Promise<{
         }
       }
 
+      await acquireRateLimitToken();
       const response = await fetchWithTimeout(url.toString(), {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -319,32 +321,69 @@ export async function getProcoreClient(): Promise<{
   };
 }
 
-export async function syncProcoreProjects(): Promise<{ synced: number; created: number; updated: number; changes: number; stageChanges: Array<{ procoreId: string; projectName: string; oldStage: string; newStage: string }> }> {
+export async function syncProcoreProjects(): Promise<{ synced: number; created: number; updated: number; changes: number; stageChanges: Array<{ procoreId: string; projectName: string; oldStage: string; newStage: string }>; skippedWebhookUpdated?: number }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 
-  const companyProjects = await fetchProcoreJson(
-    `/rest/v1.0/companies/${companyId}/projects?per_page=500`,
-    companyId
-  ) as any[];
-  console.log(`[procore] Company-level projects: ${companyProjects.length}`);
+  // ── Incremental sync: only fetch projects modified since last sync ──────────
+  const FULL_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+  let updatedAtFilter: string | null = null;
+  let isIncrementalSync = false;
 
-  const detailedProjects = await fetchProcorePages<any>(
-    `/rest/v1.0/projects?company_id=${companyId}`,
-    companyId
-  );
-  console.log(`[procore] Detailed projects (user-level): ${detailedProjects.length}`);
+  try {
+    const lastSyncConfig = await storage.getAutomationConfig("procore_last_sync_at");
+    const lastSyncAt = lastSyncConfig?.value as string | null | undefined;
+    if (lastSyncAt) {
+      const lastSyncMs = new Date(lastSyncAt).getTime();
+      const ageMs = Date.now() - lastSyncMs;
+      if (ageMs < FULL_SYNC_INTERVAL_MS) {
+        updatedAtFilter = lastSyncAt;
+        isIncrementalSync = true;
+        console.log(`[procore] Incremental sync — fetching projects updated since ${lastSyncAt}`);
+      } else {
+        console.log(`[procore] Full sync — last sync was ${Math.round(ageMs / 3600000)}h ago (>24h threshold)`);
+      }
+    } else {
+      console.log(`[procore] Full sync — no previous sync timestamp found`);
+    }
+  } catch (e: any) {
+    console.warn(`[procore] Could not read last sync timestamp, falling back to full sync: ${e.message}`);
+  }
+
+  // Record the sync start time before fetching so we don't miss updates that happen mid-sync
+  const syncStartedAt = new Date().toISOString();
+
+  const companyProjectsEndpoint = updatedAtFilter
+    ? `/rest/v1.0/companies/${companyId}/projects?per_page=500&updated_at=${encodeURIComponent(updatedAtFilter)}`
+    : `/rest/v1.0/companies/${companyId}/projects?per_page=500`;
+
+  const companyProjects = await fetchProcoreJson(companyProjectsEndpoint, companyId) as any[];
+  console.log(`[procore] Company-level projects: ${companyProjects.length}${isIncrementalSync ? ' (incremental)' : ''}`);
+
+  const detailedEndpoint = updatedAtFilter
+    ? `/rest/v1.0/projects?company_id=${companyId}&updated_at=${encodeURIComponent(updatedAtFilter)}`
+    : `/rest/v1.0/projects?company_id=${companyId}`;
+
+  const detailedProjects = await fetchProcorePages<any>(detailedEndpoint, companyId);
+  console.log(`[procore] Detailed projects (user-level): ${detailedProjects.length}${isIncrementalSync ? ' (incremental)' : ''}`);
 
   const detailedMap = new Map<string, any>();
   for (const p of detailedProjects) {
     detailedMap.set(String(p.id), p);
   }
 
-  let created = 0, updated = 0, changes = 0;
+  let created = 0, updated = 0, changes = 0, skippedWebhookUpdated = 0;
   const stageChanges: Array<{ procoreId: string; projectName: string; oldStage: string; newStage: string }> = [];
 
   for (const project of companyProjects) {
     const procoreId = String(project.id);
+
+    // Skip projects already handled by webhook in this polling interval
+    if (wasProjectWebhookUpdated(procoreId)) {
+      skippedWebhookUpdated++;
+      continue;
+    }
+
     const existing = await storage.getProcoreProjectByProcoreId(procoreId);
     const detailed = detailedMap.get(procoreId);
     const source = detailed || project;
@@ -391,7 +430,23 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
     await storage.upsertProcoreProject(data);
   }
 
-  return { synced: companyProjects.length, created, updated, changes, stageChanges };
+  // Save sync timestamp and clear webhook-updated set after cycle completes
+  try {
+    await storage.upsertAutomationConfig({
+      key: "procore_last_sync_at",
+      value: syncStartedAt,
+      description: "Timestamp of last successful Procore project sync (used for incremental sync filter)",
+    });
+  } catch (e: any) {
+    console.warn(`[procore] Could not save last sync timestamp: ${e.message}`);
+  }
+  clearWebhookUpdatedProjects();
+
+  if (skippedWebhookUpdated > 0) {
+    console.log(`[procore] Skipped ${skippedWebhookUpdated} projects already updated via webhook this cycle`);
+  }
+
+  return { synced: companyProjects.length, created, updated, changes, stageChanges, skippedWebhookUpdated };
 }
 
 export async function syncProcoreVendors(): Promise<{ synced: number; created: number; updated: number; changes: number }> {

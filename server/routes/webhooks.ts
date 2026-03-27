@@ -8,6 +8,7 @@ import { processHubspotWebhookForProcore } from "../hubspot-procore-sync";
 import { mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber } from "../procore-hubspot-sync";
 import { handleProcoreProjectWebhook } from "../webhooks/procore-webhook";
 import { recordWebhookRoleEvent } from "./settings";
+import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
 import { db } from "../db";
 import { webhookLogs } from "@shared/schema";
@@ -393,6 +394,8 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
           const projectId = String(event.project_id || event.resource_id || "");
           if (projectId) {
             console.log(`[webhook] Project update detected for ${projectId}, checking for changes...`);
+            // Track this project as webhook-updated so the polling cycle can skip redundant API calls
+            markProjectWebhookUpdated(projectId);
 
             const { takeNextPendingPhase2 } = await import('../orchestrator/portfolio-orchestrator');
             const pending = takeNextPendingPhase2();

@@ -140,7 +140,7 @@ function startPolling(intervalMinutes: number) {
   stopPolling();
   console.log(`[Polling] Starting automatic HubSpot sync every ${intervalMinutes} minutes`);
   pollingTimer = setInterval(() => runPollingCycle(), intervalMinutes * 60 * 1000);
-  setTimeout(() => runPollingCycle(), 5000);
+  setTimeout(() => runPollingCycle(), 30000); // staggered: 30s after startup
 }
 
 function stopPolling() {
@@ -211,7 +211,7 @@ function startProcorePolling(intervalMinutes: number) {
   stopProcorePolling();
   console.log(`[ProcorePolling] Starting automatic Procore sync every ${intervalMinutes} minutes`);
   procorePollingTimer = setInterval(() => runProcorePollingCycle(), intervalMinutes * 60 * 1000);
-  setTimeout(() => runProcorePollingCycle(), 15000);
+  setTimeout(() => runProcorePollingCycle(), 90000); // staggered: 90s after startup
 }
 
 function stopProcorePolling() {
@@ -326,6 +326,7 @@ function startRolePolling(intervalMinutes: number) {
   stopRolePolling();
   console.log(`[RolePolling] Starting automatic role assignment sync every ${intervalMinutes} minutes`);
   rolePollingTimer = setInterval(() => runRolePollingCycle(), intervalMinutes * 60 * 1000);
+  setTimeout(() => runRolePollingCycle(), 150000); // staggered: 150s after startup
 }
 
 function stopRolePolling() {
@@ -448,7 +449,7 @@ async function runChangeOrderPollingCycle() {
 function startChangeOrderPolling(intervalMinutes: number) {
   if (changeOrderPollingTimer) clearInterval(changeOrderPollingTimer);
   changeOrderPollingTimer = setInterval(() => runChangeOrderPollingCycle(), intervalMinutes * 60 * 1000);
-  setTimeout(runChangeOrderPollingCycle, 30000); // first run 30s after startup
+  setTimeout(runChangeOrderPollingCycle, 120000); // staggered: 120s after startup
   console.log(`[ChangeOrderPolling] Scheduled every ${intervalMinutes} minutes`);
 }
 
@@ -508,7 +509,7 @@ export async function initPolling() {
     if (val?.enabled) {
       const interval = Math.min(60, Math.max(5, val.intervalMinutes || 15));
       bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, interval * 60 * 1000);
-      setTimeout(runBidBoardStageSyncCycle, 15000);
+      setTimeout(runBidBoardStageSyncCycle, 60000); // staggered: 60s after startup
       console.log(`[BidBoardStageSync] Scheduled every ${interval} minutes`);
     }
   } catch (e) {
