@@ -78,7 +78,7 @@ const RFP_DEAL_PROPERTIES = [
   'project_location', 'city', 'state', 'zip', 'country',
   'description', 'project_description', 'project_description_briefly_describe_the_project',
   'project_description__briefly_describe_the_project_',
-  'address', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes',
+  'address', 'project_location', 'company_name', 'client_email', 'client_phone', 'estimator', 'notes',
   'attachments', 'deal_attachments',
 ];
 
@@ -145,7 +145,7 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
     project_types: props.project_types || '',
     project_number: props.project_number || '',
     project_location: props.project_location || '',
-    address: props.address || '',
+    address: props.address || props.project_location || '',
     city: props.city || '',
     state: props.state || '',
     zip: props.zip || '',
