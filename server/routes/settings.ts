@@ -1173,12 +1173,23 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       // Look up by project number if no direct ID provided
       if (!projectId && projectNumber) {
         const mappings = await storage.getSyncMappings();
+        const pn = projectNumber.toLowerCase();
         const match = mappings.find(m =>
-          m.projectNumber?.toLowerCase() === projectNumber.toLowerCase() ||
-          m.hubspotDealName?.toLowerCase().includes(projectNumber.toLowerCase())
+          m.projectNumber?.toLowerCase() === pn ||
+          m.projectNumber?.toLowerCase().includes(pn) ||
+          pn.includes(m.projectNumber?.toLowerCase() || '___') ||
+          m.hubspotDealName?.toLowerCase().includes(pn)
         );
         if (!match) {
-          return res.json({ error: `No sync mapping found for project number: ${projectNumber}`, mappingsChecked: mappings.length });
+          // Return sample mappings for debugging
+          const samples = mappings.slice(0, 10).map(m => ({
+            projectNumber: m.projectNumber,
+            hubspotDealName: m.hubspotDealName,
+            procoreProjectId: m.procoreProjectId,
+            portfolioProjectId: m.portfolioProjectId,
+            bidboardProjectId: m.bidboardProjectId,
+          }));
+          return res.json({ error: `No sync mapping found for: ${projectNumber}`, mappingsChecked: mappings.length, samples });
         }
         projectId = match.portfolioProjectId || match.procoreProjectId;
         res.locals.mapping = match;
