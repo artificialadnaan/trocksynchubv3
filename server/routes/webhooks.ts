@@ -663,39 +663,20 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                 }
               }
 
-              // Send final invoice notification when stage reaches "Close Out - Final Invoice"
-              const normalizedNewStage = newStage?.trim().toLowerCase().replace(/\s+/g, ' ');
-              if (normalizedNewStage === 'close out - final invoice') {
-                try {
-                  const { sendEmail } = await import('../email-service');
-                  const FINAL_INVOICE_RECIPIENTS = [
-                    'jhelms@trockgc.com',
-                    'kscheidegger@trockgc.com',
-                    'sbohen@trockgc.com',
-                  ];
-                  const fiMapping = await storage.getSyncMappingByProcoreProjectId(projectId);
-                  const fiDeal = fiMapping?.hubspotDealId ? await storage.getHubspotDealByHubspotId(fiMapping.hubspotDealId) : null;
-                  const dealName = fiDeal?.dealName || fiMapping?.hubspotDealName || project.name || 'Unknown Project';
-
-                  const { buildFinalInvoiceEmail } = await import('../email-notifications');
-                  const htmlBody = buildFinalInvoiceEmail(dealName, oldStage, projectId);
-
-                  for (const recipient of FINAL_INVOICE_RECIPIENTS) {
-                    await sendEmail({ to: recipient, subject: `Final Invoice: ${dealName}`, htmlBody, fromName: 'T-Rock Sync Hub' });
-                    console.log(`[webhook] Final invoice email sent to ${recipient} for ${dealName}`);
-                  }
-
-                  await storage.createAuditLog({
-                    action: 'final_invoice_notification',
-                    entityType: 'project_stage',
-                    entityId: projectId,
-                    source: 'procore_webhook',
-                    status: 'success',
-                    details: { projectId, projectName: dealName, recipients: FINAL_INVOICE_RECIPIENTS },
-                  });
-                } catch (fiErr: any) {
-                  console.error(`[webhook] Final invoice email failed for project ${projectId}:`, fiErr.message);
-                }
+              // Send stage-specific notifications (portfolio stages)
+              try {
+                const { processStageNotification } = await import('../stage-notifications');
+                const stageMapping = await storage.getSyncMappingByProcoreProjectId(projectId);
+                await processStageNotification({
+                  stage: newStage,
+                  source: 'portfolio',
+                  projectName: project.name || 'Unknown Project',
+                  oldStage,
+                  procoreProjectId: projectId,
+                  hubspotDealId: stageMapping?.hubspotDealId,
+                });
+              } catch (notifyErr: any) {
+                console.error(`[webhook] Stage notification failed for project ${projectId}:`, notifyErr.message);
               }
 
               // When Procore stage changes to closed/closeout, trigger closeout survey to deal owner

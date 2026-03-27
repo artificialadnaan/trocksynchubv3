@@ -1510,45 +1510,21 @@ export async function runFullProcoreSync(): Promise<{
       }
     }
 
-    // Send final invoice notification when stage reaches "Close Out - Final Invoice"
+    // Send stage-specific notifications (portfolio stages)
     for (const sc of projects.stageChanges) {
-      const normalizedStage = sc.newStage?.trim().toLowerCase().replace(/\s+/g, ' ');
-      if (normalizedStage === 'close out - final invoice') {
-        try {
-          const { sendEmail } = await import('./email-service');
-          const { buildFinalInvoiceEmail } = await import('./email-notifications');
-          const FINAL_INVOICE_RECIPIENTS = [
-            'jhelms@trockgc.com',
-            'kscheidegger@trockgc.com',
-            'sbohen@trockgc.com',
-          ];
-          const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
-          const deal = mapping?.hubspotDealId ? await storage.getHubspotDealByHubspotId(mapping.hubspotDealId) : null;
-          const dealName = deal?.dealName || mapping?.hubspotDealName || sc.projectName || 'Unknown Project';
-
-          const htmlBody = buildFinalInvoiceEmail(dealName, sc.oldStage, sc.procoreId);
-
-          for (const recipient of FINAL_INVOICE_RECIPIENTS) {
-            await sendEmail({
-              to: recipient,
-              subject: `Final Invoice: ${dealName}`,
-              htmlBody,
-              fromName: 'T-Rock Sync Hub',
-            });
-            console.log(`[procore] Final invoice email sent to ${recipient} for ${dealName}`);
-          }
-
-          await storage.createAuditLog({
-            action: 'final_invoice_notification',
-            entityType: 'project_stage',
-            entityId: sc.procoreId,
-            source: 'polling',
-            status: 'success',
-            details: { procoreId: sc.procoreId, projectName: dealName, recipients: FINAL_INVOICE_RECIPIENTS },
-          });
-        } catch (err: any) {
-          console.error(`[procore] Final invoice email failed for ${sc.projectName}:`, err.message);
-        }
+      try {
+        const { processStageNotification } = await import('./stage-notifications');
+        const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
+        await processStageNotification({
+          stage: sc.newStage,
+          source: 'portfolio',
+          projectName: sc.projectName,
+          oldStage: sc.oldStage,
+          procoreProjectId: sc.procoreId,
+          hubspotDealId: mapping?.hubspotDealId,
+        });
+      } catch (err: any) {
+        console.error(`[procore] Stage notification failed for ${sc.projectName}:`, err.message);
       }
     }
   }

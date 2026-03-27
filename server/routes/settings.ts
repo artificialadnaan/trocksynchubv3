@@ -1114,8 +1114,33 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     }
   });
 
-  // ── Internal: send test final invoice email ───────────────────────────────
-  app.post("/api/internal/test-final-invoice-email", async (req, res) => {
+  // ── Stage notification config routes ────────────────────────────────────────
+  app.get("/api/stage-notifications/config", requireAuth, async (_req, res) => {
+    try {
+      const { getStageNotificationConfigs } = await import('../stage-notifications');
+      const configs = await getStageNotificationConfigs();
+      res.json(configs);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put("/api/stage-notifications/config/:key", requireAuth, async (req, res) => {
+    try {
+      const { setStageNotificationEnabled } = await import('../stage-notifications');
+      const { enabled } = req.body;
+      const success = await setStageNotificationEnabled(req.params.key, !!enabled);
+      if (!success) {
+        return res.status(404).json({ error: `Unknown notification key: ${req.params.key}` });
+      }
+      res.json({ success: true, key: req.params.key, enabled: !!enabled });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Internal: send test stage notification email ──────────────────────────
+  app.post("/api/internal/test-stage-notification", async (req, res) => {
     const secret = req.headers["x-internal-secret"] || req.body?.secret;
     if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
       return res.status(403).json({ error: "Invalid secret" });
@@ -1123,10 +1148,11 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
 
     try {
       const { sendEmail } = await import('../email-service');
-      const { buildFinalInvoiceEmail } = await import('../email-notifications');
+      const { buildStageNotificationEmail } = await import('../stage-notifications');
       const to = req.body?.to || 'adnaan.iqbal@gmail.com';
-      const htmlBody = buildFinalInvoiceEmail('Test Project - DFW-4-08226-aa', 'Close Out', '562949955661621');
-      const result = await sendEmail({ to, subject: 'Final Invoice: Test Project - DFW-4-08226-aa', htmlBody, fromName: 'T-Rock Sync Hub' });
+      const stage = req.body?.stage || 'Close Out - Final Invoice';
+      const htmlBody = buildStageNotificationEmail('Test Project - DFW-4-08226-aa', 'Close Out', stage, '562949955661621');
+      const result = await sendEmail({ to, subject: `Stage Update: Test Project → ${stage}`, htmlBody, fromName: 'T-Rock Sync Hub' });
       res.json({ success: result.success, provider: result.provider, error: result.error });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
