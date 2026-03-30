@@ -1456,28 +1456,20 @@ export async function createBidBoardProject(
       await takeScreenshot(page, "bidboard-project-created");
     }
 
-    // Fallback for new UI: extract project ID from the page DOM (breadcrumb, link, or data attribute)
+    // Fallback for new UI: extract project ID from the current page URL only (not from links on the page,
+    // which could belong to other projects on the BidBoard list)
     if (!result.success && isNewBidBoardUi) {
       try {
-        const extractedId = await page.evaluate(() => {
-          // Check breadcrumb links or any anchor that points to a project detail page
-          const links = Array.from(document.querySelectorAll('a[href*="/bid-board/project/"]'));
-          for (const link of links) {
-            const match = (link as HTMLAnchorElement).href.match(/\/bid-board\/project\/(\d+)/);
-            if (match) return match[1];
-          }
-          // Check for project ID in page header / data attributes
-          const el = document.querySelector('[data-project-id], [data-qa="project-id"]');
-          if (el) return el.getAttribute('data-project-id') || el.textContent?.trim() || null;
-          return null;
-        });
-        if (extractedId) {
-          result.projectId = extractedId;
+        // Check if the URL now contains a project ID (SPA may have updated after form save)
+        const currentUrl2 = page.url();
+        const urlMatch2 = currentUrl2.match(/\/tools\/bid-board\/project\/(\d+)/);
+        if (urlMatch2) {
+          result.projectId = urlMatch2[1];
           result.success = true;
-          log(`BidBoard project ID extracted from DOM: ${extractedId}`, "playwright");
+          log(`BidBoard project ID from URL (delayed): ${result.projectId}`, "playwright");
         }
       } catch (e: any) {
-        log(`DOM extraction failed: ${e.message}`, "playwright");
+        log(`URL re-check failed: ${e.message}`, "playwright");
       }
     }
 
