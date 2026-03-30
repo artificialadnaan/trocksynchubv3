@@ -490,4 +490,18 @@ export function registerRfpApprovalRoutes(app: Express) {
     const result = await processRfpDecline(token, declinerEmail);
     res.json(result);
   }));
+
+  // Reset an approval request back to pending (admin endpoint for retrying failed BidBoard creation)
+  app.post("/api/rfp-approval/:token/reset", asyncHandler(async (req, res) => {
+    const { token } = req.params as { token: string };
+    const request = await storage.getRfpApprovalRequestByToken(token);
+    if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
+    await storage.updateRfpApprovalRequest(request.id, {
+      status: 'pending',
+      approvedBy: null,
+      approvedAt: null,
+      bidboardProjectId: null,
+    });
+    res.json({ success: true, message: `Request ${request.id} reset to pending. Token: ${token}` });
+  }));
 }
