@@ -395,12 +395,24 @@ export async function ensureLoggedIn(options?: { targetUrl?: string }): Promise<
     };
   }
 
-  // Perform login with retry
-  const result = await withRetry(
-    () => performLogin(page, credentials),
-    3,
-    2000
-  );
+  // Perform login with retry — get a fresh browser context on each attempt
+  // to avoid stale page state (CAPTCHA, pre-filled forms, rate limits)
+  let result: LoginResult = { success: false, error: 'Login not attempted' };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    result = await performLogin(page, credentials);
+    if (result.success) break;
+
+    log(`Attempt ${attempt}/3 failed: ${result.error}`, "playwright");
+    await takeScreenshot(page, `login-failed-attempt-${attempt}`);
+
+    if (attempt < 3) {
+      // Fresh browser context for next attempt
+      await clearSession();
+      await closeBrowser();
+      await new Promise((r) => setTimeout(r, 3000 * attempt)); // Increasing delay between attempts
+      page = await getPage();
+    }
+  }
 
   return {
     page,
