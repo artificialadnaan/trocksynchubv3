@@ -1439,21 +1439,77 @@ export async function createBidBoardProject(
     await page.waitForLoadState("load").catch(() => {});
 
     // Check for success - extract project ID from URL (new UI: /project/ID/, legacy: /bidding/ID/)
-    const currentUrl = page.url();
-    const newUiProjectMatch = currentUrl.match(/\/tools\/bid-board\/project\/(\d+)/);
-    const legacyMatch = currentUrl.match(/\/(?:bidding|projects)\/(\d+)/);
-    const projectIdFromUrl = newUiProjectMatch?.[1] || legacyMatch?.[1] || null;
+    // New BidBoard UI is an SPA — the URL may not update immediately after auto-save.
+    // Poll for up to 10 seconds for the URL to contain a project ID.
+    let projectIdFromUrl: string | null = null;
+    for (let poll = 0; poll < 5; poll++) {
+      const currentUrl = page.url();
+      const newUiProjectMatch = currentUrl.match(/\/tools\/bid-board\/project\/(\d+)/);
+      const legacyMatch = currentUrl.match(/\/(?:bidding|projects)\/(\d+)/);
+      projectIdFromUrl = newUiProjectMatch?.[1] || legacyMatch?.[1] || null;
+      if (projectIdFromUrl) {
+        const proposalIdMatch = currentUrl.match(/proposalId=(\d+)/);
+        if (proposalIdMatch) result.proposalId = proposalIdMatch[1];
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+
     if (projectIdFromUrl) {
       result.projectId = projectIdFromUrl;
       result.success = true;
-      // Extract proposalId from URL (e.g., ?proposalId=3731331)
-      const proposalIdMatch = currentUrl.match(/proposalId=(\d+)/);
-      if (proposalIdMatch) {
-        result.proposalId = proposalIdMatch[1];
-      }
       log(`Successfully created BidBoard project: ${projectData.name} (ID: ${result.projectId}${result.proposalId ? `, proposalId: ${result.proposalId}` : ''})`, "playwright");
       await takeScreenshot(page, "bidboard-project-created");
     }
+
+    // Fallback for new UI: extract project ID from the page DOM (breadcrumb, link, or data attribute)
+    if (!result.success && isNewBidBoardUi) {
+      try {
+        const extractedId = await page.evaluate(() => {
+          // Check breadcrumb links or any anchor that points to a project detail page
+          const links = Array.from(document.querySelectorAll('a[href*="/bid-board/project/"]'));
+          for (const link of links) {
+            const match = (link as HTMLAnchorElement).href.match(/\/bid-board\/project\/(\d+)/);
+            if (match) return match[1];
+          }
+          // Check for project ID in page header / data attributes
+          const el = document.querySelector('[data-project-id], [data-qa="project-id"]');
+          if (el) return el.getAttribute('data-project-id') || el.textContent?.trim() || null;
+          return null;
+        });
+        if (extractedId) {
+          result.projectId = extractedId;
+          result.success = true;
+          log(`BidBoard project ID extracted from DOM: ${extractedId}`, "playwright");
+        }
+      } catch (e: any) {
+        log(`DOM extraction failed: ${e.message}`, "playwright");
+      }
+    }
+
+    // Fallback: search by project number using Procore API
+    if (!result.success && projectData.projectNumber) {
+      try {
+        const { getProcoreClient } = await import("../procore");
+        const client = await getProcoreClient();
+        const companyId = await getCompanyId();
+        if (companyId) {
+          const searchRes = await client.get(`/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectData.projectNumber)}&per_page=5`);
+          const projects = Array.isArray(searchRes.data) ? searchRes.data : [];
+          const match = projects.find((p: any) =>
+            p.project_number === projectData.projectNumber || p.name === projectData.name
+          );
+          if (match?.id) {
+            result.projectId = String(match.id);
+            result.success = true;
+            log(`BidBoard project found via API search: ${result.projectId} (project number: ${projectData.projectNumber})`, "playwright");
+          }
+        }
+      } catch (apiErr: any) {
+        log(`API project search failed: ${apiErr.message}`, "playwright");
+      }
+    }
+
     if (!result.success) {
       // Check for success toast/message
       const successMsg = await page.$(PROCORE_SELECTORS.newProject.successMessage);
