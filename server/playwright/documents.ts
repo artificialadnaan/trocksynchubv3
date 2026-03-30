@@ -479,9 +479,13 @@ export async function uploadDocumentToBidBoard(
           log(`Upload file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
 
           // Use filechooser event — clicking "Upload Files" triggers native picker which Procore detects
+          // Wait for the button to be visible and stable before clicking (Railway headless can be slow)
+          const uploadFilesBtn = page.locator('button:has-text("Upload Files"), button:has-text("Attach Files")').first();
+          await uploadFilesBtn.waitFor({ state: 'visible', timeout: 15000 });
+          await new Promise((r) => setTimeout(r, 1000)); // Let modal stabilize
           const [fileChooser] = await Promise.all([
-            page.waitForEvent('filechooser', { timeout: 15000 }),
-            page.locator('button:has-text("Upload Files"), button:has-text("Attach Files"), div[data-qa="ci-Image"]').first().click({ timeout: 8000 }),
+            page.waitForEvent('filechooser', { timeout: 20000 }),
+            uploadFilesBtn.click({ timeout: 15000 }),
           ]);
           log(`Uploading to Procore: path=${filePath}, ext=${path.extname(filePath)}`, "playwright");
           await fileChooser.setFiles(filePath);
