@@ -362,10 +362,11 @@ export async function createRfpApprovalRequest(
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e2e8f0;">
         <!-- Header -->
         <tr>
-          <td style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:28px 32px;text-align:center;">
-            <!--[if mso]><v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:600px;height:80px;"><v:fill type="gradient" color="#1a1a2e" color2="#16213e" angle="135"/><v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true"><![endif]-->
-            <img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock GC" width="160" style="display:block;margin:0 auto;max-width:160px;height:auto;" />
-            <!--[if mso]></v:textbox></v:rect><![endif]-->
+          <td style="background:#1a1a2e;padding:28px 32px;text-align:center;">
+            <!--[if mso]><v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:600px;height:60px;"><v:fill type="solid" color="#1a1a2e"/><v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true"><center><![endif]-->
+            <span style="font-family:Arial,Helvetica,sans-serif;font-size:26px;font-weight:700;color:#ffffff;letter-spacing:1px;">T-ROCK</span>
+            <span style="font-family:Arial,Helvetica,sans-serif;font-size:26px;font-weight:300;color:#d11921;letter-spacing:1px;"> GC</span>
+            <!--[if mso]></center></v:textbox></v:rect><![endif]-->
           </td>
         </tr>
         <!-- Red accent bar -->
