@@ -399,11 +399,15 @@ export async function ensureLoggedIn(options?: { targetUrl?: string }): Promise<
   // to avoid stale page state (CAPTCHA, pre-filled forms, rate limits)
   let result: LoginResult = { success: false, error: 'Login not attempted' };
   for (let attempt = 1; attempt <= 3; attempt++) {
-    result = await performLogin(page, credentials);
+    try {
+      result = await performLogin(page, credentials);
+    } catch (loginErr: any) {
+      result = { success: false, error: loginErr.message || String(loginErr) };
+    }
     if (result.success) break;
 
     log(`Attempt ${attempt}/3 failed: ${result.error}`, "playwright");
-    await takeScreenshot(page, `login-failed-attempt-${attempt}`);
+    try { await takeScreenshot(page, `login-failed-attempt-${attempt}`); } catch { /* page may be closed */ }
 
     if (attempt < 3) {
       // Fresh browser context for next attempt
