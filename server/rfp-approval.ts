@@ -9,6 +9,77 @@ import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
 import { log } from './index';
 
+const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
+
+interface RfpStatusStep { name: string; success: boolean; detail: string }
+
+async function sendRfpApprovalStatusEmail(params: {
+  dealName: string;
+  hubspotDealId: string;
+  projectNumber: string;
+  approverEmail: string;
+  bidboardProjectId?: string;
+  bidboardFailed: boolean;
+  steps: RfpStatusStep[];
+}): Promise<void> {
+  try {
+    const allSuccess = params.steps.every(s => s.success);
+    const statusLabel = allSuccess ? 'All Steps Successful' : 'Partial Failure';
+    const statusColor = allSuccess ? '#166534' : '#991b1b';
+    const statusBg = allSuccess ? '#f0fdf4' : '#fef2f2';
+    const statusBorder = allSuccess ? '#bbf7d0' : '#fecaca';
+
+    const stepsHtml = params.steps.map(s =>
+      `<tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-family:Arial,sans-serif;font-size:14px;color:#1e293b;">${s.name}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-family:Arial,sans-serif;font-size:13px;color:${s.success ? '#166534' : '#991b1b'};font-weight:600;">${s.success ? 'OK' : 'FAILED'}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-family:Arial,sans-serif;font-size:13px;color:#64748b;">${s.detail}</td>
+      </tr>`
+    ).join('');
+
+    const htmlBody = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#1a1a2e;padding:16px 24px;border-radius:8px 8px 0 0;">
+        <span style="font-size:20px;font-weight:700;color:#fff;">T-ROCK</span>
+        <span style="font-size:20px;font-weight:300;color:#d11921;"> GC</span>
+        <span style="font-size:14px;color:#94a3b8;margin-left:12px;">RFP Approval Status</span>
+      </div>
+      <div style="background:${statusBg};border:1px solid ${statusBorder};padding:12px 24px;color:${statusColor};font-weight:600;font-size:15px;">
+        ${statusLabel}
+      </div>
+      <div style="padding:20px 24px;border:1px solid #e2e8f0;border-top:none;">
+        <table style="width:100%;margin-bottom:16px;">
+          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Deal</td><td style="font-size:14px;font-weight:600;padding:4px 0;">${params.dealName}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Project #</td><td style="font-size:14px;padding:4px 0;">${params.projectNumber || 'N/A'}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">HubSpot Deal</td><td style="font-size:14px;padding:4px 0;">${params.hubspotDealId}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">Approved By</td><td style="font-size:14px;padding:4px 0;">${params.approverEmail}</td></tr>
+          <tr><td style="color:#64748b;font-size:13px;padding:4px 0;">BidBoard ID</td><td style="font-size:14px;padding:4px 0;">${params.bidboardProjectId || 'Not created'}</td></tr>
+        </table>
+        <table style="width:100%;border:1px solid #e2e8f0;border-radius:6px;border-collapse:collapse;">
+          <tr style="background:#f8fafc;">
+            <th style="padding:8px 12px;text-align:left;font-size:13px;color:#64748b;border-bottom:1px solid #e2e8f0;">Step</th>
+            <th style="padding:8px 12px;text-align:left;font-size:13px;color:#64748b;border-bottom:1px solid #e2e8f0;">Status</th>
+            <th style="padding:8px 12px;text-align:left;font-size:13px;color:#64748b;border-bottom:1px solid #e2e8f0;">Detail</th>
+          </tr>
+          ${stepsHtml}
+        </table>
+      </div>
+      <div style="padding:12px 24px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;text-align:center;">
+        <span style="font-size:11px;color:#94a3b8;">Sent by T-Rock Sync Hub at ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })} CST</span>
+      </div>
+    </div>`;
+
+    await sendEmail({
+      to: RFP_ADMIN_EMAIL,
+      subject: `RFP ${allSuccess ? 'Approved' : 'Partial Failure'}: ${params.dealName} (${params.projectNumber || 'no number'})`,
+      htmlBody,
+      fromName: 'T-Rock Sync Hub',
+    });
+    log(`[rfp-approval] Status email sent to ${RFP_ADMIN_EMAIL} for deal ${params.hubspotDealId}`, 'rfp');
+  } catch (emailErr: any) {
+    console.error(`[rfp-approval] Failed to send status email: ${emailErr.message}`);
+  }
+}
+
 /** Upload a file to HubSpot Files API and associate it with a deal. */
 async function uploadFileToHubSpotAndAttachToDeal(
   localPath: string,
@@ -709,12 +780,24 @@ export async function processRfpApproval(
         approvedAt: new Date(),
         bidboardProjectId: bidboardProjectId || null,
       });
-      // If the project was actually created (ID captured), report success with a note
+
+      await sendRfpApprovalStatusEmail({
+        dealName: dealData.dealname || 'Unknown Deal',
+        hubspotDealId,
+        projectNumber: finalProjectNumber,
+        approverEmail,
+        bidboardProjectId,
+        bidboardFailed: true,
+        steps: [
+          { name: 'HubSpot Deal Updated', success: true, detail: `Stage: ${targetStageName}, Fields: ${Object.keys(changedFields).length} changed` },
+          { name: 'BidBoard Project Created', success: !!bidboardProjectId, detail: bidboardProjectId ? `ID: ${bidboardProjectId} (created but post-creation steps failed)` : 'Failed — project was not created' },
+          { name: 'Sync Mapping', success: false, detail: 'Skipped due to BidBoard failure' },
+          { name: 'Document Sync', success: false, detail: 'Skipped due to BidBoard failure' },
+        ],
+      });
+
       if (bidboardProjectId) {
-        return {
-          success: true,
-          bidboardProjectId,
-        };
+        return { success: true, bidboardProjectId };
       }
       return {
         success: false,
@@ -753,6 +836,22 @@ export async function processRfpApproval(
         targetStage: targetStageName,
         bidboardProjectId,
       },
+    });
+
+    // Send detailed status email to admin
+    await sendRfpApprovalStatusEmail({
+      dealName: dealData.dealname || 'Unknown Deal',
+      hubspotDealId,
+      projectNumber: finalProjectNumber,
+      approverEmail,
+      bidboardProjectId,
+      bidboardFailed: false,
+      steps: [
+        { name: 'HubSpot Deal Updated', success: true, detail: `Stage: ${targetStageName}, Fields: ${Object.keys(changedFields).length} changed` },
+        { name: 'BidBoard Project Created', success: !!bidboardProjectId, detail: bidboardProjectId ? `ID: ${bidboardProjectId}` : 'Not created' },
+        { name: 'Sync Mapping', success: !!bidboardProjectId, detail: bidboardProjectId ? `Deal ${hubspotDealId} → BidBoard ${bidboardProjectId}` : 'Skipped' },
+        { name: 'Document Sync', success: true, detail: `${(attachmentsToSync || []).length} attachment(s)` },
+      ],
     });
 
     return { success: true, bidboardProjectId };
