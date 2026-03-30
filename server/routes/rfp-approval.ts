@@ -500,6 +500,8 @@ export function registerRfpApprovalRoutes(app: Express) {
       status: 'pending',
       approvedBy: null,
       approvedAt: null,
+      declinedBy: null,
+      declinedAt: null,
       bidboardProjectId: null,
     });
     res.json({ success: true, message: `Request ${request.id} reset to pending. Token: ${token}` });
