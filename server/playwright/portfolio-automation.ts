@@ -1204,8 +1204,39 @@ export async function runPhase2PortfolioActions(
 
   const primeStart = Date.now();
   try {
+    // Reload page after Send to Budget — "Create Prime Contract" is disabled until
+    // the estimate is in budget and the page reflects the new state
+    await page.reload({ waitUntil: "load" }).catch(() => {});
+    await randomDelay(3000, 5000);
+    const estTab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
+    if (estTab) await estTab.click();
+    await randomDelay(2000, 3000);
+
     await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
     await randomDelay(1000, 2000);
+
+    // Check if Create Prime Contract is enabled; if disabled, wait and retry
+    let primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
+    if (!primeMenuItem) {
+      log(`[phase2] Create Prime Contract is disabled — waiting for budget sync`, "playwright");
+      await page.keyboard.press("Escape");
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        await new Promise((r) => setTimeout(r, 15000));
+        await page.reload({ waitUntil: "load" }).catch(() => {});
+        await randomDelay(3000, 5000);
+        const tab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
+        if (tab) await tab.click();
+        await randomDelay(2000, 3000);
+        await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
+        await randomDelay(1000, 2000);
+        primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
+        if (primeMenuItem) {
+          log(`[phase2] Create Prime Contract enabled (attempt ${attempt})`, "playwright");
+          break;
+        }
+        await page.keyboard.press("Escape");
+      }
+    }
 
     await clickMenuItem(
       page,
