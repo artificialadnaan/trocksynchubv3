@@ -243,7 +243,7 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
   try {
     const result = fullSync
       ? await Promise.race([
-          syncProcoreRoleAssignments(),
+          syncProcoreRoleAssignments(undefined, { fullSync: true }),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error('Role sync timed out after 5 minutes')), ROLE_SYNC_TIMEOUT_MS)
           ),

@@ -1073,17 +1073,17 @@ export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids
 let roleAssignmentSyncInProgress = false;
 const roleAssignmentSyncQueue: string[] = [];
 
-export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }>; skipped?: boolean }> {
+export async function syncProcoreRoleAssignments(projectIds?: string[], opts?: { fullSync?: boolean }): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }>; skipped?: boolean }> {
   // Prevent concurrent syncs to avoid duplicate emails
   if (roleAssignmentSyncInProgress) {
     console.log('[procore] Role assignment sync already in progress, skipping to prevent duplicates');
     return { synced: 0, newAssignments: [], skipped: true };
   }
-  
+
   roleAssignmentSyncInProgress = true;
-  
+
   try {
-    return await performRoleAssignmentSync(projectIds);
+    return await performRoleAssignmentSync(projectIds, opts?.fullSync ?? false);
   } finally {
     roleAssignmentSyncInProgress = false;
   }
@@ -1092,30 +1092,33 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
 const ROLE_SYNC_CONCURRENCY = 3; // Reduced from 5 to avoid rate limit bursts when multiple pollers run
 const ROLE_SYNC_PER_REQUEST_TIMEOUT_MS = 10000; // 10s per API call
 
-async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
+async function performRoleAssignmentSync(projectIds?: string[], fullSync: boolean = false): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 
   type ProjectEntry = { procoreId: string; name: string };
   let projectsToSync: ProjectEntry[] = [];
-  let projectsWithMeta: Array<{ procoreId: string; name: string; lastRoleCheckAt?: Date | null; procoreUpdatedAt?: Date | null }> = [];
 
   if (projectIds && projectIds.length > 0) {
+    // Explicit project IDs always sync (webhooks, closeout automation)
     for (const pid of projectIds) {
       const p = await storage.getProcoreProjectByProcoreId(pid);
       if (p) projectsToSync.push({ procoreId: pid, name: p.name || '' });
     }
   } else {
     const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
-    const activeWithMeta = allProjects
-      .filter(p => p.active !== false)
-      .map(p => ({
-        procoreId: p.procoreId,
-        name: p.name || '',
-        lastRoleCheckAt: p.lastRoleCheckAt,
-        procoreUpdatedAt: p.procoreUpdatedAt ?? null,
-      }));
-    const byId = new Map(activeWithMeta.map(p => [p.procoreId, p]));
+
+    type ProjectMeta = { procoreId: string; name: string; lastRoleCheckAt?: Date | null; procoreUpdatedAt?: Date | null; active?: boolean | null };
+    const allWithMeta: ProjectMeta[] = allProjects.map(p => ({
+      procoreId: p.procoreId,
+      name: p.name || '',
+      lastRoleCheckAt: p.lastRoleCheckAt,
+      procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+      active: p.active,
+    }));
+
+    // Also include any projects referenced in sync mappings that aren't in the main list
+    const byId = new Map(allWithMeta.map(p => [p.procoreId, p]));
     const mappings = await storage.getSyncMappings();
     for (const m of mappings) {
       for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
@@ -1127,14 +1130,51 @@ async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synce
               name: p.name || '',
               lastRoleCheckAt: p.lastRoleCheckAt,
               procoreUpdatedAt: p.procoreUpdatedAt ?? null,
+              active: p.active,
             });
           }
         }
       }
     }
-    projectsWithMeta = Array.from(byId.values());
-    // Check all active projects every cycle; role assignments can change without project-level updates
-    projectsToSync = projectsWithMeta.map(p => ({ procoreId: p.procoreId, name: p.name }));
+    const allProjectsMeta = Array.from(byId.values());
+
+    if (fullSync) {
+      // Full sync: all projects regardless of active status or last check time
+      projectsToSync = allProjectsMeta.map(p => ({ procoreId: p.procoreId, name: p.name }));
+    } else {
+      // Incremental sync: recently updated active projects + any project (active or not) overdue for stale check
+      const now = new Date();
+      const cutoff24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const cutoff7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+      const seenIds = new Set<string>();
+      const recentlyUpdated: ProjectMeta[] = [];
+      const staleRoleCheck: ProjectMeta[] = [];
+      let skippedInactive = 0;
+
+      for (const p of allProjectsMeta) {
+        // Recently updated active projects
+        if (p.active !== false && p.procoreUpdatedAt && p.procoreUpdatedAt >= cutoff24h) {
+          recentlyUpdated.push(p);
+          seenIds.add(p.procoreId);
+        }
+      }
+
+      for (const p of allProjectsMeta) {
+        // Projects not checked in 7+ days (regardless of active status — we never want to miss an assignment)
+        const isStale = !p.lastRoleCheckAt || p.lastRoleCheckAt < cutoff7d;
+        if (isStale && !seenIds.has(p.procoreId)) {
+          staleRoleCheck.push(p);
+          seenIds.add(p.procoreId);
+        } else if (!seenIds.has(p.procoreId) && p.active === false) {
+          // Inactive, up-to-date — skipped entirely
+          skippedInactive++;
+        }
+      }
+
+      projectsToSync = [...recentlyUpdated, ...staleRoleCheck].map(p => ({ procoreId: p.procoreId, name: p.name }));
+      console.log(`[procore] Role sync: ${recentlyUpdated.length} recently updated + ${staleRoleCheck.length} stale check = ${projectsToSync.length} total (skipped ${skippedInactive} inactive up-to-date)`);
+    }
   }
 
   console.log(`[procore] Syncing role assignments for ${projectsToSync.length} projects (${ROLE_SYNC_CONCURRENCY} concurrent)...`);
