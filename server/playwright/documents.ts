@@ -410,7 +410,7 @@ export async function uploadDocumentToBidBoard(
       await takeScreenshot(page, "upload-4-after-menu-click");
       await randomDelay(2000, 3000);
       // Wait for upload modal and dropzone to appear
-      await page.waitForSelector('[class*="StyledDropzoneContainer"], button.StyledUploadButton, button:has-text("Upload Files")', { timeout: 10000 }).catch(() => {});
+      await page.waitForSelector('[class*="StyledDropzoneContainer"], button.StyledUploadButton, button:has-text("Upload Files"), button:has-text("Attach Files")', { timeout: 10000 }).catch(() => {});
       await takeScreenshot(page, "upload-5-dropzone-ready");
     } else {
       // Legacy: Documents tab then upload
@@ -481,7 +481,7 @@ export async function uploadDocumentToBidBoard(
           // Use filechooser event — clicking "Upload Files" triggers native picker which Procore detects
           const [fileChooser] = await Promise.all([
             page.waitForEvent('filechooser', { timeout: 15000 }),
-            page.locator('button:has-text("Upload Files"), div[data-qa="ci-Image"]').first().click({ timeout: 8000 }),
+            page.locator('button:has-text("Upload Files"), button:has-text("Attach Files"), div[data-qa="ci-Image"]').first().click({ timeout: 8000 }),
           ]);
           log(`Uploading to Procore: path=${filePath}, ext=${path.extname(filePath)}`, "playwright");
           await fileChooser.setFiles(filePath);
