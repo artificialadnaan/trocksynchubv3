@@ -1558,7 +1558,7 @@ export async function createBidBoardProjectFromDeal(
     state: get(undefined, "state") || properties.state || properties.state_region || undefined,
     zip: get(undefined, "zip") || properties.zip || properties.postal_code || undefined,
     country: get(undefined, "country") || properties.country || undefined,
-    description: get(undefined, "description") || properties.description || properties.notes || undefined,
+    description: get(undefined, "description") || properties.description || properties.project_description__briefly_describe_the_project_ || properties.project_description || properties.notes || undefined,
     bidDueDate: get(undefined, "bid_due_date") || properties.bid_due_date || properties.due_date || undefined,
     proposalId: options.proposalId,
   };
