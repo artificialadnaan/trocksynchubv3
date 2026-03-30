@@ -1414,17 +1414,19 @@ export async function createBidBoardProject(
       }
     }
 
-    // Click Create/Save button (legacy modal); new UI may auto-save on blur
-    const submitButton = await page.$(PROCORE_SELECTORS.newProject.createButton);
-    if (submitButton) {
-      await submitButton.scrollIntoViewIfNeeded().catch(() => {});
-      await randomDelay(200, 400);
-      await submitButton.click({ force: true });
-      await randomDelay(2000, 3000);
-    } else if (!isNewBidBoardUi) {
-      result.error = "Create button not found in form";
-      result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-submit");
-      return result;
+    // Click Create/Save button (legacy modal only); new UI auto-saves on blur
+    if (!isNewBidBoardUi) {
+      const submitButton = await page.$(PROCORE_SELECTORS.newProject.createButton);
+      if (submitButton) {
+        await submitButton.scrollIntoViewIfNeeded().catch(() => {});
+        await randomDelay(200, 400);
+        await submitButton.click({ force: true });
+        await randomDelay(2000, 3000);
+      } else {
+        result.error = "Create button not found in form";
+        result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-submit");
+        return result;
+      }
     }
 
     // Wait for navigation or success indicator
