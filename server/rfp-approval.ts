@@ -701,8 +701,7 @@ export async function processRfpApproval(
     }
 
     if (bidboardFailed) {
-      // Even though BidBoard failed, HubSpot was already updated (stage, fields).
-      // Mark as approved so retries don't re-run HubSpot updates and create duplicate projects.
+      // HubSpot was already updated (stage, fields). Mark as approved.
       await storage.updateRfpApprovalRequest(request.id, {
         status: 'approved',
         editedFields: changedFields,
@@ -710,9 +709,16 @@ export async function processRfpApproval(
         approvedAt: new Date(),
         bidboardProjectId: bidboardProjectId || null,
       });
+      // If the project was actually created (ID captured), report success with a note
+      if (bidboardProjectId) {
+        return {
+          success: true,
+          bidboardProjectId,
+        };
+      }
       return {
         success: false,
-        error: 'HubSpot updated but BidBoard project creation failed. Request marked approved to prevent duplicate retries.',
+        error: 'HubSpot updated but BidBoard project creation failed. Please check BidBoard manually.',
         bidboardProjectId,
       };
     }

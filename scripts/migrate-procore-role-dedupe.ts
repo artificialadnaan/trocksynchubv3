@@ -48,6 +48,18 @@ async function main() {
 
   if (dupCount === 0) {
     console.log(`[migrate] procore_role_assignments: no duplicates (${countBefore} rows), skipping`);
+    // Ensure unique constraint exists so db:push doesn't prompt to truncate
+    await pool.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'procore_role_assignments_procore_project_id_role_name_assignee_id_unique'
+        ) THEN
+          ALTER TABLE procore_role_assignments
+            ADD CONSTRAINT procore_role_assignments_procore_project_id_role_name_assignee_id_unique
+            UNIQUE (procore_project_id, role_name, assignee_id);
+        END IF;
+      END $$;
+    `).catch(() => { /* constraint may already exist */ });
     await pool.end();
     process.exit(0);
     return;

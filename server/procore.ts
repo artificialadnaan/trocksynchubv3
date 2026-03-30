@@ -1073,6 +1073,10 @@ export async function syncProcoreBidBoard(): Promise<{ bidPackages: number; bids
 let roleAssignmentSyncInProgress = false;
 const roleAssignmentSyncQueue: string[] = [];
 
+// First sync after deploy: treat as baseline — don't report assignments as "new"
+// to avoid spam when the role_assignments table gets truncated by db:push
+let isFirstRoleSyncAfterStartup = true;
+
 export async function syncProcoreRoleAssignments(projectIds?: string[], opts?: { fullSync?: boolean }): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }>; skipped?: boolean }> {
   // Prevent concurrent syncs to avoid duplicate emails
   if (roleAssignmentSyncInProgress) {
@@ -1081,11 +1085,20 @@ export async function syncProcoreRoleAssignments(projectIds?: string[], opts?: {
   }
 
   roleAssignmentSyncInProgress = true;
+  const suppressNewAssignments = isFirstRoleSyncAfterStartup && !projectIds;
 
   try {
-    return await performRoleAssignmentSync(projectIds, opts?.fullSync ?? false);
+    const result = await performRoleAssignmentSync(projectIds, opts?.fullSync ?? false);
+
+    if (suppressNewAssignments && result.newAssignments.length > 0) {
+      console.log(`[procore] First sync after startup — suppressing ${result.newAssignments.length} "new" assignments (baseline sync, not real changes)`);
+      result.newAssignments = [];
+    }
+
+    return result;
   } finally {
     roleAssignmentSyncInProgress = false;
+    if (!projectIds) isFirstRoleSyncAfterStartup = false;
   }
 }
 
@@ -1247,15 +1260,21 @@ async function performRoleAssignmentSync(projectIds?: string[], fullSync: boolea
         });
 
         if (isNew) {
-          newAssignments.push({
-            procoreProjectId: project.procoreId,
-            projectName: project.name,
-            roleName,
-            assigneeId,
-            assigneeName,
-            assigneeEmail,
-            assigneeCompany,
-          });
+          // Double-check email send log — if already notified, don't report as new
+          // (survives role_assignments table truncation on deploy)
+          const emailDedupeKey = `role_assignment:${project.procoreId}:${roleName}:${assigneeId}`;
+          const alreadyNotified = await storage.checkEmailDedupeKey(emailDedupeKey);
+          if (!alreadyNotified) {
+            newAssignments.push({
+              procoreProjectId: project.procoreId,
+              projectName: project.name,
+              roleName,
+              assigneeId,
+              assigneeName,
+              assigneeEmail,
+              assigneeCompany,
+            });
+          }
         }
 
         synced++;
@@ -1462,6 +1481,9 @@ export async function syncProcoreRoleAssignmentsBatch(
           });
 
           if (isNew) {
+            const emailDedupeKey = `role_assignment:${project.procoreId}:${roleName}:${assigneeId}`;
+            const alreadyNotified = await storage.checkEmailDedupeKey(emailDedupeKey);
+            if (!alreadyNotified) {
             newAssignments.push({
               procoreProjectId: project.procoreId,
               projectName: project.name,
@@ -1471,6 +1493,7 @@ export async function syncProcoreRoleAssignmentsBatch(
               assigneeEmail,
               assigneeCompany,
             });
+            }
           }
 
           synced++;
