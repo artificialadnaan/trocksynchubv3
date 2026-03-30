@@ -902,15 +902,7 @@ export async function createBidBoardProject(
       const projectNumberTypeDigit = projectData.projectNumber?.match(/^[A-Z]{2,4}-(\d+)-/i)?.[1];
       isService = projectNumberTypeDigit === "4";
 
-      // Description before estimator
-      if (projectData.description) {
-        const descInput = await page.$('textarea[name="description"]');
-        if (descInput) {
-          await descInput.click();
-          await descInput.fill(projectData.description);
-          await randomDelay(200, 400);
-        }
-      }
+      // Note: description fill moved to after project form opens (line ~1312)
       log(`Tab selection: projectNumber=${projectData.projectNumber}, typeDigit=${projectNumberTypeDigit ?? "none"}, isService=${isService}`, "playwright");
       try {
         const tab = isService
@@ -980,8 +972,8 @@ export async function createBidBoardProject(
     // New BidBoard: stage dropdown defaults to SERVICE - ESTIMATING; change to ESTIMATE IN PROGRESS when not service
     if (isNewBidBoardUi && !isService) {
       try {
-        // Open the dropdown
-        await page.locator('div.StyledPageHeader-core-12_35_0__sc-1cvdbsv-0 div.StyledSelectArrowContainer-core-12_35_0__sc-mr8gwe-3, #mount-point span:nth-of-type(2) > div > div').first().click({ timeout: 8000 });
+        // Open the stage dropdown — use version-agnostic partial class match to survive Procore version bumps
+        await page.locator('div[class*="StyledPageHeader"] div[class*="StyledSelectArrowContainer"], div[class*="StyledSelectButton"], [role="combobox"]').first().click({ timeout: 8000 });
 
         await page.waitForTimeout(800);
 
@@ -1197,7 +1189,8 @@ export async function createBidBoardProject(
             if (searchInput) {
               await searchInput.fill(projectData.clientName);
               await randomDelay(2000, 3000);
-              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(projectData.clientName.slice(0, 10), "i") }).first();
+              const escapedName = projectData.clientName.slice(0, 10).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
                 await listItem.click({ timeout: 8000 });
                 await randomDelay(500, 1000);
@@ -1326,99 +1319,98 @@ export async function createBidBoardProject(
       await takeScreenshot(page, "bidboard-after-details-filled");
     }
 
-    // Select stage
-    const stageSelect = await page.$(PROCORE_SELECTORS.newProject.stageSelect);
-    if (stageSelect) {
-      try {
-        await stageSelect.selectOption({ label: projectData.stage });
-      } catch {
-        // Try alternative: click and select from dropdown
-        await stageSelect.click();
-        await randomDelay(300, 500);
-        const stageOption = await page.$(`option:has-text("${projectData.stage}")`);
-        if (stageOption) {
-          await stageOption.click();
-        }
-      }
-      await randomDelay(200, 400);
-    }
-
-    // Fill optional fields if provided
-    if (projectData.clientName) {
-      const clientInput = await page.$(PROCORE_SELECTORS.newProject.clientNameInput);
-      if (clientInput) {
-        await clientInput.fill(projectData.clientName);
-        await randomDelay(200, 400);
-      }
-    }
-
-    if (projectData.clientEmail) {
-      const emailInput = await page.$(PROCORE_SELECTORS.newProject.clientEmailInput);
-      if (emailInput) {
-        await emailInput.fill(projectData.clientEmail);
-        await randomDelay(200, 400);
-      }
-    }
-
-    if (projectData.clientPhone) {
-      const phoneInput = await page.$(PROCORE_SELECTORS.newProject.clientPhoneInput);
-      if (phoneInput) {
-        await phoneInput.fill(projectData.clientPhone);
-        await randomDelay(200, 400);
-      }
-    }
-
-    if (projectData.address) {
-      const addressInput = await page.$(PROCORE_SELECTORS.newProject.addressInput);
-      if (addressInput) {
-        await addressInput.fill(projectData.address);
-        await randomDelay(200, 400);
-      }
-    }
-
-    if (projectData.city) {
-      const cityInput = await page.$(PROCORE_SELECTORS.newProject.cityInput);
-      if (cityInput) {
-        await cityInput.fill(projectData.city);
-        await randomDelay(200, 400);
-      }
-    }
-
-    if (projectData.state) {
-      const stateInput = await page.$(PROCORE_SELECTORS.newProject.stateInput);
-      if (stateInput) {
-        // ElementHandle doesn't have .tagName directly; evaluate in browser context
-        const tagName = await stateInput.evaluate(el => el.tagName.toUpperCase());
-        if (tagName === 'SELECT') {
-          await stateInput.selectOption({ label: projectData.state });
-        } else {
-          await stateInput.fill(projectData.state);
+    // Legacy UI: fill fields via legacy selectors (skip for new UI — already handled above)
+    if (!isNewBidBoardUi) {
+      const stageSelect = await page.$(PROCORE_SELECTORS.newProject.stageSelect);
+      if (stageSelect) {
+        try {
+          await stageSelect.selectOption({ label: projectData.stage });
+        } catch {
+          await stageSelect.click();
+          await randomDelay(300, 500);
+          const stageOption = await page.$(`option:has-text("${projectData.stage}")`);
+          if (stageOption) {
+            await stageOption.click();
+          }
         }
         await randomDelay(200, 400);
       }
-    }
 
-    if (projectData.zip) {
-      const zipInput = await page.$(PROCORE_SELECTORS.newProject.zipInput);
-      if (zipInput) {
-        await zipInput.fill(projectData.zip);
-        await randomDelay(200, 400);
+      if (projectData.clientName) {
+        const clientInput = await page.$(PROCORE_SELECTORS.newProject.clientNameInput);
+        if (clientInput) {
+          await clientInput.fill(projectData.clientName);
+          await randomDelay(200, 400);
+        }
       }
-    }
 
-    if (projectData.description) {
-      const descInput = await page.$(PROCORE_SELECTORS.newProject.descriptionInput);
-      if (descInput) {
-        await descInput.fill(projectData.description);
-        await randomDelay(200, 400);
+      if (projectData.clientEmail) {
+        const emailInput = await page.$(PROCORE_SELECTORS.newProject.clientEmailInput);
+        if (emailInput) {
+          await emailInput.fill(projectData.clientEmail);
+          await randomDelay(200, 400);
+        }
       }
-    }
 
-    if (projectData.bidDueDate) {
-      const dueDateInput = await page.$(PROCORE_SELECTORS.newProject.bidDueDateInput);
-      if (dueDateInput) {
-        await dueDateInput.fill(projectData.bidDueDate);
-        await randomDelay(200, 400);
+      if (projectData.clientPhone) {
+        const phoneInput = await page.$(PROCORE_SELECTORS.newProject.clientPhoneInput);
+        if (phoneInput) {
+          await phoneInput.fill(projectData.clientPhone);
+          await randomDelay(200, 400);
+        }
+      }
+
+      if (projectData.address) {
+        const addressInput = await page.$(PROCORE_SELECTORS.newProject.addressInput);
+        if (addressInput) {
+          await addressInput.fill(projectData.address);
+          await randomDelay(200, 400);
+        }
+      }
+
+      if (projectData.city) {
+        const cityInput = await page.$(PROCORE_SELECTORS.newProject.cityInput);
+        if (cityInput) {
+          await cityInput.fill(projectData.city);
+          await randomDelay(200, 400);
+        }
+      }
+
+      if (projectData.state) {
+        const stateInput = await page.$(PROCORE_SELECTORS.newProject.stateInput);
+        if (stateInput) {
+          const tagName = await stateInput.evaluate(el => el.tagName.toUpperCase());
+          if (tagName === 'SELECT') {
+            await stateInput.selectOption({ label: projectData.state });
+          } else {
+            await stateInput.fill(projectData.state);
+          }
+          await randomDelay(200, 400);
+        }
+      }
+
+      if (projectData.zip) {
+        const zipInput = await page.$(PROCORE_SELECTORS.newProject.zipInput);
+        if (zipInput) {
+          await zipInput.fill(projectData.zip);
+          await randomDelay(200, 400);
+        }
+      }
+
+      if (projectData.description) {
+        const descInput = await page.$(PROCORE_SELECTORS.newProject.descriptionInput);
+        if (descInput) {
+          await descInput.fill(projectData.description);
+          await randomDelay(200, 400);
+        }
+      }
+
+      if (projectData.bidDueDate) {
+        const dueDateInput = await page.$(PROCORE_SELECTORS.newProject.bidDueDateInput);
+        if (dueDateInput) {
+          await dueDateInput.fill(projectData.bidDueDate);
+          await randomDelay(200, 400);
+        }
       }
     }
 
