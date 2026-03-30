@@ -78,7 +78,7 @@ export const PROCORE_SELECTORS = {
     stageTabs: '[class*="stage-tab"], [class*="status-tab"], [role="tablist"] button, [class*="tab-item"]',
     stageDropdown: '[data-testid="stage-dropdown"], .stage-dropdown, select.stage',
     createNewProject: 'button.aid-addNewProject, button[label="Create New Project"], button:has-text("Create New Project"), button:has-text("New Project"), [data-testid="create-project"], [data-testid="new-project"]',
-    sendToPortfolioButton: '[data-testid="send-to-portfolio"], button:has-text("Send to Portfolio")',
+    sendToPortfolioButton: '[data-testid="send-to-portfolio"], button:has-text("Send to Portfolio"), [role="menuitem"]:has-text("Add to Portfolio"), button:has-text("Add to Portfolio")',
     projectOverviewTab: '[data-testid="overview-tab"], a:has-text("Overview")',
     estimateTab: '[data-testid="estimate-tab"], a:has-text("Estimate")',
     documentsTab: '[data-testid="documents-tab"], a:has-text("Documents")',

@@ -930,7 +930,7 @@ export async function runPhase1BidBoardActions(
       if (filesToUpload.length > 0) {
         const [fileChooser] = await Promise.all([
           page.waitForEvent("filechooser", { timeout: 10000 }),
-          page.click('button:has-text("Upload Files")'),
+          page.click('button:has-text("Upload Files"), button:has-text("Attach Files")'),
         ]);
         await fileChooser.setFiles(filesToUpload);
 
@@ -1742,7 +1742,7 @@ export async function editPrimeContract(
         } else {
           const [fileChooser] = await Promise.all([
             page.waitForEvent("filechooser", { timeout: 10000 }),
-            page.click('button:has-text("Upload Files")'),
+            page.click('button:has-text("Upload Files"), button:has-text("Attach Files")'),
           ]);
           await fileChooser.setFiles(proposalPdfPath);
         }
