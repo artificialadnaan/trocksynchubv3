@@ -57,6 +57,25 @@ let contextInstance: BrowserContext | null = null;
 let browserInitPromise: Promise<Browser> | null = null;
 let contextInitPromise: Promise<BrowserContext> | null = null;
 
+// Operation lock — ensures only one Playwright automation runs at a time.
+// Without this, concurrent RFP approvals or BidBoard operations share the
+// same browser page and destroy each other's execution context.
+let operationLockPromise: Promise<void> = Promise.resolve();
+
+export async function withBrowserLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  let resolve: () => void;
+  const prevLock = operationLockPromise;
+  operationLockPromise = new Promise<void>((r) => { resolve = r; });
+  await prevLock; // Wait for previous operation to finish
+  log(`[browser-lock] Acquired lock for: ${name}`, "playwright");
+  try {
+    return await fn();
+  } finally {
+    log(`[browser-lock] Released lock for: ${name}`, "playwright");
+    resolve!();
+  }
+}
+
 export interface BrowserConfig {
   headless?: boolean;
   slowMo?: number;

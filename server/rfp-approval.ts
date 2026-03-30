@@ -655,8 +655,9 @@ export async function processRfpApproval(
     let bidboardFailed = false;
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
+      const { withBrowserLock } = await import('./playwright/browser');
       const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
-      const bbResult = await createBidBoardProjectFromDeal(hubspotDealId, bidboardStage, {
+      const bbResult = await withBrowserLock(`rfp-approval-${hubspotDealId}`, () => createBidBoardProjectFromDeal(hubspotDealId, bidboardStage, {
         syncDocuments: true,
         attachmentsOverride: attachmentsToSync,
         projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
@@ -665,7 +666,7 @@ export async function processRfpApproval(
           project_types: finalProjectTypeDigit,
         },
         proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
-      });
+      }));
       if (bbResult.success && bbResult.projectId) {
         bidboardProjectId = bbResult.projectId;
         log(`[rfp-approval] BidBoard project created: ${bidboardProjectId} for deal ${hubspotDealId}`, 'rfp');
