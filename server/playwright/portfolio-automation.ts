@@ -1139,8 +1139,42 @@ export async function runPhase2PortfolioActions(
 
   const budgetStart = Date.now();
   try {
-    await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
-    await randomDelay(1000, 2000);
+    // Poll for "Send to Budget" menu item — Procore needs time to initialize
+    // financial tools (Budget, Prime Contract) after Add to Portfolio.
+    // The WBS/cost code initialization runs async and can take 2-5 minutes.
+    const BUDGET_POLL_MAX = 10; // 10 attempts
+    const BUDGET_POLL_INTERVAL = 30000; // 30s between attempts
+    let budgetMenuFound = false;
+
+    for (let attempt = 1; attempt <= BUDGET_POLL_MAX; attempt++) {
+      await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
+      await randomDelay(1000, 2000);
+
+      const sendToBudgetItem = await page.$(SEL.portfolioEstimating.sendToBudget)
+        || await page.$(SEL.portfolioEstimating.sendToBudgetFallback);
+
+      if (sendToBudgetItem) {
+        budgetMenuFound = true;
+        log(`[phase2] Send to Budget menu item found (attempt ${attempt}/${BUDGET_POLL_MAX})`, "playwright");
+        break;
+      }
+
+      await page.keyboard.press("Escape");
+      if (attempt < BUDGET_POLL_MAX) {
+        log(`[phase2] Send to Budget not available yet — financial tools initializing (attempt ${attempt}/${BUDGET_POLL_MAX}, retrying in ${BUDGET_POLL_INTERVAL / 1000}s)`, "playwright");
+        await page.reload({ waitUntil: "load" }).catch(() => {});
+        await randomDelay(3000, 5000);
+        // Navigate back to Estimating tab after reload
+        const estTab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
+        if (estTab) await estTab.click();
+        await randomDelay(2000, 3000);
+        await new Promise((r) => setTimeout(r, BUDGET_POLL_INTERVAL));
+      }
+    }
+
+    if (!budgetMenuFound) {
+      throw new Error("Send to Budget menu item not available after polling — financial tools may not be initialized");
+    }
 
     await clickMenuItem(
       page,
