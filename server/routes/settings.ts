@@ -349,7 +349,8 @@ async function runBidboardPollingCycle() {
   const startTime = Date.now();
 
   try {
-    const result = await runBidBoardPolling();
+    const { withBrowserLock } = await import("../playwright/browser");
+    const result = await withBrowserLock("bidboard-polling", () => runBidBoardPolling());
     lastBidboardPollAt = new Date();
     lastBidboardPollResult = result;
 
@@ -395,10 +396,11 @@ async function runBidBoardStageSyncCycle() {
   bidboardStageSyncRunning = true;
   console.log("[BidBoardStageSync] Starting sync cycle");
   try {
+    const { withBrowserLock } = await import("../playwright/browser");
     const config = await storage.getAutomationConfig("bidboard_stage_sync");
     const val = (config?.value as any) || {};
     const dryRun = val.dryRun !== false;
-    const result = await runBidBoardStageSync({ dryRun });
+    const result = await withBrowserLock("bidboard-stage-sync", () => runBidBoardStageSync({ dryRun }));
     lastBidboardStageSyncAt = new Date();
     const runStatus = result.initialized
       ? "initialized"
