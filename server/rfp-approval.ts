@@ -412,6 +412,19 @@ export async function processRfpApproval(
     const dealData = request.dealData as Record<string, any>;
     const hubspotDealId = request.hubspotDealId;
 
+    // Retry guard: check if a previous attempt already created a BidBoard project for this deal
+    const existingMapping = await storage.getSyncMappingByHubspotDealId(hubspotDealId);
+    if (existingMapping?.bidboardProjectId) {
+      log(`[rfp-approval] Retry detected — BidBoard project ${existingMapping.bidboardProjectId} already exists for deal ${hubspotDealId}. Marking approved.`, 'rfp');
+      await storage.updateRfpApprovalRequest(request.id, {
+        status: 'approved',
+        approvedBy: approverEmail,
+        approvedAt: new Date(),
+        bidboardProjectId: existingMapping.bidboardProjectId,
+      });
+      return { success: true, bidboardProjectId: existingMapping.bidboardProjectId };
+    }
+
     // Check if project type changed — update project number and HubSpot immediately
     const submittedProjectType = editedFields.project_types;
     const currentProjectNumber = (dealData.project_number ?? '') as string;
@@ -577,9 +590,18 @@ export async function processRfpApproval(
     }
 
     if (bidboardFailed) {
+      // Even though BidBoard failed, HubSpot was already updated (stage, fields).
+      // Mark as approved so retries don't re-run HubSpot updates and create duplicate projects.
+      await storage.updateRfpApprovalRequest(request.id, {
+        status: 'approved',
+        editedFields: changedFields,
+        approvedBy: approverEmail,
+        approvedAt: new Date(),
+        bidboardProjectId: bidboardProjectId || null,
+      });
       return {
         success: false,
-        error: 'BidBoard project creation failed',
+        error: 'HubSpot updated but BidBoard project creation failed. Request marked approved to prevent duplicate retries.',
         bidboardProjectId,
       };
     }

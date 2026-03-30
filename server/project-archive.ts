@@ -453,6 +453,19 @@ export async function handleProjectStageChange(
     return { triggered: false, reason: `Stage "${newStage}" does not match trigger "${triggerStage}"` };
   }
 
+  // Skip if an archive for this project already started recently (prevents duplicate
+  // triggers from deactivation + stage-change paths or multiple Procore webhook events)
+  const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+  for (const [, progress] of archiveProgress) {
+    if (
+      progress.projectId === projectId &&
+      (progress.status === 'in_progress' || progress.status === 'completed') &&
+      Date.now() - new Date(progress.startedAt).getTime() < DEDUP_WINDOW_MS
+    ) {
+      return { triggered: false, reason: `Archive already ${progress.status} (started ${progress.startedAt})` };
+    }
+  }
+
   const result = await startProjectArchive(projectId, {
     includeDrawings: autoConfig.includeDrawings,
     includeSubmittals: autoConfig.includeSubmittals,

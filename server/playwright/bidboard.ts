@@ -1568,7 +1568,45 @@ export async function createBidBoardProjectFromDeal(
   
   const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
   
-  // If successful, create a sync mapping and sync documents
+  // If successful, verify description was saved and retry if missing
+  if (result.success && result.projectId && projectData.description) {
+    const DESC_MAX_ATTEMPTS = 3;
+    const DESC_RETRY_DELAY_MS = 3000;
+    for (let attempt = 1; attempt <= DESC_MAX_ATTEMPTS; attempt++) {
+      try {
+        const { page: descPage, success: loggedIn } = await ensureLoggedIn();
+        if (!loggedIn || !descPage) break;
+
+        await navigateToProject(descPage, result.projectId);
+        await descPage.waitForLoadState("load").catch(() => {});
+        await randomDelay(1500, 2500);
+
+        // Check if description is already filled
+        const descTextarea = await descPage.$('textarea[name="description"], textarea');
+        if (descTextarea) {
+          const currentDesc = await descTextarea.inputValue().catch(() => '');
+          if (currentDesc && currentDesc.trim().length > 0) {
+            log(`[rfp-approval] Description already present on project ${result.projectId}`, "playwright");
+            break;
+          }
+          // Description is empty — fill it
+          log(`[rfp-approval] Description missing on project ${result.projectId}, filling (attempt ${attempt}/${DESC_MAX_ATTEMPTS})`, "playwright");
+          await descTextarea.click();
+          await descTextarea.fill(projectData.description);
+          await descPage.keyboard.press('Tab');
+          await randomDelay(1000, 2000);
+          log(`[rfp-approval] Description saved on project ${result.projectId}`, "playwright");
+          break;
+        }
+      } catch (descErr: any) {
+        log(`[rfp-approval] Description retry failed (attempt ${attempt}/${DESC_MAX_ATTEMPTS}): ${descErr.message}`, "playwright");
+        if (attempt < DESC_MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, DESC_RETRY_DELAY_MS));
+        }
+      }
+    }
+  }
+
   if (result.success && result.projectId) {
     // Create sync mapping
     try {
@@ -1589,55 +1627,70 @@ export async function createBidBoardProjectFromDeal(
       log(`Warning: Could not create sync mapping: ${err.message}`, "playwright");
     }
 
-    // Sync documents and photos to BidBoard
+    // Sync documents and photos to BidBoard (with retry)
     if (options.syncDocuments !== false) {
-      try {
-        const { syncHubSpotAttachmentsToBidBoard, syncAttachmentsListToBidBoard } = await import("./documents");
-        let docResult: { success: boolean; documentsUploaded: number; documentsDownloaded: number; errors: string[] };
-        if (Array.isArray(options.attachmentsOverride)) {
-          log(`Syncing ${options.attachmentsOverride.length} attachments (override) to BidBoard project ${result.projectId}`, "playwright");
-          docResult = await syncAttachmentsListToBidBoard(result.projectId, options.attachmentsOverride);
-        } else {
-          log(`Syncing documents from HubSpot deal ${dealId} to BidBoard project ${result.projectId}`, "playwright");
-          docResult = await syncHubSpotAttachmentsToBidBoard(result.projectId, dealId);
-        }
-        
-        result.documentsUploaded = docResult.documentsUploaded;
-        result.documentErrors = docResult.errors;
-        
-        if (docResult.success) {
-          log(`Successfully synced ${docResult.documentsUploaded} documents to BidBoard project ${result.projectId}`, "playwright");
-        } else if (docResult.documentsUploaded > 0) {
-          log(`Partially synced ${docResult.documentsUploaded} documents to BidBoard (some errors)`, "playwright");
-        } else {
-          log(`No documents found or sync failed for BidBoard project ${result.projectId}`, "playwright");
+      const DOC_SYNC_MAX_ATTEMPTS = 3;
+      const DOC_SYNC_RETRY_DELAY_MS = 5000;
+      let docSyncSuccess = false;
+
+      for (let attempt = 1; attempt <= DOC_SYNC_MAX_ATTEMPTS; attempt++) {
+        try {
+          const { syncHubSpotAttachmentsToBidBoard, syncAttachmentsListToBidBoard } = await import("./documents");
+          let docResult: { success: boolean; documentsUploaded: number; documentsDownloaded: number; errors: string[] };
+          if (Array.isArray(options.attachmentsOverride)) {
+            log(`Syncing ${options.attachmentsOverride.length} attachments (override) to BidBoard project ${result.projectId} (attempt ${attempt}/${DOC_SYNC_MAX_ATTEMPTS})`, "playwright");
+            docResult = await syncAttachmentsListToBidBoard(result.projectId!, options.attachmentsOverride);
+          } else {
+            log(`Syncing documents from HubSpot deal ${dealId} to BidBoard project ${result.projectId} (attempt ${attempt}/${DOC_SYNC_MAX_ATTEMPTS})`, "playwright");
+            docResult = await syncHubSpotAttachmentsToBidBoard(result.projectId!, dealId);
+          }
+
+          result.documentsUploaded = docResult.documentsUploaded;
+          result.documentErrors = docResult.errors;
+
+          if (docResult.success) {
+            log(`Successfully synced ${docResult.documentsUploaded} documents to BidBoard project ${result.projectId}`, "playwright");
+            docSyncSuccess = true;
+          } else if (docResult.documentsUploaded > 0) {
+            log(`Partially synced ${docResult.documentsUploaded} documents to BidBoard (some errors)`, "playwright");
+            docSyncSuccess = true; // partial is acceptable
+          } else {
+            log(`No documents found or sync failed for BidBoard project ${result.projectId}`, "playwright");
+          }
+
+          await storage.createBidboardAutomationLog({
+            projectId: result.projectId,
+            projectName: projectData.name,
+            action: "sync_hubspot_documents",
+            status: docResult.success ? "success" : (docResult.documentsUploaded > 0 ? "partial" : "failed"),
+            details: {
+              hubspotDealId: dealId,
+              documentsFound: docResult.documentsDownloaded,
+              documentsUploaded: docResult.documentsUploaded,
+              attempt,
+            },
+            errorMessage: docResult.errors.length > 0 ? docResult.errors.join(", ") : undefined,
+          });
+
+          if (docSyncSuccess) break;
+        } catch (docErr: any) {
+          log(`Error syncing documents (attempt ${attempt}/${DOC_SYNC_MAX_ATTEMPTS}): ${docErr.message}`, "playwright");
+          result.documentErrors = [docErr.message];
+
+          await storage.createBidboardAutomationLog({
+            projectId: result.projectId,
+            projectName: projectData.name,
+            action: "sync_hubspot_documents",
+            status: "failed",
+            details: { hubspotDealId: dealId, attempt },
+            errorMessage: docErr.message,
+          });
         }
 
-        // Log document sync action
-        await storage.createBidboardAutomationLog({
-          projectId: result.projectId,
-          projectName: projectData.name,
-          action: "sync_hubspot_documents",
-          status: docResult.success ? "success" : (docResult.documentsUploaded > 0 ? "partial" : "failed"),
-          details: {
-            hubspotDealId: dealId,
-            documentsFound: docResult.documentsDownloaded,
-            documentsUploaded: docResult.documentsUploaded,
-          },
-          errorMessage: docResult.errors.length > 0 ? docResult.errors.join(", ") : undefined,
-        });
-      } catch (docErr: any) {
-        log(`Error syncing documents: ${docErr.message}`, "playwright");
-        result.documentErrors = [docErr.message];
-        
-        await storage.createBidboardAutomationLog({
-          projectId: result.projectId,
-          projectName: projectData.name,
-          action: "sync_hubspot_documents",
-          status: "failed",
-          details: { hubspotDealId: dealId },
-          errorMessage: docErr.message,
-        });
+        if (!docSyncSuccess && attempt < DOC_SYNC_MAX_ATTEMPTS) {
+          log(`Retrying document sync in ${DOC_SYNC_RETRY_DELAY_MS / 1000}s...`, "playwright");
+          await new Promise((r) => setTimeout(r, DOC_SYNC_RETRY_DELAY_MS));
+        }
       }
     }
   }
