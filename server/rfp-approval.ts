@@ -199,16 +199,55 @@ async function fetchDealAttachmentsFromFiles(dealId: string): Promise<Array<{ na
   return list;
 }
 
+async function fetchDealAttachmentsFromEngagements(dealId: string): Promise<Array<{ name: string; url: string; type?: string; size?: number }>> {
+  const list: Array<{ name: string; url: string; type?: string; size?: number }> = [];
+  try {
+    const token = await getAccessToken();
+    const base = 'https://api.hubapi.com';
+    const headers = { Authorization: `Bearer ${token}` };
+    // Get all engagement associations for the deal
+    const assocRes = await fetchWithTimeout(`${base}/crm/v4/objects/deal/${dealId}/associations/emails`, { headers });
+    if (assocRes.ok) {
+      const assoc = (await assocRes.json()) as { results?: Array<{ id?: string; toObjectId?: string }> };
+      const engagementIds = (assoc.results || []).map((r) => r.id || r.toObjectId).filter(Boolean) as string[];
+      for (const engId of engagementIds.slice(0, 10)) { // Limit to 10 most recent
+        try {
+          const engRes = await fetchWithTimeout(`${base}/crm/v3/objects/emails/${engId}?properties=hs_attachment_ids`, { headers });
+          if (!engRes.ok) continue;
+          const eng = (await engRes.json()) as { properties?: { hs_attachment_ids?: string } };
+          const idsStr = eng.properties?.hs_attachment_ids || '';
+          const ids = idsStr.split(';').map((s) => s.trim()).filter(Boolean);
+          for (const fileId of ids) {
+            try {
+              const fileRes = await fetchWithTimeout(`${base}/files/v3/files/${fileId}`, { headers });
+              if (!fileRes.ok) continue;
+              const file = (await fileRes.json()) as { url?: string; defaultHostingUrl?: string; name?: string; extension?: string; size?: number };
+              const url = file.url || file.defaultHostingUrl;
+              if (url) list.push({ name: file.name || `file-${fileId}`, url, size: file.size });
+            } catch { /* skip */ }
+          }
+        } catch { /* skip */ }
+      }
+    }
+  } catch (e: any) {
+    log(`[rfp-approval] Failed to fetch deal attachments from engagements: ${e.message}`, 'rfp');
+  }
+  return list;
+}
+
 async function fetchDealAttachments(dealId: string, props: Record<string, any>): Promise<Array<{ name: string; url: string; type?: string; size?: number }>> {
   const fromProps = fetchAttachmentsFromProps(props);
   const fromNotes = await fetchDealAttachmentsFromNotes(dealId);
   const fromFiles = await fetchDealAttachmentsFromFiles(dealId);
+  const fromEngagements = await fetchDealAttachmentsFromEngagements(dealId);
+  log(`[rfp-approval] Attachment sources for deal ${dealId}: props=${fromProps.length}, notes=${fromNotes.length}, files=${fromFiles.length}, engagements=${fromEngagements.length}`, 'rfp');
   const seen = new Set<string>();
   const list: Array<{ name: string; url: string; type?: string; size?: number }> = [];
-  for (const a of [...fromProps, ...fromNotes, ...fromFiles]) {
+  for (const a of [...fromProps, ...fromNotes, ...fromFiles, ...fromEngagements]) {
     const key = `${a.url}|${a.name}`;
     if (!seen.has(key)) { seen.add(key); list.push(a); }
   }
+  log(`[rfp-approval] Total unique attachments for deal ${dealId}: ${list.length}`, 'rfp');
   return list;
 }
 
