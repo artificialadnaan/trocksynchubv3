@@ -455,29 +455,33 @@ function startChangeOrderPolling(intervalMinutes: number) {
 
 // ─── Startup: read persisted config and start pollers that were enabled ───────
 export async function initPolling() {
-  // HubSpot polling
+  // Polling intervals use coprime numbers to avoid simultaneous firing.
+  // Old: HubSpot 10m, Procore 15m, Role 30m, BidBoard 60m, StageSync 15m, ChangeOrder 15m
+  // New: staggered so at most 1-2 Procore-hitting pollers fire in any given window.
+
+  // HubSpot polling (11 min — coprime with Procore intervals)
   try {
     const config = await storage.getAutomationConfig("hubspot_polling");
     const val = (config?.value as any);
     if (val?.enabled) {
-      startPolling(val.intervalMinutes || 10);
+      startPolling(val.intervalMinutes || 11);
     }
   } catch (e) {
     console.log('[Polling] No saved config, polling disabled by default');
   }
 
-  // Procore polling
+  // Procore polling (17 min — main project sync, includes role sync internally)
   try {
     const config = await storage.getAutomationConfig("procore_polling");
     const val = (config?.value as any);
     if (val?.enabled) {
-      startProcorePolling(val.intervalMinutes || 15);
+      startProcorePolling(val.intervalMinutes || 17);
     }
   } catch (e) {
     console.log('[ProcorePolling] No saved config, Procore polling disabled by default');
   }
 
-  // Role polling
+  // Role polling (23 min — offset from Procore polling)
   try {
     const config = await storage.getAutomationConfig("role_assignment_polling");
     const val = (config?.value as any);
@@ -485,29 +489,29 @@ export async function initPolling() {
       if (val.batchSize != null) {
         ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(val.batchSize) || 50));
       }
-      startRolePolling(val.intervalMinutes ?? 30);
+      startRolePolling(val.intervalMinutes ?? 23);
     }
   } catch (e) {
     console.log('[RolePolling] No saved config, role polling disabled by default');
   }
 
-  // BidBoard polling
+  // BidBoard polling (61 min — Playwright-based, doesn't hit API directly)
   try {
     const config = await storage.getAutomationConfig("bidboard_automation");
     const val = (config?.value as any);
     if (val?.enabled) {
-      startBidboardPolling(val.pollingIntervalMinutes || 60);
+      startBidboardPolling(val.pollingIntervalMinutes || 61);
     }
   } catch (e) {
     console.log('[BidBoardPolling] No saved config, BidBoard polling disabled by default');
   }
 
-  // BidBoard stage sync
+  // BidBoard stage sync (19 min — uses Playwright + HubSpot, offset from others)
   try {
     const config = await storage.getAutomationConfig("bidboard_stage_sync");
     const val = (config?.value as any);
     if (val?.enabled) {
-      const interval = Math.min(60, Math.max(5, val.intervalMinutes || 15));
+      const interval = Math.min(60, Math.max(5, val.intervalMinutes || 19));
       bidboardStageSyncTimer = setInterval(runBidBoardStageSyncCycle, interval * 60 * 1000);
       setTimeout(runBidBoardStageSyncCycle, 60000); // staggered: 60s after startup
       console.log(`[BidBoardStageSync] Scheduled every ${interval} minutes`);
@@ -516,12 +520,12 @@ export async function initPolling() {
     console.log('[BidBoardStageSync] No saved config, stage sync disabled by default');
   }
 
-  // Change order polling
+  // Change order polling (29 min — least frequent Procore poller)
   try {
     const config = await storage.getAutomationConfig("sync_change_orders");
     const val = (config?.value as any);
     if (val?.enabled) {
-      const interval = Math.min(60, Math.max(5, val.intervalMinutes || 15));
+      const interval = Math.min(60, Math.max(5, val.intervalMinutes || 29));
       startChangeOrderPolling(interval);
     }
   } catch (e) {

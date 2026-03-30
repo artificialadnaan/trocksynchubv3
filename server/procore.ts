@@ -696,6 +696,7 @@ async function fetchProcoreJson(endpoint: string, companyId: string, options?: {
   const config = await getProcoreConfig();
   const baseUrl = getBaseUrl(config.environment);
   const url = `${baseUrl}${endpoint}`;
+  await acquireRateLimitToken(); // Unified token bucket — all Procore calls share the same budget
   await applyBackpressure("procore");
   const response = await fetchWithTimeout(url, {
     signal: options?.signal,
@@ -707,6 +708,12 @@ async function fetchProcoreJson(endpoint: string, companyId: string, options?: {
   });
   updateRateLimits("procore", response.headers);
   if (!response.ok) {
+    if (response.status === 429) {
+      const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10);
+      console.warn(`[procore] 429 rate limited on ${endpoint}, waiting ${retryAfter}s`);
+      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      return fetchProcoreJson(endpoint, companyId, options); // Retry once
+    }
     if (response.status === 401) throw new Error("Procore token expired or invalid.");
     const errText = await response.text();
     throw new Error(`Procore API error ${response.status}: ${errText}`);
@@ -1082,7 +1089,7 @@ export async function syncProcoreRoleAssignments(projectIds?: string[]): Promise
   }
 }
 
-const ROLE_SYNC_CONCURRENCY = 5; // Stay within 3600 req/hr (~1 req/sec sustained)
+const ROLE_SYNC_CONCURRENCY = 3; // Reduced from 5 to avoid rate limit bursts when multiple pollers run
 const ROLE_SYNC_PER_REQUEST_TIMEOUT_MS = 10000; // 10s per API call
 
 async function performRoleAssignmentSync(projectIds?: string[]): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }> }> {
