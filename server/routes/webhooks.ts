@@ -144,15 +144,20 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                 const newStageName = resolvedStage?.stageName || newValue;
                 const oldStageName = previousStageForEmail ?? "Previous stage";
 
-                await sendStageChangeEmail({
-                  hubspotDealId: objectId,
-                  dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
-                  procoreProjectId: mapping?.procoreProjectId || "",
-                  procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
-                  oldStage: oldStageName,
-                  newStage: newStageName,
-                  hubspotStageName: newStageName,
-                });
+                // Skip email if stage didn't actually change (HubSpot sends propertyChange events even for same-value updates)
+                if (oldStageName.toLowerCase().trim() === newStageName.toLowerCase().trim()) {
+                  console.log(`[hubspot-webhook] Skipping stage change email for deal ${objectId} — stage unchanged: "${oldStageName}"`);
+                } else {
+                  await sendStageChangeEmail({
+                    hubspotDealId: objectId,
+                    dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
+                    procoreProjectId: mapping?.procoreProjectId || "",
+                    procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
+                    oldStage: oldStageName,
+                    newStage: newStageName,
+                    hubspotStageName: newStageName,
+                  });
+                }
               } catch (emailErr: any) {
                 console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
               }
