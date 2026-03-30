@@ -325,28 +325,111 @@ export async function createRfpApprovalRequest(
       return { success: true, token };
     }
 
+    const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
     const attachments = (dealData.attachments || []) as Array<{ name: string; url?: string }>;
     const attachmentListHtml = attachments.length > 0
-      ? attachments.map(a => `<a href="${(a.url || '#').replace(/"/g, '&quot;')}" style="color: #d11921; text-decoration: underline;">${String(a.name || 'Attachment').replace(/</g, '&lt;')}</a>`).join('<br>')
-      : 'None';
+      ? attachments.map(a => `<a href="${(a.url || '#').replace(/"/g, '&quot;')}" style="color:#d11921;text-decoration:underline;font-family:Arial,Helvetica,sans-serif;">${esc(a.name || 'Attachment')}</a>`).join('<br>')
+      : '<span style="color:#94a3b8;">None</span>';
 
-    const variables: Record<string, string> = {
-      dealName: dealData.dealname,
-      projectNumber: dealData.project_number,
-      projectType: dealData.project_types,
-      amount: dealData.amount,
-      companyName: dealData.company_name,
-      location: [dealData.address, dealData.city, dealData.state, dealData.zip].filter(Boolean).join(', '),
-      description: dealData.description || dealData.notes || 'N/A',
-      estimator: dealData.estimator || 'N/A',
-      ownerName: ownerInfo.ownerName || 'N/A',
-      hubspotDealUrl,
-      reviewUrl,
-      attachmentList: attachmentListHtml,
-    };
+    const dealName = esc(dealData.dealname || 'Unknown Deal');
+    const projectNumber = esc(dealData.project_number || 'N/A');
+    const projectType = esc(dealData.project_types || 'N/A');
+    const amount = dealData.amount ? `$${Number(dealData.amount).toLocaleString('en-US')}` : 'N/A';
+    const companyName = esc(dealData.company_name || 'N/A');
+    const location = esc([dealData.address, dealData.city, dealData.state, dealData.zip].filter(Boolean).join(', ') || 'N/A');
+    const description = esc(dealData.description || dealData.notes || 'N/A');
+    const estimator = esc(dealData.estimator || 'N/A');
+    const ownerName = esc(ownerInfo.ownerName || 'N/A');
 
-    const subject = renderTemplate(template.subject, variables);
-    const htmlBody = renderTemplate(template.bodyHtml, variables);
+    const row = (label: string, value: string, isHtml = false) =>
+      `<tr>
+        <td style="padding:10px 16px;border-bottom:1px solid #e2e8f0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;width:160px;vertical-align:top;">${label}</td>
+        <td style="padding:10px 16px;border-bottom:1px solid #e2e8f0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1e293b;vertical-align:top;">${isHtml ? value : value}</td>
+      </tr>`;
+
+    const subject = `Review Required: ${dealData.dealname || 'New RFP'}`;
+    const htmlBody = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--[if mso]><style>table{border-collapse:collapse;}td{font-family:Arial,Helvetica,sans-serif;}</style><![endif]-->
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f1f5f9;">
+    <tr><td align="center" style="padding:24px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e2e8f0;">
+        <!-- Header -->
+        <tr>
+          <td style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:28px 32px;text-align:center;">
+            <!--[if mso]><v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:600px;height:80px;"><v:fill type="gradient" color="#1a1a2e" color2="#16213e" angle="135"/><v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true"><![endif]-->
+            <img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock GC" width="160" style="display:block;margin:0 auto;max-width:160px;height:auto;" />
+            <!--[if mso]></v:textbox></v:rect><![endif]-->
+          </td>
+        </tr>
+        <!-- Red accent bar -->
+        <tr><td style="background:#d11921;height:4px;font-size:1px;line-height:1px;">&nbsp;</td></tr>
+        <!-- Title -->
+        <tr>
+          <td style="padding:28px 32px 8px 32px;">
+            <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:700;color:#1a1a2e;">New RFP Review Required</h1>
+            <p style="margin:8px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#64748b;line-height:1.5;">A new deal requires your review and approval before a BidBoard project is created.</p>
+          </td>
+        </tr>
+        <!-- Deal name banner -->
+        <tr>
+          <td style="padding:8px 32px 20px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#fef2f2;border-left:4px solid #d11921;border-radius:4px;">
+              <tr><td style="padding:14px 18px;font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;color:#1a1a2e;">${dealName}</td></tr>
+            </table>
+          </td>
+        </tr>
+        <!-- Details table -->
+        <tr>
+          <td style="padding:0 32px 24px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;">
+              ${row('Project Type', projectType)}
+              ${row('Project Number', projectNumber)}
+              ${row('Amount', amount)}
+              ${row('Company', companyName)}
+              ${row('Location', location)}
+              ${row('Estimator', estimator)}
+              ${row('Deal Owner', ownerName)}
+              ${row('Description', description)}
+              ${row('Attachments', attachmentListHtml, true)}
+            </table>
+          </td>
+        </tr>
+        <!-- CTA Buttons -->
+        <tr>
+          <td style="padding:0 32px 12px 32px;" align="center">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="border-radius:6px;background:#d11921;" align="center">
+                  <!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${reviewUrl}" style="height:44px;v-text-anchor:middle;width:220px;" arcsize="14%" strokecolor="#d11921" fillcolor="#d11921"><center style="color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;"><![endif]-->
+                  <a href="${reviewUrl}" target="_blank" style="display:inline-block;padding:12px 32px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:6px;background:#d11921;">Review &amp; Approve</a>
+                  <!--[if mso]></center></v:roundrect><![endif]-->
+                </td>
+                <td style="width:12px;">&nbsp;</td>
+                <td style="border-radius:6px;border:2px solid #e2e8f0;" align="center">
+                  <a href="${hubspotDealUrl}" target="_blank" style="display:inline-block;padding:10px 24px;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:600;color:#64748b;text-decoration:none;border-radius:6px;">View in HubSpot</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="padding:20px 32px;border-top:1px solid #e2e8f0;">
+            <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#94a3b8;text-align:center;">Sent by T-Rock Sync Hub &bull; This is an automated notification</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
 
     const rfpRecipients = getRfpReviewRecipients(dealData.project_types);
     console.log(`[rfp-approval] Project type: ${dealData.project_types || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
