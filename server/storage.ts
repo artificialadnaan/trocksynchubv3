@@ -46,6 +46,11 @@
  */
 
 import { eq, desc, and, gte, lte, sql, ilike, or } from "drizzle-orm";
+
+/** Escape LIKE/ILIKE wildcards so user input is treated literally */
+function escapeLike(input: string): string {
+  return input.replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
 import { db } from "./db";
 import {
   users, type User, type InsertUser,
@@ -335,8 +340,8 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  async getSyncMappings(): Promise<SyncMapping[]> {
-    return db.select().from(syncMappings).orderBy(desc(syncMappings.lastSyncAt));
+  async getSyncMappings(limit: number = 200): Promise<SyncMapping[]> {
+    return db.select().from(syncMappings).orderBy(desc(syncMappings.lastSyncAt)).limit(limit);
   }
 
   async getSyncMappingByHubspotDealId(dealId: string): Promise<SyncMapping | undefined> {
@@ -386,11 +391,11 @@ export class DatabaseStorage implements IStorage {
   async searchSyncMappings(query: string): Promise<SyncMapping[]> {
     return db.select().from(syncMappings).where(
       or(
-        ilike(syncMappings.hubspotDealName, `%${query}%`),
-        ilike(syncMappings.procoreProjectName, `%${query}%`),
-        ilike(syncMappings.procoreProjectNumber, `%${query}%`)
+        ilike(syncMappings.hubspotDealName, `%${escapeLike(query)}%`),
+        ilike(syncMappings.procoreProjectName, `%${escapeLike(query)}%`),
+        ilike(syncMappings.procoreProjectNumber, `%${escapeLike(query)}%`)
       )
-    ).orderBy(desc(syncMappings.lastSyncAt));
+    ).orderBy(desc(syncMappings.lastSyncAt)).limit(200);
   }
 
   async transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined> {
@@ -731,9 +736,9 @@ export class DatabaseStorage implements IStorage {
     if (search) {
       conditions.push(
         or(
-          ilike(hubspotOwners.email, `%${search}%`),
-          ilike(hubspotOwners.firstName, `%${search}%`),
-          ilike(hubspotOwners.lastName, `%${search}%`)
+          ilike(hubspotOwners.email, `%${escapeLike(search)}%`),
+          ilike(hubspotOwners.firstName, `%${escapeLike(search)}%`),
+          ilike(hubspotOwners.lastName, `%${escapeLike(search)}%`)
         )
       );
     }
@@ -821,9 +826,9 @@ export class DatabaseStorage implements IStorage {
     const conditions = [];
     if (filters.search) {
       conditions.push(or(
-        ilike(hubspotCompanies.name, `%${filters.search}%`),
-        ilike(hubspotCompanies.domain, `%${filters.search}%`),
-        ilike(hubspotCompanies.hubspotId, `%${filters.search}%`)
+        ilike(hubspotCompanies.name, `%${escapeLike(filters.search)}%`),
+        ilike(hubspotCompanies.domain, `%${escapeLike(filters.search)}%`),
+        ilike(hubspotCompanies.hubspotId, `%${escapeLike(filters.search)}%`)
       ));
     }
     const where = conditions.length ? and(...conditions) : undefined;
@@ -845,13 +850,13 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(hubspotContacts.firstName, `%${word}%`),
-        ilike(hubspotContacts.lastName, `%${word}%`),
-        ilike(hubspotContacts.email, `%${word}%`),
-        ilike(hubspotContacts.company, `%${word}%`),
-        ilike(hubspotContacts.ownerName, `%${word}%`),
-        ilike(hubspotContacts.associatedCompanyName, `%${word}%`),
-        ilike(hubspotContacts.hubspotId, `%${word}%`)
+        ilike(hubspotContacts.firstName, `%${escapeLike(word)}%`),
+        ilike(hubspotContacts.lastName, `%${escapeLike(word)}%`),
+        ilike(hubspotContacts.email, `%${escapeLike(word)}%`),
+        ilike(hubspotContacts.company, `%${escapeLike(word)}%`),
+        ilike(hubspotContacts.ownerName, `%${escapeLike(word)}%`),
+        ilike(hubspotContacts.associatedCompanyName, `%${escapeLike(word)}%`),
+        ilike(hubspotContacts.hubspotId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -874,10 +879,10 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(hubspotDeals.dealName, `%${word}%`),
-        ilike(hubspotDeals.hubspotId, `%${word}%`),
-        ilike(hubspotDeals.ownerName, `%${word}%`),
-        ilike(hubspotDeals.associatedCompanyName, `%${word}%`)
+        ilike(hubspotDeals.dealName, `%${escapeLike(word)}%`),
+        ilike(hubspotDeals.hubspotId, `%${escapeLike(word)}%`),
+        ilike(hubspotDeals.ownerName, `%${escapeLike(word)}%`),
+        ilike(hubspotDeals.associatedCompanyName, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -944,13 +949,13 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(procoreProjects.name, `%${word}%`),
-        ilike(procoreProjects.projectNumber, `%${word}%`),
-        ilike(procoreProjects.city, `%${word}%`),
-        ilike(procoreProjects.stateCode, `%${word}%`),
-        ilike(procoreProjects.stage, `%${word}%`),
-        ilike(procoreProjects.companyName, `%${word}%`),
-        ilike(procoreProjects.procoreId, `%${word}%`)
+        ilike(procoreProjects.name, `%${escapeLike(word)}%`),
+        ilike(procoreProjects.projectNumber, `%${escapeLike(word)}%`),
+        ilike(procoreProjects.city, `%${escapeLike(word)}%`),
+        ilike(procoreProjects.stateCode, `%${escapeLike(word)}%`),
+        ilike(procoreProjects.stage, `%${escapeLike(word)}%`),
+        ilike(procoreProjects.companyName, `%${escapeLike(word)}%`),
+        ilike(procoreProjects.procoreId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -987,13 +992,13 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(procoreVendors.name, `%${word}%`),
-        ilike(procoreVendors.tradeName, `%${word}%`),
-        ilike(procoreVendors.emailAddress, `%${word}%`),
-        ilike(procoreVendors.legalName, `%${word}%`),
-        ilike(procoreVendors.city, `%${word}%`),
-        ilike(procoreVendors.stateCode, `%${word}%`),
-        ilike(procoreVendors.procoreId, `%${word}%`)
+        ilike(procoreVendors.name, `%${escapeLike(word)}%`),
+        ilike(procoreVendors.tradeName, `%${escapeLike(word)}%`),
+        ilike(procoreVendors.emailAddress, `%${escapeLike(word)}%`),
+        ilike(procoreVendors.legalName, `%${escapeLike(word)}%`),
+        ilike(procoreVendors.city, `%${escapeLike(word)}%`),
+        ilike(procoreVendors.stateCode, `%${escapeLike(word)}%`),
+        ilike(procoreVendors.procoreId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1030,13 +1035,13 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(procoreUsers.name, `%${word}%`),
-        ilike(procoreUsers.firstName, `%${word}%`),
-        ilike(procoreUsers.lastName, `%${word}%`),
-        ilike(procoreUsers.emailAddress, `%${word}%`),
-        ilike(procoreUsers.jobTitle, `%${word}%`),
-        ilike(procoreUsers.vendorName, `%${word}%`),
-        ilike(procoreUsers.procoreId, `%${word}%`)
+        ilike(procoreUsers.name, `%${escapeLike(word)}%`),
+        ilike(procoreUsers.firstName, `%${escapeLike(word)}%`),
+        ilike(procoreUsers.lastName, `%${escapeLike(word)}%`),
+        ilike(procoreUsers.emailAddress, `%${escapeLike(word)}%`),
+        ilike(procoreUsers.jobTitle, `%${escapeLike(word)}%`),
+        ilike(procoreUsers.vendorName, `%${escapeLike(word)}%`),
+        ilike(procoreUsers.procoreId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1122,10 +1127,10 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(procoreBidPackages.title, `%${word}%`),
-        ilike(procoreBidPackages.projectName, `%${word}%`),
-        ilike(procoreBidPackages.projectLocation, `%${word}%`),
-        ilike(procoreBidPackages.procoreId, `%${word}%`)
+        ilike(procoreBidPackages.title, `%${escapeLike(word)}%`),
+        ilike(procoreBidPackages.projectName, `%${escapeLike(word)}%`),
+        ilike(procoreBidPackages.projectLocation, `%${escapeLike(word)}%`),
+        ilike(procoreBidPackages.procoreId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1164,12 +1169,12 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(procoreBids.vendorName, `%${word}%`),
-        ilike(procoreBids.bidPackageTitle, `%${word}%`),
-        ilike(procoreBids.bidFormTitle, `%${word}%`),
-        ilike(procoreBids.projectName, `%${word}%`),
-        ilike(procoreBids.bidStatus, `%${word}%`),
-        ilike(procoreBids.procoreId, `%${word}%`)
+        ilike(procoreBids.vendorName, `%${escapeLike(word)}%`),
+        ilike(procoreBids.bidPackageTitle, `%${escapeLike(word)}%`),
+        ilike(procoreBids.bidFormTitle, `%${escapeLike(word)}%`),
+        ilike(procoreBids.projectName, `%${escapeLike(word)}%`),
+        ilike(procoreBids.bidStatus, `%${escapeLike(word)}%`),
+        ilike(procoreBids.procoreId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1202,9 +1207,9 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(procoreBidForms.title, `%${word}%`),
-        ilike(procoreBidForms.proposalName, `%${word}%`),
-        ilike(procoreBidForms.procoreId, `%${word}%`)
+        ilike(procoreBidForms.title, `%${escapeLike(word)}%`),
+        ilike(procoreBidForms.proposalName, `%${escapeLike(word)}%`),
+        ilike(procoreBidForms.procoreId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1232,10 +1237,10 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(bidboardEstimates.name, `%${word}%`),
-        ilike(bidboardEstimates.estimator, `%${word}%`),
-        ilike(bidboardEstimates.customerName, `%${word}%`),
-        ilike(bidboardEstimates.projectNumber, `%${word}%`)
+        ilike(bidboardEstimates.name, `%${escapeLike(word)}%`),
+        ilike(bidboardEstimates.estimator, `%${escapeLike(word)}%`),
+        ilike(bidboardEstimates.customerName, `%${escapeLike(word)}%`),
+        ilike(bidboardEstimates.projectNumber, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1306,10 +1311,10 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(companycamProjects.name, `%${word}%`),
-        ilike(companycamProjects.city, `%${word}%`),
-        ilike(companycamProjects.state, `%${word}%`),
-        ilike(companycamProjects.companycamId, `%${word}%`)
+        ilike(companycamProjects.name, `%${escapeLike(word)}%`),
+        ilike(companycamProjects.city, `%${escapeLike(word)}%`),
+        ilike(companycamProjects.state, `%${escapeLike(word)}%`),
+        ilike(companycamProjects.companycamId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1351,10 +1356,10 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(companycamUsers.firstName, `%${word}%`),
-        ilike(companycamUsers.lastName, `%${word}%`),
-        ilike(companycamUsers.email, `%${word}%`),
-        ilike(companycamUsers.companycamId, `%${word}%`)
+        ilike(companycamUsers.firstName, `%${escapeLike(word)}%`),
+        ilike(companycamUsers.lastName, `%${escapeLike(word)}%`),
+        ilike(companycamUsers.email, `%${escapeLike(word)}%`),
+        ilike(companycamUsers.companycamId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1396,10 +1401,10 @@ export class DatabaseStorage implements IStorage {
     if (filters.search) {
       const words = filters.search.trim().split(/\s+/);
       const wordConditions = words.map(word => or(
-        ilike(companycamPhotos.projectName, `%${word}%`),
-        ilike(companycamPhotos.creatorName, `%${word}%`),
-        ilike(companycamPhotos.description, `%${word}%`),
-        ilike(companycamPhotos.companycamId, `%${word}%`)
+        ilike(companycamPhotos.projectName, `%${escapeLike(word)}%`),
+        ilike(companycamPhotos.creatorName, `%${escapeLike(word)}%`),
+        ilike(companycamPhotos.description, `%${escapeLike(word)}%`),
+        ilike(companycamPhotos.companycamId, `%${escapeLike(word)}%`)
       ));
       conditions.push(and(...wordConditions));
     }
@@ -1482,9 +1487,9 @@ export class DatabaseStorage implements IStorage {
     const conditions: any[] = [];
     if (filters.search) {
       conditions.push(or(
-        ilike(procoreRoleAssignments.projectName, `%${filters.search}%`),
-        ilike(procoreRoleAssignments.assigneeName, `%${filters.search}%`),
-        ilike(procoreRoleAssignments.assigneeEmail, `%${filters.search}%`),
+        ilike(procoreRoleAssignments.projectName, `%${escapeLike(filters.search)}%`),
+        ilike(procoreRoleAssignments.assigneeName, `%${escapeLike(filters.search)}%`),
+        ilike(procoreRoleAssignments.assigneeEmail, `%${escapeLike(filters.search)}%`),
       ));
     }
     if (filters.roleName) {

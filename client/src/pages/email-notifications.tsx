@@ -1,4 +1,5 @@
 import { useState } from "react";
+import DOMPurify from 'dompurify';
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -545,11 +546,11 @@ function TemplatesTab() {
                     </p>
                     <div
                       dangerouslySetInnerHTML={{
-                        __html: template.bodyHtml.replace(
+                        __html: DOMPurify.sanitize(template.bodyHtml.replace(
                           /\{\{(\w+)\}\}/g,
                           (_: string, key: string) =>
                             `<span style="background:#dbeafe;padding:1px 4px;border-radius:3px;font-size:12px;">[${key}]</span>`
-                        ),
+                        )),
                       }}
                     />
                   </div>

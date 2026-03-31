@@ -81,7 +81,7 @@ export async function registerRoutes(
 
   // Pre-existing extracted routers
   app.use("/api/reconciliation", requireAuth, reconciliationRouter);
-  registerArchiveRoutes(app as any);
+  registerArchiveRoutes(app as any, requireAuth);
 
   // Register all domain routes
   registerAuthRoutes(app, requireAuth);

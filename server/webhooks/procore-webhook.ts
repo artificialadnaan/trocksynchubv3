@@ -40,6 +40,13 @@ export { registerPendingPhase2 };
 const processedWebhooks = new Set<string>();
 const MAX_PROCESSED_CACHE = 1000;
 
+/** Evict dedup cache when it grows too large to prevent memory leaks */
+function evictDedupCache(): void {
+  if (processedWebhooks.size > MAX_PROCESSED_CACHE) {
+    processedWebhooks.clear();
+  }
+}
+
 /**
  * Express route handler for Procore Projects webhook events.
  * Mount this at POST /webhooks/procore/project-events
@@ -70,6 +77,7 @@ export async function handleProcoreProjectWebhook(
       log(`[webhook] Duplicate webhook ${webhookId}, skipping`, "webhook");
       return;
     }
+    evictDedupCache();
     processedWebhooks.add(webhookId);
     if (processedWebhooks.size > MAX_PROCESSED_CACHE) {
       const first = processedWebhooks.values().next().value;

@@ -39,7 +39,7 @@ function renderRfpPage(title: string, content: string): string {
 }
 
 function renderRfpReviewPage(token: string, d: Record<string, any>): string {
-  const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const formatDateForInput = (val: any): string => {
     if (val == null || val === '') return '';
     const n = typeof val === 'string' && /^\d+$/.test(val) ? parseInt(val, 10) : val;

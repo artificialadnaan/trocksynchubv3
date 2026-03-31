@@ -27,10 +27,8 @@ import type { StorageProviderConfig } from './storage-config';
 
 const router = Router();
 
-function requireAuth(req: any, res: Response, next: () => void) {
-  if (req.session?.userId) return next();
-  res.status(401).json({ message: 'Unauthorized' });
-}
+// requireAuth is injected by registerArchiveRoutes — see bottom of file
+let _requireAuth: (req: any, res: any, next: any) => void;
 
 // Redact secrets from config for GET responses
 function redactConfig(cfg: StorageProviderConfig): Record<string, any> {
@@ -59,7 +57,7 @@ function redactConfig(cfg: StorageProviderConfig): Record<string, any> {
 // Storage settings
 // ---------------------------------------------------------------------------
 
-router.get('/api/settings/storage', requireAuth, async (_req: Request, res: Response) => {
+router.get('/api/settings/storage', (req, res, next) => _requireAuth(req, res, next), async (_req: Request, res: Response) => {
   try {
     const config = await getStorageConfig();
     res.json(redactConfig(config));
@@ -68,7 +66,7 @@ router.get('/api/settings/storage', requireAuth, async (_req: Request, res: Resp
   }
 });
 
-router.put('/api/settings/storage', requireAuth, async (req: Request, res: Response) => {
+router.put('/api/settings/storage', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
     const partial = req.body as Partial<StorageProviderConfig>;
     const config = await saveStorageConfig(partial);
@@ -78,7 +76,7 @@ router.put('/api/settings/storage', requireAuth, async (req: Request, res: Respo
   }
 });
 
-router.post('/api/settings/storage/test', requireAuth, async (_req: Request, res: Response) => {
+router.post('/api/settings/storage/test', (req, res, next) => _requireAuth(req, res, next), async (_req: Request, res: Response) => {
   try {
     const result = await testStorageConnection();
     res.json(result);
@@ -91,7 +89,7 @@ router.post('/api/settings/storage/test', requireAuth, async (_req: Request, res
 // Archive operations
 // ---------------------------------------------------------------------------
 
-router.get('/api/archive/projects', requireAuth, async (_req: Request, res: Response) => {
+router.get('/api/archive/projects', (req, res, next) => _requireAuth(req, res, next), async (_req: Request, res: Response) => {
   try {
     const projects = await getArchivableProjects();
     res.json(projects);
@@ -133,7 +131,7 @@ function parseOptions(query: Record<string, any>) {
   };
 }
 
-router.get('/api/archive/projects/:projectId/preview', requireAuth, async (req: Request, res: Response) => {
+router.get('/api/archive/projects/:projectId/preview', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
     const projectId = String(req.params.projectId ?? '');
     const options = parseOptions((req.query as any) || {});
@@ -144,7 +142,7 @@ router.get('/api/archive/projects/:projectId/preview', requireAuth, async (req: 
   }
 });
 
-router.get('/api/archive/projects/:projectId/documents', requireAuth, async (req: Request, res: Response) => {
+router.get('/api/archive/projects/:projectId/documents', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
     const projectId = String(req.params.projectId ?? '');
     const summary = await getProjectDocumentSummary(projectId);
@@ -154,7 +152,7 @@ router.get('/api/archive/projects/:projectId/documents', requireAuth, async (req
   }
 });
 
-router.post('/api/archive/start', requireAuth, async (req: Request, res: Response) => {
+router.post('/api/archive/start', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
     const { projectId, options = {} } = req.body;
     if (!projectId) {
@@ -167,7 +165,7 @@ router.post('/api/archive/start', requireAuth, async (req: Request, res: Respons
   }
 });
 
-router.get('/api/archive/progress/:archiveId', requireAuth, async (req: Request, res: Response) => {
+router.get('/api/archive/progress/:archiveId', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
     const archiveId = String(req.params.archiveId ?? '');
     const progress = getArchiveProgress(archiveId);
@@ -178,7 +176,7 @@ router.get('/api/archive/progress/:archiveId', requireAuth, async (req: Request,
   }
 });
 
-router.get('/api/archive/progress', requireAuth, async (_req: Request, res: Response) => {
+router.get('/api/archive/progress', (req, res, next) => _requireAuth(req, res, next), async (_req: Request, res: Response) => {
   try {
     const progress = getAllArchiveProgress();
     res.json(progress);
@@ -317,7 +315,7 @@ const SAMPLE_DATA: Record<string, { data: any[]; generator: string; title: strin
 };
 
 // Download a single sample PDF: GET /api/archive/test-pdf/:type
-router.get('/api/archive/test-pdf/:type', requireAuth, async (req: Request, res: Response) => {
+router.get('/api/archive/test-pdf/:type', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
     const type = req.params.type;
     const sample = SAMPLE_DATA[type];
@@ -339,7 +337,7 @@ router.get('/api/archive/test-pdf/:type', requireAuth, async (req: Request, res:
 });
 
 // Download ALL sample PDFs as ZIP: GET /api/archive/test-pdf-all
-router.get('/api/archive/test-pdf-all', requireAuth, async (_req: Request, res: Response) => {
+router.get('/api/archive/test-pdf-all', (req, res, next) => _requireAuth(req, res, next), async (_req: Request, res: Response) => {
   try {
     const archiver = (await import('archiver')).default;
     const gen = await import('./archive-pdf-generator');
@@ -364,7 +362,7 @@ router.get('/api/archive/test-pdf-all', requireAuth, async (_req: Request, res: 
 });
 
 // List available test PDFs: GET /api/archive/test-pdf
-router.get('/api/archive/test-pdf', requireAuth, async (_req: Request, res: Response) => {
+router.get('/api/archive/test-pdf', (req, res, next) => _requireAuth(req, res, next), async (_req: Request, res: Response) => {
   const types = Object.entries(SAMPLE_DATA).map(([key, val]) => ({
     type: key,
     title: val.title,
@@ -393,6 +391,7 @@ function parseBool(val: any): boolean | undefined {
   return undefined;
 }
 
-export function registerArchiveRoutes(app: Router): void {
+export function registerArchiveRoutes(app: Router, requireAuth: (req: any, res: any, next: any) => void): void {
+  _requireAuth = requireAuth;
   app.use(router);
 }

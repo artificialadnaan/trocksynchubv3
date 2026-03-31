@@ -9,3 +9,10 @@ attached_assets/
 .env
 .env.*
 .local/
+
+# Audit fixes - temp files and local data
+..env*
+sed[A-Z]*
+.playwright-storage/
+data/
+.playwright-mcp/

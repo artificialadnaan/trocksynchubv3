@@ -173,7 +173,7 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
       descriptionFromProps = cp.description || cp.project_description || cp.project_description_briefly_describe_the_project
         || cp.hs_project_description || cp.hs_description
         || (() => { const k = Object.keys(cp).find(x => x.toLowerCase().includes('description')); return k ? cp[k] : ''; })() || '';
-    } catch { /* ignore */ }
+    } catch (e) { console.error('[rfp-approval] Failed to load cached deal description:', (e as Error).message); }
   }
   let companyName = props.company_name || '';
   let contactEmail = props.client_email || '';
@@ -262,7 +262,7 @@ async function fetchDealAttachmentsFromFiles(dealId: string): Promise<Array<{ na
             size: file.size,
           });
         }
-      } catch { /* skip file */ }
+      } catch (e) { console.error('[rfp-approval] Failed to fetch individual file attachment:', (e as Error).message); }
     }
   } catch (e: any) {
     log(`[rfp-approval] Failed to fetch deal attachments from files: ${e.message}`, 'rfp');
@@ -295,9 +295,9 @@ async function fetchDealAttachmentsFromEngagements(dealId: string): Promise<Arra
               const file = (await fileRes.json()) as { url?: string; defaultHostingUrl?: string; name?: string; extension?: string; size?: number };
               const url = file.url || file.defaultHostingUrl;
               if (url) list.push({ name: file.name || `file-${fileId}`, url, size: file.size });
-            } catch { /* skip */ }
+            } catch (e) { console.error('[rfp-approval] Failed to fetch engagement file attachment:', (e as Error).message); }
           }
-        } catch { /* skip */ }
+        } catch (e) { console.error('[rfp-approval] Failed to fetch engagement attachments:', (e as Error).message); }
       }
     }
   } catch (e: any) {
@@ -351,7 +351,7 @@ async function fetchDealAttachmentsFromNotes(dealId: string): Promise<Array<{ na
               size: file.size,
             });
           }
-        } catch { /* skip file */ }
+        } catch (e) { console.error('[rfp-approval] Failed to fetch note file attachment:', (e as Error).message); }
       }
     }
   } catch (e: any) {
@@ -389,7 +389,7 @@ function fetchAttachmentsFromProps(props: Record<string, any>): Array<{ name: st
           }
         }
       }
-    } catch { /* ignore */ }
+    } catch (e) { console.error('[rfp-approval] Failed to parse attachments from deal props:', (e as Error).message); }
   }
   return list;
 }

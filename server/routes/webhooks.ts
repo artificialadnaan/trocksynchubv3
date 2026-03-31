@@ -18,6 +18,39 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
   // ── HubSpot webhook ─────────────────────────────────────────────────────────
   app.post("/webhooks/hubspot", async (req, res) => {
     try {
+      // C-1: HubSpot signature verification (optional — skipped if secret not configured)
+      const hubspotSecret = process.env.HUBSPOT_CLIENT_SECRET;
+      if (hubspotSecret) {
+        const signature = req.headers['x-hubspot-signature-v3'] || req.headers['x-hubspot-signature'];
+        if (signature) {
+          const crypto = await import('crypto');
+          const requestBody = JSON.stringify(req.body);
+          const hash = crypto.createHmac('sha256', hubspotSecret)
+            .update(requestBody)
+            .digest('hex');
+          if (hash !== signature) {
+            console.warn('[webhook] HubSpot signature verification FAILED');
+            return res.status(401).json({ error: 'Invalid signature' });
+          }
+        }
+      } else {
+        console.warn('[webhook] HUBSPOT_CLIENT_SECRET not set — skipping signature verification');
+      }
+
+      // H-4: HubSpot payload validation
+      if (!req.body || (typeof req.body !== 'object')) {
+        return res.status(400).json({ error: 'Invalid payload: expected object or array' });
+      }
+      const rawEvents = Array.isArray(req.body) ? req.body : [req.body];
+      for (const evt of rawEvents) {
+        if (!evt.subscriptionType && !evt.eventType) {
+          return res.status(400).json({ error: 'Invalid payload: each event must have subscriptionType' });
+        }
+        if (evt.objectId == null) {
+          return res.status(400).json({ error: 'Invalid payload: each event must have objectId' });
+        }
+      }
+
       const events = Array.isArray(req.body) ? req.body : [req.body];
       for (const event of events) {
         const idempotencyKey = `hs_${event.eventId || event.objectId}_${Date.now()}`;
@@ -239,6 +272,36 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
   app.post("/webhooks/procore", async (req, res) => {
     let webhookLog: any = null;
     try {
+      // C-1: Procore signature verification (optional — skipped if secret not configured)
+      const procoreSecret = process.env.PROCORE_WEBHOOK_SECRET;
+      if (procoreSecret) {
+        const signature = req.headers['x-procore-signature'] || req.headers['x-webhook-signature'];
+        if (signature) {
+          const crypto = await import('crypto');
+          const requestBody = JSON.stringify(req.body);
+          const hash = crypto.createHmac('sha256', procoreSecret)
+            .update(requestBody)
+            .digest('hex');
+          if (hash !== signature) {
+            console.warn('[webhook] Procore signature verification FAILED');
+            return res.status(401).json({ error: 'Invalid signature' });
+          }
+        }
+      } else {
+        console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — skipping signature verification');
+      }
+
+      // H-4: Procore payload validation
+      if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        return res.status(400).json({ error: 'Invalid payload: expected object' });
+      }
+      if (!req.body.resource_name && !req.body.resource_type) {
+        return res.status(400).json({ error: 'Invalid payload: missing resource_name' });
+      }
+      if (!req.body.event_type && !req.body.reason) {
+        return res.status(400).json({ error: 'Invalid payload: missing event_type' });
+      }
+
       const event = req.body;
       const idempotencyKey = `pc_${event.id || event.resource_id}_${event.timestamp || Date.now()}`;
       const existing = await storage.checkIdempotencyKey(idempotencyKey);
@@ -999,11 +1062,11 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
         const objectId = String(event.objectId || "");
 
         if (objectType === "deal") {
-          try { await processHubspotWebhookForProcore(eventType, objectType, objectId); } catch {}
+          try { await processHubspotWebhookForProcore(eventType, objectType, objectId); } catch (e) { console.error('[webhook] processHubspotWebhookForProcore failed during replay:', (e as Error).message); }
           try {
             const { syncSingleHubSpotDeal } = await import("../hubspot");
             await syncSingleHubSpotDeal(objectId);
-          } catch {}
+          } catch (e) { console.error('[webhook] syncSingleHubSpotDeal failed during replay:', (e as Error).message); }
         }
       } else if (log.source === "procore") {
         const event = log.payload as any;
