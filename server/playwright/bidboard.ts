@@ -1259,103 +1259,10 @@ export async function createBidBoardProject(
       } else {
         log("Customer: no clientName provided in project data", "playwright");
       }
-      // Add Primary Contact: click Add Contact, search, select from list, click Select
-      // Verified March 2026 — dialog uses searchbox role, contacts are buttons inside listitems,
-      // Select button appears at bottom after clicking a contact.
-      // Production Procore uses MUI dialogs with role="presentation" (not role="dialog").
-      if (projectData.contactName) {
-        log(`Adding primary contact: ${projectData.contactName}`, "playwright");
-        try {
-          await randomDelay(1500, 2500);
-          const addContactBtn = page.locator('button:has-text("Add Contact")').first();
-          if ((await addContactBtn.count()) > 0) {
-            await addContactBtn.click();
-            await randomDelay(1500, 2500);
-
-            // Contact dialog can be role="dialog" or MUI role="presentation" — match both
-            const contactDialog = page.locator('dialog:has-text("Available Contacts"), [role="dialog"]:has-text("Available Contacts"), .MuiDialog-root:has-text("Available Contacts")').last();
-            // Search input: try searchbox role, then MUI/Procore input selectors
-            // Production placeholder: "Type part of contact or create new one"
-            const searchInput = page.locator('[role="searchbox"], input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"], input[placeholder*="contact"], input[placeholder*="Type part"]').first();
-            if ((await searchInput.count()) > 0) {
-              await searchInput.pressSequentially(projectData.contactName, { delay: 50 });
-              await randomDelay(2000, 3000);
-
-              // Contacts are button elements inside listitem elements (or MUI ListItem)
-              const escapedName = projectData.contactName.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const contactBtn = page.locator('li button, [role="listitem"] button, div.MuiListItem-root, div.aid-listItem').filter({ hasText: new RegExp(escapedName, "i") }).first();
-              try {
-                await contactBtn.scrollIntoViewIfNeeded().catch(() => {});
-                // MUI dialog footer intercepts pointer events; force:true bypasses but doesn't
-                // trigger React synthetic events. Use JS dispatchEvent for a proper click.
-                await contactBtn.evaluate((el: HTMLElement) => {
-                  el.scrollIntoView({ block: 'center' });
-                  el.click();
-                });
-                await randomDelay(500, 1000);
-                log(`Contact list item clicked: ${projectData.contactName}`, "playwright");
-              } catch (e: any) {
-                log(`Contact list item not found for "${projectData.contactName}": ${e.message}`, "playwright");
-              }
-
-              // Select button appears at dialog bottom after clicking a contact
-              const selectBtn = page.locator('button:has-text("Select")').first();
-              try {
-                await selectBtn.waitFor({ state: 'visible', timeout: 5000 });
-                await selectBtn.click();
-                log("Primary contact Select button clicked", "playwright");
-                // Wait for the contact dialog to close
-                try {
-                  await contactDialog.waitFor({ state: 'hidden', timeout: 5000 });
-                  log("Primary contact dialog closed", "playwright");
-                } catch {
-                  log("Contact dialog didn't close after Select — pressing Escape", "playwright");
-                  await page.keyboard.press('Escape');
-                  await randomDelay(1000, 1500);
-                }
-              } catch {
-                // Fallback: try Close button anywhere on page
-                const closeBtn = page.locator('button:has-text("Close")').first();
-                if ((await closeBtn.count()) > 0) {
-                  await closeBtn.click();
-                  await randomDelay(1000, 1500);
-                  log("Contact dialog closed via Close button", "playwright");
-                } else {
-                  log("Select/Close button not found after contact click — pressing Escape", "playwright");
-                  await page.keyboard.press('Escape');
-                  await randomDelay(1000, 1500);
-                }
-              }
-            } else {
-              log("Contact search input not found in dialog", "playwright");
-            }
-          } else {
-            log("Add Contact button not found on page", "playwright");
-          }
-        } catch (e: any) {
-          log(`Add Contact failed: ${e.message}`, "playwright");
-        }
-        // Dismiss any lingering dialog/overlay — check both role="dialog" and MUI role="presentation" overlays
-        const contactDialogStillOpen = await page.locator('[role="dialog"], .MuiDialog-root').isVisible().catch(() => false);
-        if (contactDialogStillOpen) {
-          try {
-            log("Contact dialog still open after flow — dismissing", "playwright");
-            await page.keyboard.press('Escape');
-            await randomDelay(1000, 1500);
-            // Double-check and try Close button if still open
-            const stillOpen = await page.locator('[role="dialog"], .MuiDialog-root').isVisible().catch(() => false);
-            if (stillOpen) {
-              const closeBtn = page.locator('button:has-text("Close")').first();
-              if ((await closeBtn.count()) > 0) {
-                await closeBtn.click();
-                await randomDelay(1000, 1500);
-              }
-            }
-          } catch (_) {}
-        }
-      } else {
-        log("Primary Contact: no contactName provided in project data", "playwright");
-      }
+      // Primary Contact: DISABLED — not needed for RFP→BidBoard flow.
+      // Customer Company and Project Address are the required fields.
+      // if (projectData.contactName) { ... }
+      log("Primary Contact: skipped (not required for RFP flow)", "playwright");
       // Add Address: must run AFTER Add Customer/Contact dialogs are closed
       // Verified March 2026 — click "Add Address" by text (aid-* class removed by Procore),
       // Procore renders two dialog elements; use .last() to get the one with input fields.
