@@ -406,6 +406,8 @@ export async function syncProcoreProjects(): Promise<{ synced: number; created: 
         });
         changes++;
         if (change.field === 'stage' || change.field === 'projectStageName') {
+          // Skip same-stage "changes" — webhook can fire without an actual stage transition
+          if (change.oldValue?.trim() === change.newValue?.trim()) continue;
           stageChanges.push({
             procoreId,
             projectName: data.name || 'Unknown',
