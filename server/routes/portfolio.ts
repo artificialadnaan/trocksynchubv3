@@ -321,17 +321,34 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
     if (!companyId || !portfolioProjectId) {
       return res.status(400).json({ error: "companyId and portfolioProjectId required" });
     }
-    res.json({ message: "Phase 2 started", companyId, portfolioProjectId, bidboardProjectId });
+
+    // Look up mapping to get bidboardProjectUrl and proposalId for Phase 3 chaining
+    let bidboardProjectUrl: string | undefined;
+    let proposalPdfPath: string | null = null;
+    if (bidboardProjectId) {
+      const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
+      const proposalId = (mapping?.metadata as any)?.proposalId;
+      bidboardProjectUrl = proposalId
+        ? `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details?proposalId=${proposalId}`
+        : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details`;
+    }
+
+    res.json({ message: "Phase 2+3 started", companyId, portfolioProjectId, bidboardProjectId, bidboardProjectUrl });
     setImmediate(async () => {
       try {
         const { withBrowserLock } = await import("../playwright/browser");
         const { runPhase2 } = await import("../playwright/portfolio-automation");
+        const phase2Input = bidboardProjectUrl ? {
+          bidboardProjectUrl,
+          proposalPdfPath,
+          customerName: undefined,
+        } : undefined;
         const result = await withBrowserLock(`phase2-${portfolioProjectId}`, () =>
-          runPhase2(companyId, portfolioProjectId, bidboardProjectId)
+          runPhase2(companyId, portfolioProjectId, bidboardProjectId, phase2Input)
         );
-        console.log(`[portfolio-auto] Phase 2 internal trigger: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
+        console.log(`[portfolio-auto] Phase 2+3 internal trigger: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
       } catch (err) {
-        console.error("[portfolio-auto] Phase 2 internal trigger failed:", (err as Error).message);
+        console.error("[portfolio-auto] Phase 2+3 internal trigger failed:", (err as Error).message);
       }
     });
   }));
