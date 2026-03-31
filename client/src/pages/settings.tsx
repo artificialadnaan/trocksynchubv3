@@ -319,6 +319,8 @@ export default function SettingsPage() {
 
       <RfpAutomationCard />
 
+      <EstimatorsCard />
+
       <HubspotProcoreSyncCard />
 
       <PollingCard />
@@ -2752,6 +2754,142 @@ function ProjectNumberCard() {
           <p><strong>Format:</strong> DDD + YY + suffix (e.g., 05626-aa for day 56 of 2026)</p>
           <p>Replaces the Zapier "New Deal → Run JavaScript → Create Record → Update Deal → Send Email" zap.</p>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function EstimatorsCard() {
+  const { toast } = useToast();
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [estimators, setEstimators] = useState<Array<{ name: string; email: string }>>([]);
+
+  const { data, isLoading } = useQuery<{ estimators: Array<{ name: string; email: string }> }>({
+    queryKey: ["/api/settings/estimators"],
+  });
+
+  useEffect(() => {
+    if (data?.estimators) {
+      setEstimators(data.estimators);
+    }
+  }, [data]);
+
+  const saveMutation = useMutation({
+    mutationFn: async (list: Array<{ name: string; email: string }>) => {
+      const res = await apiRequest("POST", "/api/settings/estimators", { estimators: list });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/settings/estimators"] });
+      toast({ title: "Estimators saved" });
+    },
+    onError: (e: any) => {
+      toast({ title: "Save failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  const handleAdd = () => {
+    const name = newName.trim();
+    const email = newEmail.trim();
+    if (!name || !email) return;
+    const updated = [...estimators, { name, email }];
+    setEstimators(updated);
+    setNewName('');
+    setNewEmail('');
+    setAdding(false);
+    saveMutation.mutate(updated);
+  };
+
+  const handleRemove = (index: number) => {
+    const updated = estimators.filter((_, i) => i !== index);
+    setEstimators(updated);
+    saveMutation.mutate(updated);
+  };
+
+  if (isLoading) return <Skeleton className="h-40" />;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-base font-semibold flex items-center gap-2">
+            <Users className="w-4 h-4" />
+            Estimators
+          </CardTitle>
+          <Button size="sm" variant="outline" onClick={() => setAdding(v => !v)}>
+            <UserPlus className="w-3.5 h-3.5 mr-1.5" />
+            Add Estimator
+          </Button>
+        </div>
+        <p className="text-sm text-muted-foreground mt-1">
+          Estimators shown in the RFP review approval form dropdown.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {adding && (
+          <div className="flex gap-2 items-end border rounded-md p-3 bg-muted/30">
+            <div className="flex-1 space-y-1">
+              <Label className="text-xs">Name</Label>
+              <Input
+                placeholder="Full name"
+                value={newName}
+                onChange={e => setNewName(e.target.value)}
+                className="h-8 text-sm"
+              />
+            </div>
+            <div className="flex-1 space-y-1">
+              <Label className="text-xs">Email</Label>
+              <Input
+                placeholder="email@trockgc.com"
+                value={newEmail}
+                onChange={e => setNewEmail(e.target.value)}
+                className="h-8 text-sm"
+              />
+            </div>
+            <Button size="sm" onClick={handleAdd} disabled={!newName.trim() || !newEmail.trim()}>
+              <Save className="w-3.5 h-3.5 mr-1" />
+              Add
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setNewName(''); setNewEmail(''); }}>
+              Cancel
+            </Button>
+          </div>
+        )}
+        {estimators.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No estimators configured.</p>
+        ) : (
+          <div className="border rounded-md overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50">
+                <tr>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Name</th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Email</th>
+                  <th className="w-10 px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {estimators.map((est, i) => (
+                  <tr key={i} className="border-t hover:bg-muted/30 transition-colors">
+                    <td className="px-3 py-2 font-medium">{est.name}</td>
+                    <td className="px-3 py-2 text-muted-foreground">{est.email}</td>
+                    <td className="px-3 py-2 text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+                        onClick={() => handleRemove(i)}
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

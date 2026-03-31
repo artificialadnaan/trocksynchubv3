@@ -434,111 +434,103 @@ export async function uploadDocumentToBidBoard(
     }
     await randomDelay(1000, 2000);
 
-    // Upload file: New BidBoard — per-file loop (one file per modal cycle).
-    // Use filechooser event: Procore's React dropzone doesn't detect setInputFiles on the input.
+    // Upload files: New BidBoard — batch all files in one modal cycle.
+    // Flow: Upload → Upload Attachments → Upload Files (filechooser with ALL files) → wait for progress → Attach
     let success: boolean;
     if (isNewBidBoard) {
-      let successCount = 0;
+      try {
+        log(`Uploading ${filePaths.length} file(s) to BidBoard project ${projectId}`, "playwright");
 
-      for (let i = 0; i < filePaths.length; i++) {
-        const filePath = filePaths[i];
-        const fileName = documentNames[i];
+        // Click "Upload Files" button to trigger native file picker
+        const uploadFilesBtn = page.locator(
+          'button:has-text("Upload Files"), button:has-text("Attach Files"), ' +
+          '[class*="StyledDropzoneMessage"] button, [class*="StyledDropzone"] button'
+        ).first();
+        await uploadFilesBtn.waitFor({ state: 'visible', timeout: 20000 });
+        await randomDelay(1000, 1500);
 
+        // Use filechooser event — set ALL files at once
+        const [fileChooser] = await Promise.all([
+          page.waitForEvent('filechooser', { timeout: 25000 }),
+          uploadFilesBtn.click({ force: true, timeout: 15000 }),
+        ]);
+        log(`Setting ${filePaths.length} file(s) in file chooser`, "playwright");
+        await fileChooser.setFiles(filePaths);
+
+        // Wait for all uploads to complete — poll for "Total Progress: 100%" or all progress bars done
+        // Procore shows "Uploaded X of Y" status text
+        const fileCount = filePaths.length;
+        await page.waitForFunction(
+          (count) => {
+            const statusEl = document.querySelector('[role="status"]');
+            if (statusEl?.textContent?.includes(`Uploaded ${count} of ${count}`)) return true;
+            if (statusEl?.textContent?.includes('Total Progress: 100%')) return true;
+            // Check if all progress bars are complete
+            const bars = document.querySelectorAll('[role="progressbar"]');
+            if (bars.length === count) {
+              return Array.from(bars).every((b) => {
+                const val = b.getAttribute('aria-valuenow');
+                return val === '100';
+              });
+            }
+            return false;
+          },
+          fileCount,
+          { timeout: 120000 } // 2 min max for large files
+        ).catch(() => {
+          log(`Upload progress check timed out — continuing to click Attach anyway`, "playwright");
+        });
+        await randomDelay(2000, 3000);
+        await takeScreenshot(page, "upload-progress-complete");
+
+        // Click Attach button — try multiple selectors
+        const attachButton = page.locator(
+          'button:has-text("Attach"):not([disabled]), ' +
+          '[data-qa="qa-attach-button"]:not([disabled])'
+        ).first();
+        await attachButton.waitFor({ state: 'visible', timeout: 20000 });
+        await attachButton.click({ force: true });
+        log(`Clicked Attach for ${filePaths.length} file(s)`, "playwright");
+
+        // Wait for modal to close — the Attach Files dialog disappears after successful attach
+        await page.waitForFunction(
+          () => {
+            // Check that no "Attach Files" modal header is visible
+            const headers = document.querySelectorAll('div, h2, h3');
+            for (const h of headers) {
+              if (h.textContent?.trim() === 'Attach Files' && (h as HTMLElement).offsetParent !== null) return false;
+            }
+            return true;
+          },
+          undefined,
+          { timeout: 60000 }
+        ).catch(() => {
+          log("Attach Files modal did not close within timeout", "playwright");
+        });
+        await randomDelay(3000, 5000);
+
+        success = true;
+        log(`Successfully uploaded ${filePaths.length} file(s) to BidBoard project ${projectId}`, "playwright");
+        await takeScreenshot(page, "upload-complete");
+      } catch (err: any) {
+        log(`Failed to upload files: ${err.message}`, "playwright");
+        await takeScreenshot(page, "upload-error");
+        success = false;
+
+        // Try to dismiss modal if still open
         try {
-          // Re-open the upload modal for each file (first file: modal already open from caller)
-          if (i > 0) {
-            await page.evaluate(() => window.scrollTo(0, 0));
-            await page.waitForTimeout(3000);
-            await randomDelay(2000, 3000);
-
-            // Dismiss any existing toasts that might block clicks
-            const toasts = await page.$$('.Toastify__close-button, [aria-label="close"]');
-            for (const toast of toasts) await toast.click().catch(() => {});
-            await randomDelay(300, 500);
-
-            // Click the Upload button (top right of project page)
-            const uploadBtn = page.locator('button:has-text("Upload"), div.aid-upload-documents button').first();
-            await uploadBtn.click({ force: true, timeout: 10000 });
-            await randomDelay(600, 1000);
-
-            // Click Upload Attachments from dropdown menu (or three-dot fallback if dropdown is stale)
-            try {
-              const uploadAttachmentsItem = page.locator('li, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
-              await uploadAttachmentsItem.click({ timeout: 15000 });
-            } catch {
-              // After a failed upload the dropdown state may be stale; try three-dot menu
-              const threeDotBtn = page.locator('div.aid-upload-documents [aria-label*="more" i], div.aid-upload-documents button[class*="icon"], [data-qa*="more"]').first();
-              await threeDotBtn.click({ timeout: 5000, force: true }).catch(() => {});
-              await randomDelay(500, 800);
-              const uploadAttachmentsItem = page.locator('li, [role="menuitem"]').filter({ hasText: /Upload Attachments/i }).first();
-              await uploadAttachmentsItem.click({ timeout: 15000 });
-            }
-            await randomDelay(2000, 3000);
+          const cancelBtn = page.locator('button:has-text("Cancel")').first();
+          if (await cancelBtn.isVisible({ timeout: 2000 })) {
+            await cancelBtn.click();
+            await randomDelay(1000, 1500);
           }
-
-          log(`Upload file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
-
-          // Use filechooser event — clicking the file trigger in the dropzone opens native picker
-          // The trigger may be a button, span, or div depending on Procore version
-          const uploadFilesBtn = page.locator(
-            'button:has-text("Upload Files"), button:has-text("Attach Files"), ' +
-            '[class*="StyledDropzoneMessage"] button, [class*="StyledDropzone"] button, ' +
-            'text="Upload Files", text="Attach Files"'
-          ).first();
-          await uploadFilesBtn.waitFor({ state: 'visible', timeout: 20000 });
-          await new Promise((r) => setTimeout(r, 1500)); // Let modal stabilize
-          const [fileChooser] = await Promise.all([
-            page.waitForEvent('filechooser', { timeout: 25000 }),
-            uploadFilesBtn.click({ force: true, timeout: 15000 }),
-          ]);
-          log(`Uploading to Procore: path=${filePath}, ext=${path.extname(filePath)}`, "playwright");
-          await fileChooser.setFiles(filePath);
-
-          // Wait for file to register in upload list (filename appears in modal)
-          const fileNameBase = path.basename(filePath);
-          await page.waitForFunction(
-            (name) => {
-              const modal = document.querySelector('[class*="StyledModalBody"], [class*="StyledModal"], [role="dialog"]');
-              return modal && modal.textContent && modal.textContent.includes(name);
-            },
-            fileNameBase.substring(0, 20), // Use first 20 chars to avoid encoding issues
-            { timeout: 15000 }
-          ).catch(() => {});
-          await page.waitForTimeout(1000);
-
-          // Try multiple selectors for the Attach button (inside StyledModalFooter, may be obscured)
-          const attachButton = page.locator('[data-qa="qa-attach-button"], [class*="StyledModalFooter"] button:has-text("Attach")').first();
-          await attachButton.waitFor({ state: 'visible', timeout: 20000 });
-          await attachButton.click({ force: true });
-
-          // Wait for modal to close (modal itself disappearing, not just "Attach Files" text)
-          await page.waitForSelector('[class*="StyledModal"][class*="StyledModalBody"], [role="dialog"]:has(button[data-qa="qa-attach-button"])', { state: 'hidden', timeout: 45000 }).catch(() => {});
-          await page.waitForTimeout(2000);
-
-          successCount++;
-          log(`Successfully uploaded file ${i + 1}/${filePaths.length}: ${fileName}`, "playwright");
-          await takeScreenshot(page, `upload-after-attach-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
-        } catch (err: any) {
-          log(`Failed to upload file ${i + 1} (${fileName}): ${err.message}`, "playwright");
-          await takeScreenshot(page, `upload-error-${i + 1}-${fileName.replace(/[^a-z0-9]/gi, "_")}`);
-
-          // Try to dismiss modal if still open before next iteration
-          try {
-            const cancelBtn = page.locator('button:has-text("Cancel")').first();
-            if (await cancelBtn.isVisible({ timeout: 2000 })) {
-              await cancelBtn.click();
-              await randomDelay(1000, 1500);
-            }
-          } catch { /* ignore */ }
-        }
+        } catch { /* modal may already be closed */ }
       }
-
-      success = successCount > 0;
-      log(`Upload complete: ${successCount}/${filePaths.length} files uploaded to BidBoard project ${projectId}`, "playwright");
+      log(`Upload complete: ${success ? filePaths.length : 0}/${filePaths.length} files uploaded to BidBoard project ${projectId}`, "playwright");
       if (success) {
-        await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentNames: documentNames.slice(0, successCount), count: successCount });
+        await logDocumentAction(projectId, "upload_to_bidboard", "success", { documentNames, count: filePaths.length });
       } else {
-        log(`Failed to upload any files to BidBoard project ${projectId}`, "playwright");
+        log(`Failed to upload files to BidBoard project ${projectId}`, "playwright");
       }
     } else {
       const fileInput = await findFileInputForUpload(page, 8000);

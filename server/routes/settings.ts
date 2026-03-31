@@ -535,10 +535,62 @@ export async function initPolling() {
   }
 }
 
+// ─── Estimator list seeding ───────────────────────────────────────────────────
+async function seedEstimatorList() {
+  const existing = await storage.getAutomationConfig('estimator_list');
+  if (!existing) {
+    await storage.upsertAutomationConfig({
+      key: 'estimator_list',
+      value: {
+        estimators: [
+          { name: 'Brett Bell', email: 'bbell@trockgc.com' },
+          { name: 'Colby Burling', email: 'cburling@trockgc.com' },
+          { name: 'Andrew Green', email: 'agreen@trockgc.com' },
+          { name: 'Alex Koch', email: 'akoch@trockgc.com' },
+          { name: 'Eric Williams', email: 'ewilliams@trockgc.com' },
+          { name: 'James Helms', email: 'jhelms@trockgc.com' },
+          { name: 'Sidney Gibson', email: 'sgibson@trockgc.com' },
+          { name: 'Tim Mitchell', email: 'tmitchell@trockgc.com' },
+        ],
+      },
+      description: 'Estimator list for RFP review dropdown',
+    });
+    console.log('[Settings] Seeded estimator_list with 8 default estimators');
+  }
+}
+
 // ─── Route registration ───────────────────────────────────────────────────────
 export function registerSettingsRoutes(app: Express, requireAuth: any) {
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "2.0.0" });
+  });
+
+  // ── Estimator list endpoints ───────────────────────────────────────────────
+  app.get("/api/settings/estimators", requireAuth, async (_req, res) => {
+    try {
+      const config = await storage.getAutomationConfig('estimator_list');
+      const estimators = ((config?.value as any)?.estimators || []) as Array<{ name: string; email: string }>;
+      res.json({ estimators });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/settings/estimators", requireAuth, async (req, res) => {
+    try {
+      const { estimators } = req.body as { estimators: Array<{ name: string; email: string }> };
+      if (!Array.isArray(estimators)) {
+        return res.status(400).json({ message: 'estimators must be an array' });
+      }
+      await storage.upsertAutomationConfig({
+        key: 'estimator_list',
+        value: { estimators },
+        description: 'Estimator list for RFP review dropdown',
+      });
+      res.json({ success: true, estimators });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
   });
 
   // ── Automation dry-run status overview ─────────────────────────────────────
@@ -1318,4 +1370,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // Seed estimator list on startup if not already set
+  seedEstimatorList().catch(e => console.warn('[Settings] Failed to seed estimator list:', e.message));
 }

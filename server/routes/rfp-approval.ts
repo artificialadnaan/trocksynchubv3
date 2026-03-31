@@ -38,7 +38,7 @@ function renderRfpPage(title: string, content: string): string {
 </html>`;
 }
 
-function renderRfpReviewPage(token: string, d: Record<string, any>): string {
+async function renderRfpReviewPage(token: string, d: Record<string, any>): Promise<string> {
   const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const formatDateForInput = (val: any): string => {
     if (val == null || val === '') return '';
@@ -57,6 +57,21 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
   const projectDescription = (d.project_description__briefly_describe_the_project_ || d.description || '').trim();
 
   const currentTypeDigit = parseProjectTypeFromNumber(d.project_number || '') ?? d.project_types ?? '2';
+
+  const estimatorConfig = await storage.getAutomationConfig('estimator_list');
+  const estimators = ((estimatorConfig?.value as any)?.estimators || []) as Array<{ name: string; email: string }>;
+
+  const selectField = (label: string, name: string, value: any, options: Array<{ name: string; email: string }>) => {
+    const val = String(value || '').trim();
+    const opts = options.map(o => `<option value="${esc(o.name)}"${val === o.name ? ' selected' : ''}>${esc(o.name)}</option>`).join('');
+    return `<div class="field">
+      <label>${label}</label>
+      <select name="${name}">
+        <option value="">-- Select --</option>
+        ${opts}
+      </select>
+    </div>`;
+  };
 
   const field = (label: string, name: string, value: any, type = 'text') => {
     if (name === 'project_types') {
@@ -179,7 +194,7 @@ function renderRfpReviewPage(token: string, d: Record<string, any>): string {
           <small style="display:block;color:#64748b;font-size:12px;margin-top:6px;">Changing the project type will update the project number in HubSpot.</small>
         </div>
         <div class="row">
-          ${field('Estimator', 'estimator', d.estimator)}
+          ${selectField('Estimator', 'estimator', d.estimator, estimators)}
           ${field('Project Due Date', 'bid_due_date', proposalDueDateFormatted, 'date')}
         </div>
 
@@ -434,7 +449,7 @@ export function registerRfpApprovalRoutes(app: Express) {
         }
       } catch { /* ignore */ }
     }
-    res.send(renderRfpReviewPage(token, d));
+    res.send(await renderRfpReviewPage(token, d));
   }));
 
   app.post("/api/rfp-approval/:token/approve", async (req, res, next) => {
