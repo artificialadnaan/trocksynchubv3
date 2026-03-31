@@ -81,26 +81,52 @@ export async function runPhase1WithRetry(
         "playwright"
       );
 
+      // Pre-register pending Phase 2 BEFORE attempting direct chain.
+      // This ensures the Procore webhook can find the job even if it fires
+      // during Phase 1 (race condition fix). If direct chain succeeds, we
+      // mark it complete. If it fails, the webhook picks it up as fallback.
+      const { registerPendingPhase2, markPhase2Complete: markComplete } = await import("./orchestrator/portfolio-orchestrator");
+      let pendingJobRegistered = false;
+      try {
+        await registerPendingPhase2(bidboardProjectId, {
+          bidboardProjectUrl,
+          proposalPdfPath: output.proposalPdfPath ?? null,
+          estimateExcelPath: output.estimateExcelPath ?? null,
+          customerName: context.customerName,
+        });
+        pendingJobRegistered = true;
+      } catch (regErr) {
+        log(
+          `[portfolio-runner] Warning: Could not pre-register pending Phase 2: ${regErr instanceof Error ? regErr.message : String(regErr)}`,
+          "playwright"
+        );
+      }
+
       // Chain Phase 2 and Phase 3 directly (primary path). Webhook remains as fallback if this fails.
       const companyId = (await storage.getAutomationConfig("procore_config"))?.value as { companyId?: string } | undefined;
       const cid = companyId?.companyId;
+      let directChainSucceeded = false;
       if (cid && result.portfolioProjectId) {
         try {
           log(
             `[portfolio-runner] Chaining Phase 2 directly for portfolio ${result.portfolioProjectId}`,
             "playwright"
           );
+          const { withBrowserLock } = await import("./playwright/browser");
           const { runPhase2 } = await import("./playwright/portfolio-automation");
-          const phase2Result = await runPhase2(cid, result.portfolioProjectId, bidboardProjectId, {
-            bidboardProjectUrl,
-            proposalPdfPath: output.proposalPdfPath ?? null,
-            customerName: context.customerName,
-          });
+          const phase2Result = await withBrowserLock(`phase2-${result.portfolioProjectId}`, () =>
+            runPhase2(cid, result.portfolioProjectId!, bidboardProjectId, {
+              bidboardProjectUrl,
+              proposalPdfPath: output.proposalPdfPath ?? null,
+              customerName: context.customerName,
+            })
+          );
           // Merge Phase 2 (and Phase 3) steps into result
           phase2Result.steps.forEach((s) => result.steps.push(s));
           result.success = result.success && phase2Result.success;
           result.completedAt = phase2Result.completedAt ?? result.completedAt;
           if (phase2Result.error) result.error = phase2Result.error;
+          directChainSucceeded = phase2Result.success;
           log(
             `[portfolio-runner] Phase 2+3 direct chain ${phase2Result.success ? "succeeded" : "failed"}`,
             "playwright"
@@ -113,15 +139,25 @@ export async function runPhase1WithRetry(
           result.error = (result.error ? result.error + "; " : "") + (err instanceof Error ? err.message : String(err));
           result.success = false;
         }
+      } else {
+        log(
+          `[portfolio-runner] Cannot direct-chain Phase 2: companyId=${cid || 'MISSING'}, portfolioProjectId=${result.portfolioProjectId || 'MISSING'}`,
+          "playwright"
+        );
       }
-      if (!cid || !result.portfolioProjectId || !result.success) {
-        const { registerPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
-        await registerPendingPhase2(bidboardProjectId, {
-          bidboardProjectUrl,
-          proposalPdfPath: output.proposalPdfPath ?? null,
-          estimateExcelPath: output.estimateExcelPath ?? null,
-          customerName: context.customerName,
-        });
+
+      // If direct chain succeeded, mark pre-registered pending job as complete
+      if (directChainSucceeded && pendingJobRegistered) {
+        try {
+          const { takeNextPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
+          const claimed = await takeNextPendingPhase2();
+          if (claimed) {
+            await markComplete(claimed.id);
+            log(`[portfolio-runner] Marked pre-registered Phase 2 job #${claimed.id} as complete (direct chain succeeded)`, "playwright");
+          }
+        } catch (cleanupErr) {
+          // Non-critical — job will expire naturally
+        }
       }
 
       await sendPortfolioAutomationEmail(result, attempts, {
