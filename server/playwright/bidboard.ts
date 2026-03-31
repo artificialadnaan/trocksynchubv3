@@ -1317,21 +1317,62 @@ export async function createBidBoardProject(
 
           // Approach 1: "+ Add Address" button (new projects)
           if (addAddrBtnCount > 0) {
+            // Screenshot before click to see page state
+            await takeScreenshot(page, "bidboard-before-address-click");
+
             const addAddrBtn = page.locator('button.aid-add-address-button').first();
-            await addAddrBtn.scrollIntoViewIfNeeded();
-            await randomDelay(500, 1000);
+
+            // Check if button is in a scrollable container
+            const btnInfo = await page.evaluate(() => {
+              const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
+              if (!btn) return { found: false };
+              const rect = btn.getBoundingClientRect();
+              const style = window.getComputedStyle(btn);
+              return {
+                found: true,
+                top: rect.top,
+                left: rect.left,
+                width: rect.width,
+                height: rect.height,
+                visible: style.display !== 'none' && style.visibility !== 'hidden',
+                disabled: btn.disabled,
+                windowHeight: window.innerHeight,
+              };
+            });
+            log(`Add Address button info: ${JSON.stringify(btnInfo)}`, "playwright");
+
+            // Scroll the button into view within its container
+            await page.evaluate(() => {
+              const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
+              if (btn) {
+                // Scroll all parent containers
+                let el: HTMLElement | null = btn;
+                while (el) {
+                  el.scrollIntoView({ block: 'center', behavior: 'instant' });
+                  el = el.parentElement;
+                  if (el && el.scrollHeight > el.clientHeight) {
+                    el.scrollTop = btn.offsetTop - el.clientHeight / 2;
+                  }
+                }
+                btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+              }
+            });
+            await randomDelay(1000, 1500);
 
             // Try Playwright click first (triggers proper events)
             try {
               await addAddrBtn.click({ timeout: 5000 });
               log("Add Address button clicked via Playwright", "playwright");
-            } catch {
-              // Fallback: DOM click
+            } catch (clickErr: any) {
+              log(`Playwright click failed: ${clickErr.message?.slice(0, 200)}`, "playwright");
+              // Fallback: DOM click with proper event dispatch
               await page.evaluate(() => {
                 const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
-                if (btn) btn.click();
+                if (btn) {
+                  btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                }
               });
-              log("Add Address button clicked via DOM evaluate", "playwright");
+              log("Add Address button clicked via MouseEvent dispatch", "playwright");
             }
             await randomDelay(2000, 3000);
             dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
