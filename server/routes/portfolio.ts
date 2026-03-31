@@ -311,6 +311,28 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
     });
   }));
 
+  // ═══ Internal Phase 2 trigger (no auth, secured by secret) ─────────────────
+  app.post("/api/internal/portfolio-phase2", asyncHandler(async (req, res) => {
+    const secret = req.headers["x-internal-secret"] || req.body?.secret;
+    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
+      return res.status(403).json({ error: "Invalid secret" });
+    }
+    const { companyId, portfolioProjectId, bidboardProjectId } = req.body || {};
+    if (!companyId || !portfolioProjectId) {
+      return res.status(400).json({ error: "companyId and portfolioProjectId required" });
+    }
+    res.json({ message: "Phase 2 started", companyId, portfolioProjectId, bidboardProjectId });
+    setImmediate(async () => {
+      try {
+        const { runPhase2 } = await import("../playwright/portfolio-automation");
+        const result = await runPhase2(companyId, portfolioProjectId, bidboardProjectId);
+        console.log(`[portfolio-auto] Phase 2 internal trigger: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
+      } catch (err) {
+        console.error("[portfolio-auto] Phase 2 internal trigger failed:", (err as Error).message);
+      }
+    });
+  }));
+
   // ═══ Portfolio Automation Test Endpoints (phase-by-phase) ───────────────────
 
   app.post("/api/portfolio-automation/test/phase1", requireAuth, asyncHandler(async (req, res) => {
