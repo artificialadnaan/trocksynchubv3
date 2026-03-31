@@ -1183,6 +1183,7 @@ export async function runPhase2PortfolioActions(
     const BUDGET_POLL_MAX = 10; // 10 attempts
     const BUDGET_POLL_INTERVAL = 30000; // 30s between attempts
     let budgetMenuFound = false;
+    let budgetAlreadySent = false;
 
     for (let attempt = 1; attempt <= BUDGET_POLL_MAX; attempt++) {
       await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
@@ -1197,12 +1198,21 @@ export async function runPhase2PortfolioActions(
         break;
       }
 
+      // If Send to Budget is absent but Create Prime Contract exists → budget already sent
+      const primeItem = await page.$(SEL.portfolioEstimating.createPrimeContract)
+        || await page.$(SEL.portfolioEstimating.createPrimeContractFallback);
+      if (primeItem) {
+        budgetAlreadySent = true;
+        log(`[phase2] Send to Budget not in menu but Create Prime Contract is — budget already sent, skipping`, "playwright");
+        await page.keyboard.press("Escape");
+        break;
+      }
+
       await page.keyboard.press("Escape");
       if (attempt < BUDGET_POLL_MAX) {
         log(`[phase2] Send to Budget not available yet — financial tools initializing (attempt ${attempt}/${BUDGET_POLL_MAX}, retrying in ${BUDGET_POLL_INTERVAL / 1000}s)`, "playwright");
         await page.reload({ waitUntil: "load" }).catch(() => {});
         await randomDelay(3000, 5000);
-        // Navigate back to Estimating tab after reload
         const estTab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
         if (estTab) await estTab.click();
         await randomDelay(2000, 3000);
@@ -1210,25 +1220,29 @@ export async function runPhase2PortfolioActions(
       }
     }
 
-    if (!budgetMenuFound) {
+    if (budgetAlreadySent) {
+      await logStep(page, result, "send_to_budget", "skipped", Date.now() - budgetStart, {
+        metadata: { reason: "Budget already sent" },
+      });
+    } else if (!budgetMenuFound) {
       throw new Error("Send to Budget menu item not available after polling — financial tools may not be initialized");
+    } else {
+      await clickMenuItem(
+        page,
+        SEL.portfolioEstimating.sendToBudget,
+        SEL.portfolioEstimating.sendToBudgetFallback,
+        "Send to Budget"
+      );
+      await randomDelay(2000, 4000);
+
+      await waitForConfirmButtonEnabled(page, 30000);
+      await page.click(SEL.confirmButton, { timeout: 10000 });
+      await randomDelay(2000, 3000);
+      await waitForModalToClose(page, 120000);
+      await randomDelay(3000, 5000);
+
+      await logStep(page, result, "send_to_budget", "success", Date.now() - budgetStart);
     }
-
-    await clickMenuItem(
-      page,
-      SEL.portfolioEstimating.sendToBudget,
-      SEL.portfolioEstimating.sendToBudgetFallback,
-      "Send to Budget"
-    );
-    await randomDelay(2000, 4000);
-
-    await waitForConfirmButtonEnabled(page, 30000);
-    await page.click(SEL.confirmButton, { timeout: 10000 });
-    await randomDelay(2000, 3000);
-    await waitForModalToClose(page, 120000);
-    await randomDelay(3000, 5000);
-
-    await logStep(page, result, "send_to_budget", "success", Date.now() - budgetStart);
   } catch (err: unknown) {
     const { screenshotPath, diagnostics } = await captureFailureContext(page, "phase2-send-to-budget");
     await logStep(page, result, "send_to_budget", "failed", Date.now() - budgetStart, {
@@ -1253,56 +1267,69 @@ export async function runPhase2PortfolioActions(
     await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
     await randomDelay(1000, 2000);
 
-    // Check if Create Prime Contract is enabled; if disabled, wait and retry
-    let primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
-    if (!primeMenuItem) {
-      log(`[phase2] Create Prime Contract is disabled — waiting for budget sync`, "playwright");
+    // Check if Create Prime Contract exists in the menu at all
+    const primeItemAny = await page.$(SEL.portfolioEstimating.createPrimeContract)
+      || await page.$(SEL.portfolioEstimating.createPrimeContractFallback);
+
+    if (!primeItemAny) {
+      // Menu item completely absent → prime contract already created, skip
+      log(`[phase2] Create Prime Contract not in Actions menu — already created, skipping`, "playwright");
       await page.keyboard.press("Escape");
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        await new Promise((r) => setTimeout(r, 15000));
-        await page.reload({ waitUntil: "load" }).catch(() => {});
-        await randomDelay(3000, 5000);
-        const tab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
-        if (tab) await tab.click();
-        await randomDelay(2000, 3000);
-        await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
-        await randomDelay(1000, 2000);
-        primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
-        if (primeMenuItem) {
-          log(`[phase2] Create Prime Contract enabled (attempt ${attempt})`, "playwright");
-          break;
-        }
+      await logStep(page, result, "create_prime_contract", "skipped", Date.now() - primeStart, {
+        metadata: { reason: "Prime contract already exists" },
+      });
+    } else {
+      // Check if enabled; if disabled, wait and retry
+      let primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
+      if (!primeMenuItem) {
+        log(`[phase2] Create Prime Contract is disabled — waiting for budget sync`, "playwright");
         await page.keyboard.press("Escape");
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          await new Promise((r) => setTimeout(r, 15000));
+          await page.reload({ waitUntil: "load" }).catch(() => {});
+          await randomDelay(3000, 5000);
+          const tab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
+          if (tab) await tab.click();
+          await randomDelay(2000, 3000);
+          await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
+          await randomDelay(1000, 2000);
+          primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
+          if (primeMenuItem) {
+            log(`[phase2] Create Prime Contract enabled (attempt ${attempt})`, "playwright");
+            break;
+          }
+          await page.keyboard.press("Escape");
+        }
       }
-    }
 
-    await clickMenuItem(
-      page,
-      SEL.portfolioEstimating.createPrimeContract,
-      SEL.portfolioEstimating.createPrimeContractFallback,
-      "Create Prime Contract"
-    );
-    await randomDelay(2000, 4000);
+      await clickMenuItem(
+        page,
+        SEL.portfolioEstimating.createPrimeContract,
+        SEL.portfolioEstimating.createPrimeContractFallback,
+        "Create Prime Contract"
+      );
+      await randomDelay(2000, 4000);
 
-    await waitForConfirmButtonEnabled(page, 30000);
-    await page.click(SEL.confirmButton, { timeout: 10000 });
-    await randomDelay(2000, 3000);
-    await waitForModalToClose(page, 120000);
-    await randomDelay(3000, 5000);
+      await waitForConfirmButtonEnabled(page, 30000);
+      await page.click(SEL.confirmButton, { timeout: 10000 });
+      await randomDelay(2000, 3000);
+      await waitForModalToClose(page, 120000);
+      await randomDelay(3000, 5000);
 
-    await logStep(page, result, "create_prime_contract", "success", Date.now() - primeStart);
+      await logStep(page, result, "create_prime_contract", "success", Date.now() - primeStart);
 
-    // Immediately sync prime contract amount to HubSpot (non-blocking)
-    try {
-      const { syncChangeOrdersToHubSpot } = await import("../change-order-sync");
-      const syncResult = await syncChangeOrdersToHubSpot(portfolioProjectId);
-      if (syncResult.success) {
-        log(`[portfolio-auto] Prime contract amount synced to HubSpot: $${(syncResult.newAmount ?? 0).toLocaleString()} (deal ${syncResult.dealId})`, "playwright");
-      } else {
-        log(`[portfolio-auto] Prime contract amount sync skipped: ${syncResult.error}`, "playwright");
+      // Immediately sync prime contract amount to HubSpot (non-blocking)
+      try {
+        const { syncChangeOrdersToHubSpot } = await import("../change-order-sync");
+        const syncResult = await syncChangeOrdersToHubSpot(portfolioProjectId);
+        if (syncResult.success) {
+          log(`[portfolio-auto] Prime contract amount synced to HubSpot: $${(syncResult.newAmount ?? 0).toLocaleString()} (deal ${syncResult.dealId})`, "playwright");
+        } else {
+          log(`[portfolio-auto] Prime contract amount sync skipped: ${syncResult.error}`, "playwright");
+        }
+      } catch (syncErr: any) {
+        log(`[portfolio-auto] WARNING: Could not sync prime contract amount to HubSpot: ${syncErr.message}`, "playwright");
       }
-    } catch (syncErr: any) {
-      log(`[portfolio-auto] WARNING: Could not sync prime contract amount to HubSpot: ${syncErr.message}`, "playwright");
     }
   } catch (err: unknown) {
     const { screenshotPath, diagnostics } = await captureFailureContext(page, "phase2-create-prime-contract");
