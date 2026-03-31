@@ -1,5 +1,11 @@
 import { useState } from "react";
-import DOMPurify from 'dompurify';
+
+/** Strip script tags and event handlers from HTML to prevent stored XSS */
+function sanitizeHtml(html: string): string {
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/\bon\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)/gi, '');
+}
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -546,7 +552,7 @@ function TemplatesTab() {
                     </p>
                     <div
                       dangerouslySetInnerHTML={{
-                        __html: DOMPurify.sanitize(template.bodyHtml.replace(
+                        __html: sanitizeHtml(template.bodyHtml.replace(
                           /\{\{(\w+)\}\}/g,
                           (_: string, key: string) =>
                             `<span style="background:#dbeafe;padding:1px 4px;border-radius:3px;font-size:12px;">[${key}]</span>`
