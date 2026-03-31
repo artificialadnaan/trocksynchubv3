@@ -15,6 +15,14 @@ import { webhookLogs } from "@shared/schema";
 import { eq, and, lt, desc } from "drizzle-orm";
 
 export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
+  // Log signature verification status once on startup, not per request
+  if (!process.env.HUBSPOT_CLIENT_SECRET) {
+    console.warn('[webhook] HUBSPOT_CLIENT_SECRET not set — HubSpot signature verification disabled');
+  }
+  if (!process.env.PROCORE_WEBHOOK_SECRET) {
+    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — Procore signature verification disabled');
+  }
+
   // ── HubSpot webhook ─────────────────────────────────────────────────────────
   app.post("/webhooks/hubspot", async (req, res) => {
     try {
@@ -33,8 +41,6 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             return res.status(401).json({ error: 'Invalid signature' });
           }
         }
-      } else {
-        console.warn('[webhook] HUBSPOT_CLIENT_SECRET not set — skipping signature verification');
       }
 
       // H-4: HubSpot payload validation
@@ -287,8 +293,6 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             return res.status(401).json({ error: 'Invalid signature' });
           }
         }
-      } else {
-        console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — skipping signature verification');
       }
 
       // H-4: Procore payload validation
