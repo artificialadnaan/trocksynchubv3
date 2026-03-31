@@ -1852,14 +1852,24 @@ export async function editPrimeContract(
       const descFrames = page.locator(SEL.primeContract.tinyMceFrame);
       const descFrame = descFrames.first();
       // Wait for TinyMCE iframe to appear and be ready
-      await descFrame.waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
-      await randomDelay(2000, 3000); // TinyMCE needs time to initialize
+      await descFrame.waitFor({ state: 'attached', timeout: 20000 }).catch(() => {});
+      await randomDelay(3000, 5000); // TinyMCE needs extra time after modal dismissal
       const frameHandle = await descFrame.elementHandle();
       const descContent = await frameHandle?.contentFrame();
       if (descContent) {
-        await descContent.waitForSelector("body#tinymce", { state: 'visible', timeout: 15000 }).catch(() => {});
-        await descContent.click("body#tinymce", { timeout: 10000 });
-        await descContent.fill("body#tinymce", scrapedData.scopeOfWork);
+        await descContent.waitForSelector("body#tinymce, body[contenteditable='true']", { state: 'visible', timeout: 20000 }).catch(() => {});
+        try {
+          await descContent.click("body#tinymce", { timeout: 15000 });
+        } catch {
+          // Fallback: click contenteditable body
+          await descContent.click("body[contenteditable='true']", { timeout: 10000 }).catch(() => {});
+        }
+        const scope = scrapedData.scopeOfWork!;
+        await descContent.fill("body#tinymce", scope).catch(async () => {
+          // Fallback: type into the contenteditable body
+          await descContent!.fill("body[contenteditable='true']", scope).catch(() => {});
+        });
+        log(`[portfolio-auto] Description/scope filled: ${scrapedData.scopeOfWork.slice(0, 80)}...`, "playwright");
       }
       await randomDelay(500, 1000);
     }
@@ -1890,26 +1900,29 @@ export async function editPrimeContract(
           `[portfolio-auto] Failed to attach proposal PDF (best-effort): ${err instanceof Error ? err.message : String(err)}`,
           "playwright"
         );
-        // Dismiss the Attach Files modal so it doesn't block Save
-        try {
-          const modalCancel = page.locator('.MuiDialog-root button:has-text("Cancel"), [role="dialog"] button:has-text("Cancel")').first();
-          if ((await modalCancel.count()) > 0) {
-            await modalCancel.click({ timeout: 3000 });
-            await randomDelay(500, 1000);
-          }
-          // Also try clicking the modal backdrop or close button as fallback
-          const closeBtn = page.locator('.MuiDialog-root [data-qa="ci-Close"], [role="dialog"] button[aria-label="Close"]').first();
-          if ((await closeBtn.count()) > 0) {
-            await closeBtn.click({ timeout: 3000 });
-            await randomDelay(500, 1000);
-          }
-        } catch {
-          // Press Escape as last resort to dismiss any modal
-          await page.keyboard.press("Escape").catch(() => {});
+        // Aggressively dismiss the Attach Files modal so it doesn't block TinyMCE/Save
+        // Try Cancel button, Close button, then Escape (always attempt all)
+        const modalCancel = page.locator('.MuiDialog-root button:has-text("Cancel"), [role="dialog"] button:has-text("Cancel"), [role="presentation"] button:has-text("Cancel")').first();
+        if ((await modalCancel.count()) > 0) {
+          await modalCancel.click({ timeout: 3000 }).catch(() => {});
           await randomDelay(500, 1000);
         }
-        // Wait for modal to be fully gone before continuing
-        await page.waitForSelector('.MuiDialog-root', { state: 'hidden', timeout: 5000 }).catch(() => {});
+        const closeBtn = page.locator('.MuiDialog-root [data-qa="ci-Close"], [role="dialog"] button[aria-label="Close"], button:has-text("Close")').first();
+        if ((await closeBtn.count()) > 0) {
+          await closeBtn.click({ timeout: 3000 }).catch(() => {});
+          await randomDelay(500, 1000);
+        }
+        // Always press Escape twice to ensure any overlay is dismissed
+        await page.keyboard.press("Escape").catch(() => {});
+        await randomDelay(500, 800);
+        await page.keyboard.press("Escape").catch(() => {});
+        await randomDelay(500, 800);
+        // Wait for any modal/overlay to be gone
+        await page.waitForFunction(
+          () => document.querySelectorAll('.MuiDialog-root, .MuiModal-root, [role="dialog"]').length === 0,
+          { timeout: 5000 }
+        ).catch(() => {});
+        log("[portfolio-auto] Attach Files modal dismissed after PDF failure", "playwright");
       }
     }
 
