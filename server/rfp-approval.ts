@@ -733,6 +733,15 @@ export async function processRfpApproval(
         attachmentsOverride: attachmentsToSync,
         projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
         editedFieldsOverride: {
+          // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
+          ...(dealData.description ? { description: String(dealData.description) } : {}),
+          ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
+          ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
+          ...(dealData.address ? { address: String(dealData.address) } : {}),
+          ...(dealData.city ? { city: String(dealData.city) } : {}),
+          ...(dealData.state ? { state: String(dealData.state) } : {}),
+          ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
+          // User-edited fields override the enriched fallbacks
           ...editedFields,
           project_types: finalProjectTypeDigit,
         },

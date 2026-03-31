@@ -5,7 +5,7 @@ import { updateHubSpotDealStage } from "../hubspot";
 import { sendStageChangeEmail } from "../email-notifications";
 import { processNewDealWebhook } from "../deal-project-number";
 import { processHubspotWebhookForProcore } from "../hubspot-procore-sync";
-import { mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber } from "../procore-hubspot-sync";
+import { mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber, getTerminalStageGuard } from "../procore-hubspot-sync";
 import { handleProcoreProjectWebhook } from "../webhooks/procore-webhook";
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
@@ -473,18 +473,36 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   const stageSyncEnabled = (stageSyncConfig?.value as any)?.enabled === true;
                     if (stageSyncEnabled) {
                       const hubspotStageLabel = mapProcoreStageToHubspot(newStage);
-                      const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
-                      if (resolvedStage) {
-                        const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, resolvedStage.stageId);
-                        console.log(`[webhook] Project ${projectId} not in local DB - synced stage "${newStage}" to HubSpot deal ${mapping.hubspotDealId}: ${updateResult.message}`);
-                        await storage.createAuditLog({
-                          action: 'webhook_stage_change_processed',
-                          entityType: 'project_stage',
-                          entityId: projectId,
-                          source: 'procore',
-                          status: 'success',
-                          details: { projectId, newStage, hubspotDealId: mapping.hubspotDealId, reason: 'project_not_in_local_db' },
-                        });
+                      if (!hubspotStageLabel) {
+                        console.log(`[webhook] Project ${projectId} has null/empty stage — skipping HubSpot sync`);
+                      } else {
+                        // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
+                        const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId);
+                        if (terminalStage) {
+                          console.log(`[webhook] BLOCKED: Deal ${mapping.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${hubspotStageLabel}" (project ${projectId})`);
+                          await storage.createAuditLog({
+                            action: 'webhook_stage_change_blocked',
+                            entityType: 'project_stage',
+                            entityId: projectId,
+                            source: 'procore',
+                            status: 'skipped',
+                            details: { projectId, newStage, hubspotDealId: mapping.hubspotDealId, currentHubspotStage: terminalStage, blockedStage: hubspotStageLabel, reason: 'terminal_stage_guard' },
+                          });
+                        } else {
+                          const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
+                          if (resolvedStage) {
+                            const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, resolvedStage.stageId);
+                            console.log(`[webhook] Project ${projectId} not in local DB - synced stage "${newStage}" to HubSpot deal ${mapping.hubspotDealId}: ${updateResult.message}`);
+                            await storage.createAuditLog({
+                              action: 'webhook_stage_change_processed',
+                              entityType: 'project_stage',
+                              entityId: projectId,
+                              source: 'procore',
+                              status: 'success',
+                              details: { projectId, newStage, hubspotDealId: mapping.hubspotDealId, reason: 'project_not_in_local_db' },
+                            });
+                          }
+                        }
                       }
                     }
 
@@ -598,6 +616,23 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   } else {
                     // Map Procore stage to HubSpot stage label, then resolve to actual stage ID
                     const hubspotStageLabel = mapProcoreStageToHubspot(newStage);
+
+                    if (!hubspotStageLabel) {
+                      console.log(`[webhook] Procore stage "${newStage}" mapped to null — skipping HubSpot sync for deal ${mapping.hubspotDealId}`);
+                    } else {
+                    // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
+                    const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId);
+                    if (terminalStage) {
+                      console.log(`[webhook] BLOCKED: Deal ${mapping.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${hubspotStageLabel}" from Procore stage "${newStage}"`);
+                      await storage.createAuditLog({
+                        action: 'webhook_stage_change_blocked',
+                        entityType: 'project_stage',
+                        entityId: projectId,
+                        source: 'procore',
+                        status: 'skipped',
+                        details: { projectId, projectName: project.name, oldStage, newStage, hubspotDealId: mapping.hubspotDealId, currentHubspotStage: terminalStage, blockedStage: hubspotStageLabel, reason: 'terminal_stage_guard' },
+                      });
+                    } else {
                     const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
 
                     if (!resolvedStage) {
@@ -649,6 +684,8 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                         },
                       });
                     } // End resolvedStage check
+                    } // End terminalStageGuard check
+                    } // End hubspotStageLabel null check
                   } // End stageSyncEnabled check
                 } else {
                   console.log(`[webhook] No HubSpot mapping found for project ${projectId}, stage change logged but not synced`);

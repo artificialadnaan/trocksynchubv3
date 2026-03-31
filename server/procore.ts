@@ -1587,20 +1587,40 @@ export async function runFullProcoreSync(): Promise<{
     } else {
       try {
         const { sendStageChangeEmail } = await import('./email-notifications');
-        const { mapProcoreStageToHubspot, resolveHubspotStageId } = await import('./procore-hubspot-sync');
+        const { mapProcoreStageToHubspot, resolveHubspotStageId, getTerminalStageGuard } = await import('./procore-hubspot-sync');
         const { updateHubSpotDealStage } = await import('./hubspot');
 
         for (const sc of projects.stageChanges) {
           const mapping = await storage.getSyncMappingByProcoreProjectId(sc.procoreId);
           if (mapping?.hubspotDealId) {
             const hubspotStageLabel = mapProcoreStageToHubspot(sc.newStage);
+            if (!hubspotStageLabel) {
+              console.log(`[procore] Procore stage "${sc.newStage}" mapped to null — skipping HubSpot sync for ${sc.projectName}`);
+              continue;
+            }
+
+            // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
+            const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId);
+            if (terminalStage) {
+              console.log(`[procore] BLOCKED: Deal ${mapping.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${hubspotStageLabel}" from polling stage "${sc.newStage}" (${sc.projectName})`);
+              await storage.createAuditLog({
+                action: 'polling_stage_change_blocked',
+                entityType: 'project_stage',
+                entityId: sc.procoreId,
+                source: 'polling',
+                status: 'skipped',
+                details: { procoreId: sc.procoreId, projectName: sc.projectName, oldStage: sc.oldStage, newStage: sc.newStage, hubspotDealId: mapping.hubspotDealId, currentHubspotStage: terminalStage, blockedStage: hubspotStageLabel, reason: 'terminal_stage_guard' },
+              });
+              continue;
+            }
+
             const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
-            
+
             if (!resolvedStage) {
               console.log(`[procore] Could not resolve HubSpot stage for label: ${hubspotStageLabel}`);
               continue;
             }
-            
+
             const hubspotStageId = resolvedStage.stageId;
             const hubspotStageName = resolvedStage.stageName;
 

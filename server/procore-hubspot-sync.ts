@@ -127,10 +127,39 @@ const PROCORE_TO_HUBSPOT_STAGE: Record<string, string> = {
   'Production - lost': 'Closed Lost',
 };
 
-export function mapProcoreStageToHubspot(procoreStage: string | null): string {
-  if (!procoreStage) return 'Estimating'; // Default to Estimating for new projects
+export function mapProcoreStageToHubspot(procoreStage: string | null): string | null {
+  if (!procoreStage) return null; // Null stage = skip sync, don't default to Estimating
   const trimmed = procoreStage.trim();
   return PROCORE_TO_HUBSPOT_STAGE[trimmed] || trimmed; // Pass through if no mapping
+}
+
+/**
+ * Terminal HubSpot stages that automation should never overwrite.
+ * Deals in these stages were explicitly closed by humans — only humans should reopen them.
+ * Normalized to lowercase for comparison.
+ */
+const TERMINAL_HUBSPOT_STAGES = new Set([
+  'closed won',
+  'closed lost',
+  'service – won',
+  'service - won',
+  'service – lost',
+  'service - lost',
+]);
+
+/**
+ * Check if a HubSpot deal is in a terminal stage that should not be overwritten by automation.
+ * Returns the current stage name if terminal (for logging), or null if safe to update.
+ */
+export async function getTerminalStageGuard(hubspotDealId: string): Promise<string | null> {
+  const deal = await storage.getHubspotDealByHubspotId(hubspotDealId);
+  if (!deal) return null; // No cached deal — allow update (conservative)
+  const currentStage = deal.dealStageName?.trim();
+  if (!currentStage) return null;
+  if (TERMINAL_HUBSPOT_STAGES.has(currentStage.toLowerCase())) {
+    return currentStage;
+  }
+  return null;
 }
 
 /** Normalize Unicode dashes (em dash, en dash, etc.) to ASCII hyphen for stage label comparison */
@@ -258,7 +287,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
       const createProps: Record<string, string> = {
         dealname: project.name || 'Unnamed Procore Project',
         pipeline: 'default',
-        dealstage: mapProcoreStageToHubspot(project.stage),
+        dealstage: mapProcoreStageToHubspot(project.stage) || 'Estimating',
       };
       if (project.projectNumber) createProps.project_number = project.projectNumber;
       const procoreLocation = [project.city, project.stateCode].filter(Boolean).join(', ');

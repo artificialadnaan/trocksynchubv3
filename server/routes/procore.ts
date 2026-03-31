@@ -243,6 +243,9 @@ export function registerProcoreRoutes(app: Express, requireAuth: RequestHandler)
     if (mapping?.hubspotDealId) {
       // Map Procore stage to HubSpot stage label, then resolve to actual stage ID
       const hubspotStageLabel = mapProcoreStageToHubspot(newStage);
+      if (!hubspotStageLabel) {
+        console.log(`[manual] Procore stage "${newStage}" mapped to null — skipping HubSpot sync`);
+      } else {
       const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
 
       if (!resolvedStage) {
@@ -273,6 +276,7 @@ export function registerProcoreRoutes(app: Express, requireAuth: RequestHandler)
           details: { projectId, projectName: localProject.name, oldStage, newStage, hubspotDealId: mapping.hubspotDealId, hubspotStageId, hubspotStageName, emailSent: emailResult?.sent },
         });
       }
+      } // End hubspotStageLabel null check
     }
 
     res.json({

@@ -17,7 +17,7 @@ import * as fs from "fs";
 import * as XLSX from "xlsx";
 import { storage } from "../storage";
 import { updateHubSpotDealStage } from "../hubspot";
-import { resolveHubspotStageId } from "../procore-hubspot-sync";
+import { resolveHubspotStageId, getTerminalStageGuard } from "../procore-hubspot-sync";
 import { BIDBOARD_TO_HUBSPOT_STAGE, normalizeStageLabel } from "./stage-mapping";
 import { triggerPortfolioAutomationFromStageChange } from "../playwright/portfolio-automation";
 import { log } from "../index";
@@ -319,6 +319,19 @@ export async function syncStagesToHubSpot(
         "sync"
       );
       result.success++;
+      continue;
+    }
+
+    // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
+    const terminalStage = await getTerminalStageGuard(change.hubspotDealId);
+    if (terminalStage) {
+      log(
+        `BLOCKED: Deal ${change.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${label}" from Bid Board stage "${change.newStage}" (${change.projectName})`,
+        "sync"
+      );
+      result.errors.push(
+        `${change.projectName}: deal is "${terminalStage}", refusing stage regression to "${label}"`
+      );
       continue;
     }
 

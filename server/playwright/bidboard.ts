@@ -839,6 +839,7 @@ export interface NewBidBoardProjectData {
   /** Estimator name from RFP form */
   estimator?: string;
   clientName?: string;
+  contactName?: string;
   clientEmail?: string;
   clientPhone?: string;
   address?: string;
@@ -1223,6 +1224,55 @@ export async function createBidBoardProject(
       } else {
         log("Customer: no clientName provided in project data", "playwright");
       }
+      // Add Primary Contact: click + Add Contact, search, select from list
+      if (projectData.contactName) {
+        log(`Adding primary contact: ${projectData.contactName}`, "playwright");
+        try {
+          await randomDelay(1500, 2500);
+          let addContactBtn = await page.$("button:has-text('Add Contact')");
+          if (!addContactBtn) {
+            addContactBtn = await page.$("button.aid-add-contact-button");
+          }
+          if (addContactBtn) {
+            await addContactBtn.click();
+            await randomDelay(1500, 2500);
+            const searchInput = await page.$('input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"]');
+            if (searchInput) {
+              await searchInput.fill(projectData.contactName);
+              await randomDelay(2000, 3000);
+              const escapedName = projectData.contactName.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
+              try {
+                await listItem.click({ timeout: 8000 });
+                await randomDelay(500, 1000);
+                log(`Contact list item clicked: ${projectData.contactName}`, "playwright");
+              } catch (e: any) {
+                log(`Contact list item not found for "${projectData.contactName}": ${e.message}`, "playwright");
+              }
+              const selectBtn = page.locator('[role="dialog"]').locator('button').filter({ hasText: /Select/i }).first();
+              if ((await selectBtn.count()) > 0) {
+                await selectBtn.click();
+                await randomDelay(1500, 2500);
+                log("Primary contact selected and dialog closed", "playwright");
+              } else {
+                const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
+                if ((await confirmBtn.count()) > 0) {
+                  await confirmBtn.click();
+                  await randomDelay(1500, 2500);
+                }
+              }
+            } else {
+              log("Contact search input not found in dialog", "playwright");
+            }
+          } else {
+            log("Add Contact button not found on page", "playwright");
+          }
+        } catch (e: any) {
+          log(`Add Contact failed: ${e.message}`, "playwright");
+        }
+      } else {
+        log("Primary Contact: no contactName provided in project data", "playwright");
+      }
       // Add Address: must run AFTER Add Customer dialog is closed
       if (projectData.address || projectData.city || projectData.state || projectData.zip || projectData.country) {
         log(`Adding address: ${projectData.address || ''}, ${projectData.city || ''}, ${projectData.state || ''} ${projectData.zip || ''}`, "playwright");
@@ -1593,6 +1643,7 @@ export async function createBidBoardProjectFromDeal(
     projectTypes: (ed.project_types ?? properties.project_types) ?? undefined,
     estimator: get(undefined, "estimator"),
     clientName: get(deal.associatedCompanyName ?? undefined, "company_name") || deal.associatedCompanyName || properties.company_name || undefined,
+    contactName: get(undefined, "contact_name") || properties.contact_name || undefined,
     clientEmail: get(undefined, "client_email") || properties.client_email || properties.contact_email || undefined,
     clientPhone: get(undefined, "client_phone") || properties.client_phone || properties.contact_phone || undefined,
     address: get(undefined, "address") || properties.address || properties.street_address || undefined,
@@ -1606,7 +1657,7 @@ export async function createBidBoardProjectFromDeal(
   };
 
   log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");
-  log(`Project data — clientName: ${projectData.clientName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
+  log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
   
   const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
   
