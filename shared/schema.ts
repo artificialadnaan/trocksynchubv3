@@ -124,6 +124,27 @@ export const bidboardAutomationLogs = pgTable("bidboard_automation_logs", {
 
 export type BidboardAutomationLog = typeof bidboardAutomationLogs.$inferSelect;
 
+// Pending Phase 2 jobs — database-backed queue for portfolio automation
+// Replaces the in-memory array to survive restarts and prevent race conditions
+export const pendingPhase2Jobs = pgTable("pending_phase2_jobs", {
+  id: serial("id").primaryKey(),
+  bidboardProjectId: text("bidboard_project_id").notNull(),
+  bidboardProjectUrl: text("bidboard_project_url").default(""),
+  proposalPdfPath: text("proposal_pdf_path"),
+  estimateExcelPath: text("estimate_excel_path"),
+  customerName: text("customer_name"),
+  status: text("status").notNull().default("pending"), // pending | claimed | completed | failed
+  claimedAt: timestamp("claimed_at"),
+  completedAt: timestamp("completed_at"),
+  error: text("error"),
+  attempts: integer("attempts").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (table) => [
+  index("IDX_phase2_status").on(table.status),
+]);
+
+export type PendingPhase2Job = typeof pendingPhase2Jobs.$inferSelect;
+
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),

@@ -116,7 +116,7 @@ export async function runPhase1WithRetry(
       }
       if (!cid || !result.portfolioProjectId || !result.success) {
         const { registerPendingPhase2 } = await import("./orchestrator/portfolio-orchestrator");
-        registerPendingPhase2(bidboardProjectId, {
+        await registerPendingPhase2(bidboardProjectId, {
           bidboardProjectUrl,
           proposalPdfPath: output.proposalPdfPath ?? null,
           estimateExcelPath: output.estimateExcelPath ?? null,

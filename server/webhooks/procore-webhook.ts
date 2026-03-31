@@ -32,6 +32,8 @@ import { log } from "../index";
 import {
   registerPendingPhase2,
   takeNextPendingPhase2,
+  markPhase2Complete,
+  markPhase2Failed,
 } from "../orchestrator/portfolio-orchestrator";
 
 export { registerPendingPhase2 };
@@ -112,14 +114,15 @@ export async function handleProcoreProjectWebhook(
     if (reason === "update" && payload.project_id) {
       const portfolioProjectId = String(payload.project_id);
 
-      const pending = takeNextPendingPhase2();
+      const pending = await takeNextPendingPhase2();
       if (pending) {
         log(
-          `[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId})`,
+          `[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId}, job #${pending.id})`,
           "webhook"
         );
 
         const webhookPayload = payload;
+        const jobId = pending.id;
         setTimeout(async () => {
           try {
             const phase2Input =
@@ -127,7 +130,7 @@ export async function handleProcoreProjectWebhook(
                 ? {
                     bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
                     proposalPdfPath: pending.proposalPdfPath ?? undefined,
-                    customerName: pending.customerName,
+                    customerName: pending.customerName ?? undefined,
                   }
                 : undefined;
 
@@ -138,6 +141,12 @@ export async function handleProcoreProjectWebhook(
               phase2Input,
               { triggerSource: "webhook" }
             );
+
+            if (result.success) {
+              await markPhase2Complete(jobId);
+            } else {
+              await markPhase2Failed(jobId, result.steps.map((s) => `${s.step}: ${s.status}`).join("; "));
+            }
 
             await storage.createAuditLog({
               action: "webhook_triggered_phase2",
@@ -150,17 +159,20 @@ export async function handleProcoreProjectWebhook(
                 webhookReason: webhookPayload.reason,
                 portfolioProjectId,
                 bidboardProjectId: pending.bidboardProjectId,
+                jobId,
                 automationSteps: result.steps.map((s) => ({ step: s.step, status: s.status })),
               },
             });
 
             log(
-              `[webhook] Phase 2 completed: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`,
+              `[webhook] Phase 2 completed: ${result.success ? "success" : "failed"} (${result.steps.length} steps, job #${jobId})`,
               "webhook"
             );
           } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await markPhase2Failed(jobId, errMsg).catch(() => {});
             log(
-              `[webhook] Phase 2 failed: ${err instanceof Error ? err.message : String(err)}`,
+              `[webhook] Phase 2 failed: ${errMsg} (job #${jobId})`,
               "webhook"
             );
           }
