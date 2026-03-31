@@ -1878,18 +1878,13 @@ export async function editPrimeContract(
       try {
         await page.click('button:has-text("Attach Files")', { timeout: 8000 });
         await randomDelay(2000, 3000);
-        // Scope file input to the MuiDialog modal to avoid strict mode violation
-        // (page has multiple input[type="file"] — one inside modal, one on the form)
-        const modalFileInput = page.locator('.MuiDialog-root input[type="file"], [role="dialog"] input[type="file"]').first();
-        if ((await modalFileInput.count()) > 0) {
-          await modalFileInput.setInputFiles(proposalPdfPath);
-        } else {
-          const [fileChooser] = await Promise.all([
-            page.waitForEvent("filechooser", { timeout: 10000 }),
-            page.click('button:has-text("Upload Files"), button:has-text("Attach Files")'),
-          ]);
-          await fileChooser.setFiles(proposalPdfPath);
-        }
+        // Attach Files modal: click "Upload Files" button to trigger native file chooser
+        // The modal is NOT a MuiDialog — it's a plain overlay with "Upload Files" + drag-and-drop
+        const [fileChooser] = await Promise.all([
+          page.waitForEvent("filechooser", { timeout: 15000 }),
+          page.locator('button:has-text("Upload Files")').click({ timeout: 8000 }),
+        ]);
+        await fileChooser.setFiles(proposalPdfPath);
         await randomDelay(3000, 5000);
         await page
           .click('button:has-text("Attach"):not(:has-text("Attach Files"))', { timeout: 15000 })
