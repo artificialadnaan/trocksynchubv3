@@ -1235,6 +1235,7 @@ export async function createBidBoardProject(
       // Add Primary Contact: click Add Contact, search, select from list, click Select
       // Verified March 2026 — dialog uses searchbox role, contacts are buttons inside listitems,
       // Select button appears at bottom after clicking a contact.
+      // Production Procore uses MUI dialogs with role="presentation" (not role="dialog").
       if (projectData.contactName) {
         log(`Adding primary contact: ${projectData.contactName}`, "playwright");
         try {
@@ -1244,16 +1245,18 @@ export async function createBidBoardProject(
             await addContactBtn.click();
             await randomDelay(1500, 2500);
 
-            // Search input is a searchbox role element in the Available Contacts dialog
-            const contactDialog = page.locator('dialog:has-text("Available Contacts"), [role="dialog"]:has-text("Available Contacts")').last();
-            const searchInput = contactDialog.locator('[role="searchbox"], input[placeholder*="Search"], input[placeholder*="search"]').first();
+            // Contact dialog can be role="dialog" or MUI role="presentation" — match both
+            const contactDialog = page.locator('dialog:has-text("Available Contacts"), [role="dialog"]:has-text("Available Contacts"), .MuiDialog-root:has-text("Available Contacts")').last();
+            // Search input: try searchbox role, then MUI/Procore input selectors
+            // Production placeholder: "Type part of contact or create new one"
+            const searchInput = page.locator('[role="searchbox"], input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"], input[placeholder*="contact"], input[placeholder*="Type part"]').first();
             if ((await searchInput.count()) > 0) {
               await searchInput.pressSequentially(projectData.contactName, { delay: 50 });
               await randomDelay(2000, 3000);
 
-              // Contacts are button elements inside listitem elements
+              // Contacts are button elements inside listitem elements (or MUI ListItem)
               const escapedName = projectData.contactName.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const contactBtn = contactDialog.locator('listitem button, [role="listitem"] button, li button').filter({ hasText: new RegExp(escapedName, "i") }).first();
+              const contactBtn = page.locator('li button, [role="listitem"] button, div.MuiListItem-root, div.aid-listItem').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
                 await contactBtn.scrollIntoViewIfNeeded().catch(() => {});
                 await contactBtn.click({ timeout: 8000 });
@@ -1264,7 +1267,7 @@ export async function createBidBoardProject(
               }
 
               // Select button appears at dialog bottom after clicking a contact
-              const selectBtn = contactDialog.locator('button:has-text("Select")').first();
+              const selectBtn = page.locator('button:has-text("Select")').first();
               try {
                 await selectBtn.waitFor({ state: 'visible', timeout: 5000 });
                 await selectBtn.click();
@@ -1279,8 +1282,8 @@ export async function createBidBoardProject(
                   await randomDelay(1000, 1500);
                 }
               } catch {
-                // Fallback: try Close button
-                const closeBtn = contactDialog.locator('button:has-text("Close")').first();
+                // Fallback: try Close button anywhere on page
+                const closeBtn = page.locator('button:has-text("Close")').first();
                 if ((await closeBtn.count()) > 0) {
                   await closeBtn.click();
                   await randomDelay(1000, 1500);
@@ -1300,12 +1303,22 @@ export async function createBidBoardProject(
         } catch (e: any) {
           log(`Add Contact failed: ${e.message}`, "playwright");
         }
-        // Only dismiss dialog if one is still open (avoid Escape on main page which breaks SPA)
-        const contactDialogStillOpen = await page.locator('[role="dialog"]').isVisible().catch(() => false);
+        // Dismiss any lingering dialog/overlay — check both role="dialog" and MUI role="presentation" overlays
+        const contactDialogStillOpen = await page.locator('[role="dialog"], .MuiDialog-root').isVisible().catch(() => false);
         if (contactDialogStillOpen) {
           try {
+            log("Contact dialog still open after flow — dismissing", "playwright");
             await page.keyboard.press('Escape');
-            await randomDelay(500, 1000);
+            await randomDelay(1000, 1500);
+            // Double-check and try Close button if still open
+            const stillOpen = await page.locator('[role="dialog"], .MuiDialog-root').isVisible().catch(() => false);
+            if (stillOpen) {
+              const closeBtn = page.locator('button:has-text("Close")').first();
+              if ((await closeBtn.count()) > 0) {
+                await closeBtn.click();
+                await randomDelay(1000, 1500);
+              }
+            }
           } catch (_) {}
         }
       } else {
@@ -1324,13 +1337,20 @@ export async function createBidBoardProject(
           let dialogOpened = false;
 
           // Approach 1: "Add Address" button (new projects without an address)
-          const addAddrBtn = page.locator('button:has-text("Add Address")').first();
+          // Try both text-based and class-based selectors; use force:true to bypass any lingering overlay
+          const addAddrBtn = page.locator('button:has-text("Add Address"), button.aid-add-address-button').first();
           if ((await addAddrBtn.count()) > 0) {
             await addAddrBtn.scrollIntoViewIfNeeded().catch(() => {});
-            await addAddrBtn.click({ timeout: 5000 });
-            log("Add Address button clicked", "playwright");
+            try {
+              await addAddrBtn.click({ timeout: 5000 });
+              log("Add Address button clicked", "playwright");
+            } catch (clickErr: any) {
+              log(`Add Address click intercepted: ${clickErr.message?.slice(0, 200)} — retrying with force`, "playwright");
+              await addAddrBtn.click({ force: true, timeout: 5000 });
+              log("Add Address button clicked with force:true", "playwright");
+            }
             await randomDelay(2000, 3000);
-            dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+            dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address"), .MuiDialog-root:has-text("Edit Address")').isVisible().catch(() => false);
             log(`After Add Address click: dialogOpened=${dialogOpened}`, "playwright");
           }
 
@@ -1341,13 +1361,13 @@ export async function createBidBoardProject(
               await countryBtn.scrollIntoViewIfNeeded().catch(() => {});
               await countryBtn.click({ force: true });
               await randomDelay(1000, 1500);
-              dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address"), .MuiDialog-root:has-text("Edit Address")').isVisible().catch(() => false);
               if (!dialogOpened) {
                 const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
                 if ((await editMenuItem.count()) > 0) {
                   await editMenuItem.click();
                   await randomDelay(1000, 1500);
-                  dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+                  dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address"), .MuiDialog-root:has-text("Edit Address")').isVisible().catch(() => false);
                 } else {
                   await page.keyboard.press('Escape');
                   await randomDelay(500, 1000);
@@ -1360,7 +1380,7 @@ export async function createBidBoardProject(
             await randomDelay(500, 1000);
 
             // Procore renders two Edit Address dialogs — use .last() to get the one with fields
-            const addrDialog = page.locator('dialog:has-text("Edit Address"), [role="dialog"]:has-text("Edit Address")').last();
+            const addrDialog = page.locator('dialog:has-text("Edit Address"), [role="dialog"]:has-text("Edit Address"), .MuiDialog-root:has-text("Edit Address")').last();
 
             // Fill address fields using placeholder-based selectors
             if (projectData.address) {
