@@ -1824,10 +1824,14 @@ export async function editPrimeContract(
     if (scrapedData.scopeOfWork) {
       const descFrames = page.locator(SEL.primeContract.tinyMceFrame);
       const descFrame = descFrames.first();
+      // Wait for TinyMCE iframe to appear and be ready
+      await descFrame.waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
+      await randomDelay(2000, 3000); // TinyMCE needs time to initialize
       const frameHandle = await descFrame.elementHandle();
       const descContent = await frameHandle?.contentFrame();
       if (descContent) {
-        await descContent.click("body#tinymce");
+        await descContent.waitForSelector("body#tinymce", { state: 'visible', timeout: 15000 }).catch(() => {});
+        await descContent.click("body#tinymce", { timeout: 10000 });
         await descContent.fill("body#tinymce", scrapedData.scopeOfWork);
       }
       await randomDelay(500, 1000);
@@ -1887,10 +1891,13 @@ export async function editPrimeContract(
       await randomDelay(500, 1000);
       const allFrames = page.locator(SEL.primeContract.tinyMceFrame);
       const inclusionsFrame = allFrames.nth(1);
+      await inclusionsFrame.waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
+      await randomDelay(1000, 2000);
       const inclHandle = await inclusionsFrame.elementHandle();
       const inclContent = await inclHandle?.contentFrame();
       if (inclContent) {
-        await inclContent.click("body#tinymce");
+        await inclContent.waitForSelector("body#tinymce", { state: 'visible', timeout: 15000 }).catch(() => {});
+        await inclContent.click("body#tinymce", { timeout: 10000 });
         await inclContent.fill("body#tinymce", scrapedData.inclusions.join("\n"));
       }
       await randomDelay(500, 1000);
@@ -1899,10 +1906,13 @@ export async function editPrimeContract(
     if (scrapedData.exclusions.length > 0) {
       const allFrames = page.locator(SEL.primeContract.tinyMceFrame);
       const exclusionsFrame = allFrames.nth(2);
+      await exclusionsFrame.waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
+      await randomDelay(1000, 2000);
       const exclHandle = await exclusionsFrame.elementHandle();
       const exclContent = await exclHandle?.contentFrame();
       if (exclContent) {
-        await exclContent.click("body#tinymce");
+        await exclContent.waitForSelector("body#tinymce", { state: 'visible', timeout: 15000 }).catch(() => {});
+        await exclContent.click("body#tinymce", { timeout: 10000 });
         await exclContent.fill("body#tinymce", scrapedData.exclusions.join("\n"));
       }
       await randomDelay(500, 1000);
