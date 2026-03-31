@@ -1302,34 +1302,40 @@ export async function createBidBoardProject(
           // Use a fixed delay rather than waitFor to avoid race conditions
           await randomDelay(2000, 3000);
 
-          // Procore now shows address with a default "United States" and an edit (pencil) button
-          // Try the edit button next to Project Address, then fall back to Add Address button
-          let addAddrBtn = await page.$('[ref] button:near(:text("Project Address"))');
-          if (!addAddrBtn) {
-            // Try clicking the pencil/edit icon button near the address section
-            const addrEditBtn = page.locator('button').filter({ has: page.locator('img') }).locator('near=:text("Project Address")').first();
-            if ((await addrEditBtn.count()) > 0) {
-              addAddrBtn = await addrEditBtn.elementHandle();
+          // Procore shows address with a default country and edit (pencil) button.
+          // Strategy: click the address text button to open Edit Address dialog directly.
+          // If that doesn't work, try pencil icon → "Edit" context menu.
+          let dialogOpened = false;
+
+          // Approach 1: Click the address text button (e.g. "United States") directly
+          const addrTextBtn = page.locator(':text("Project Address") ~ * button').first();
+          if ((await addrTextBtn.count()) > 0) {
+            await addrTextBtn.click({ force: true });
+            await randomDelay(1000, 1500);
+            dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+            // If a context menu appeared instead, click "Edit"
+            if (!dialogOpened) {
+              const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
+              if ((await editMenuItem.count()) > 0) {
+                await editMenuItem.click();
+                await randomDelay(1000, 1500);
+                dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              }
             }
           }
-          if (!addAddrBtn) {
-            addAddrBtn = await page.$('button.aid-add-address-button');
-          }
-          if (!addAddrBtn) {
-            addAddrBtn = await page.$("button:has-text('Add Address')");
-          }
-          // Last resort: click the address text/icon itself to open the edit dialog
-          if (!addAddrBtn) {
-            const addrSection = page.locator(':text("Project Address") ~ * button').first();
-            if ((await addrSection.count()) > 0) {
-              addAddrBtn = await addrSection.elementHandle();
+
+          // Approach 2: Legacy Add Address button
+          if (!dialogOpened) {
+            const legacyBtn = await page.$('button.aid-add-address-button') || await page.$("button:has-text('Add Address')");
+            if (legacyBtn) {
+              await legacyBtn.click({ force: true });
+              await randomDelay(1500, 2500);
+              dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
             }
           }
-          if (addAddrBtn) {
-            await addAddrBtn.click({ force: true });
-            // Wait for the Edit Address dialog to appear
-            await page.waitForSelector('dialog:has-text("Edit Address"), [role="dialog"]:has-text("Edit Address")', { timeout: 10000 }).catch(() => {});
-            await randomDelay(1500, 2500);
+
+          if (dialogOpened) {
+            await randomDelay(500, 1000);
 
             // Fill address fields using placeholder-based selectors (Procore removed aid-* classes)
             const addrDialog = page.locator('dialog:has-text("Edit Address"), [role="dialog"]:has-text("Edit Address")').last();
@@ -1358,7 +1364,7 @@ export async function createBidBoardProject(
               await page.keyboard.press('Tab');
             }
             if (projectData.country) {
-              const countryInput = page.locator('div.aid-country input, input[name="country"], input[placeholder*="Country"]').first();
+              const countryInput = addrDialog.locator('input[placeholder*="United States"], input[placeholder*="Country"], input[placeholder*="country"]').first();
               if ((await countryInput.count()) > 0) {
                 await countryInput.fill(projectData.country);
                 await page.keyboard.press('Tab');
@@ -1390,8 +1396,8 @@ export async function createBidBoardProject(
             }
             log("Address saved", "playwright");
           } else {
-            await takeScreenshot(page, "bidboard-add-address-btn-not-found");
-            log("Add Address button not found on page — check screenshot", "playwright");
+            await takeScreenshot(page, "bidboard-address-dialog-not-opened");
+            log("Could not open Edit Address dialog — check screenshot", "playwright");
           }
         } catch (e: any) {
           log(`Add Address failed: ${e.message}`, "playwright");
