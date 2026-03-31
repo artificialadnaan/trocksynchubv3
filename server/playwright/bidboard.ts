@@ -1232,48 +1232,63 @@ export async function createBidBoardProject(
       } else {
         log("Customer: no clientName provided in project data", "playwright");
       }
-      // Add Primary Contact: click + Add Contact, search, select from list
+      // Add Primary Contact: click Add Contact, search, select from list, click Select
+      // Verified March 2026 — dialog uses searchbox role, contacts are buttons inside listitems,
+      // Select button appears at bottom after clicking a contact.
       if (projectData.contactName) {
         log(`Adding primary contact: ${projectData.contactName}`, "playwright");
         try {
           await randomDelay(1500, 2500);
-          let addContactBtn = await page.$("button:has-text('Add Contact')");
-          if (!addContactBtn) {
-            addContactBtn = await page.$("button.aid-add-contact-button");
-          }
-          if (addContactBtn) {
+          const addContactBtn = page.locator('button:has-text("Add Contact")').first();
+          if ((await addContactBtn.count()) > 0) {
             await addContactBtn.click();
             await randomDelay(1500, 2500);
-            const searchInput = await page.$('input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"]');
-            if (searchInput) {
-              await searchInput.fill(projectData.contactName);
+
+            // Search input is a searchbox role element in the Available Contacts dialog
+            const contactDialog = page.locator('dialog:has-text("Available Contacts"), [role="dialog"]:has-text("Available Contacts")').last();
+            const searchInput = contactDialog.locator('[role="searchbox"], input[placeholder*="Search"], input[placeholder*="search"]').first();
+            if ((await searchInput.count()) > 0) {
+              await searchInput.pressSequentially(projectData.contactName, { delay: 50 });
               await randomDelay(2000, 3000);
+
+              // Contacts are button elements inside listitem elements
               const escapedName = projectData.contactName.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
+              const contactBtn = contactDialog.locator('listitem button, [role="listitem"] button, li button').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
-                await listItem.scrollIntoViewIfNeeded().catch(() => {});
-                await listItem.click({ force: true, timeout: 8000 });
+                await contactBtn.scrollIntoViewIfNeeded().catch(() => {});
+                await contactBtn.click({ timeout: 8000 });
                 await randomDelay(500, 1000);
                 log(`Contact list item clicked: ${projectData.contactName}`, "playwright");
               } catch (e: any) {
                 log(`Contact list item not found for "${projectData.contactName}": ${e.message}`, "playwright");
               }
-              // Wait for the Select button to appear after clicking a contact (React re-render)
-              const selectBtn = page.locator('[role="dialog"] button:has-text("Select"), button:has-text("Select")').first();
+
+              // Select button appears at dialog bottom after clicking a contact
+              const selectBtn = contactDialog.locator('button:has-text("Select")').first();
               try {
                 await selectBtn.waitFor({ state: 'visible', timeout: 5000 });
-                await selectBtn.click({ force: true });
-                await randomDelay(1500, 2500);
-                log("Primary contact selected and dialog closed", "playwright");
+                await selectBtn.click();
+                log("Primary contact Select button clicked", "playwright");
+                // Wait for the contact dialog to close
+                try {
+                  await contactDialog.waitFor({ state: 'hidden', timeout: 5000 });
+                  log("Primary contact dialog closed", "playwright");
+                } catch {
+                  log("Contact dialog didn't close after Select — pressing Escape", "playwright");
+                  await page.keyboard.press('Escape');
+                  await randomDelay(1000, 1500);
+                }
               } catch {
-                // Fallback: try confirm button or close
-                const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
-                if ((await confirmBtn.count()) > 0) {
-                  await confirmBtn.click();
-                  await randomDelay(1500, 2500);
-                  log("Primary contact confirmed via confirm button", "playwright");
+                // Fallback: try Close button
+                const closeBtn = contactDialog.locator('button:has-text("Close")').first();
+                if ((await closeBtn.count()) > 0) {
+                  await closeBtn.click();
+                  await randomDelay(1000, 1500);
+                  log("Contact dialog closed via Close button", "playwright");
                 } else {
-                  log("Select/Confirm button not found after contact click — contact may not have been saved", "playwright");
+                  log("Select/Close button not found after contact click — pressing Escape", "playwright");
+                  await page.keyboard.press('Escape');
+                  await randomDelay(1000, 1500);
                 }
               }
             } else {
@@ -1296,113 +1311,47 @@ export async function createBidBoardProject(
       } else {
         log("Primary Contact: no contactName provided in project data", "playwright");
       }
-      // Add Address: must run AFTER Add Customer dialog is closed
+      // Add Address: must run AFTER Add Customer/Contact dialogs are closed
+      // Verified March 2026 — click "Add Address" by text (aid-* class removed by Procore),
+      // Procore renders two dialog elements; use .last() to get the one with input fields.
+      // Fields use placeholder text: "e.g. 123 Comalt St", "e.g. Austin", "e.g. Texas", "e.g. 78702", "e.g. United States"
       if (projectData.address || projectData.city || projectData.state || projectData.zip || projectData.country) {
         log(`Adding address: ${projectData.address || ''}, ${projectData.city || ''}, ${projectData.state || ''} ${projectData.zip || ''}`, "playwright");
         try {
-          // Wait for the customer picker dialog to disappear specifically (not any dialog)
-          // Use a fixed delay rather than waitFor to avoid race conditions
           await randomDelay(2000, 3000);
 
           // Open Edit Address dialog
           let dialogOpened = false;
 
-          // Wait for any lingering overlays/animations to settle
-          await randomDelay(1500, 2000);
-
-          // Check what address elements exist
-          const addAddrBtnCount = await page.locator('button.aid-add-address-button').count();
-          const countryBtnCount = await page.locator('button:has-text("United States")').count();
-          log(`Address buttons: aid-add-address-button=${addAddrBtnCount}, United States=${countryBtnCount}`, "playwright");
-
-          // Approach 1: "+ Add Address" button (new projects)
-          if (addAddrBtnCount > 0) {
-            // Screenshot before click to see page state
-            await takeScreenshot(page, "bidboard-before-address-click");
-
-            const addAddrBtn = page.locator('button.aid-add-address-button').first();
-
-            // Check if button is in a scrollable container
-            const btnInfo = await page.evaluate(() => {
-              const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
-              if (!btn) return { found: false };
-              const rect = btn.getBoundingClientRect();
-              const style = window.getComputedStyle(btn);
-              return {
-                found: true,
-                top: rect.top,
-                left: rect.left,
-                width: rect.width,
-                height: rect.height,
-                visible: style.display !== 'none' && style.visibility !== 'hidden',
-                disabled: btn.disabled,
-                windowHeight: window.innerHeight,
-              };
-            });
-            log(`Add Address button info: ${JSON.stringify(btnInfo)}`, "playwright");
-
-            // Scroll the button into view within its container
-            await page.evaluate(() => {
-              const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
-              if (btn) {
-                // Scroll all parent containers
-                let el: HTMLElement | null = btn;
-                while (el) {
-                  el.scrollIntoView({ block: 'center', behavior: 'instant' });
-                  el = el.parentElement;
-                  if (el && el.scrollHeight > el.clientHeight) {
-                    el.scrollTop = btn.offsetTop - el.clientHeight / 2;
-                  }
-                }
-                btn.scrollIntoView({ block: 'center', behavior: 'instant' });
-              }
-            });
-            await randomDelay(1000, 1500);
-
-            // Try Playwright click first (triggers proper events)
-            try {
-              await addAddrBtn.click({ timeout: 5000 });
-              log("Add Address button clicked via Playwright", "playwright");
-            } catch (clickErr: any) {
-              log(`Playwright click failed: ${clickErr.message?.slice(0, 200)}`, "playwright");
-              // Fallback: DOM click with proper event dispatch
-              await page.evaluate(() => {
-                const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
-                if (btn) {
-                  btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                }
-              });
-              log("Add Address button clicked via MouseEvent dispatch", "playwright");
-            }
+          // Approach 1: "Add Address" button (new projects without an address)
+          const addAddrBtn = page.locator('button:has-text("Add Address")').first();
+          if ((await addAddrBtn.count()) > 0) {
+            await addAddrBtn.scrollIntoViewIfNeeded().catch(() => {});
+            await addAddrBtn.click({ timeout: 5000 });
+            log("Add Address button clicked", "playwright");
             await randomDelay(2000, 3000);
             dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
             log(`After Add Address click: dialogOpened=${dialogOpened}`, "playwright");
-
-            // If still not open, try double-click
-            if (!dialogOpened) {
-              await addAddrBtn.dblclick({ force: true }).catch(() => {});
-              await randomDelay(1500, 2000);
-              dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-              log(`After double-click: dialogOpened=${dialogOpened}`, "playwright");
-            }
           }
 
-          // Approach 2: Country text button (existing address)
-          if (!dialogOpened && countryBtnCount > 0) {
+          // Approach 2: Country text button (existing address — click to edit)
+          if (!dialogOpened) {
             const countryBtn = page.locator('button:has-text("United States")').first();
-            await countryBtn.scrollIntoViewIfNeeded();
-            await countryBtn.click({ force: true });
-            await randomDelay(1000, 1500);
-            dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-            if (!dialogOpened) {
-              const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
-              if ((await editMenuItem.count()) > 0) {
-                await editMenuItem.click();
-                await randomDelay(1000, 1500);
-                dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-              } else {
-                await page.keyboard.press('Escape');
-                await randomDelay(500, 1000);
+            if ((await countryBtn.count()) > 0) {
+              await countryBtn.scrollIntoViewIfNeeded().catch(() => {});
+              await countryBtn.click({ force: true });
+              await randomDelay(1000, 1500);
+              dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              if (!dialogOpened) {
+                const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
+                if ((await editMenuItem.count()) > 0) {
+                  await editMenuItem.click();
+                  await randomDelay(1000, 1500);
+                  dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+                } else {
+                  await page.keyboard.press('Escape');
+                  await randomDelay(500, 1000);
+                }
               }
             }
           }
@@ -1410,34 +1359,35 @@ export async function createBidBoardProject(
           if (dialogOpened) {
             await randomDelay(500, 1000);
 
-            // Fill address fields using placeholder-based selectors (Procore removed aid-* classes)
+            // Procore renders two Edit Address dialogs — use .last() to get the one with fields
             const addrDialog = page.locator('dialog:has-text("Edit Address"), [role="dialog"]:has-text("Edit Address")').last();
-            const streetInput = addrDialog.locator('input[placeholder*="Comalt"], input[placeholder*="Street"], input[placeholder*="street"]').first();
-            const cityInput = addrDialog.locator('input[placeholder*="Austin"], input[placeholder*="City"], input[placeholder*="city"]').first();
-            const stateInput = addrDialog.locator('input[placeholder*="Texas"], input[placeholder*="State"], input[placeholder*="state"]').first();
-            const zipInput = addrDialog.locator('input[placeholder*="78702"], input[placeholder*="ZIP"], input[placeholder*="zip"]').first();
 
+            // Fill address fields using placeholder-based selectors
             if (projectData.address) {
+              const streetInput = addrDialog.locator('input[placeholder*="Comalt"], input[placeholder*="Street"]').first();
               await streetInput.fill(projectData.address);
               log(`Address street filled: ${projectData.address}`, "playwright");
               await page.keyboard.press('Tab');
             }
             if (projectData.city) {
+              const cityInput = addrDialog.locator('input[placeholder*="Austin"], input[placeholder*="City"]').first();
               await cityInput.fill(projectData.city);
               await page.keyboard.press('Tab');
             }
             if (projectData.state) {
               const stateAbbrev = normalizeState(projectData.state);
               log(`State normalized: "${projectData.state}" → "${stateAbbrev}"`, "playwright");
+              const stateInput = addrDialog.locator('input[placeholder*="Texas"], input[placeholder*="State"]').first();
               await stateInput.fill(stateAbbrev);
               await page.keyboard.press('Escape'); // Dismiss state autocomplete dropdown
             }
             if (projectData.zip) {
+              const zipInput = addrDialog.locator('input[placeholder*="78702"], input[placeholder*="ZIP"]').first();
               await zipInput.fill(projectData.zip);
               await page.keyboard.press('Tab');
             }
             if (projectData.country) {
-              const countryInput = addrDialog.locator('input[placeholder*="United States"], input[placeholder*="Country"], input[placeholder*="country"]').first();
+              const countryInput = addrDialog.locator('input[placeholder*="United States"], input[placeholder*="Country"]').first();
               if ((await countryInput.count()) > 0) {
                 await countryInput.fill(projectData.country);
                 await page.keyboard.press('Tab');
@@ -1449,15 +1399,14 @@ export async function createBidBoardProject(
             // Click Save within the Edit Address dialog
             const saveBtn = addrDialog.locator('button:has-text("Save")').first();
             if ((await saveBtn.count()) > 0) {
-              await saveBtn.scrollIntoViewIfNeeded();
               await saveBtn.click({ force: true });
             } else {
-              // Fallback: any Save button on page
               const fallbackSave = page.locator('button:has-text("Save")').last();
               await fallbackSave.click({ force: true });
             }
             await new Promise((r) => setTimeout(r, 1500));
 
+            // Verify dialog closed; retry Save if still open
             const dialogStillOpen = await page.locator('text=Edit Address').isVisible().catch(() => false);
             if (dialogStillOpen) {
               await page.evaluate(() => {
