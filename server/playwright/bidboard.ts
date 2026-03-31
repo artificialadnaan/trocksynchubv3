@@ -1193,7 +1193,10 @@ export async function createBidBoardProject(
               const escapedName = projectData.clientName.slice(0, 10).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
-                await listItem.click({ force: true, timeout: 8000 });
+                await listItem.evaluate((el: HTMLElement) => {
+                  el.scrollIntoView({ block: 'center' });
+                  el.click();
+                });
                 await randomDelay(500, 1000);
                 log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
               } catch (e: any) {
@@ -1260,8 +1263,12 @@ export async function createBidBoardProject(
               const contactBtn = page.locator('li button, [role="listitem"] button, div.MuiListItem-root, div.aid-listItem').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
                 await contactBtn.scrollIntoViewIfNeeded().catch(() => {});
-                // Use force:true — MUI dialog footer (MuiDialogActions-root) intercepts pointer events
-                await contactBtn.click({ force: true, timeout: 8000 });
+                // MUI dialog footer intercepts pointer events; force:true bypasses but doesn't
+                // trigger React synthetic events. Use JS dispatchEvent for a proper click.
+                await contactBtn.evaluate((el: HTMLElement) => {
+                  el.scrollIntoView({ block: 'center' });
+                  el.click();
+                });
                 await randomDelay(500, 1000);
                 log(`Contact list item clicked: ${projectData.contactName}`, "playwright");
               } catch (e: any) {
