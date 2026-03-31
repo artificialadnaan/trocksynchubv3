@@ -452,18 +452,31 @@ export async function uploadDocumentToBidBoard(
           log("'My Computer' tab not found or already active", "playwright");
         }
 
-        // Click "Upload Files" button to trigger native file picker
-        const uploadFilesBtn = page.locator(
-          'button:has-text("Upload Files"), button:has-text("Attach Files"), ' +
-          '[class*="StyledDropzoneMessage"] button, [class*="StyledDropzone"] button'
-        ).first();
-        await uploadFilesBtn.waitFor({ state: 'visible', timeout: 20000 });
+        // Click "Upload Files" button inside the Attach Files modal to trigger native file picker.
+        // Scope to the modal container to avoid matching hidden Upload buttons elsewhere on the page.
+        // The modal contains "Attach Files" header and the dropzone with "Upload Files" + "or Drag & Drop".
         await randomDelay(1000, 1500);
-
-        // Use filechooser event — set ALL files at once
         const [fileChooser] = await Promise.all([
-          page.waitForEvent('filechooser', { timeout: 25000 }),
-          uploadFilesBtn.click({ force: true, timeout: 15000 }),
+          page.waitForEvent('filechooser', { timeout: 30000 }),
+          page.evaluate(() => {
+            // Find the button containing "Upload Files" text that's inside the attach modal
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const uploadBtn = buttons.find(b => {
+              const text = b.textContent?.trim();
+              if (!text?.includes('Upload Files')) return false;
+              // Verify it's inside the attach modal (near "Drag & Drop" text)
+              const parent = b.closest('[class*="region"], [role="region"], [class*="Modal"]') || b.parentElement?.parentElement;
+              return parent?.textContent?.includes('Drag & Drop');
+            });
+            if (uploadBtn) {
+              uploadBtn.click();
+            } else {
+              // Fallback: click any visible Upload Files button
+              const fallback = buttons.find(b => b.textContent?.trim().includes('Upload Files') && b.offsetParent !== null);
+              if (fallback) fallback.click();
+              else throw new Error('Upload Files button not found in modal');
+            }
+          }),
         ]);
         log(`Setting ${filePaths.length} file(s) in file chooser`, "playwright");
         await fileChooser.setFiles(filePaths);
