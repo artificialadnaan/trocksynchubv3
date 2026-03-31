@@ -1666,6 +1666,25 @@ export interface CreateBidBoardProjectFromDealResult extends CreateBidBoardProje
 }
 
 // Create BidBoard project from HubSpot deal data and sync documents
+/** Look up the first associated contact's name from the deal's associatedContactIds */
+async function getAssociatedContactName(deal: any): Promise<string | null> {
+  try {
+    const contactIds = deal.associatedContactIds;
+    if (!contactIds) return null;
+    // contactIds may be a comma-separated string or JSON array
+    const ids = typeof contactIds === "string"
+      ? contactIds.split(",").map((s: string) => s.trim()).filter(Boolean)
+      : Array.isArray(contactIds) ? contactIds : [];
+    if (ids.length === 0) return null;
+    const contact = await storage.getHubspotContactByHubspotId(ids[0]);
+    if (!contact) return null;
+    const name = [contact.firstName, contact.lastName].filter(Boolean).join(" ").trim();
+    return name || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function createBidBoardProjectFromDeal(
   dealId: string,
   initialStage: string = "Estimate in Progress",
@@ -1704,7 +1723,7 @@ export async function createBidBoardProjectFromDeal(
     projectTypes: (ed.project_types ?? properties.project_types) ?? undefined,
     estimator: get(undefined, "estimator"),
     clientName: get(deal.associatedCompanyName ?? undefined, "company_name") || deal.associatedCompanyName || properties.company_name || undefined,
-    contactName: get(undefined, "contact_name") || properties.contact_name || undefined,
+    contactName: get(undefined, "contact_name") || properties.contact_name || await getAssociatedContactName(deal) || undefined,
     clientEmail: get(undefined, "client_email") || properties.client_email || properties.contact_email || undefined,
     clientPhone: get(undefined, "client_phone") || properties.client_phone || properties.contact_phone || undefined,
     address: get(undefined, "address") || properties.address || properties.street_address || undefined,
