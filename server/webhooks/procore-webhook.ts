@@ -126,10 +126,10 @@ export async function handleProcoreProjectWebhook(
         setTimeout(async () => {
           try {
             const phase2Input =
-              pending.bidboardProjectUrl || pending.proposalPdfPath != null
+              pending.bidboardProjectUrl || pending.proposalPdfPath != null || pending.customerName
                 ? {
                     bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
-                    proposalPdfPath: pending.proposalPdfPath ?? undefined,
+                    proposalPdfPath: pending.proposalPdfPath ?? null,
                     customerName: pending.customerName ?? undefined,
                   }
                 : undefined;

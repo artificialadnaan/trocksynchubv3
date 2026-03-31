@@ -2216,25 +2216,35 @@ export async function runPhase2(
 
     logAutomationSummary(result);
 
-    // Phase 3: run if Phase 2 succeeded and we have required data
-    if (
-      result.success &&
-      phase2Input?.bidboardProjectUrl &&
-      phase2Input?.proposalPdfPath !== undefined
-    ) {
-      const phase3Result = await runPhase3(
-        companyId,
-        portfolioProjectId,
-        phase2Input.bidboardProjectUrl,
-        phase2Input.proposalPdfPath,
-        bidboardProjectId,
-        page,
-        phase2Input.customerName
-      );
-      phase3Result.steps.forEach((s) => result.steps.push(s));
-      result.success = result.success && phase3Result.success;
-      result.completedAt = phase3Result.completedAt || result.completedAt;
-      if (phase3Result.error) result.error = phase3Result.error;
+    // Phase 3: always run after Phase 2 succeeds — construct missing inputs if needed
+    if (result.success) {
+      let bbUrl = phase2Input?.bidboardProjectUrl;
+      // Construct bidboardProjectUrl if not provided but we have the project ID
+      if (!bbUrl && bidboardProjectId && bidboardProjectId !== "unknown") {
+        const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
+        const proposalId = (mapping?.metadata as any)?.proposalId;
+        bbUrl = proposalId
+          ? `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details?proposalId=${proposalId}`
+          : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details`;
+        log(`[portfolio-auto] Constructed bidboardProjectUrl for Phase 3: ${bbUrl}`, "playwright");
+      }
+      if (bbUrl) {
+        const phase3Result = await runPhase3(
+          companyId,
+          portfolioProjectId,
+          bbUrl,
+          phase2Input?.proposalPdfPath ?? null,
+          bidboardProjectId,
+          page,
+          phase2Input?.customerName
+        );
+        phase3Result.steps.forEach((s) => result.steps.push(s));
+        result.success = result.success && phase3Result.success;
+        result.completedAt = phase3Result.completedAt || result.completedAt;
+        if (phase3Result.error) result.error = phase3Result.error;
+      } else {
+        log(`[portfolio-auto] WARNING: Cannot run Phase 3 — no bidboardProjectUrl and no bidboardProjectId to construct one`, "playwright");
+      }
     }
   } catch (err: unknown) {
     result.error = err instanceof Error ? err.message : String(err);
