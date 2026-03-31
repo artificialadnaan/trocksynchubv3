@@ -441,6 +441,17 @@ export async function uploadDocumentToBidBoard(
       try {
         log(`Uploading ${filePaths.length} file(s) to BidBoard project ${projectId}`, "playwright");
 
+        // Ensure "My Computer" tab is active in the Attach Files modal
+        // The modal may default to a different tab (e.g., Procore files)
+        const myComputerTab = page.locator('text="My Computer"').first();
+        try {
+          await myComputerTab.click({ timeout: 5000 });
+          await randomDelay(1000, 1500);
+          log("Clicked 'My Computer' tab in upload modal", "playwright");
+        } catch {
+          log("'My Computer' tab not found or already active", "playwright");
+        }
+
         // Click "Upload Files" button to trigger native file picker
         const uploadFilesBtn = page.locator(
           'button:has-text("Upload Files"), button:has-text("Attach Files"), ' +
