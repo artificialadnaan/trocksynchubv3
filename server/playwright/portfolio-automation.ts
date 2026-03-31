@@ -78,11 +78,11 @@ const SEL = {
 
   // Portfolio — Estimating tool (after project is in Portfolio)
   portfolioEstimating: {
-    actionsButton: "button.aid-actions",
-    sendToBudget: ".aid-send-to-budget[role='menuitem']",
-    sendToBudgetFallback: '[role="menuitem"] a:has-text("Send to Budget")',
-    createPrimeContract: ".aid-create-prime-contract[role='menuitem']",
-    createPrimeContractFallback: '[role="menuitem"] a:has-text("Create Prime Contract")',
+    actionsButton: 'button.aid-actions, button:has-text("Actions")',
+    sendToBudget: ".aid-send-to-budget[role='menuitem'], [role='menuitem']:has-text('Send to Budget')",
+    sendToBudgetFallback: '[role="menuitem"] a:has-text("Send to Budget"), [role="menuitem"]:has-text("Send to Budget")',
+    createPrimeContract: ".aid-create-prime-contract[role='menuitem'], [role='menuitem']:has-text('Create Prime Contract')",
+    createPrimeContractFallback: '[role="menuitem"] a:has-text("Create Prime Contract"), [role="menuitem"]:has-text("Create Prime Contract")',
     estimatingTab: '.aid-tab-title:has-text("Estimating")',
   },
 
@@ -1145,7 +1145,7 @@ export async function runPhase2PortfolioActions(
   try {
     await page.goto(estimatingUrl, { waitUntil: "load", timeout: 60000 });
     const portfolioEstimatingSpaSelectors = [
-      "button.aid-actions",
+      'button.aid-actions, button:has-text("Actions")',
       ".aid-tab-title",
       ".aid-send-to-budget",
       ".aid-create-prime-contract",
@@ -1544,7 +1544,7 @@ export async function scrapeBidBoardData(
       try {
         await page.goto(estimatingUrl, { waitUntil: "load", timeout: 60000 });
         const estimatingSpaSelectors = [
-          "button.aid-actions",
+          'button.aid-actions, button:has-text("Actions")',
           ".aid-tab-title",
           ".aid-inclusions",
           ".aid-exclusions",
