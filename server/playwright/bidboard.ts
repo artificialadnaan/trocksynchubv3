@@ -1254,7 +1254,8 @@ export async function createBidBoardProject(
               const escapedName = projectData.contactName.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
-                await listItem.click({ timeout: 8000 });
+                await listItem.scrollIntoViewIfNeeded().catch(() => {});
+                await listItem.click({ force: true, timeout: 8000 });
                 await randomDelay(500, 1000);
                 log(`Contact list item clicked: ${projectData.contactName}`, "playwright");
               } catch (e: any) {
@@ -1303,14 +1304,13 @@ export async function createBidBoardProject(
           await randomDelay(2000, 3000);
 
           // Procore shows address with a default country and edit (pencil) button.
-          // Strategy: click the address text button to open Edit Address dialog directly.
-          // If that doesn't work, try pencil icon → "Edit" context menu.
+          // Strategy: click the address text/button to open Edit Address dialog.
           let dialogOpened = false;
 
-          // Approach 1: Click the address text button (e.g. "United States") directly
-          const addrTextBtn = page.locator(':text("Project Address") ~ * button').first();
-          if ((await addrTextBtn.count()) > 0) {
-            await addrTextBtn.click({ force: true });
+          // Approach 1: Click the button showing the country text (e.g. "United States")
+          const countryBtn = page.locator('button:has-text("United States"), button:has-text("US")').first();
+          if ((await countryBtn.count()) > 0) {
+            await countryBtn.click({ force: true });
             await randomDelay(1000, 1500);
             dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
             // If a context menu appeared instead, click "Edit"
@@ -1320,11 +1320,32 @@ export async function createBidBoardProject(
                 await editMenuItem.click();
                 await randomDelay(1000, 1500);
                 dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              } else {
+                // Dismiss any stale menu
+                await page.keyboard.press('Escape');
+                await randomDelay(500, 1000);
               }
             }
           }
 
-          // Approach 2: Legacy Add Address button
+          // Approach 2: Click the pencil icon button next to address section
+          if (!dialogOpened) {
+            // The pencil icon is a sibling button after the country text button
+            const pencilBtn = page.locator('button:has-text("United States") + button, button:has-text("US") + button').first();
+            if ((await pencilBtn.count()) > 0) {
+              await pencilBtn.click({ force: true });
+              await randomDelay(1000, 1500);
+              // This opens a context menu with "Edit"
+              const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
+              if ((await editMenuItem.count()) > 0) {
+                await editMenuItem.click();
+                await randomDelay(1000, 1500);
+                dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              }
+            }
+          }
+
+          // Approach 3: Legacy Add Address button
           if (!dialogOpened) {
             const legacyBtn = await page.$('button.aid-add-address-button') || await page.$("button:has-text('Add Address')");
             if (legacyBtn) {
