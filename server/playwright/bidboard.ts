@@ -1303,55 +1303,40 @@ export async function createBidBoardProject(
           // Use a fixed delay rather than waitFor to avoid race conditions
           await randomDelay(2000, 3000);
 
-          // Procore shows address with a default country and edit (pencil) button.
-          // Strategy: click the address text/button to open Edit Address dialog.
+          // Open Edit Address dialog. Two cases:
+          // 1. New project (no address): shows "+ Add Address" button (class: aid-add-address-button)
+          // 2. Existing address: shows country text button (e.g. "United States") or pencil icon
           let dialogOpened = false;
 
-          // Approach 1: Click the button showing the country text (e.g. "United States")
-          const countryBtn = page.locator('button:has-text("United States"), button:has-text("US")').first();
-          if ((await countryBtn.count()) > 0) {
-            await countryBtn.click({ force: true });
-            await randomDelay(1000, 1500);
+          // Approach 1: "+ Add Address" button (new projects without address)
+          const addAddrBtn = page.locator('button.aid-add-address-button').first();
+          if ((await addAddrBtn.count()) > 0) {
+            await addAddrBtn.scrollIntoViewIfNeeded();
+            await addAddrBtn.click({ force: true });
+            await randomDelay(1500, 2500);
             dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-            // If a context menu appeared instead, click "Edit"
-            if (!dialogOpened) {
-              const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
-              if ((await editMenuItem.count()) > 0) {
-                await editMenuItem.click();
-                await randomDelay(1000, 1500);
-                dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-              } else {
-                // Dismiss any stale menu
-                await page.keyboard.press('Escape');
-                await randomDelay(500, 1000);
-              }
-            }
           }
 
-          // Approach 2: Click the pencil icon button next to address section
+          // Approach 2: Country text button (projects with existing address)
           if (!dialogOpened) {
-            // The pencil icon is a sibling button after the country text button
-            const pencilBtn = page.locator('button:has-text("United States") + button, button:has-text("US") + button').first();
-            if ((await pencilBtn.count()) > 0) {
-              await pencilBtn.click({ force: true });
+            const countryBtn = page.locator('button:has-text("United States"), button:has-text("US")').first();
+            if ((await countryBtn.count()) > 0) {
+              await countryBtn.scrollIntoViewIfNeeded();
+              await countryBtn.click({ force: true });
               await randomDelay(1000, 1500);
-              // This opens a context menu with "Edit"
-              const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
-              if ((await editMenuItem.count()) > 0) {
-                await editMenuItem.click();
-                await randomDelay(1000, 1500);
-                dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-              }
-            }
-          }
-
-          // Approach 3: Legacy Add Address button
-          if (!dialogOpened) {
-            const legacyBtn = await page.$('button.aid-add-address-button') || await page.$("button:has-text('Add Address')");
-            if (legacyBtn) {
-              await legacyBtn.click({ force: true });
-              await randomDelay(1500, 2500);
               dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              // If a context menu appeared instead, click "Edit"
+              if (!dialogOpened) {
+                const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
+                if ((await editMenuItem.count()) > 0) {
+                  await editMenuItem.click();
+                  await randomDelay(1000, 1500);
+                  dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+                } else {
+                  await page.keyboard.press('Escape');
+                  await randomDelay(500, 1000);
+                }
+              }
             }
           }
 
