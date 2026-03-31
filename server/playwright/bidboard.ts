@@ -1193,13 +1193,13 @@ export async function createBidBoardProject(
               const escapedName = projectData.clientName.slice(0, 10).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
-                await listItem.click({ timeout: 8000 });
+                await listItem.click({ force: true, timeout: 8000 });
                 await randomDelay(500, 1000);
                 log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
               } catch (e: any) {
                 log(`Customer list item not found for "${projectData.clientName}": ${e.message}`, "playwright");
               }
-              const selectBtn = page.locator('[role="dialog"]').locator('button').filter({ hasText: /Select/i }).first();
+              const selectBtn = page.locator('[role="dialog"] button, .MuiDialog-root button').filter({ hasText: /Select/i }).first();
               if ((await selectBtn.count()) > 0) {
                 await selectBtn.click();
                 await randomDelay(1500, 2500);
@@ -1222,11 +1222,12 @@ export async function createBidBoardProject(
           log(`Add Customer failed: ${e.message}`, "playwright");
         }
         // Only dismiss dialog if one is still open (avoid Escape on main page which breaks SPA)
-        const custDialogStillOpen = await page.locator('[role="dialog"]').isVisible().catch(() => false);
+        const custDialogStillOpen = await page.locator('[role="dialog"], .MuiDialog-root').isVisible().catch(() => false);
         if (custDialogStillOpen) {
           try {
+            log("Customer dialog still open — dismissing", "playwright");
             await page.keyboard.press('Escape');
-            await randomDelay(500, 1000);
+            await randomDelay(1000, 1500);
           } catch (_) {}
         }
       } else {
@@ -1259,7 +1260,8 @@ export async function createBidBoardProject(
               const contactBtn = page.locator('li button, [role="listitem"] button, div.MuiListItem-root, div.aid-listItem').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
                 await contactBtn.scrollIntoViewIfNeeded().catch(() => {});
-                await contactBtn.click({ timeout: 8000 });
+                // Use force:true — MUI dialog footer (MuiDialogActions-root) intercepts pointer events
+                await contactBtn.click({ force: true, timeout: 8000 });
                 await randomDelay(500, 1000);
                 log(`Contact list item clicked: ${projectData.contactName}`, "playwright");
               } catch (e: any) {
@@ -1340,6 +1342,7 @@ export async function createBidBoardProject(
           // Try both text-based and class-based selectors; use force:true to bypass any lingering overlay
           const addAddrBtn = page.locator('button:has-text("Add Address"), button.aid-add-address-button').first();
           if ((await addAddrBtn.count()) > 0) {
+            await takeScreenshot(page, "bidboard-before-address-click");
             await addAddrBtn.scrollIntoViewIfNeeded().catch(() => {});
             try {
               await addAddrBtn.click({ timeout: 5000 });
@@ -1349,8 +1352,15 @@ export async function createBidBoardProject(
               await addAddrBtn.click({ force: true, timeout: 5000 });
               log("Add Address button clicked with force:true", "playwright");
             }
+            await takeScreenshot(page, "bidboard-after-address-click");
             await randomDelay(2000, 3000);
-            dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address"), .MuiDialog-root:has-text("Edit Address")').isVisible().catch(() => false);
+            // Detect dialog: try role="dialog", MUI dialog, native <dialog>, or any overlay with address fields
+            dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address"), .MuiDialog-root:has-text("Edit Address"), dialog:has-text("Edit Address"), [role="dialog"]:has-text("Street"), .MuiDialog-root:has-text("Street")').first().isVisible().catch(() => false);
+            if (!dialogOpened) {
+              // Fallback: check if address input fields appeared anywhere on page (inline edit)
+              dialogOpened = await page.locator('input[placeholder*="Comalt"], input[placeholder*="123 Comalt"]').first().isVisible().catch(() => false);
+              if (dialogOpened) log("Address fields detected (inline/non-dialog mode)", "playwright");
+            }
             log(`After Add Address click: dialogOpened=${dialogOpened}`, "playwright");
           }
 
