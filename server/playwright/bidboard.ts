@@ -1186,30 +1186,43 @@ export async function createBidBoardProject(
           if (addCustBtn) {
             await addCustBtn.click();
             await randomDelay(1500, 2500);
-            const searchInput = await page.$('input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"]');
+            // Search input: try multiple selectors (MUI, searchbox role, placeholder variants)
+            const searchInput = await page.$('[role="searchbox"], input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"], input[placeholder*="customer"], input[placeholder*="Customer"]');
             if (searchInput) {
               await searchInput.fill(projectData.clientName);
               await randomDelay(2000, 3000);
               const escapedName = projectData.clientName.slice(0, 10).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
-                await listItem.click({ force: true, timeout: 8000 });
-                await randomDelay(500, 1000);
+                // Use JS click — force:true doesn't trigger React synthetic events on MUI components
+                await listItem.evaluate((el: HTMLElement) => {
+                  el.scrollIntoView({ block: 'center' });
+                  el.click();
+                });
+                await randomDelay(1000, 2000);
                 log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
               } catch (e: any) {
                 log(`Customer list item not found for "${projectData.clientName}": ${e.message}`, "playwright");
               }
-              const selectBtn = page.locator('[role="dialog"] button, .MuiDialog-root button').filter({ hasText: /Select/i }).first();
+              // Check for Select button (appears after clicking a customer in some dialog variants)
+              const selectBtn = page.locator('button').filter({ hasText: /^Select$/i }).first();
               if ((await selectBtn.count()) > 0) {
                 await selectBtn.click();
                 await randomDelay(1500, 2500);
                 log("Customer selected and dialog closed", "playwright");
               } else {
-                // Try confirm button
-                const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
-                if ((await confirmBtn.count()) > 0) {
-                  await confirmBtn.click();
-                  await randomDelay(1500, 2500);
+                // Some dialogs auto-close on item click; check if dialog is gone
+                const dialogGone = !(await page.locator('[role="dialog"], .MuiDialog-root, [role="presentation"].MuiModal-root').isVisible().catch(() => false));
+                if (dialogGone) {
+                  log("Customer dialog auto-closed after item click", "playwright");
+                } else {
+                  // Try Close button to dismiss
+                  const closeBtn = page.locator('button:has-text("Close")').first();
+                  if ((await closeBtn.count()) > 0) {
+                    await closeBtn.click();
+                    await randomDelay(1000, 1500);
+                    log("Customer dialog closed via Close button", "playwright");
+                  }
                 }
               }
             } else {
@@ -1221,13 +1234,26 @@ export async function createBidBoardProject(
         } catch (e: any) {
           log(`Add Customer failed: ${e.message}`, "playwright");
         }
-        // Only dismiss dialog if one is still open (avoid Escape on main page which breaks SPA)
-        const custDialogStillOpen = await page.locator('[role="dialog"], .MuiDialog-root').isVisible().catch(() => false);
+        // Aggressively dismiss any lingering dialog/overlay (MUI uses role="presentation")
+        const custDialogStillOpen = await page.locator('[role="dialog"], .MuiDialog-root, [role="presentation"].MuiModal-root').isVisible().catch(() => false);
         if (custDialogStillOpen) {
           try {
             log("Customer dialog still open — dismissing", "playwright");
-            await page.keyboard.press('Escape');
-            await randomDelay(1000, 1500);
+            // Try Close button first
+            const closeBtn = page.locator('button:has-text("Close")').first();
+            if ((await closeBtn.count()) > 0) {
+              await closeBtn.click();
+              await randomDelay(1000, 1500);
+            } else {
+              await page.keyboard.press('Escape');
+              await randomDelay(1000, 1500);
+            }
+            // Double-check and force Escape if still open
+            const stillOpen = await page.locator('[role="dialog"], .MuiDialog-root, [role="presentation"].MuiModal-root').isVisible().catch(() => false);
+            if (stillOpen) {
+              await page.keyboard.press('Escape');
+              await randomDelay(1000, 1500);
+            }
           } catch (_) {}
         }
       } else {
