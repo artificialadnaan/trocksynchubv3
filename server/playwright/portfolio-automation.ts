@@ -928,19 +928,57 @@ export async function runPhase1BidBoardActions(
       }
 
       if (filesToUpload.length > 0) {
+        // Click "My Computer" tab if present
+        try {
+          await page.locator('text="My Computer"').first().click({ timeout: 5000 });
+          await randomDelay(1000, 1500);
+        } catch { /* tab may already be active */ }
+
+        // Use page.evaluate to click "Upload Files" — Playwright locators can't see buttons inside Procore modals
         const [fileChooser] = await Promise.all([
-          page.waitForEvent("filechooser", { timeout: 10000 }),
-          page.click('button:has-text("Upload Files"), button:has-text("Attach Files")'),
+          page.waitForEvent("filechooser", { timeout: 30000 }),
+          page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const uploadBtn = buttons.find(b => {
+              const text = b.textContent?.trim();
+              if (!text?.includes('Upload Files')) return false;
+              const parent = b.closest('[class*="region"], [role="region"], [class*="Modal"]') || b.parentElement?.parentElement;
+              return parent?.textContent?.includes('Drag & Drop');
+            });
+            if (uploadBtn) uploadBtn.click();
+            else {
+              const fallback = buttons.find(b => b.textContent?.trim().includes('Upload Files') && b.offsetParent !== null);
+              if (fallback) fallback.click();
+              else throw new Error('Upload Files button not found in modal');
+            }
+          }),
         ]);
         await fileChooser.setFiles(filesToUpload);
 
+        // Wait for uploads to complete
         const fileCount = filesToUpload.length;
-        const fileCountText = fileCount === 1 ? "1 file selected" : `${fileCount} files selected`;
-        await page.waitForSelector(`text="${fileCountText}"`, { timeout: 15000 }).catch(() => {});
-        await randomDelay(500, 1000);
+        await page.waitForFunction(
+          (count: number) => {
+            const statusEl = document.querySelector('[role="status"]');
+            if (statusEl?.textContent?.includes(`Uploaded ${count} of ${count}`)) return true;
+            if (statusEl?.textContent?.includes('Total Progress: 100%')) return true;
+            return false;
+          },
+          fileCount,
+          { timeout: 120000 }
+        ).catch(() => {});
+        await randomDelay(2000, 3000);
 
-        await page.waitForSelector(`${SEL.documents.attachButton}:not([disabled])`, { timeout: 15000 });
-        await page.click(SEL.documents.attachButton, { timeout: 10000 });
+        // Click Attach via page.evaluate — same modal visibility issue
+        await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          const attachBtn = buttons.find(b => b.textContent?.trim() === 'Attach' && !b.disabled && b.offsetParent !== null);
+          if (attachBtn) attachBtn.click();
+          else {
+            const fallback = buttons.find(b => b.textContent?.trim().includes('Attach') && !b.textContent?.includes('Attach Files') && !b.disabled);
+            if (fallback) fallback.click();
+          }
+        });
         await randomDelay(3000, 5000);
         await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
         await randomDelay(2000, 3000);
