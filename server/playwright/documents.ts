@@ -507,13 +507,27 @@ export async function uploadDocumentToBidBoard(
         await randomDelay(2000, 3000);
         await takeScreenshot(page, "upload-progress-complete");
 
-        // Click Attach button — try multiple selectors
-        const attachButton = page.locator(
-          'button:has-text("Attach"):not([disabled]), ' +
-          '[data-qa="qa-attach-button"]:not([disabled])'
-        ).first();
-        await attachButton.waitFor({ state: 'visible', timeout: 20000 });
-        await attachButton.click({ force: true });
+        // Click Attach button via page.evaluate — locators fail to find it due to Procore's modal structure
+        await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          // Find an enabled button whose text is exactly "Attach" (not "Attach Files" header)
+          const attachBtn = buttons.find(b => {
+            const text = b.textContent?.trim();
+            return text === 'Attach' && !b.disabled && b.offsetParent !== null;
+          });
+          if (attachBtn) {
+            attachBtn.click();
+          } else {
+            // Fallback: any button containing "Attach" that's not disabled
+            const fallback = buttons.find(b =>
+              b.textContent?.trim().includes('Attach') &&
+              !b.textContent?.includes('Attach Files') &&
+              !b.disabled && b.offsetParent !== null
+            );
+            if (fallback) fallback.click();
+            else throw new Error('Attach button not found or still disabled');
+          }
+        });
         log(`Clicked Attach for ${filePaths.length} file(s)`, "playwright");
 
         // Wait for modal to close — the Attach Files dialog disappears after successful attach
