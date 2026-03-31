@@ -1302,20 +1302,41 @@ export async function createBidBoardProject(
           // Use a fixed delay rather than waitFor to avoid race conditions
           await randomDelay(2000, 3000);
 
-          let addAddrBtn = await page.$('button.aid-add-address-button');
+          // Procore now shows address with a default "United States" and an edit (pencil) button
+          // Try the edit button next to Project Address, then fall back to Add Address button
+          let addAddrBtn = await page.$('[ref] button:near(:text("Project Address"))');
+          if (!addAddrBtn) {
+            // Try clicking the pencil/edit icon button near the address section
+            const addrEditBtn = page.locator('button').filter({ has: page.locator('img') }).locator('near=:text("Project Address")').first();
+            if ((await addrEditBtn.count()) > 0) {
+              addAddrBtn = await addrEditBtn.elementHandle();
+            }
+          }
+          if (!addAddrBtn) {
+            addAddrBtn = await page.$('button.aid-add-address-button');
+          }
           if (!addAddrBtn) {
             addAddrBtn = await page.$("button:has-text('Add Address')");
           }
+          // Last resort: click the address text/icon itself to open the edit dialog
+          if (!addAddrBtn) {
+            const addrSection = page.locator(':text("Project Address") ~ * button').first();
+            if ((await addrSection.count()) > 0) {
+              addAddrBtn = await addrSection.elementHandle();
+            }
+          }
           if (addAddrBtn) {
             await addAddrBtn.click({ force: true });
-            // Wait for the address dialog to appear
-            await randomDelay(2000, 3000);
+            // Wait for the Edit Address dialog to appear
+            await page.waitForSelector('dialog:has-text("Edit Address"), [role="dialog"]:has-text("Edit Address")', { timeout: 10000 }).catch(() => {});
+            await randomDelay(1500, 2500);
 
-            // Fill address fields using aid-* selectors; Tab/Escape to dismiss autocomplete dropdown
-            const streetInput = page.locator('div.aid-street input').first();
-            const cityInput = page.locator('div.aid-city input').first();
-            const stateInput = page.locator('div.aid-state input').first();
-            const zipInput = page.locator('div.aid-zip input').first();
+            // Fill address fields using placeholder-based selectors (Procore removed aid-* classes)
+            const addrDialog = page.locator('dialog:has-text("Edit Address"), [role="dialog"]:has-text("Edit Address")').last();
+            const streetInput = addrDialog.locator('input[placeholder*="Comalt"], input[placeholder*="Street"], input[placeholder*="street"]').first();
+            const cityInput = addrDialog.locator('input[placeholder*="Austin"], input[placeholder*="City"], input[placeholder*="city"]').first();
+            const stateInput = addrDialog.locator('input[placeholder*="Texas"], input[placeholder*="State"], input[placeholder*="state"]').first();
+            const zipInput = addrDialog.locator('input[placeholder*="78702"], input[placeholder*="ZIP"], input[placeholder*="zip"]').first();
 
             if (projectData.address) {
               await streetInput.fill(projectData.address);
@@ -1346,9 +1367,16 @@ export async function createBidBoardProject(
 
             await new Promise((r) => setTimeout(r, 500)); // Let form settle before Save
 
-            const saveBtn = page.locator('div[role="dialog"] button:has-text("Save"), button.btn-confirm, button:has-text("Save")').last();
-            await saveBtn.scrollIntoViewIfNeeded();
-            await saveBtn.click({ force: true });
+            // Click Save within the Edit Address dialog
+            const saveBtn = addrDialog.locator('button:has-text("Save")').first();
+            if ((await saveBtn.count()) > 0) {
+              await saveBtn.scrollIntoViewIfNeeded();
+              await saveBtn.click({ force: true });
+            } else {
+              // Fallback: any Save button on page
+              const fallbackSave = page.locator('button:has-text("Save")').last();
+              await fallbackSave.click({ force: true });
+            }
             await new Promise((r) => setTimeout(r, 1500));
 
             const dialogStillOpen = await page.locator('text=Edit Address').isVisible().catch(() => false);
