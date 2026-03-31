@@ -1261,16 +1261,22 @@ export async function createBidBoardProject(
               } catch (e: any) {
                 log(`Contact list item not found for "${projectData.contactName}": ${e.message}`, "playwright");
               }
-              const selectBtn = page.locator('[role="dialog"]').locator('button').filter({ hasText: /Select/i }).first();
-              if ((await selectBtn.count()) > 0) {
-                await selectBtn.click();
+              // Wait for the Select button to appear after clicking a contact (React re-render)
+              const selectBtn = page.locator('[role="dialog"] button:has-text("Select"), button:has-text("Select")').first();
+              try {
+                await selectBtn.waitFor({ state: 'visible', timeout: 5000 });
+                await selectBtn.click({ force: true });
                 await randomDelay(1500, 2500);
                 log("Primary contact selected and dialog closed", "playwright");
-              } else {
+              } catch {
+                // Fallback: try confirm button or close
                 const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
                 if ((await confirmBtn.count()) > 0) {
                   await confirmBtn.click();
                   await randomDelay(1500, 2500);
+                  log("Primary contact confirmed via confirm button", "playwright");
+                } else {
+                  log("Select/Confirm button not found after contact click — contact may not have been saved", "playwright");
                 }
               }
             } else {
@@ -1303,43 +1309,64 @@ export async function createBidBoardProject(
           // Use a fixed delay rather than waitFor to avoid race conditions
           await randomDelay(2000, 3000);
 
-          // Open Edit Address dialog. Two cases:
-          // 1. New project (no address): shows "+ Add Address" button (class: aid-add-address-button)
-          // 2. Existing address: shows country text button (e.g. "United States") or pencil icon
+          // Open Edit Address dialog
           let dialogOpened = false;
 
-          // Approach 1: "+ Add Address" button (new projects without address)
-          // Use page.evaluate for the click — Playwright's force:true doesn't always
-          // trigger React event handlers on Procore's SPA buttons.
-          const hasAddAddrBtn = await page.locator('button.aid-add-address-button').count() > 0;
-          if (hasAddAddrBtn) {
-            await page.evaluate(() => {
-              const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
-              if (btn) { btn.scrollIntoView({ block: 'center' }); btn.click(); }
-            });
-            await randomDelay(1500, 2500);
+          // Wait for any lingering overlays/animations to settle
+          await randomDelay(1500, 2000);
+
+          // Check what address elements exist
+          const addAddrBtnCount = await page.locator('button.aid-add-address-button').count();
+          const countryBtnCount = await page.locator('button:has-text("United States")').count();
+          log(`Address buttons: aid-add-address-button=${addAddrBtnCount}, United States=${countryBtnCount}`, "playwright");
+
+          // Approach 1: "+ Add Address" button (new projects)
+          if (addAddrBtnCount > 0) {
+            const addAddrBtn = page.locator('button.aid-add-address-button').first();
+            await addAddrBtn.scrollIntoViewIfNeeded();
+            await randomDelay(500, 1000);
+
+            // Try Playwright click first (triggers proper events)
+            try {
+              await addAddrBtn.click({ timeout: 5000 });
+              log("Add Address button clicked via Playwright", "playwright");
+            } catch {
+              // Fallback: DOM click
+              await page.evaluate(() => {
+                const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
+                if (btn) btn.click();
+              });
+              log("Add Address button clicked via DOM evaluate", "playwright");
+            }
+            await randomDelay(2000, 3000);
             dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+            log(`After Add Address click: dialogOpened=${dialogOpened}`, "playwright");
+
+            // If still not open, try double-click
+            if (!dialogOpened) {
+              await addAddrBtn.dblclick({ force: true }).catch(() => {});
+              await randomDelay(1500, 2000);
+              dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              log(`After double-click: dialogOpened=${dialogOpened}`, "playwright");
+            }
           }
 
-          // Approach 2: Country text button (projects with existing address)
-          if (!dialogOpened) {
-            const countryBtn = page.locator('button:has-text("United States"), button:has-text("US")').first();
-            if ((await countryBtn.count()) > 0) {
-              await countryBtn.scrollIntoViewIfNeeded();
-              await countryBtn.click({ force: true });
-              await randomDelay(1000, 1500);
-              dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-              // If a context menu appeared instead, click "Edit"
-              if (!dialogOpened) {
-                const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
-                if ((await editMenuItem.count()) > 0) {
-                  await editMenuItem.click();
-                  await randomDelay(1000, 1500);
-                  dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
-                } else {
-                  await page.keyboard.press('Escape');
-                  await randomDelay(500, 1000);
-                }
+          // Approach 2: Country text button (existing address)
+          if (!dialogOpened && countryBtnCount > 0) {
+            const countryBtn = page.locator('button:has-text("United States")').first();
+            await countryBtn.scrollIntoViewIfNeeded();
+            await countryBtn.click({ force: true });
+            await randomDelay(1000, 1500);
+            dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+            if (!dialogOpened) {
+              const editMenuItem = page.locator('[role="menuitem"]:has-text("Edit")');
+              if ((await editMenuItem.count()) > 0) {
+                await editMenuItem.click();
+                await randomDelay(1000, 1500);
+                dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
+              } else {
+                await page.keyboard.press('Escape');
+                await randomDelay(500, 1000);
               }
             }
           }
