@@ -226,6 +226,14 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             const { syncSingleHubSpotCompany } = await import("../hubspot");
             if (!eventType.includes("deletion") && !eventType.includes("delete")) {
               await syncSingleHubSpotCompany(objectId);
+              // Also sync to Procore vendor directory so BidBoard customer search finds them
+              try {
+                const { syncHubspotCompanyToProcore } = await import("../hubspot-procore-sync");
+                const result = await syncHubspotCompanyToProcore(objectId);
+                console.log(`[hubspot] Company ${objectId} synced to Procore: ${result.action} — ${result.message}`);
+              } catch (procoreErr: any) {
+                console.error(`[hubspot] Company ${objectId} Procore sync failed (non-blocking): ${procoreErr.message}`);
+              }
             }
             // Note: Company deletion would require implementing deleteHubspotCompany handler
           } catch (companyErr: any) {
