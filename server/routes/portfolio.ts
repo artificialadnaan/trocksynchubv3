@@ -324,8 +324,11 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
     res.json({ message: "Phase 2 started", companyId, portfolioProjectId, bidboardProjectId });
     setImmediate(async () => {
       try {
+        const { withBrowserLock } = await import("../playwright/browser");
         const { runPhase2 } = await import("../playwright/portfolio-automation");
-        const result = await runPhase2(companyId, portfolioProjectId, bidboardProjectId);
+        const result = await withBrowserLock(`phase2-${portfolioProjectId}`, () =>
+          runPhase2(companyId, portfolioProjectId, bidboardProjectId)
+        );
         console.log(`[portfolio-auto] Phase 2 internal trigger: ${result.success ? "success" : "failed"} (${result.steps.length} steps)`);
       } catch (err) {
         console.error("[portfolio-auto] Phase 2 internal trigger failed:", (err as Error).message);
