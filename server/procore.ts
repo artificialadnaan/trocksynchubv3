@@ -1600,7 +1600,7 @@ export async function runFullProcoreSync(): Promise<{
             }
 
             // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
-            const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId);
+            const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId, hubspotStageLabel);
             if (terminalStage) {
               console.log(`[procore] BLOCKED: Deal ${mapping.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${hubspotStageLabel}" from polling stage "${sc.newStage}" (${sc.projectName})`);
               await storage.createAuditLog({

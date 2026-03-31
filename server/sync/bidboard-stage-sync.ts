@@ -323,7 +323,7 @@ export async function syncStagesToHubSpot(
     }
 
     // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
-    const terminalStage = await getTerminalStageGuard(change.hubspotDealId);
+    const terminalStage = await getTerminalStageGuard(change.hubspotDealId, label);
     if (terminalStage) {
       log(
         `BLOCKED: Deal ${change.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${label}" from Bid Board stage "${change.newStage}" (${change.projectName})`,

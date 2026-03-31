@@ -149,14 +149,26 @@ const TERMINAL_HUBSPOT_STAGES = new Set([
 
 /**
  * Check if a HubSpot deal is in a terminal stage that should not be overwritten by automation.
- * Returns the current stage name if terminal (for logging), or null if safe to update.
+ * Returns the current stage name if terminal AND the target is a different stage (for logging),
+ * or null if safe to update.
+ *
+ * Allows writes when the target stage matches the current terminal stage (after dash normalization),
+ * since that's a no-op or a dash-variant correction, not a regression.
  */
-export async function getTerminalStageGuard(hubspotDealId: string): Promise<string | null> {
+export async function getTerminalStageGuard(hubspotDealId: string, targetStageLabel?: string): Promise<string | null> {
   const deal = await storage.getHubspotDealByHubspotId(hubspotDealId);
   if (!deal) return null; // No cached deal — allow update (conservative)
   const currentStage = deal.dealStageName?.trim();
   if (!currentStage) return null;
   if (TERMINAL_HUBSPOT_STAGES.has(currentStage.toLowerCase())) {
+    // Allow if target is the same terminal stage (dash normalization difference)
+    if (targetStageLabel) {
+      const normalizedCurrent = normalizeStageDashes(currentStage).toLowerCase();
+      const normalizedTarget = normalizeStageDashes(targetStageLabel).toLowerCase();
+      if (normalizedCurrent === normalizedTarget) {
+        return null; // Same stage — safe to write (no regression)
+      }
+    }
     return currentStage;
   }
   return null;

@@ -558,7 +558,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                         console.log(`[webhook] Project ${projectId} has null/empty stage — skipping HubSpot sync`);
                       } else {
                         // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
-                        const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId);
+                        const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId, hubspotStageLabel);
                         if (terminalStage) {
                           console.log(`[webhook] BLOCKED: Deal ${mapping.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${hubspotStageLabel}" (project ${projectId})`);
                           await storage.createAuditLog({
@@ -702,7 +702,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                       console.log(`[webhook] Procore stage "${newStage}" mapped to null — skipping HubSpot sync for deal ${mapping.hubspotDealId}`);
                     } else {
                     // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
-                    const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId);
+                    const terminalStage = await getTerminalStageGuard(mapping.hubspotDealId, hubspotStageLabel);
                     if (terminalStage) {
                       console.log(`[webhook] BLOCKED: Deal ${mapping.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${hubspotStageLabel}" from Procore stage "${newStage}"`);
                       await storage.createAuditLog({
