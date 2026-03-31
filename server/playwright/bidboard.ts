@@ -1193,10 +1193,7 @@ export async function createBidBoardProject(
               const escapedName = projectData.clientName.slice(0, 10).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
               try {
-                await listItem.evaluate((el: HTMLElement) => {
-                  el.scrollIntoView({ block: 'center' });
-                  el.click();
-                });
+                await listItem.click({ force: true, timeout: 8000 });
                 await randomDelay(500, 1000);
                 log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
               } catch (e: any) {
