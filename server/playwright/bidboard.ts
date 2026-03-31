@@ -1221,17 +1221,14 @@ export async function createBidBoardProject(
         } catch (e: any) {
           log(`Add Customer failed: ${e.message}`, "playwright");
         }
-        // Always dismiss any lingering dialog (Escape + click backdrop) to prevent cascade failures
-        try {
-          await page.keyboard.press('Escape');
-          await randomDelay(500, 1000);
-          // Click outside any remaining dialog backdrop
-          const backdrop = page.locator('.MuiBackdrop-root, [data-qa="modal-backdrop"], .aid-overlay');
-          if ((await backdrop.count()) > 0) {
-            await backdrop.first().click({ force: true }).catch(() => {});
+        // Only dismiss dialog if one is still open (avoid Escape on main page which breaks SPA)
+        const custDialogStillOpen = await page.locator('[role="dialog"]').isVisible().catch(() => false);
+        if (custDialogStillOpen) {
+          try {
+            await page.keyboard.press('Escape');
             await randomDelay(500, 1000);
-          }
-        } catch (_) {}
+          } catch (_) {}
+        }
       } else {
         log("Customer: no clientName provided in project data", "playwright");
       }
@@ -1288,16 +1285,14 @@ export async function createBidBoardProject(
         } catch (e: any) {
           log(`Add Contact failed: ${e.message}`, "playwright");
         }
-        // Always dismiss any lingering dialog to prevent cascade failures on address
-        try {
-          await page.keyboard.press('Escape');
-          await randomDelay(500, 1000);
-          const backdrop = page.locator('.MuiBackdrop-root, [data-qa="modal-backdrop"], .aid-overlay');
-          if ((await backdrop.count()) > 0) {
-            await backdrop.first().click({ force: true }).catch(() => {});
+        // Only dismiss dialog if one is still open (avoid Escape on main page which breaks SPA)
+        const contactDialogStillOpen = await page.locator('[role="dialog"]').isVisible().catch(() => false);
+        if (contactDialogStillOpen) {
+          try {
+            await page.keyboard.press('Escape');
             await randomDelay(500, 1000);
-          }
-        } catch (_) {}
+          } catch (_) {}
+        }
       } else {
         log("Primary Contact: no contactName provided in project data", "playwright");
       }
