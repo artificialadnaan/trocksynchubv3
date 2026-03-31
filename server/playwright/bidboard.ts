@@ -1309,10 +1309,14 @@ export async function createBidBoardProject(
           let dialogOpened = false;
 
           // Approach 1: "+ Add Address" button (new projects without address)
-          const addAddrBtn = page.locator('button.aid-add-address-button').first();
-          if ((await addAddrBtn.count()) > 0) {
-            await addAddrBtn.scrollIntoViewIfNeeded();
-            await addAddrBtn.click({ force: true });
+          // Use page.evaluate for the click — Playwright's force:true doesn't always
+          // trigger React event handlers on Procore's SPA buttons.
+          const hasAddAddrBtn = await page.locator('button.aid-add-address-button').count() > 0;
+          if (hasAddAddrBtn) {
+            await page.evaluate(() => {
+              const btn = document.querySelector('button.aid-add-address-button') as HTMLButtonElement | null;
+              if (btn) { btn.scrollIntoView({ block: 'center' }); btn.click(); }
+            });
             await randomDelay(1500, 2500);
             dialogOpened = await page.locator('[role="dialog"]:has-text("Edit Address")').isVisible().catch(() => false);
           }
