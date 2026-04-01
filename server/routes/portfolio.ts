@@ -268,8 +268,11 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
 
     setImmediate(async () => {
       try {
+        const { withBrowserLock } = await import("../playwright/browser");
         const { runPhase1WithRetry } = await import("../portfolio-automation-runner");
-        await runPhase1WithRetry(url, bidboardId!, { triggerSource: "manual" });
+        await withBrowserLock(`manual-phase1-${bidboardId}`, () =>
+          runPhase1WithRetry(url, bidboardId!, { triggerSource: "manual" })
+        );
       } catch (err) {
         console.error("[portfolio-auto] Manual trigger failed:", (err as Error).message);
       }
@@ -300,11 +303,14 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
 
     setImmediate(async () => {
       try {
+        const { withBrowserLock } = await import("../playwright/browser");
         const { runPhase1WithRetry } = await import("../portfolio-automation-runner");
-        await runPhase1WithRetry(url, bidboardProjectId, {
-          projectName: mapping?.hubspotDealName || mapping?.bidboardProjectName || undefined,
-          triggerSource: "manual",
-        });
+        await withBrowserLock(`internal-phase1-${bidboardProjectId}`, () =>
+          runPhase1WithRetry(url, bidboardProjectId, {
+            projectName: mapping?.hubspotDealName || mapping?.bidboardProjectName || undefined,
+            triggerSource: "manual",
+          })
+        );
       } catch (err) {
         console.error("[portfolio-auto] Internal trigger failed:", (err as Error).message);
       }
