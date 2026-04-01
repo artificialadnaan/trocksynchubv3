@@ -322,6 +322,27 @@ export async function syncStagesToHubSpot(
       continue;
     }
 
+    // Trigger portfolio automation BEFORE terminal guard — production stages always fire regardless of HubSpot block
+    const normalizedNewStageEarly = normalizeStageLabel(change.newStage);
+    if (
+      normalizedNewStageEarly === "Sent to Production" ||
+      normalizedNewStageEarly === "Service - Sent to Production"
+    ) {
+      try {
+        await triggerPortfolioAutomationFromStageChange(
+          change.projectName,
+          change.projectNumber,
+          change.customerName,
+          change.hubspotDealId
+        );
+      } catch (err) {
+        log(
+          `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
+          "sync"
+        );
+      }
+    }
+
     // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
     const terminalStage = await getTerminalStageGuard(change.hubspotDealId, label);
     if (terminalStage) {
@@ -385,26 +406,6 @@ export async function syncStagesToHubSpot(
         }
       }
 
-      // Trigger portfolio automation when stage is "Sent to Production" or "Service - Sent to Production"
-      const normalizedNewStage = normalizeStageLabel(change.newStage);
-      if (
-        normalizedNewStage === "Sent to Production" ||
-        normalizedNewStage === "Service - Sent to Production"
-      ) {
-        try {
-          await triggerPortfolioAutomationFromStageChange(
-            change.projectName,
-            change.projectNumber,
-            change.customerName,
-            change.hubspotDealId
-          );
-        } catch (err) {
-          log(
-            `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
-            "sync"
-          );
-        }
-      }
     } else {
       result.failed++;
       result.errors.push(
