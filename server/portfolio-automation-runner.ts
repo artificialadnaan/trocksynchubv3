@@ -102,6 +102,17 @@ export async function runPhase1WithRetry(
         );
       }
 
+      // If portfolioProjectId is missing (URL didn't redirect), try sync mapping lookup
+      if (!result.portfolioProjectId) {
+        try {
+          const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
+          if (mapping?.portfolioProjectId) {
+            result.portfolioProjectId = mapping.portfolioProjectId;
+            log(`[portfolio-runner] Recovered portfolio project ID from sync mapping: ${mapping.portfolioProjectId}`, "playwright");
+          }
+        } catch { /* non-blocking */ }
+      }
+
       // Chain Phase 2 and Phase 3 directly (primary path). Webhook remains as fallback if this fails.
       const companyId = (await storage.getAutomationConfig("procore_config"))?.value as { companyId?: string } | undefined;
       const cid = companyId?.companyId;

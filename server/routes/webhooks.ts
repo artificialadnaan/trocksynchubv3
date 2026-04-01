@@ -468,20 +468,27 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             } else {
               console.log(`[webhook] Project create for ${resourceId}, no pending Phase 2 job`);
               // Store portfolio project ID in sync mapping so Phase 1 retries can find it
-              try {
-                const { fetchProcoreProjectDetail } = await import('../procore');
-                const project = await fetchProcoreProjectDetail(resourceId);
-                const projectNumber = project?.project_number;
-                if (projectNumber) {
-                  const mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
-                  if (mapping?.bidboardProjectId && !mapping.portfolioProjectId) {
-                    await storage.updateSyncMapping(mapping.id, { portfolioProjectId: resourceId });
-                    console.log(`[webhook] Stored portfolio project ${resourceId} in sync mapping for bidboard ${mapping.bidboardProjectId}`);
+              // Delay slightly — Procore may not have project details ready immediately
+              setTimeout(async () => {
+                try {
+                  const { fetchProcoreProjectDetail } = await import('../procore');
+                  const project = await fetchProcoreProjectDetail(resourceId);
+                  const projectNumber = project?.project_number;
+                  const projectName = project?.name || project?.display_name;
+                  console.log(`[webhook] Portfolio project ${resourceId} details: number=${projectNumber || 'none'}, name=${projectName || 'none'}`);
+                  if (projectNumber) {
+                    const mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
+                    if (mapping?.bidboardProjectId && !mapping.portfolioProjectId) {
+                      await storage.updateSyncMapping(mapping.id, { portfolioProjectId: resourceId });
+                      console.log(`[webhook] Stored portfolio project ${resourceId} in sync mapping for bidboard ${mapping.bidboardProjectId}`);
+                    } else if (!mapping) {
+                      console.log(`[webhook] No sync mapping found for project number ${projectNumber}`);
+                    }
                   }
+                } catch (linkErr: any) {
+                  console.log(`[webhook] Could not link portfolio project ${resourceId} to bidboard: ${linkErr.message}`);
                 }
-              } catch (linkErr: any) {
-                console.log(`[webhook] Could not link portfolio project ${resourceId} to bidboard: ${linkErr.message}`);
-              }
+              }, 5000);
             }
           } catch (err: any) {
             console.error(`[webhook] Error in Phase 2 create handler:`, err.message);
