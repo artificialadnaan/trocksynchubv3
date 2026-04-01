@@ -123,15 +123,14 @@ export async function runPhase1WithRetry(
             `[portfolio-runner] Chaining Phase 2 directly for portfolio ${result.portfolioProjectId}`,
             "playwright"
           );
-          const { withBrowserLock } = await import("./playwright/browser");
           const { runPhase2 } = await import("./playwright/portfolio-automation");
-          const phase2Result = await withBrowserLock(`phase2-${result.portfolioProjectId}`, () =>
-            runPhase2(cid, result.portfolioProjectId!, bidboardProjectId, {
-              bidboardProjectUrl,
-              proposalPdfPath: output.proposalPdfPath ?? null,
-              customerName: context.customerName,
-            })
-          );
+          // NOTE: No withBrowserLock here — this may be called from within the stage sync's lock.
+          // A nested lock causes a deadlock. The caller (stage sync or manual trigger) already holds the lock.
+          const phase2Result = await runPhase2(cid, result.portfolioProjectId!, bidboardProjectId, {
+            bidboardProjectUrl,
+            proposalPdfPath: output.proposalPdfPath ?? null,
+            customerName: context.customerName,
+          });
           // Merge Phase 2 (and Phase 3) steps into result
           phase2Result.steps.forEach((s) => result.steps.push(s));
           result.success = result.success && phase2Result.success;
