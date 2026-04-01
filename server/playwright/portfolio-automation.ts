@@ -299,7 +299,12 @@ function logAutomationSummary(result: PortfolioAutomationResult): void {
 // ─── Helper: Extract portfolio project ID from URL ────────────────────────
 // Portfolio URLs: /projects/{id}/tools/estimating/ (Bid Board uses /tools/bid-board/project/)
 function extractPortfolioProjectIdFromUrl(url: string): string | null {
-  const match = url.match(/\/projects\/(\d+)\//);
+  const match = url.match(/\/projects\/(\d+)(?:\/|$|\?)/);
+  return match ? match[1] : null;
+}
+
+function extractBidBoardProjectIdFromUrl(url: string): string | null {
+  const match = url.match(/\/project\/(\d+)(?:\/|$|\?)/);
   return match ? match[1] : null;
 }
 
@@ -338,6 +343,23 @@ async function dismissOpenModals(page: Page): Promise<void> {
   } catch {
     log("[portfolio-auto] Warning: modal may still be present, proceeding anyway", "playwright");
   }
+}
+
+async function recoverPortfolioProjectIdFromMapping(
+  bidboardProjectId: string
+): Promise<{ portfolioProjectId: string | null; source: string | null }> {
+  const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
+  if (mapping?.portfolioProjectId) {
+    return { portfolioProjectId: mapping.portfolioProjectId, source: "sync mapping" };
+  }
+
+  // Older mappings may only have procoreProjectId populated even after the project
+  // has effectively transitioned into Portfolio. Treat that as a usable fallback.
+  if (mapping?.procoreProjectId) {
+    return { portfolioProjectId: mapping.procoreProjectId, source: "sync mapping procoreProjectId fallback" };
+  }
+
+  return { portfolioProjectId: null, source: null };
 }
 
 // ─── Helper: Wait for modal to close ────────────────────────────
@@ -625,21 +647,38 @@ export async function runPhase1BidBoardActions(
     if (!result.portfolioProjectId) {
       // Method 1: Check sync mapping for portfolio_project_id
       try {
-        const bidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1];
+        const bidId = extractBidBoardProjectIdFromUrl(bidboardProjectUrl);
         if (bidId) {
-          const mapping = await storage.getSyncMappingByBidboardProjectId(bidId);
-          if (mapping?.portfolioProjectId) {
-            result.portfolioProjectId = mapping.portfolioProjectId;
-            log(`[portfolio-auto] Found portfolio project ID from sync mapping: ${mapping.portfolioProjectId}`, "playwright");
+          const recovered = await recoverPortfolioProjectIdFromMapping(bidId);
+          if (recovered.portfolioProjectId) {
+            result.portfolioProjectId = recovered.portfolioProjectId;
+            log(
+              `[portfolio-auto] Found portfolio project ID from ${recovered.source}: ${recovered.portfolioProjectId}`,
+              "playwright"
+            );
           }
         }
       } catch { /* continue to method 2 */ }
 
+      // Method 2: Look for a visible Portfolio project link on the Bid Board page
       // Method 2: Navigate to project home — Procore redirects BidBoard projects in portfolio to /projects/{id}/
       if (!result.portfolioProjectId) {
         try {
+          const directPortfolioLink = page.locator('a[href*="/projects/"]').filter({ hasNotText: "bid-board" }).first();
+          const directHref = await directPortfolioLink.getAttribute("href").catch(() => null);
+          const directPid = directHref ? extractPortfolioProjectIdFromUrl(directHref) : null;
+          if (directPid) {
+            result.portfolioProjectId = directPid;
+            log(`[portfolio-auto] Found portfolio project ID from Bid Board page link: ${directPid}`, "playwright");
+          }
+        } catch { /* continue to next method */ }
+      }
+
+      // Method 3: Navigate to project home search — Procore may expose a /projects/{id} link in search results
+      if (!result.portfolioProjectId) {
+        try {
           const companyMatch = bidboardProjectUrl.match(/\/companies\/(\d+)/);
-          const bidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1];
+          const bidId = extractBidBoardProjectIdFromUrl(bidboardProjectUrl);
           if (companyMatch && bidId) {
             const homeUrl = `https://us02.procore.com/webclients/host/companies/${companyMatch[1]}/projects?search=${bidId}`;
             await page.goto(homeUrl, { waitUntil: "load", timeout: 30000 });
@@ -648,7 +687,7 @@ export async function runPhase1BidBoardActions(
             const projectLinks = await page.locator('a[href*="/projects/"]').all();
             for (const link of projectLinks) {
               const href = await link.getAttribute("href");
-              const pid = href?.match(/\/projects\/(\d+)/)?.[1];
+              const pid = href ? extractPortfolioProjectIdFromUrl(href) : null;
               if (pid) {
                 result.portfolioProjectId = pid;
                 log(`[portfolio-auto] Found portfolio project ID from project search: ${pid}`, "playwright");

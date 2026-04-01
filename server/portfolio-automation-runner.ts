@@ -106,9 +106,13 @@ export async function runPhase1WithRetry(
       if (!result.portfolioProjectId) {
         try {
           const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
-          if (mapping?.portfolioProjectId) {
-            result.portfolioProjectId = mapping.portfolioProjectId;
-            log(`[portfolio-runner] Recovered portfolio project ID from sync mapping: ${mapping.portfolioProjectId}`, "playwright");
+          const recoveredPortfolioProjectId = mapping?.portfolioProjectId || mapping?.procoreProjectId || null;
+          if (recoveredPortfolioProjectId) {
+            result.portfolioProjectId = recoveredPortfolioProjectId;
+            log(
+              `[portfolio-runner] Recovered portfolio project ID from sync mapping${mapping?.portfolioProjectId ? "" : " procoreProjectId fallback"}: ${recoveredPortfolioProjectId}`,
+              "playwright"
+            );
           }
         } catch { /* non-blocking */ }
       }
