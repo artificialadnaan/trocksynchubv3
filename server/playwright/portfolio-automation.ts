@@ -1875,6 +1875,7 @@ export async function editPrimeContract(
     }
 
     if (proposalPdfPath) {
+      log(`[portfolio-auto] Attaching proposal PDF: ${proposalPdfPath}`, "playwright");
       try {
         await page.click('button:has-text("Attach Files")', { timeout: 8000 });
         await randomDelay(2000, 3000);
@@ -1890,6 +1891,7 @@ export async function editPrimeContract(
           .click('button:has-text("Attach"):not(:has-text("Attach Files"))', { timeout: 15000 })
           .catch(() => {});
         await randomDelay(3000, 5000);
+        log(`[portfolio-auto] Proposal PDF attached successfully`, "playwright");
       } catch (err: unknown) {
         log(
           `[portfolio-auto] Failed to attach proposal PDF (best-effort): ${err instanceof Error ? err.message : String(err)}`,
@@ -1919,6 +1921,8 @@ export async function editPrimeContract(
         ).catch(() => {});
         log("[portfolio-auto] Attach Files modal dismissed after PDF failure", "playwright");
       }
+    } else {
+      log(`[portfolio-auto] No proposal PDF path provided — skipping attachment`, "playwright");
     }
 
     if (scrapedData.inclusions.length > 0) {
