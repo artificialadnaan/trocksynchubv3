@@ -155,7 +155,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
           if (changedProperty === "dealstage") {
             // Skip stage change email when change was triggered by SyncHub itself (e.g. RFP approval handler)
             const changeSource = (event as any).changeSource;
-            const skipStageChangeEmail = changeSource === "INTEGRATION";
+            const skipStageChangeEmail = changeSource === "INTEGRATION" || changeSource === "CLONE_OBJECTS";
             const resolvedNewStage = await resolveHubspotStageId(newValue);
             const stageName = (resolvedNewStage?.stageName || newValue).toLowerCase();
             const stageId = newValue.toLowerCase();
