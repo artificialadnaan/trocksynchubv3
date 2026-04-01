@@ -84,7 +84,8 @@ async function runBidBoardStageSyncCycle() {
     const config = await storage.getAutomationConfig("bidboard_stage_sync");
     const val = (config?.value as any) || {};
     const dryRun = val.dryRun !== false;
-    const result = await runBidBoardStageSync({ dryRun });
+    const { withBrowserLock } = await import("../playwright/browser");
+    const result = await withBrowserLock("bidboard-stage-sync", () => runBidBoardStageSync({ dryRun }));
     lastBidboardStageSyncAt = new Date();
     const runStatus = result.initialized
       ? "initialized"

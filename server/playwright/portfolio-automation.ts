@@ -2399,15 +2399,18 @@ export async function triggerPortfolioAutomationFromStageChange(
   );
 
   const { runPhase1WithRetry } = await import("../portfolio-automation-runner");
-  const { result } = await runPhase1WithRetry(
-    bidboardProjectUrl,
-    bidboardProjectId,
-    {
-      projectName,
-      projectNumber: projectNumber || undefined,
-      customerName,
-      triggerSource: "stage_sync",
-    }
+  const { withBrowserLock } = await import("../playwright/browser");
+  const { result } = await withBrowserLock(`phase1-${bidboardProjectId}`, () =>
+    runPhase1WithRetry(
+      bidboardProjectUrl,
+      bidboardProjectId,
+      {
+        projectName,
+        projectNumber: projectNumber || undefined,
+        customerName,
+        triggerSource: "stage_sync",
+      }
+    )
   );
 
   return result;
