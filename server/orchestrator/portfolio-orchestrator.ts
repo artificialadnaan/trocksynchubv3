@@ -175,3 +175,26 @@ export async function getPendingPhase2Count(): Promise<number> {
     .where(eq(pendingPhase2Jobs.status, "pending"));
   return Number(result?.count ?? 0);
 }
+
+/**
+ * Look up the most recent Phase 2 job for a bidboard project (any status).
+ * Used by the internal Phase 2 trigger to recover proposalPdfPath.
+ */
+export async function getPendingPhase2ForBidboard(bidboardProjectId: string): Promise<PendingPhase2Job | null> {
+  await ensureTable();
+  const [row] = await db.select()
+    .from(pendingPhase2Jobs)
+    .where(eq(pendingPhase2Jobs.bidboardProjectId, bidboardProjectId))
+    .orderBy(asc(pendingPhase2Jobs.createdAt))
+    .limit(1);
+  if (!row) return null;
+  return {
+    id: row.id,
+    bidboardProjectId: row.bidboardProjectId,
+    bidboardProjectUrl: row.bidboardProjectUrl || "",
+    proposalPdfPath: row.proposalPdfPath,
+    estimateExcelPath: row.estimateExcelPath,
+    customerName: row.customerName,
+    timestamp: row.createdAt ? new Date(row.createdAt).getTime() : Date.now(),
+  };
+}

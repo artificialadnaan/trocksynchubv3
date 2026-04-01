@@ -331,6 +331,15 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
       bidboardProjectUrl = proposalId
         ? `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details?proposalId=${proposalId}`
         : `https://us02.procore.com/webclients/host/companies/${companyId}/tools/bid-board/project/${bidboardProjectId}/details`;
+
+      // Look up proposal PDF from pending Phase 2 job or recent downloads
+      try {
+        const { getPendingPhase2ForBidboard } = await import("../orchestrator/portfolio-orchestrator");
+        const pendingJob = await getPendingPhase2ForBidboard(bidboardProjectId);
+        if (pendingJob?.proposalPdfPath) {
+          proposalPdfPath = pendingJob.proposalPdfPath;
+        }
+      } catch { /* non-blocking */ }
     }
 
     res.json({ message: "Phase 2+3 started", companyId, portfolioProjectId, bidboardProjectId, bidboardProjectUrl });
