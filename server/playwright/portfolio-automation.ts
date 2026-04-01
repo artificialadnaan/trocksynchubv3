@@ -394,7 +394,7 @@ async function clickMenuItem(
 ): Promise<void> {
   const item = await findMenuItem(page, [primary, fallback], opts);
   if (item) {
-    await item.click({ timeout: 8000 });
+    await item.click({ timeout: 15000 });
     return;
   }
 

@@ -114,7 +114,9 @@ export async function runPhase1WithRetry(
               "playwright"
             );
           }
-        } catch { /* non-blocking */ }
+        } catch (err) {
+          log(`[portfolio-runner] Sync mapping lookup failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`, "playwright");
+        }
       }
 
       // Chain Phase 2 and Phase 3 directly (primary path). Webhook remains as fallback if this fails.

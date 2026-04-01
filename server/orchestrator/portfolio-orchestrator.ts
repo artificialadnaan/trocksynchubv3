@@ -13,7 +13,7 @@
 import { log } from "../index";
 import { db } from "../db";
 import { pendingPhase2Jobs } from "@shared/schema";
-import { eq, and, lt, sql, asc } from "drizzle-orm";
+import { eq, and, lt, sql, asc, desc } from "drizzle-orm";
 
 export interface PendingPhase2Job {
   id: number;
@@ -185,7 +185,7 @@ export async function getPendingPhase2ForBidboard(bidboardProjectId: string): Pr
   const [row] = await db.select()
     .from(pendingPhase2Jobs)
     .where(eq(pendingPhase2Jobs.bidboardProjectId, bidboardProjectId))
-    .orderBy(asc(pendingPhase2Jobs.createdAt))
+    .orderBy(desc(pendingPhase2Jobs.createdAt))
     .limit(1);
   if (!row) return null;
   return {
