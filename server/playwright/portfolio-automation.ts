@@ -2399,18 +2399,17 @@ export async function triggerPortfolioAutomationFromStageChange(
   );
 
   const { runPhase1WithRetry } = await import("../portfolio-automation-runner");
-  const { withBrowserLock } = await import("../playwright/browser");
-  const { result } = await withBrowserLock(`phase1-${bidboardProjectId}`, () =>
-    runPhase1WithRetry(
-      bidboardProjectUrl,
-      bidboardProjectId,
-      {
-        projectName,
-        projectNumber: projectNumber || undefined,
-        customerName,
-        triggerSource: "stage_sync",
-      }
-    )
+  // NOTE: No withBrowserLock here — this is called from within the stage sync's lock.
+  // Adding a nested lock causes a deadlock (inner waits for outer, outer waits for inner).
+  const { result } = await runPhase1WithRetry(
+    bidboardProjectUrl,
+    bidboardProjectId,
+    {
+      projectName,
+      projectNumber: projectNumber || undefined,
+      customerName,
+      triggerSource: "stage_sync",
+    }
   );
 
   return result;
