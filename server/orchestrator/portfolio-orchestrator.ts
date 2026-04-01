@@ -177,6 +177,100 @@ export async function getPendingPhase2Count(): Promise<number> {
 }
 
 /**
+ * Failsafe: pick up orphaned pending Phase 2 jobs that weren't direct-chained.
+ * Runs on a cron interval. For each orphan, tries to resolve the portfolio project ID
+ * and triggers Phase 2 via the internal endpoint.
+ */
+export async function processOrphanedPhase2Jobs(): Promise<{ processed: number; failed: number }> {
+  await ensureTable();
+  const ORPHAN_AGE_MS = 3 * 60 * 1000; // Jobs pending for >3 minutes are orphaned
+  const cutoff = new Date(Date.now() - ORPHAN_AGE_MS);
+  const expiry = new Date(Date.now() - MAX_AGE_MS);
+
+  const orphans = await db.select()
+    .from(pendingPhase2Jobs)
+    .where(and(
+      eq(pendingPhase2Jobs.status, "pending"),
+      lt(pendingPhase2Jobs.createdAt, cutoff),
+    ));
+
+  let processed = 0, failed = 0;
+
+  for (const job of orphans) {
+    if (job.createdAt && new Date(job.createdAt) < expiry) {
+      await db.update(pendingPhase2Jobs)
+        .set({ status: "expired", completedAt: new Date() })
+        .where(eq(pendingPhase2Jobs.id, job.id));
+      continue;
+    }
+
+    try {
+      // Try to find portfolio project ID from sync mapping
+      const { storage } = await import("../storage");
+      let portfolioProjectId: string | null = null;
+
+      const mapping = await storage.getSyncMappingByBidboardProjectId(job.bidboardProjectId);
+      portfolioProjectId = mapping?.portfolioProjectId || mapping?.procoreProjectId || null;
+
+      if (!portfolioProjectId) {
+        log(`[orchestrator] Orphan job #${job.id} (bidboard ${job.bidboardProjectId}): cannot resolve portfolio project ID — will retry`, "webhook");
+        failed++;
+        continue;
+      }
+
+      // Resolve company ID
+      const config = await storage.getAutomationConfig("procore_config");
+      const companyId = (config?.value as { companyId?: string })?.companyId;
+      if (!companyId) {
+        log(`[orchestrator] Orphan job #${job.id}: Procore company ID not configured`, "webhook");
+        failed++;
+        continue;
+      }
+
+      // Claim the job
+      await db.update(pendingPhase2Jobs)
+        .set({ status: "claimed", claimedAt: new Date() })
+        .where(eq(pendingPhase2Jobs.id, job.id));
+
+      log(`[orchestrator] Orphan failsafe: triggering Phase 2 for portfolio ${portfolioProjectId} (bidboard ${job.bidboardProjectId}, job #${job.id})`, "webhook");
+
+      // Trigger Phase 2 with browser lock
+      const { withBrowserLock } = await import("../playwright/browser");
+      const { runPhase2 } = await import("../playwright/portfolio-automation");
+      const result = await withBrowserLock(`failsafe-phase2-${portfolioProjectId}`, () =>
+        runPhase2(companyId, portfolioProjectId!, job.bidboardProjectId, {
+          bidboardProjectUrl: job.bidboardProjectUrl || undefined,
+          proposalPdfPath: job.proposalPdfPath ?? undefined,
+          customerName: job.customerName ?? undefined,
+        })
+      );
+
+      if (result.success) {
+        await db.update(pendingPhase2Jobs)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(pendingPhase2Jobs.id, job.id));
+        log(`[orchestrator] Orphan failsafe: Phase 2 succeeded for job #${job.id}`, "webhook");
+      } else {
+        await db.update(pendingPhase2Jobs)
+          .set({ status: "failed", error: result.error || "Phase 2 failed", completedAt: new Date() })
+          .where(eq(pendingPhase2Jobs.id, job.id));
+        log(`[orchestrator] Orphan failsafe: Phase 2 failed for job #${job.id}: ${result.error}`, "webhook");
+      }
+      processed++;
+    } catch (err: any) {
+      log(`[orchestrator] Orphan failsafe error for job #${job.id}: ${err.message}`, "webhook");
+      failed++;
+    }
+  }
+
+  if (orphans.length > 0) {
+    log(`[orchestrator] Orphan failsafe complete: ${processed} processed, ${failed} failed, ${orphans.length} total`, "webhook");
+  }
+
+  return { processed, failed };
+}
+
+/**
  * Look up the most recent Phase 2 job for a bidboard project (any status).
  * Used by the internal Phase 2 trigger to recover proposalPdfPath.
  */

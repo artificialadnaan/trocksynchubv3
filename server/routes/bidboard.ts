@@ -1066,6 +1066,17 @@ export function registerBidboardRoutes(app: Express, requireAuth: RequestHandler
       } catch {
         console.log('[BidBoardStageSync] No saved config, stage sync disabled by default');
       }
+
+      // Orphan Phase 2 failsafe — picks up pending jobs that weren't direct-chained
+      setInterval(async () => {
+        try {
+          const { processOrphanedPhase2Jobs } = await import("../orchestrator/portfolio-orchestrator");
+          await processOrphanedPhase2Jobs();
+        } catch (err: any) {
+          console.error(`[OrphanFailsafe] Error: ${err.message}`);
+        }
+      }, 5 * 60 * 1000); // Every 5 minutes
+      console.log(`[OrphanFailsafe] Scheduled every 5 minutes`);
     },
   };
 }
