@@ -17,7 +17,7 @@
  * @module playwright/portfolio-automation
  */
 
-import { Page } from "playwright";
+import { Locator, Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
 import { randomDelay, takeScreenshot } from "./browser";
 import { log } from "../index";
@@ -307,6 +307,22 @@ function extractPortfolioProjectIdFromUrl(url: string): string | null {
 // The Add to Portfolio confirmation dialog can linger and block clicks on the Estimation tab.
 
 async function dismissOpenModals(page: Page): Promise<void> {
+  const cancelBtn = page.locator(
+    '[role="dialog"] button:has-text("Cancel"), .MuiDialog-root button:has-text("Cancel"), [role="presentation"] button:has-text("Cancel")'
+  ).first();
+  if (await cancelBtn.isVisible().catch(() => false)) {
+    await cancelBtn.click({ timeout: 3000 }).catch(() => {});
+    await randomDelay(500, 800);
+  }
+
+  const closeBtn = page.locator(
+    '[role="dialog"] [data-qa="ci-Close"], [role="dialog"] button[aria-label="Close"], .MuiDialog-root [data-qa="ci-Close"], button:has-text("Close")'
+  ).first();
+  if (await closeBtn.isVisible().catch(() => false)) {
+    await closeBtn.click({ timeout: 3000 }).catch(() => {});
+    await randomDelay(500, 800);
+  }
+
   const openModal = page.locator('.MuiDialog-root, [role="presentation"].MuiModal-root, [role="dialog"]');
   if ((await openModal.count()) > 0) {
     await page.keyboard.press("Escape");
@@ -351,25 +367,50 @@ async function clickMenuItem(
   page: Page,
   primary: string,
   fallback: string,
-  description: string
+  description: string,
+  opts?: { requireEnabled?: boolean }
 ): Promise<void> {
-  try {
-    const item = page.locator(primary).first();
-    if ((await item.count()) > 0) {
-      await item.click({ timeout: 8000 });
-      return;
-    }
-  } catch {
-    /* try fallback */
-  }
-
-  const fb = page.locator(fallback).first();
-  if ((await fb.count()) > 0) {
-    await fb.click({ timeout: 8000 });
+  const item = await findMenuItem(page, [primary, fallback], opts);
+  if (item) {
+    await item.click({ timeout: 8000 });
     return;
   }
 
-  throw new Error(`Could not find menu item: ${description}`);
+  const requireEnabled = opts?.requireEnabled ?? false;
+  const visibilityText = requireEnabled ? "visible enabled" : "visible";
+  throw new Error(`Could not find ${visibilityText} menu item: ${description}`);
+}
+
+async function findMenuItem(
+  page: Page,
+  selectors: string[],
+  opts?: { requireEnabled?: boolean }
+): Promise<Locator | null> {
+  const requireEnabled = opts?.requireEnabled ?? false;
+
+  for (const selector of selectors) {
+    const items = page.locator(selector);
+    const itemCount = await items.count().catch(() => 0);
+
+    for (let idx = 0; idx < itemCount; idx++) {
+      const item = items.nth(idx);
+      const isVisible = await item.isVisible().catch(() => false);
+      if (!isVisible) continue;
+
+      if (requireEnabled) {
+        const ariaDisabled = await item.getAttribute("aria-disabled").catch(() => null);
+        const disabled = await item.evaluate((el) => {
+          const element = el as HTMLElement & { disabled?: boolean };
+          return Boolean(element.disabled);
+        }).catch(() => false);
+        if (ariaDisabled === "true" || disabled) continue;
+      }
+
+      return item;
+    }
+  }
+
+  return null;
 }
 
 // ─── Helper: Wait for Procore SPA content to load ─────────────────
@@ -543,7 +584,7 @@ export async function runPhase1BidBoardActions(
       await page.goto(listUrl, { waitUntil: "load", timeout: 60000 });
       await randomDelay(5000, 7000);
       const projectLink = page.locator(`a[href*="/project/${projectId}"]`).first();
-      if (await projectLink.count() > 0) {
+      if (await projectLink.isVisible().catch(() => false)) {
         await projectLink.click({ timeout: 10000 });
         await page.waitForLoadState("load").catch(() => {});
         await waitForProcoreSpaLoaded(page, bidboardSpaSelectors, "Bid Board project (list nav)");
@@ -637,10 +678,10 @@ export async function runPhase1BidBoardActions(
       await randomDelay(500, 1000);
 
       let menuOpened = false;
-      const ellipsisButtons = page.locator(SEL.ellipsisButton);
-      if ((await ellipsisButtons.count()) > 0) {
+      const ellipsisButton = page.locator(SEL.ellipsisButton).first();
+      if (await ellipsisButton.isVisible().catch(() => false)) {
         try {
-          await ellipsisButtons.first().click({ timeout: 8000 });
+          await ellipsisButton.click({ timeout: 8000 });
           menuOpened = true;
           log("[portfolio-auto] Clicked header ellipsis", "playwright");
         } catch {
@@ -649,7 +690,7 @@ export async function runPhase1BidBoardActions(
       }
       if (!menuOpened) {
         const stageCaret = page.locator('[data-qa="ci-ChevronDown"]').first();
-        if ((await stageCaret.count()) > 0) {
+        if (await stageCaret.isVisible().catch(() => false)) {
           await stageCaret.click({ timeout: 8000 });
           menuOpened = true;
           log("[portfolio-auto] Clicked stage badge caret (ellipsis fallback)", "playwright");
@@ -844,12 +885,13 @@ export async function runPhase1BidBoardActions(
   } else {
     const step8Start = Date.now();
     try {
+      await dismissOpenModals(page);
       await page.click(SEL.tabs.proposal, { timeout: 10000 });
     await randomDelay(2000, 4000);
 
     try {
-      const warningButton = page.locator(`${SEL.confirmButton}:has-text("Show Proposal")`);
-      if ((await warningButton.count()) > 0) {
+      const warningButton = page.locator(`${SEL.confirmButton}:has-text("Show Proposal")`).first();
+      if (await warningButton.isVisible().catch(() => false)) {
         await warningButton.click({ timeout: 5000 });
         await randomDelay(2000, 3000);
         log("[portfolio-auto] Dismissed Zero Field Warning modal", "playwright");
@@ -895,6 +937,7 @@ export async function runPhase1BidBoardActions(
   } else {
     const step11Start = Date.now();
     try {
+      await dismissOpenModals(page);
       await page.click(SEL.tabs.documents, { timeout: 10000 });
       await randomDelay(3000, 5000);
 
@@ -1009,17 +1052,7 @@ export async function runPhase1BidBoardActions(
   } else {
     const step12Start = Date.now();
     try {
-      // Dismiss Attach Files modal if still open from failed upload (avoids StyledModalScrim blocking clicks)
-      try {
-          const cancelBtn = page.locator('button:has-text("Cancel"), [role="dialog"] button:has([data-qa="ci-Close"])').first();
-        if ((await cancelBtn.count()) > 0) {
-          await cancelBtn.click({ timeout: 3000 });
-          await page.waitForSelector(SEL.modal.dialog, { state: "hidden", timeout: 5000 }).catch(() => {});
-          await randomDelay(500, 1000);
-        }
-      } catch {
-        /* modal may already be closed */
-      }
+      await dismissOpenModals(page);
 
       // Target the ellipsis next to the "Folders" header in the left sidebar (not the page-level ellipsis)
       const foldersHeader = page.locator('text="Folders"').first();
@@ -1030,7 +1063,7 @@ export async function runPhase1BidBoardActions(
         .locator("..")
         .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
         .first();
-      if ((await foldersEllipsis.count()) > 0) {
+      if (await foldersEllipsis.isVisible().catch(() => false)) {
         await foldersEllipsis.click({ timeout: 8000 });
         clicked = true;
         log("[portfolio-auto] Clicked Folders header ellipsis", "playwright");
@@ -1044,7 +1077,7 @@ export async function runPhase1BidBoardActions(
           .locator("..")
           .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
           .first();
-        if ((await hoverEllipsis.count()) > 0) {
+        if (await hoverEllipsis.isVisible().catch(() => false)) {
           await hoverEllipsis.click({ timeout: 8000 });
           clicked = true;
           log("[portfolio-auto] Clicked Folders header ellipsis (after hover)", "playwright");
@@ -1186,11 +1219,14 @@ export async function runPhase2PortfolioActions(
     let budgetAlreadySent = false;
 
     for (let attempt = 1; attempt <= BUDGET_POLL_MAX; attempt++) {
+      await dismissOpenModals(page);
       await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
       await randomDelay(1000, 2000);
 
-      const sendToBudgetItem = await page.$(SEL.portfolioEstimating.sendToBudget)
-        || await page.$(SEL.portfolioEstimating.sendToBudgetFallback);
+      const sendToBudgetItem = await findMenuItem(
+        page,
+        [SEL.portfolioEstimating.sendToBudget, SEL.portfolioEstimating.sendToBudgetFallback]
+      );
 
       if (sendToBudgetItem) {
         budgetMenuFound = true;
@@ -1199,8 +1235,10 @@ export async function runPhase2PortfolioActions(
       }
 
       // If Send to Budget is absent but Create Prime Contract exists → budget already sent
-      const primeItem = await page.$(SEL.portfolioEstimating.createPrimeContract)
-        || await page.$(SEL.portfolioEstimating.createPrimeContractFallback);
+      const primeItem = await findMenuItem(
+        page,
+        [SEL.portfolioEstimating.createPrimeContract, SEL.portfolioEstimating.createPrimeContractFallback]
+      );
       if (primeItem) {
         budgetAlreadySent = true;
         log(`[phase2] Send to Budget not in menu but Create Prime Contract is — budget already sent, skipping`, "playwright");
@@ -1240,6 +1278,7 @@ export async function runPhase2PortfolioActions(
       await randomDelay(2000, 3000);
       await waitForModalToClose(page, 120000);
       await randomDelay(3000, 5000);
+      await dismissOpenModals(page);
 
       await logStep(page, result, "send_to_budget", "success", Date.now() - budgetStart);
     }
@@ -1250,12 +1289,13 @@ export async function runPhase2PortfolioActions(
       screenshotPath,
       metadata: { diagnostics },
     });
-    await page.keyboard.press("Escape");
-    await randomDelay(1000, 2000);
+    await dismissOpenModals(page);
   }
 
   const primeStart = Date.now();
   try {
+    await dismissOpenModals(page);
+
     // Reload page after Send to Budget — "Create Prime Contract" is disabled until
     // the estimate is in budget and the page reflects the new state
     await page.reload({ waitUntil: "load" }).catch(() => {});
@@ -1264,12 +1304,15 @@ export async function runPhase2PortfolioActions(
     if (estTab) await estTab.click();
     await randomDelay(2000, 3000);
 
+    await dismissOpenModals(page);
     await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
     await randomDelay(1000, 2000);
 
     // Check if Create Prime Contract exists in the menu at all
-    const primeItemAny = await page.$(SEL.portfolioEstimating.createPrimeContract)
-      || await page.$(SEL.portfolioEstimating.createPrimeContractFallback);
+    const primeItemAny = await findMenuItem(
+      page,
+      [SEL.portfolioEstimating.createPrimeContract, SEL.portfolioEstimating.createPrimeContractFallback]
+    );
 
     if (!primeItemAny) {
       // Menu item completely absent → prime contract already created, skip
@@ -1280,25 +1323,44 @@ export async function runPhase2PortfolioActions(
       });
     } else {
       // Check if enabled; if disabled, wait and retry
-      let primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
+      let primeMenuItem = await findMenuItem(
+        page,
+        [SEL.portfolioEstimating.createPrimeContract, SEL.portfolioEstimating.createPrimeContractFallback],
+        { requireEnabled: true }
+      );
       if (!primeMenuItem) {
         log(`[phase2] Create Prime Contract is disabled — waiting for budget sync`, "playwright");
         await page.keyboard.press("Escape");
+        let primeEnabled = false;
         for (let attempt = 1; attempt <= 5; attempt++) {
           await new Promise((r) => setTimeout(r, 15000));
+          await dismissOpenModals(page);
           await page.reload({ waitUntil: "load" }).catch(() => {});
           await randomDelay(3000, 5000);
           const tab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
           if (tab) await tab.click();
           await randomDelay(2000, 3000);
+          await dismissOpenModals(page);
           await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
           await randomDelay(1000, 2000);
-          primeMenuItem = await page.$(SEL.portfolioEstimating.createPrimeContract + ':not([aria-disabled="true"])');
+          primeMenuItem = await findMenuItem(
+            page,
+            [SEL.portfolioEstimating.createPrimeContract, SEL.portfolioEstimating.createPrimeContractFallback],
+            { requireEnabled: true }
+          );
           if (primeMenuItem) {
             log(`[phase2] Create Prime Contract enabled (attempt ${attempt})`, "playwright");
+            primeEnabled = true;
             break;
           }
-          await page.keyboard.press("Escape");
+          if (attempt < 5) {
+            await page.keyboard.press("Escape");
+          }
+        }
+
+        if (!primeEnabled) {
+          await page.keyboard.press("Escape").catch(() => {});
+          throw new Error("Create Prime Contract remained disabled after 5 retries");
         }
       }
 
@@ -1306,7 +1368,8 @@ export async function runPhase2PortfolioActions(
         page,
         SEL.portfolioEstimating.createPrimeContract,
         SEL.portfolioEstimating.createPrimeContractFallback,
-        "Create Prime Contract"
+        "Create Prime Contract",
+        { requireEnabled: true }
       );
       await randomDelay(2000, 4000);
 
@@ -1315,6 +1378,7 @@ export async function runPhase2PortfolioActions(
       await randomDelay(2000, 3000);
       await waitForModalToClose(page, 120000);
       await randomDelay(3000, 5000);
+      await dismissOpenModals(page);
 
       await logStep(page, result, "create_prime_contract", "success", Date.now() - primeStart);
 
@@ -1338,6 +1402,7 @@ export async function runPhase2PortfolioActions(
       screenshotPath,
       metadata: { diagnostics },
     });
+    await dismissOpenModals(page);
   }
 }
 
@@ -1897,28 +1962,7 @@ export async function editPrimeContract(
           `[portfolio-auto] Failed to attach proposal PDF (best-effort): ${err instanceof Error ? err.message : String(err)}`,
           "playwright"
         );
-        // Aggressively dismiss the Attach Files modal so it doesn't block TinyMCE/Save
-        // Try Cancel button, Close button, then Escape (always attempt all)
-        const modalCancel = page.locator('.MuiDialog-root button:has-text("Cancel"), [role="dialog"] button:has-text("Cancel"), [role="presentation"] button:has-text("Cancel")').first();
-        if ((await modalCancel.count()) > 0) {
-          await modalCancel.click({ timeout: 3000 }).catch(() => {});
-          await randomDelay(500, 1000);
-        }
-        const closeBtn = page.locator('.MuiDialog-root [data-qa="ci-Close"], [role="dialog"] button[aria-label="Close"], button:has-text("Close")').first();
-        if ((await closeBtn.count()) > 0) {
-          await closeBtn.click({ timeout: 3000 }).catch(() => {});
-          await randomDelay(500, 1000);
-        }
-        // Always press Escape twice to ensure any overlay is dismissed
-        await page.keyboard.press("Escape").catch(() => {});
-        await randomDelay(500, 800);
-        await page.keyboard.press("Escape").catch(() => {});
-        await randomDelay(500, 800);
-        // Wait for any modal/overlay to be gone
-        await page.waitForFunction(
-          () => document.querySelectorAll('.MuiDialog-root, .MuiModal-root, [role="dialog"]').length === 0,
-          { timeout: 5000 }
-        ).catch(() => {});
+        await dismissOpenModals(page);
         log("[portfolio-auto] Attach Files modal dismissed after PDF failure", "playwright");
       }
     } else {
