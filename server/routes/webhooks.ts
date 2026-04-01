@@ -14,6 +14,10 @@ import { db } from "../db";
 import { webhookLogs } from "@shared/schema";
 import { eq, and, lt, desc } from "drizzle-orm";
 
+// Debounce: skip webhook-triggered role check if same project was checked within last 60s
+const recentRoleCheckTimestamps = new Map<string, number>();
+const ROLE_CHECK_DEBOUNCE_MS = 60_000;
+
 export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
   // Log signature verification status once on startup, not per request
   if (!process.env.HUBSPOT_CLIENT_SECRET) {
@@ -477,6 +481,30 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             console.log(`[webhook] Project update detected for ${projectId}, checking for changes...`);
             // Track this project as webhook-updated so the polling cycle can skip redundant API calls
             markProjectWebhookUpdated(projectId);
+
+            // Webhook-triggered role check (debounced to 60s per project)
+            const _roleCheckNow = Date.now();
+            const _roleLastChecked = recentRoleCheckTimestamps.get(projectId) ?? 0;
+            if (_roleCheckNow - _roleLastChecked < ROLE_CHECK_DEBOUNCE_MS) {
+              console.log(`[webhook] Role check debounced for project ${projectId} (checked ${Math.round((_roleCheckNow - _roleLastChecked) / 1000)}s ago)`);
+            } else {
+              recentRoleCheckTimestamps.set(projectId, _roleCheckNow);
+              setTimeout(async () => {
+                try {
+                  const roleResult = await syncProcoreRoleAssignments([projectId]);
+                  if (roleResult.newAssignments.length > 0) {
+                    console.log(`[webhook] Role check found ${roleResult.newAssignments.length} new assignment(s) for project ${projectId}, sending notifications`);
+                    const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('../email-notifications');
+                    await sendRoleAssignmentEmails(roleResult.newAssignments);
+                    await triggerKickoffForNewPmOnPortfolio(roleResult.newAssignments);
+                  } else {
+                    console.log(`[webhook] Role check complete for project ${projectId}: no new assignments`);
+                  }
+                } catch (roleErr: any) {
+                  console.error(`[webhook] Role check failed for project ${projectId}:`, roleErr.message);
+                }
+              }, 5000);
+            }
 
             const { takeNextPendingPhase2, markPhase2Complete, markPhase2Failed } = await import('../orchestrator/portfolio-orchestrator');
             const pending = await takeNextPendingPhase2();

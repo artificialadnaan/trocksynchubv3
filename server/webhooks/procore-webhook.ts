@@ -38,6 +38,10 @@ import {
 
 export { registerPendingPhase2 };
 
+// Debounce: skip webhook-triggered role check if same project was checked within last 60s
+const recentRoleCheckTimestamps = new Map<string, number>();
+const ROLE_CHECK_DEBOUNCE_MS = 60_000;
+
 // Track processed webhook IDs to avoid duplicate processing
 const processedWebhooks = new Set<string>();
 const MAX_PROCESSED_CACHE = 1000;
@@ -212,6 +216,32 @@ export async function handleProcoreProjectWebhook(
             "webhook"
           );
         }
+      }
+
+      // Webhook-triggered role check: fire for both create and update events
+      // Debounce to avoid hammering if multiple webhooks arrive for the same project
+      const now = Date.now();
+      const lastChecked = recentRoleCheckTimestamps.get(resourceId) ?? 0;
+      if (now - lastChecked < ROLE_CHECK_DEBOUNCE_MS) {
+        log(`[webhook] Role check debounced for project ${resourceId} (checked ${Math.round((now - lastChecked) / 1000)}s ago)`, "webhook");
+      } else {
+        recentRoleCheckTimestamps.set(resourceId, now);
+        setTimeout(async () => {
+          try {
+            const { syncProcoreRoleAssignments } = await import("../procore");
+            const result = await syncProcoreRoleAssignments([resourceId]);
+            if (result.newAssignments.length > 0) {
+              log(`[webhook] Role check found ${result.newAssignments.length} new assignment(s) for project ${resourceId}, sending notifications`, "webhook");
+              const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import("../email-notifications");
+              await sendRoleAssignmentEmails(result.newAssignments);
+              await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
+            } else {
+              log(`[webhook] Role check complete for project ${resourceId}: no new assignments`, "webhook");
+            }
+          } catch (roleErr: unknown) {
+            log(`[webhook] Role check failed for project ${resourceId}: ${roleErr instanceof Error ? roleErr.message : String(roleErr)}`, "webhook");
+          }
+        }, 5000);
       }
     }
   } catch (err: unknown) {

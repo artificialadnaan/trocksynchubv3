@@ -1080,8 +1080,10 @@ const roleAssignmentSyncQueue: string[] = [];
 let isFirstRoleSyncAfterStartup = true;
 
 export async function syncProcoreRoleAssignments(projectIds?: string[], opts?: { fullSync?: boolean }): Promise<{ synced: number; newAssignments: Array<{ procoreProjectId: string; projectName: string; roleName: string; assigneeId: string; assigneeName: string; assigneeEmail: string; assigneeCompany: string }>; skipped?: boolean }> {
-  // Prevent concurrent syncs to avoid duplicate emails
-  if (roleAssignmentSyncInProgress) {
+  // Prevent concurrent syncs to avoid duplicate emails.
+  // Exception: if projectIds is explicitly provided (webhook-triggered single-project check),
+  // bypass the mutex so it doesn't get dropped when a batch poll is running.
+  if (roleAssignmentSyncInProgress && (!projectIds || projectIds.length === 0)) {
     console.log('[procore] Role assignment sync already in progress, skipping to prevent duplicates');
     return { synced: 0, newAssignments: [], skipped: true };
   }
@@ -1388,9 +1390,26 @@ export async function syncProcoreRoleAssignmentsBatch(
       };
     }
 
+    // Prioritize webhook-updated projects: put them at the front of the batch
+    const priorityIds = fullList
+      .map(p => p.procoreId)
+      .filter(id => wasProjectWebhookUpdated(id));
+    const priorityProjects = priorityIds
+      .map(id => fullList.find(p => p.procoreId === id)!)
+      .filter(Boolean);
+    const priorityIdSet = new Set(priorityIds);
+
     const effectiveCursor = cursor >= totalProjects ? 0 : cursor;
-    const batch = fullList.slice(effectiveCursor, effectiveCursor + batchSize);
+    const cursorSlice = fullList
+      .slice(effectiveCursor, effectiveCursor + batchSize)
+      .filter(p => !priorityIdSet.has(p.procoreId));
+
+    const batch = [...priorityProjects, ...cursorSlice].slice(0, batchSize);
     const batchProcessed = batch.length;
+
+    if (priorityProjects.length > 0) {
+      console.log(`[procore] Batch includes ${priorityProjects.length} webhook-priority project(s): ${priorityIds.join(', ')}`);
+    }
 
     if (batchProcessed === 0) {
       return {
@@ -1522,6 +1541,9 @@ export async function syncProcoreRoleAssignmentsBatch(
       }
       await new Promise(r => setTimeout(r, ROLE_SYNC_BATCH_DELAY_MS));
     }, ROLE_SYNC_CONCURRENCY);
+
+    // Clear webhook-priority flags now that we've processed this batch
+    clearWebhookUpdatedProjects();
 
     const nextCursor = effectiveCursor + batchSize >= totalProjects ? 0 : effectiveCursor + batchSize;
     if (nextCursor === 0) {
