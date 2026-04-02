@@ -234,7 +234,7 @@ export async function runPhase2WithRetry(
   phase2Input?: Phase2Input,
   context?: {
     projectName?: string;
-    triggerSource: "webhook" | "manual";
+    triggerSource: "webhook" | "manual" | "orphan_failsafe";
   }
 ): Promise<PortfolioAutomationResult> {
   const attempts: Array<{

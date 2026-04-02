@@ -227,33 +227,34 @@ export async function processOrphanedPhase2Jobs(): Promise<{ processed: number; 
         continue;
       }
 
-      // Claim the job
-      await db.update(pendingPhase2Jobs)
-        .set({ status: "claimed", claimedAt: new Date() })
-        .where(eq(pendingPhase2Jobs.id, job.id));
+      // Atomic claim — prevent double-claim race with webhook/direct-chain consumers
+      const claimed = await db.update(pendingPhase2Jobs)
+        .set({ status: "claimed", claimedAt: new Date(), attempts: sql`attempts + 1` })
+        .where(and(eq(pendingPhase2Jobs.id, job.id), eq(pendingPhase2Jobs.status, "pending")))
+        .returning();
+      if (!claimed.length) {
+        log(`[orchestrator] Orphan job #${job.id} already claimed by another consumer — skipping`, "webhook");
+        continue;
+      }
 
       log(`[orchestrator] Orphan failsafe: triggering Phase 2 for portfolio ${portfolioProjectId} (bidboard ${job.bidboardProjectId}, job #${job.id})`, "webhook");
 
-      // Trigger Phase 2 with browser lock
+      // Trigger Phase 2 with browser lock — use runPhase2WithRetry for consistent retry behavior
       const { withBrowserLock } = await import("../playwright/browser");
-      const { runPhase2 } = await import("../playwright/portfolio-automation");
+      const { runPhase2WithRetry } = await import("../portfolio-automation-runner");
       const result = await withBrowserLock(`failsafe-phase2-${portfolioProjectId}`, () =>
-        runPhase2(companyId, portfolioProjectId!, job.bidboardProjectId, {
+        runPhase2WithRetry(companyId, portfolioProjectId!, job.bidboardProjectId, {
           bidboardProjectUrl: job.bidboardProjectUrl || undefined,
           proposalPdfPath: job.proposalPdfPath ?? undefined,
           customerName: job.customerName ?? undefined,
-        })
+        }, { triggerSource: "orphan_failsafe" })
       );
 
       if (result.success) {
-        await db.update(pendingPhase2Jobs)
-          .set({ status: "completed", completedAt: new Date() })
-          .where(eq(pendingPhase2Jobs.id, job.id));
+        await markPhase2Complete(job.id);
         log(`[orchestrator] Orphan failsafe: Phase 2 succeeded for job #${job.id}`, "webhook");
       } else {
-        await db.update(pendingPhase2Jobs)
-          .set({ status: "failed", error: result.error || "Phase 2 failed", completedAt: new Date() })
-          .where(eq(pendingPhase2Jobs.id, job.id));
+        await markPhase2Failed(job.id, result.error || "Phase 2 failed");
         log(`[orchestrator] Orphan failsafe: Phase 2 failed for job #${job.id}: ${result.error}`, "webhook");
       }
       processed++;

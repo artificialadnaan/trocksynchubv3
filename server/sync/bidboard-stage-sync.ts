@@ -402,11 +402,39 @@ export async function syncStagesToHubSpot(
       const projectId =
         change.projectNumber ||
         compositeKey(change.projectName, change.customerName);
-      await storage.upsertBidboardSyncState({
-        projectId,
-        projectName: change.projectName,
-        currentStage: change.newStage,
-      });
+
+      // If Phase 1 failed for a production stage, use cross-cycle retry instead of advancing state
+      if (!portfolioTriggerSucceeded && (
+        normalizedNewStageEarly === "Sent to Production" ||
+        normalizedNewStageEarly === "Service - Sent to Production"
+      )) {
+        const prevState = (await storage.getBidboardSyncStates()).find(s => s.projectId === projectId);
+        const attempts = ((prevState?.metadata as any)?.portfolioTriggerAttempts ?? 0) + 1;
+        const MAX_CROSS_CYCLE_RETRIES = 3;
+        if (attempts >= MAX_CROSS_CYCLE_RETRIES) {
+          log(`[sync] Portfolio automation failed ${attempts} cycles for ${change.projectName} — giving up`, "sync");
+          await storage.upsertBidboardSyncState({
+            projectId,
+            projectName: change.projectName,
+            currentStage: change.newStage,
+            metadata: { portfolioTriggerAttempts: attempts, gaveUp: true },
+          });
+        } else {
+          log(`[sync] Portfolio automation failed for ${change.projectName} (attempt ${attempts}/${MAX_CROSS_CYCLE_RETRIES}) — will retry next cycle`, "sync");
+          await storage.upsertBidboardSyncState({
+            projectId,
+            projectName: change.projectName,
+            currentStage: change.previousStage || undefined,
+            metadata: { portfolioTriggerAttempts: attempts },
+          });
+        }
+      } else {
+        await storage.upsertBidboardSyncState({
+          projectId,
+          projectName: change.projectName,
+          currentStage: change.newStage,
+        });
+      }
       log(
         `Stage synced: ${change.projectName} → ${change.newStage} (HubSpot: ${resolved.stageName})`,
         "sync"
