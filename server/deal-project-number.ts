@@ -89,20 +89,6 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
     .limit(1);
 
   if (existingEntry.length > 0) {
-    // Project number already assigned — still send to additional recipients if not yet notified
-    try {
-      await sendNewDealNotification({
-        dealName: existingEntry[0].hubspotDealName || 'Unnamed Deal',
-        projectNumber: existingEntry[0].fullProjectNumber,
-        ownerName: existingEntry[0].ownerName || 'Unassigned',
-        ownerEmail: existingEntry[0].ownerEmail || null,
-        officeLocation: existingEntry[0].officeLocation || '',
-        estimator: existingEntry[0].estimator || '',
-        hubspotDealId,
-      });
-    } catch (emailErr: any) {
-      console.error('[project-number] Additional recipient notification failed:', emailErr.message);
-    }
     return {
       success: true,
       projectNumber: existingEntry[0].fullProjectNumber,
@@ -119,24 +105,6 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   const props = dealResponse.properties || {};
 
   if (props.project_number) {
-    // Still send to additional recipients if not yet notified
-    let ownerDetails: { name: string; email: string } | null = null;
-    if (props.hubspot_owner_id) {
-      ownerDetails = await getOwnerDetails(props.hubspot_owner_id);
-    }
-    try {
-      await sendNewDealNotification({
-        dealName: props.dealname || 'Unnamed Deal',
-        projectNumber: props.project_number,
-        ownerName: ownerDetails?.name || 'Unassigned',
-        ownerEmail: ownerDetails?.email || null,
-        officeLocation: props.office_location || props.project_location || '',
-        estimator: props.estimator || '',
-        hubspotDealId,
-      });
-    } catch (emailErr: any) {
-      console.error('[project-number] Additional recipient notification failed:', emailErr.message);
-    }
     return {
       success: true,
       projectNumber: props.project_number,
