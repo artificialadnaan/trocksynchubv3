@@ -353,6 +353,15 @@ export async function syncStagesToHubSpot(
       result.errors.push(
         `${change.projectName}: deal is "${terminalStage}", refusing stage regression to "${label}"`
       );
+      // Update sync state so this blocked change isn't re-detected every cycle
+      const projectId =
+        change.projectNumber ||
+        compositeKey(change.projectName, change.customerName);
+      await storage.upsertBidboardSyncState({
+        projectId,
+        projectName: change.projectName,
+        currentStage: change.newStage,
+      });
       continue;
     }
 
