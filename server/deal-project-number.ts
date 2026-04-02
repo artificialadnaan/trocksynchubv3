@@ -89,6 +89,20 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
     .limit(1);
 
   if (existingEntry.length > 0) {
+    // Project number already assigned — still send to additional recipients if not yet notified
+    try {
+      await sendNewDealNotification({
+        dealName: existingEntry[0].hubspotDealName || 'Unnamed Deal',
+        projectNumber: existingEntry[0].fullProjectNumber,
+        ownerName: existingEntry[0].ownerName || 'Unassigned',
+        ownerEmail: existingEntry[0].ownerEmail || null,
+        officeLocation: existingEntry[0].officeLocation || '',
+        estimator: existingEntry[0].estimator || '',
+        hubspotDealId,
+      });
+    } catch (emailErr: any) {
+      console.error('[project-number] Additional recipient notification failed:', emailErr.message);
+    }
     return {
       success: true,
       projectNumber: existingEntry[0].fullProjectNumber,
@@ -105,6 +119,24 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   const props = dealResponse.properties || {};
 
   if (props.project_number) {
+    // Still send to additional recipients if not yet notified
+    let ownerDetails: { name: string; email: string } | null = null;
+    if (props.hubspot_owner_id) {
+      ownerDetails = await getOwnerDetails(props.hubspot_owner_id);
+    }
+    try {
+      await sendNewDealNotification({
+        dealName: props.dealname || 'Unnamed Deal',
+        projectNumber: props.project_number,
+        ownerName: ownerDetails?.name || 'Unassigned',
+        ownerEmail: ownerDetails?.email || null,
+        officeLocation: props.project_location || '',
+        estimator: props.estimator || '',
+        hubspotDealId,
+      });
+    } catch (emailErr: any) {
+      console.error('[project-number] Additional recipient notification failed:', emailErr.message);
+    }
     return {
       success: true,
       projectNumber: props.project_number,
@@ -197,10 +229,6 @@ async function sendNewDealNotification(params: {
   hubspotDealId: string;
 }) {
   const template = await storage.getEmailTemplate('new_deal_project_number');
-  if (!template || !template.enabled) {
-    console.log('[project-number] Email template disabled, skipping notification');
-    return;
-  }
 
   const variables: Record<string, string> = {
     dealName: params.dealName,
@@ -213,15 +241,20 @@ async function sendNewDealNotification(params: {
     hubspotDealUrl: `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${params.hubspotDealId}`,
   };
 
-  const subject = renderTemplate(template.subject, variables);
-  const htmlBody = renderTemplate(template.bodyHtml, variables);
+  // Build subject/body from template, or use fallback if template is disabled
+  const subject = template?.enabled
+    ? renderTemplate(template.subject, variables)
+    : `New Deal: ${params.dealName} — ${params.projectNumber}`;
+  const htmlBody = template?.enabled
+    ? renderTemplate(template.bodyHtml, variables)
+    : `<p>A new deal <strong>${params.dealName}</strong> has been assigned project number <strong>${params.projectNumber}</strong>.</p><p><a href="${variables.hubspotDealUrl}">View in HubSpot</a></p>`;
 
   const dedupeKey = `project_number:${params.hubspotDealId}`;
   const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
 
-  // Send to deal owner if available and not already sent
+  // Send to deal owner if available, template enabled, and not already sent
   const recipientEmail = params.ownerEmail;
-  if (recipientEmail && !alreadySent) {
+  if (recipientEmail && !alreadySent && template?.enabled) {
     const result = await sendEmail({
       to: recipientEmail,
       subject,
