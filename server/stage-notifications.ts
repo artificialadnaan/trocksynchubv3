@@ -12,7 +12,7 @@ import { getDealOwnerInfo } from './hubspot';
 export interface StageNotificationRoute {
   key: string;
   stage: string;
-  source: 'bidboard' | 'portfolio' | 'hubspot';
+  source: 'bidboard' | 'portfolio';
   label: string;
   staticRecipients: string[];
   includeDealOwner: boolean;
@@ -20,15 +20,6 @@ export interface StageNotificationRoute {
 }
 
 export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
-  // HubSpot deal creation / Pipeline stage notification
-  {
-    key: 'hs_pipeline',
-    stage: 'Pipeline',
-    source: 'hubspot',
-    label: 'Deal Created / Pipeline',
-    staticRecipients: ['kscheidegger@trockgc.com', 'sbohen@trockgc.com'],
-    includeDealOwner: false,
-  },
   // BidBoard stage notifications
   {
     key: 'bb_internal_review',
@@ -205,7 +196,7 @@ export function buildStageNotificationEmail(dealName: string, oldStage: string |
 
 export async function processStageNotification(params: {
   stage: string;
-  source: 'bidboard' | 'portfolio' | 'hubspot';
+  source: 'bidboard' | 'portfolio';
   projectName: string;
   oldStage: string | null;
   procoreProjectId: string;

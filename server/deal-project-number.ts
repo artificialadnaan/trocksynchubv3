@@ -244,6 +244,23 @@ async function sendNewDealNotification(params: {
     dedupeKey,
     metadata: { dealName: params.dealName, projectNumber: params.projectNumber },
   });
+
+  // Also notify kscheidegger + sbohen on every new deal
+  const additionalRecipients = ['kscheidegger@trockgc.com', 'sbohen@trockgc.com'];
+  for (const extra of additionalRecipients) {
+    if (extra === recipientEmail) continue; // skip if already the primary recipient
+    try {
+      await sendEmail({
+        to: extra,
+        subject,
+        htmlBody,
+        fromName: 'T-Rock Sync Hub',
+      });
+      console.log(`[project-number] New deal notification sent to ${extra}`);
+    } catch (err: any) {
+      console.error(`[project-number] Failed to notify ${extra}:`, err.message);
+    }
+  }
 }
 
 export async function processNewDealWebhook(hubspotDealId: string): Promise<void> {
