@@ -114,7 +114,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   const client = await getHubSpotClient();
   const dealResponse = await client.crm.deals.basicApi.getById(hubspotDealId, [
     'dealname', 'createdate', 'hubspot_owner_id', 'project_number',
-    'project_location', 'project_types', 'estimator',
+    'project_location', 'office_location', 'project_types', 'estimator',
   ]);
   const props = dealResponse.properties || {};
 
@@ -130,7 +130,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
         projectNumber: props.project_number,
         ownerName: ownerDetails?.name || 'Unassigned',
         ownerEmail: ownerDetails?.email || null,
-        officeLocation: props.project_location || '',
+        officeLocation: props.office_location || props.project_location || '',
         estimator: props.estimator || '',
         hubspotDealId,
       });
@@ -146,7 +146,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   }
 
   const createDate = props.createdate ? new Date(props.createdate) : new Date();
-  const office = resolveOfficeCode(props.project_location);
+  const office = resolveOfficeCode(props.office_location || props.project_location);
   const projectType = resolveProjectTypeCode(props.project_types);
   const julianDate = generateJulianDate(createDate);
   const baseNumber = `${office}-${projectType}-${julianDate}`;
@@ -165,7 +165,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
     baseNumber,
     suffix,
     fullProjectNumber,
-    officeLocation: props.project_location || null,
+    officeLocation: props.office_location || props.project_location || null,
     projectTypes: props.project_types || null,
     estimator: props.estimator || null,
     ownerName: ownerDetails?.name || null,
@@ -185,7 +185,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
       projectNumber: fullProjectNumber,
       ownerName: ownerDetails?.name || 'Unassigned',
       ownerEmail: ownerDetails?.email || null,
-      officeLocation: props.project_location || '',
+      officeLocation: props.office_location || props.project_location || '',
       estimator: props.estimator || '',
       hubspotDealId,
     });
