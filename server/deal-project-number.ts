@@ -202,19 +202,6 @@ async function sendNewDealNotification(params: {
     return;
   }
 
-  const recipientEmail = params.ownerEmail;
-  if (!recipientEmail) {
-    console.log('[project-number] No recipient email available, skipping notification');
-    return;
-  }
-
-  const dedupeKey = `project_number:${params.hubspotDealId}`;
-  const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
-  if (alreadySent) {
-    console.log(`[project-number] Already sent notification for ${dedupeKey}`);
-    return;
-  }
-
   const variables: Record<string, string> = {
     dealName: params.dealName,
     projectNumber: params.projectNumber,
@@ -229,32 +216,50 @@ async function sendNewDealNotification(params: {
   const subject = renderTemplate(template.subject, variables);
   const htmlBody = renderTemplate(template.bodyHtml, variables);
 
-  const result = await sendEmail({
-    to: recipientEmail,
-    subject,
-    htmlBody,
-    fromName: 'T-Rock Sync Hub',
-  });
+  const dedupeKey = `project_number:${params.hubspotDealId}`;
+  const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
 
-  await storage.createEmailSendLog({
-    templateKey: 'new_deal_project_number',
-    recipientEmail,
-    subject,
-    status: result.success ? 'sent' : 'failed',
-    dedupeKey,
-    metadata: { dealName: params.dealName, projectNumber: params.projectNumber },
-  });
+  // Send to deal owner if available and not already sent
+  const recipientEmail = params.ownerEmail;
+  if (recipientEmail && !alreadySent) {
+    const result = await sendEmail({
+      to: recipientEmail,
+      subject,
+      htmlBody,
+      fromName: 'T-Rock Sync Hub',
+    });
 
-  // Also notify kscheidegger + sbohen on every new deal
+    await storage.createEmailSendLog({
+      templateKey: 'new_deal_project_number',
+      recipientEmail,
+      subject,
+      status: result.success ? 'sent' : 'failed',
+      dedupeKey,
+      metadata: { dealName: params.dealName, projectNumber: params.projectNumber },
+    });
+  }
+
+  // Always notify kscheidegger + sbohen on every new deal (separate dedup per recipient)
   const additionalRecipients = ['kscheidegger@trockgc.com', 'sbohen@trockgc.com'];
   for (const extra of additionalRecipients) {
-    if (extra === recipientEmail) continue; // skip if already the primary recipient
+    if (extra === recipientEmail) continue;
+    const extraDedupeKey = `project_number:${params.hubspotDealId}:${extra}`;
+    const extraAlreadySent = await storage.checkEmailDedupeKey(extraDedupeKey);
+    if (extraAlreadySent) continue;
     try {
-      await sendEmail({
+      const result = await sendEmail({
         to: extra,
         subject,
         htmlBody,
         fromName: 'T-Rock Sync Hub',
+      });
+      await storage.createEmailSendLog({
+        templateKey: 'new_deal_project_number',
+        recipientEmail: extra,
+        subject,
+        status: result.success ? 'sent' : 'failed',
+        dedupeKey: extraDedupeKey,
+        metadata: { dealName: params.dealName, projectNumber: params.projectNumber },
       });
       console.log(`[project-number] New deal notification sent to ${extra}`);
     } catch (err: any) {
