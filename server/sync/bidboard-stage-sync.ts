@@ -324,6 +324,7 @@ export async function syncStagesToHubSpot(
 
     // Trigger portfolio automation BEFORE terminal guard — production stages always fire regardless of HubSpot block
     const normalizedNewStageEarly = normalizeStageLabel(change.newStage);
+    let portfolioTriggerSucceeded = true;
     if (
       normalizedNewStageEarly === "Sent to Production" ||
       normalizedNewStageEarly === "Service - Sent to Production"
@@ -336,6 +337,7 @@ export async function syncStagesToHubSpot(
           change.hubspotDealId
         );
       } catch (err) {
+        portfolioTriggerSucceeded = false;
         log(
           `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
           "sync"
@@ -353,15 +355,40 @@ export async function syncStagesToHubSpot(
       result.errors.push(
         `${change.projectName}: deal is "${terminalStage}", refusing stage regression to "${label}"`
       );
-      // Update sync state so this blocked change isn't re-detected every cycle
       const projectId =
         change.projectNumber ||
         compositeKey(change.projectName, change.customerName);
-      await storage.upsertBidboardSyncState({
-        projectId,
-        projectName: change.projectName,
-        currentStage: change.newStage,
-      });
+
+      if (!portfolioTriggerSucceeded) {
+        // Phase 1 failed — check retry counter before updating sync state
+        const prevState = (await storage.getBidboardSyncStates()).find(s => s.projectId === projectId);
+        const attempts = ((prevState?.metadata as any)?.portfolioTriggerAttempts ?? 0) + 1;
+        const MAX_CROSS_CYCLE_RETRIES = 3;
+        if (attempts >= MAX_CROSS_CYCLE_RETRIES) {
+          log(`[sync] Portfolio automation failed ${attempts} cycles for ${change.projectName} — giving up, updating sync state`, "sync");
+          await storage.upsertBidboardSyncState({
+            projectId,
+            projectName: change.projectName,
+            currentStage: change.newStage,
+            metadata: { portfolioTriggerAttempts: attempts, gaveUp: true },
+          });
+        } else {
+          log(`[sync] Portfolio automation failed for ${change.projectName} (attempt ${attempts}/${MAX_CROSS_CYCLE_RETRIES}) — will retry next cycle`, "sync");
+          await storage.upsertBidboardSyncState({
+            projectId,
+            projectName: change.projectName,
+            currentStage: change.previousStage || undefined, // Keep old stage so it re-triggers
+            metadata: { portfolioTriggerAttempts: attempts },
+          });
+        }
+      } else {
+        // Phase 1 succeeded or wasn't a production stage — update sync state normally
+        await storage.upsertBidboardSyncState({
+          projectId,
+          projectName: change.projectName,
+          currentStage: change.newStage,
+        });
+      }
       continue;
     }
 
