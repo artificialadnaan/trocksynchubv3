@@ -139,7 +139,9 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
           }
         }
 
-        if (objectType === "deal" && (eventType.includes("creation") || eventType.includes("create"))) {
+        // Assign project number on any deal webhook event (not just deal.creation which is unreliable)
+        // assignProjectNumber short-circuits if the deal already has one, so this is safe to call repeatedly
+        if (objectType === "deal") {
           try {
             await processNewDealWebhook(objectId);
           } catch (pnErr: any) {
