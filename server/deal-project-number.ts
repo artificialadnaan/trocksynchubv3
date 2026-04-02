@@ -1,7 +1,7 @@
 import { storage } from './storage';
 import { getHubSpotClient, getAccessToken } from './hubspot';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
-import { sendEmail, renderTemplate } from './email-service';
+import { sendEmail } from './email-service';
 import { db } from './db';
 import { projectNumberRegistry } from '@shared/schema';
 import { eq, desc, like } from 'drizzle-orm';
@@ -228,33 +228,74 @@ async function sendNewDealNotification(params: {
   estimator: string;
   hubspotDealId: string;
 }) {
-  const template = await storage.getEmailTemplate('new_deal_project_number');
+  const hubspotDealUrl = `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${params.hubspotDealId}`;
+  const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' });
 
-  const variables: Record<string, string> = {
-    dealName: params.dealName,
-    projectNumber: params.projectNumber,
-    ownerName: params.ownerName,
-    ownerEmail: params.ownerEmail || '',
-    officeLocation: params.officeLocation,
-    estimator: params.estimator,
-    hubspotDealId: params.hubspotDealId,
-    hubspotDealUrl: `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${params.hubspotDealId}`,
-  };
-
-  // Build subject/body from template, or use fallback if template is disabled
-  const subject = template?.enabled
-    ? renderTemplate(template.subject, variables)
-    : `New Deal: ${params.dealName} — ${params.projectNumber}`;
-  const htmlBody = template?.enabled
-    ? renderTemplate(template.bodyHtml, variables)
-    : `<p>A new deal <strong>${params.dealName}</strong> has been assigned project number <strong>${params.projectNumber}</strong>.</p><p><a href="${variables.hubspotDealUrl}">View in HubSpot</a></p>`;
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const subject = `New Deal: ${esc(params.dealName)} — ${esc(params.projectNumber)}`;
+  const htmlBody = `<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#f4f4f5;font-family:Arial,sans-serif;">
+  <tr><td style="padding:40px 20px;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="margin:0 auto;max-width:600px;">
+      <tr>
+        <td style="background:#1a1a2e;padding:16px 24px;border-radius:8px 8px 0 0;">
+          <img src="https://trockgc.com/wp-content/uploads/2020/12/TRock-CONTRACTING_Icon-dark-1-150x150.png" alt="T-Rock" width="32" height="32" style="vertical-align:middle;margin-right:10px;">
+          <span style="font-size:20px;font-weight:700;color:#ffffff;vertical-align:middle;">T-ROCK</span>
+          <span style="font-size:20px;font-weight:300;color:#d11921;vertical-align:middle;"> GC</span>
+          <span style="font-size:14px;color:#94a3b8;margin-left:12px;vertical-align:middle;">New Deal Assigned</span>
+        </td>
+      </tr>
+      <tr><td style="background:#d11921;height:4px;font-size:0;line-height:0;">&nbsp;</td></tr>
+      <tr>
+        <td style="background:#f0fdf4;border-left:1px solid #bbf7d0;border-right:1px solid #bbf7d0;padding:12px 24px;color:#166534;font-weight:600;font-size:15px;">
+          Project Number Assigned
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:24px;border:1px solid #e2e8f0;border-top:none;background:#ffffff;">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin-bottom:20px;">
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:8px 0;width:120px;">Deal Name</td>
+              <td style="font-size:14px;font-weight:600;padding:8px 0;color:#1e293b;">${esc(params.dealName)}</td>
+            </tr>
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:8px 0;">Project #</td>
+              <td style="font-size:14px;font-weight:600;padding:8px 0;color:#d11921;">${esc(params.projectNumber)}</td>
+            </tr>
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:8px 0;">Owner</td>
+              <td style="font-size:14px;padding:8px 0;color:#1e293b;">${esc(params.ownerName)}${params.ownerEmail ? ` (${esc(params.ownerEmail)})` : ''}</td>
+            </tr>
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:8px 0;">Office</td>
+              <td style="font-size:14px;padding:8px 0;color:#1e293b;">${esc(params.officeLocation || 'Not set')}</td>
+            </tr>
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:8px 0;">Estimator</td>
+              <td style="font-size:14px;padding:8px 0;color:#1e293b;">${esc(params.estimator || 'Not set')}</td>
+            </tr>
+          </table>
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+            <tr><td align="center">
+              <a href="${hubspotDealUrl}" style="display:inline-block;background:#d11921;color:#ffffff;padding:10px 24px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">View in HubSpot</a>
+            </td></tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:12px 24px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;background:#f8fafc;text-align:center;">
+          <span style="font-size:11px;color:#94a3b8;">Sent by T-Rock Sync Hub at ${timestamp} CT</span>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>`;
 
   const dedupeKey = `project_number:${params.hubspotDealId}`;
   const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
 
-  // Send to deal owner if available, template enabled, and not already sent
+  // Send to deal owner if available and not already sent
   const recipientEmail = params.ownerEmail;
-  if (recipientEmail && !alreadySent && template?.enabled) {
+  if (recipientEmail && !alreadySent) {
     const result = await sendEmail({
       to: recipientEmail,
       subject,
