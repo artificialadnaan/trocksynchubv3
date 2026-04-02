@@ -145,6 +145,21 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
           } catch (pnErr: any) {
             console.error(`[project-number] Webhook error for deal ${objectId}:`, pnErr.message);
           }
+          // Notify kscheidegger + sbohen when a new deal is created (Pipeline stage)
+          try {
+            const { processStageNotification } = await import('../stage-notifications');
+            const deal = await storage.getHubspotDealByHubspotId(objectId);
+            await processStageNotification({
+              stage: 'Pipeline',
+              source: 'hubspot',
+              projectName: deal?.dealName || `Deal ${objectId}`,
+              oldStage: null,
+              procoreProjectId: '',
+              hubspotDealId: objectId,
+            });
+          } catch (notifyErr: any) {
+            console.error(`[hubspot-webhook] Pipeline notification failed for deal ${objectId}:`, notifyErr.message);
+          }
         }
 
         // Handle deal stage changes - trigger BidBoard project creation + stage change email
@@ -160,6 +175,24 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             const stageName = (resolvedNewStage?.stageName || newValue).toLowerCase();
             const stageId = newValue.toLowerCase();
             console.log(`[hubspot-webhook] Deal ${objectId} stage change: stageId="${stageId}", resolved="${stageName}", changeSource="${changeSource || 'unknown'}"`);
+            // Notify kscheidegger + sbohen when a deal moves to Pipeline stage
+            if (stageName === 'pipeline') {
+              try {
+                const { processStageNotification } = await import('../stage-notifications');
+                const deal = await storage.getHubspotDealByHubspotId(objectId);
+                const mapping = await storage.getSyncMappingByHubspotDealId(objectId);
+                await processStageNotification({
+                  stage: 'Pipeline',
+                  source: 'hubspot',
+                  projectName: deal?.dealName || `Deal ${objectId}`,
+                  oldStage: previousStageForEmail,
+                  procoreProjectId: mapping?.procoreProjectId || '',
+                  hubspotDealId: objectId,
+                });
+              } catch (notifyErr: any) {
+                console.error(`[hubspot-webhook] Pipeline stage notification failed for deal ${objectId}:`, notifyErr.message);
+              }
+            }
             const isRfpStage = stageName.includes('rfp') || stageId.includes('rfp');
             if (isRfpStage) {
               try {
@@ -689,7 +722,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                 try {
                   const { runProjectCloseout } = await import('../closeout-automation');
                   const closeoutResult = await runProjectCloseout(projectId, {
-                    sendSurvey: true,
+                    sendSurvey: false,
                     archiveToSharePoint: true,
                     deactivateProject: false, // Already deactivated in Procore
                     updateHubSpotStage: true,

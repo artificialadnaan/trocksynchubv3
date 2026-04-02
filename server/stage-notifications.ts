@@ -12,7 +12,7 @@ import { getDealOwnerInfo } from './hubspot';
 export interface StageNotificationRoute {
   key: string;
   stage: string;
-  source: 'bidboard' | 'portfolio';
+  source: 'bidboard' | 'portfolio' | 'hubspot';
   label: string;
   staticRecipients: string[];
   includeDealOwner: boolean;
@@ -20,6 +20,15 @@ export interface StageNotificationRoute {
 }
 
 export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
+  // HubSpot deal creation / Pipeline stage notification
+  {
+    key: 'hs_pipeline',
+    stage: 'Pipeline',
+    source: 'hubspot',
+    label: 'Deal Created / Pipeline',
+    staticRecipients: ['kscheidegger@trockgc.com', 'sbohen@trockgc.com'],
+    includeDealOwner: false,
+  },
   // BidBoard stage notifications
   {
     key: 'bb_internal_review',
@@ -110,7 +119,7 @@ function normalizeStage(stage: string): string {
   return stage.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function findRoute(stage: string, source: 'bidboard' | 'portfolio'): StageNotificationRoute | undefined {
+function findRoute(stage: string, source: 'bidboard' | 'portfolio' | 'hubspot'): StageNotificationRoute | undefined {
   const normalized = normalizeStage(stage);
   return STAGE_NOTIFICATION_ROUTES.find(
     r => r.source === source && normalizeStage(r.stage) === normalized
@@ -196,7 +205,7 @@ export function buildStageNotificationEmail(dealName: string, oldStage: string |
 
 export async function processStageNotification(params: {
   stage: string;
-  source: 'bidboard' | 'portfolio';
+  source: 'bidboard' | 'portfolio' | 'hubspot';
   projectName: string;
   oldStage: string | null;
   procoreProjectId: string;
