@@ -78,6 +78,41 @@ export function registerCloseoutRoutes(app: Express, requireAuth: RequestHandler
     res.json(result);
   }));
 
+  // Send a test survey to a specified email (admin only)
+  app.post("/api/closeout/test-survey", requireAuth, asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+    const crypto = await import('crypto');
+    const { sendEmail, renderTemplate } = await import('../email-service');
+    const surveyToken = crypto.randomBytes(32).toString('hex');
+    const appUrl = process.env.APP_URL || 'http://localhost:5000';
+    const surveyUrl = `${appUrl}/survey/${surveyToken}`;
+    const projectName = 'Test Project — DFW Office Renovation';
+    const clientName = 'Adnaan';
+
+    await storage.createCloseoutSurvey({
+      procoreProjectId: 'test-001',
+      procoreProjectName: projectName,
+      hubspotDealId: null,
+      surveyToken,
+      clientEmail: email,
+      clientName,
+      googleReviewLink: 'https://g.page/r/test-review/review',
+      sentAt: new Date(),
+    });
+
+    const template = await storage.getEmailTemplate('closeout_survey');
+    if (!template || !template.enabled) {
+      return res.status(500).json({ error: 'closeout_survey email template not found or disabled' });
+    }
+
+    const variables: Record<string, string> = { clientName, projectName, surveyUrl, googleReviewUrl: 'https://g.page/r/test-review/review' };
+    const subject = renderTemplate(template.subject, variables);
+    const htmlBody = renderTemplate(template.bodyHtml, variables);
+    const result = await sendEmail({ to: email, subject, htmlBody, fromName: 'T-Rock Construction' });
+    res.json({ success: result.success, surveyUrl, error: result.error });
+  }));
+
   // Deactivate project after archive
   app.post("/api/closeout/deactivate/:projectId", requireAuth, asyncHandler(async (req, res) => {
     const projectId = req.params.projectId as string;
