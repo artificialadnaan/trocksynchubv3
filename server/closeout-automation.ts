@@ -254,11 +254,18 @@ export async function triggerCloseoutSurvey(
 export async function submitSurveyResponse(
   token: string,
   response: {
-    rating: number;
+    ratings: {
+      overallExperience: number;
+      communication: number;
+      schedule: number;
+      quality: number;
+      hireAgain: number;
+      referral: number;
+    };
     feedback?: string;
     googleReviewClicked?: boolean;
   }
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; showGoogleReview?: boolean; googleReviewLink?: string | null; error?: string }> {
   try {
     const survey = await storage.getCloseoutSurveyByToken(token);
     if (!survey) {
@@ -269,8 +276,20 @@ export async function submitSurveyResponse(
       return { success: false, error: 'Survey has already been submitted' };
     }
 
+    const { ratings } = response;
+    const ratingValues = [ratings.overallExperience, ratings.communication, ratings.schedule, ratings.quality, ratings.hireAgain, ratings.referral];
+    const average = ratingValues.reduce((a, b) => a + b, 0) / ratingValues.length;
+    const ratingAverage = average.toFixed(2);
+
     await storage.updateCloseoutSurvey(survey.id, {
-      rating: response.rating,
+      ratingOverallExperience: ratings.overallExperience,
+      ratingCommunication: ratings.communication,
+      ratingSchedule: ratings.schedule,
+      ratingQuality: ratings.quality,
+      ratingHireAgain: ratings.hireAgain,
+      ratingReferral: ratings.referral,
+      ratingAverage,
+      rating: Math.round(average),
       feedback: response.feedback || null,
       googleReviewClicked: response.googleReviewClicked || false,
       submittedAt: new Date(),
@@ -282,19 +301,167 @@ export async function submitSurveyResponse(
       entityId: String(survey.id),
       source: 'client',
       status: 'success',
-      details: { 
-        projectId: survey.procoreProjectId, 
-        rating: response.rating,
+      details: {
+        projectId: survey.procoreProjectId,
+        ratings,
+        ratingAverage,
         hasGoogleReview: response.googleReviewClicked,
       },
     });
 
-    console.log(`[closeout] Survey submitted for project ${survey.procoreProjectId} - Rating: ${response.rating}`);
-    return { success: true };
+    // Send survey results notification to deal owner + Brett
+    try {
+      await sendSurveyResultsNotification(survey, ratings, ratingAverage, response.feedback || null);
+    } catch (notifErr: any) {
+      console.error(`[closeout] Survey results notification failed:`, notifErr.message);
+    }
+
+    const showGoogleReview = average > 4;
+    console.log(`[closeout] Survey submitted for project ${survey.procoreProjectId} - Average: ${ratingAverage}`);
+    return {
+      success: true,
+      showGoogleReview,
+      googleReviewLink: showGoogleReview ? survey.googleReviewLink : null,
+    };
   } catch (error) {
     const err = error instanceof Error ? error.message : String(error);
     console.error(`[closeout] Error submitting survey: ${err}`);
     return { success: false, error: err };
+  }
+}
+
+async function sendSurveyResultsNotification(
+  survey: { id: number; procoreProjectId: string; procoreProjectName: string | null; hubspotDealId: string | null; clientEmail: string; clientName: string | null },
+  ratings: { overallExperience: number; communication: number; schedule: number; quality: number; hireAgain: number; referral: number },
+  ratingAverage: string,
+  feedback: string | null,
+) {
+  // Resolve deal owner email
+  let ownerEmail: string | null = null;
+  let ownerName = '';
+  if (survey.hubspotDealId) {
+    const deal = await storage.getHubspotDealByHubspotId(survey.hubspotDealId);
+    if (deal?.ownerId) {
+      let owner;
+      try { owner = await storage.getHubspotOwnerByHubspotId(deal.ownerId); } catch {}
+      if (owner?.email) {
+        ownerEmail = owner.email;
+        ownerName = [owner.firstName, owner.lastName].filter(Boolean).join(' ');
+      } else {
+        const mapping = await storage.getHubspotOwnerMappingByHubspotId(deal.ownerId);
+        if (mapping?.email) {
+          ownerEmail = mapping.email;
+          ownerName = mapping.name || '';
+        }
+      }
+    }
+  }
+
+  const avg = parseFloat(ratingAverage);
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const starColor = (val: number) => val >= 4 ? '#16a34a' : val >= 3 ? '#ca8a04' : '#dc2626';
+  const stars = (val: number) => '★'.repeat(val) + '☆'.repeat(5 - val);
+  const avgColor = avg > 4 ? '#16a34a' : avg >= 3 ? '#ca8a04' : '#dc2626';
+  const projectName = survey.procoreProjectName || 'Unknown Project';
+
+  const subject = `Survey Results: ${esc(projectName)} — ${ratingAverage}/5.00`;
+  const htmlBody = `<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#f4f4f5;font-family:Arial,sans-serif;">
+  <tr><td style="padding:40px 20px;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="margin:0 auto;max-width:600px;">
+      <tr>
+        <td style="background:#1a1a2e;padding:16px 24px;border-radius:8px 8px 0 0;">
+          <img src="https://trockgc.com/wp-content/uploads/2020/12/TRock-CONTRACTING_Icon-dark-1-150x150.png" alt="T-Rock" width="32" height="32" style="vertical-align:middle;margin-right:10px;">
+          <span style="font-size:20px;font-weight:700;color:#ffffff;vertical-align:middle;">T-ROCK</span>
+          <span style="font-size:20px;font-weight:300;color:#d11921;vertical-align:middle;"> GC</span>
+          <span style="font-size:14px;color:#94a3b8;margin-left:12px;vertical-align:middle;">Survey Results</span>
+        </td>
+      </tr>
+      <tr><td style="background:#d11921;height:4px;font-size:0;line-height:0;">&nbsp;</td></tr>
+      <tr>
+        <td style="background:${avg > 4 ? '#f0fdf4;border-left:1px solid #bbf7d0;border-right:1px solid #bbf7d0' : '#fffbeb;border-left:1px solid #fde68a;border-right:1px solid #fde68a'};padding:12px 24px;color:${avgColor};font-weight:600;font-size:15px;">
+          Average Rating: ${ratingAverage} / 5.00 ${avg > 4 ? '— Google Review Prompted' : ''}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:24px;border:1px solid #e2e8f0;border-top:none;background:#ffffff;">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin-bottom:20px;">
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:8px 0;width:50%;">Project</td>
+              <td style="font-size:14px;font-weight:600;padding:8px 0;color:#1e293b;">${esc(projectName)}</td>
+            </tr>
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:8px 0;">Respondent</td>
+              <td style="font-size:14px;padding:8px 0;color:#1e293b;">${esc(survey.clientName || 'Unknown')} (${esc(survey.clientEmail)})</td>
+            </tr>
+          </table>
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-top:1px solid #e2e8f0;padding-top:12px;">
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="color:#64748b;font-size:13px;padding:10px 0;">Overall Experience</td>
+              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.overallExperience)};letter-spacing:2px;">${stars(ratings.overallExperience)}</td>
+              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.overallExperience)};text-align:right;">${ratings.overallExperience}/5</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="color:#64748b;font-size:13px;padding:10px 0;">Communication</td>
+              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.communication)};letter-spacing:2px;">${stars(ratings.communication)}</td>
+              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.communication)};text-align:right;">${ratings.communication}/5</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="color:#64748b;font-size:13px;padding:10px 0;">Project Schedule</td>
+              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.schedule)};letter-spacing:2px;">${stars(ratings.schedule)}</td>
+              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.schedule)};text-align:right;">${ratings.schedule}/5</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="color:#64748b;font-size:13px;padding:10px 0;">Quality of Work</td>
+              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.quality)};letter-spacing:2px;">${stars(ratings.quality)}</td>
+              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.quality)};text-align:right;">${ratings.quality}/5</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="color:#64748b;font-size:13px;padding:10px 0;">Would Hire Again</td>
+              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.hireAgain)};letter-spacing:2px;">${stars(ratings.hireAgain)}</td>
+              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.hireAgain)};text-align:right;">${ratings.hireAgain}/5</td>
+            </tr>
+            <tr>
+              <td style="color:#64748b;font-size:13px;padding:10px 0;">Would Refer T-Rock</td>
+              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.referral)};letter-spacing:2px;">${stars(ratings.referral)}</td>
+              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.referral)};text-align:right;">${ratings.referral}/5</td>
+            </tr>
+          </table>
+          ${feedback ? `
+          <div style="margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;font-weight:600;">Comments</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;line-height:1.5;">${esc(feedback)}</p>
+          </div>` : ''}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:12px 24px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;background:#f8fafc;text-align:center;">
+          <span style="font-size:11px;color:#94a3b8;">Sent by T-Rock Sync Hub at ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })} CT</span>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>`;
+
+  // Send to deal owner + Brett
+  const recipients = new Set<string>();
+  if (ownerEmail) recipients.add(ownerEmail);
+  recipients.add('bbell@trockgc.com');
+
+  for (const email of recipients) {
+    try {
+      await sendEmail({ to: email, subject, htmlBody, fromName: 'T-Rock Sync Hub' });
+      await storage.createEmailSendLog({
+        templateKey: 'survey_results_notification',
+        recipientEmail: email,
+        subject,
+        status: 'sent',
+        dedupeKey: `survey_results:${survey.id}:${email}`,
+        metadata: { surveyId: survey.id, projectName, ratingAverage },
+      });
+      console.log(`[closeout] Survey results notification sent to ${email}`);
+    } catch (err: any) {
+      console.error(`[closeout] Failed to send survey results to ${email}:`, err.message);
+    }
   }
 }
 

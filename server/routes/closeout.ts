@@ -31,22 +31,32 @@ export function registerCloseoutRoutes(app: Express, requireAuth: RequestHandler
       projectName: survey.procoreProjectName,
       clientName: survey.clientName,
       submitted: !!survey.submittedAt,
-      rating: survey.rating,
-      googleReviewLink: survey.googleReviewLink,
+      ratingAverage: survey.ratingAverage ? parseFloat(survey.ratingAverage) : null,
+      // Only reveal Google review link after submission if average > 4
+      googleReviewLink: survey.submittedAt && survey.ratingAverage && parseFloat(survey.ratingAverage) > 4
+        ? survey.googleReviewLink
+        : null,
     });
   }));
 
   app.post("/api/survey/:token/submit", asyncHandler(async (req, res) => {
     const token = req.params.token as string;
-    const { rating, feedback, googleReviewClicked } = req.body;
+    const { ratings, feedback, googleReviewClicked } = req.body;
 
-    if (!rating || rating < 1 || rating > 5) {
-      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    if (!ratings || typeof ratings !== 'object') {
+      return res.status(400).json({ error: 'Ratings object is required' });
+    }
+    const ratingFields = ['overallExperience', 'communication', 'schedule', 'quality', 'hireAgain', 'referral'];
+    for (const field of ratingFields) {
+      const val = ratings[field];
+      if (!val || val < 1 || val > 5) {
+        return res.status(400).json({ error: `Rating for ${field} must be between 1 and 5` });
+      }
     }
 
     const { submitSurveyResponse } = await import('../closeout-automation');
     const result = await submitSurveyResponse(token, {
-      rating,
+      ratings,
       feedback,
       googleReviewClicked,
     });
