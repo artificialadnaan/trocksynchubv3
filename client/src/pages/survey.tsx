@@ -7,16 +7,20 @@ import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { Star, CheckCircle, ExternalLink, Loader2 } from 'lucide-react';
 
-const SURVEY_QUESTIONS = [
+const STAR_QUESTIONS = [
   { key: 'overallExperience', label: 'How satisfied were you with your overall experience?' },
   { key: 'communication', label: 'How would you rate our communication?' },
   { key: 'schedule', label: 'How satisfied were you with the project schedule?' },
   { key: 'quality', label: 'How would you rate the quality of work?' },
+] as const;
+
+const YES_NO_QUESTIONS = [
   { key: 'hireAgain', label: 'Would you hire us again?' },
   { key: 'referral', label: 'Would you refer T-Rock?' },
 ] as const;
 
-type RatingKey = typeof SURVEY_QUESTIONS[number]['key'];
+type StarKey = typeof STAR_QUESTIONS[number]['key'];
+type YesNoKey = typeof YES_NO_QUESTIONS[number]['key'];
 
 function StarRating({ value, hovered, onSelect, onHover, onLeave }: {
   value: number;
@@ -53,11 +57,14 @@ export default function SurveyPage() {
   const [location] = useLocation();
   const token = location.split('/survey/')[1];
   const { toast } = useToast();
-  const [ratings, setRatings] = useState<Record<RatingKey, number>>({
-    overallExperience: 0, communication: 0, schedule: 0, quality: 0, hireAgain: 0, referral: 0,
+  const [ratings, setRatings] = useState<Record<StarKey, number>>({
+    overallExperience: 0, communication: 0, schedule: 0, quality: 0,
   });
-  const [hoveredRatings, setHoveredRatings] = useState<Record<RatingKey, number>>({
-    overallExperience: 0, communication: 0, schedule: 0, quality: 0, hireAgain: 0, referral: 0,
+  const [hoveredRatings, setHoveredRatings] = useState<Record<StarKey, number>>({
+    overallExperience: 0, communication: 0, schedule: 0, quality: 0,
+  });
+  const [yesNo, setYesNo] = useState<Record<YesNoKey, boolean | null>>({
+    hireAgain: null, referral: null,
   });
   const [feedback, setFeedback] = useState('');
   const [googleReviewClicked, setGoogleReviewClicked] = useState(false);
@@ -75,10 +82,15 @@ export default function SurveyPage() {
 
   const submitMutation = useMutation({
     mutationFn: async () => {
+      const allRatings = {
+        ...ratings,
+        hireAgain: yesNo.hireAgain ? 5 : 1,
+        referral: yesNo.referral ? 5 : 1,
+      };
       const res = await fetch(`/api/survey/${token}/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ratings, feedback, googleReviewClicked }),
+        body: JSON.stringify({ ratings: allRatings, feedback, googleReviewClicked }),
       });
       if (!res.ok) throw new Error('Failed to submit survey');
       return res.json();
@@ -93,7 +105,7 @@ export default function SurveyPage() {
     },
   });
 
-  const allRated = SURVEY_QUESTIONS.every((q) => ratings[q.key] > 0);
+  const allRated = STAR_QUESTIONS.every((q) => ratings[q.key] > 0) && YES_NO_QUESTIONS.every((q) => yesNo[q.key] !== null);
 
   if (isLoading) {
     return (
@@ -198,7 +210,7 @@ export default function SurveyPage() {
             </div>
 
             <div className="space-y-6">
-              {SURVEY_QUESTIONS.map((q, idx) => (
+              {STAR_QUESTIONS.map((q, idx) => (
                 <div key={q.key} className="space-y-2">
                   <label className="block text-center font-medium text-sm md:text-base">
                     {idx + 1}. {q.label}
@@ -219,6 +231,38 @@ export default function SurveyPage() {
                       {ratings[q.key] === 1 && 'Poor'}
                     </p>
                   )}
+                </div>
+              ))}
+
+              {YES_NO_QUESTIONS.map((q, idx) => (
+                <div key={q.key} className="space-y-3">
+                  <label className="block text-center font-medium text-sm md:text-base">
+                    {STAR_QUESTIONS.length + idx + 1}. {q.label}
+                  </label>
+                  <div className="flex justify-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setYesNo((prev) => ({ ...prev, [q.key]: true }))}
+                      className={`px-8 py-2.5 rounded-full text-sm font-semibold transition-all touch-manipulation ${
+                        yesNo[q.key] === true
+                          ? 'bg-green-600 text-white shadow-md scale-105'
+                          : 'bg-gray-100 text-gray-600 hover:bg-green-50 hover:text-green-700'
+                      }`}
+                    >
+                      Yes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setYesNo((prev) => ({ ...prev, [q.key]: false }))}
+                      className={`px-8 py-2.5 rounded-full text-sm font-semibold transition-all touch-manipulation ${
+                        yesNo[q.key] === false
+                          ? 'bg-red-600 text-white shadow-md scale-105'
+                          : 'bg-gray-100 text-gray-600 hover:bg-red-50 hover:text-red-700'
+                      }`}
+                    >
+                      No
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -254,7 +298,7 @@ export default function SurveyPage() {
 
             {!allRated && (
               <p className="text-center text-xs text-muted-foreground">
-                Please rate all {SURVEY_QUESTIONS.length} questions to submit
+                Please answer all 6 questions to submit
               </p>
             )}
           </CardContent>

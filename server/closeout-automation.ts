@@ -277,8 +277,9 @@ export async function submitSurveyResponse(
     }
 
     const { ratings } = response;
-    const ratingValues = [ratings.overallExperience, ratings.communication, ratings.schedule, ratings.quality, ratings.hireAgain, ratings.referral];
-    const average = ratingValues.reduce((a, b) => a + b, 0) / ratingValues.length;
+    // Average only the 4 star-rating questions (not yes/no which are 5 or 1)
+    const starRatingValues = [ratings.overallExperience, ratings.communication, ratings.schedule, ratings.quality];
+    const average = starRatingValues.reduce((a, b) => a + b, 0) / starRatingValues.length;
     const ratingAverage = average.toFixed(2);
 
     await storage.updateCloseoutSurvey(survey.id, {
@@ -417,13 +418,11 @@ async function sendSurveyResultsNotification(
             </tr>
             <tr style="border-bottom:1px solid #f1f5f9;">
               <td style="color:#64748b;font-size:13px;padding:10px 0;">Would Hire Again</td>
-              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.hireAgain)};letter-spacing:2px;">${stars(ratings.hireAgain)}</td>
-              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.hireAgain)};text-align:right;">${ratings.hireAgain}/5</td>
+              <td colspan="2" style="font-size:14px;font-weight:600;padding:10px 0;color:${ratings.hireAgain >= 5 ? '#16a34a' : '#dc2626'};text-align:right;">${ratings.hireAgain >= 5 ? 'Yes' : 'No'}</td>
             </tr>
             <tr>
               <td style="color:#64748b;font-size:13px;padding:10px 0;">Would Refer T-Rock</td>
-              <td style="font-size:16px;padding:10px 0;color:${starColor(ratings.referral)};letter-spacing:2px;">${stars(ratings.referral)}</td>
-              <td style="font-size:14px;font-weight:600;padding:10px 0;color:${starColor(ratings.referral)};text-align:right;">${ratings.referral}/5</td>
+              <td colspan="2" style="font-size:14px;font-weight:600;padding:10px 0;color:${ratings.referral >= 5 ? '#16a34a' : '#dc2626'};text-align:right;">${ratings.referral >= 5 ? 'Yes' : 'No'}</td>
             </tr>
           </table>
           ${feedback ? `
