@@ -1102,6 +1102,39 @@ export async function createBidBoardProject(
         } catch (e: any) {
           log(`Estimator selection failed: ${e.message}`, "playwright");
         }
+      } else {
+        // No estimator specified — clear the default (Procore auto-fills logged-in user)
+        log("No estimator specified — clearing default auto-populated value", "playwright");
+        try {
+          let trigger = page.locator('div.aid-estimatorSelector').locator('div.StyledSelectButton, [role="button"]').first();
+          if ((await trigger.count()) === 0) {
+            trigger = page.locator('[aria-label*="estimator" i], [title*="estimator" i]').first();
+          }
+          if ((await trigger.count()) === 0) {
+            trigger = page.locator('xpath=//label[contains(translate(normalize-space(),"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"estimator")]/following::*[contains(@class,"StyledSelectButton") or @role="button"][1]').first();
+          }
+          if ((await trigger.count()) === 0) {
+            const allBtns = page.locator('div.StyledSelectButton');
+            const btnCount = await allBtns.count();
+            if (btnCount >= 2) trigger = allBtns.nth(1);
+          }
+          if ((await trigger.count()) > 0) {
+            await trigger.click({ timeout: 8000 });
+            await randomDelay(800, 1200);
+            const clearBtn = await page.$('button[data-qa="core-select-clear"], button[aria-label="Delete field"], button[aria-label="Clear"]');
+            if (clearBtn) {
+              await clearBtn.click();
+              await randomDelay(500, 800);
+              log("Estimator default cleared", "playwright");
+            } else {
+              log("Estimator clear button not found — default may remain", "playwright");
+            }
+            await page.keyboard.press('Escape');
+            await randomDelay(500, 800);
+          }
+        } catch (e: any) {
+          log(`Estimator clear failed: ${e.message}`, "playwright");
+        }
       }
       // Office: always select T-Rock Construction LLC
       try {
@@ -1188,28 +1221,81 @@ export async function createBidBoardProject(
             await randomDelay(1500, 2500);
             const searchInput = await page.$('input[data-qa="core-search-input"], input[placeholder*="Search"], input[placeholder*="search"]');
             if (searchInput) {
-              await searchInput.fill(projectData.clientName);
+              // Use first 2 words of client name for search — full name with abbreviations
+              // (e.g., "Low Country Construction MGT") may return 0 results if Procore stores
+              // the unabbreviated name ("Low Country Construction Management")
+              const searchTerm = projectData.clientName.split(/\s+/).slice(0, 2).join(' ');
+              log(`Customer search term: "${searchTerm}" (from "${projectData.clientName}")`, "playwright");
+              await searchInput.fill(searchTerm);
               await randomDelay(2000, 3000);
-              const escapedName = projectData.clientName.slice(0, 10).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: new RegExp(escapedName, "i") }).first();
+
+              // Check if results appeared; if 0, retry with just the first word
+              const zeroResults = await page.locator('text=/Customers found \\(0\\)/').isVisible().catch(() => false);
+              if (zeroResults) {
+                const singleWord = projectData.clientName.split(/\s+/)[0];
+                if (singleWord !== searchTerm) {
+                  log(`0 results for "${searchTerm}", retrying with "${singleWord}"`, "playwright");
+                  await searchInput.fill(singleWord);
+                  await randomDelay(2000, 3000);
+                } else {
+                  log(`0 results for "${searchTerm}" — single word, no shorter retry available`, "playwright");
+                }
+              }
+
+              const escapedName = projectData.clientName.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+              // Detect "Available Customers" modal (appears when multiple matches exist in directory)
+              const availableCustomersVisible = await page.locator('text=Available Customers').isVisible().catch(() => false);
+              if (availableCustomersVisible) {
+                log(`"Available Customers" modal detected — multiple matches may exist, selecting first`, "playwright");
+                await takeScreenshot(page, "bidboard-available-customers-modal");
+              }
+
+              // "Available Customers" modal DOM: dialog > listitem > button (with customer name text)
+              // Target the button inside each listitem, scoped to the dialog — verified April 2026
+              const dialogScope = page.locator('dialog, [role="dialog"], .MuiDialog-root');
+              const listItem = dialogScope.locator('[role="listitem"] button, li button')
+                .filter({ hasText: new RegExp(escapedName, "i") }).first();
+
+              let customerFound = false;
               try {
                 await listItem.click({ force: true, timeout: 8000 });
                 await randomDelay(500, 1000);
                 log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
+                customerFound = true;
               } catch (e: any) {
-                log(`Customer list item not found for "${projectData.clientName}": ${e.message}`, "playwright");
+                // Fallback: any button in the dialog matching the customer name
+                log(`Primary selectors failed for "${projectData.clientName}", trying dialog button fallback`, "playwright");
+                try {
+                  // Broader fallback — match any button in the dialog with customer name (skips listitem scope)
+                  const btnMatch = dialogScope.locator('button').filter({ hasText: new RegExp(escapedName, "i") }).filter({ hasNotText: /Select|Cancel|Close|Search|Create/i }).first();
+                  if (await btnMatch.isVisible().catch(() => false)) {
+                    await btnMatch.click({ force: true, timeout: 5000 });
+                    await randomDelay(500, 1000);
+                    log(`Customer selected via button fallback: ${projectData.clientName}`, "playwright");
+                    customerFound = true;
+                  } else {
+                    log(`No matching customer button found for "${projectData.clientName}"`, "playwright");
+                    await takeScreenshot(page, "bidboard-customer-selection-failed");
+                  }
+                } catch (fallbackErr: any) {
+                  log(`Customer button fallback also failed for "${projectData.clientName}": ${fallbackErr.message}`, "playwright");
+                  await takeScreenshot(page, "bidboard-customer-selection-failed");
+                }
               }
-              const selectBtn = page.locator('[role="dialog"] button, .MuiDialog-root button').filter({ hasText: /Select/i }).first();
-              if ((await selectBtn.count()) > 0) {
-                await selectBtn.click();
-                await randomDelay(1500, 2500);
-                log("Customer selected and dialog closed", "playwright");
-              } else {
-                // Try confirm button
-                const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
-                if ((await confirmBtn.count()) > 0) {
-                  await confirmBtn.click();
+              if (customerFound) {
+                const selectBtn = page.locator('[role="dialog"] button, .MuiDialog-root button').filter({ hasText: /Select/i }).first();
+                if ((await selectBtn.count()) > 0) {
+                  await selectBtn.click();
                   await randomDelay(1500, 2500);
+                  log("Customer selected and dialog closed", "playwright");
+                } else {
+                  // Try confirm button
+                  const confirmBtn = page.locator('[role="dialog"]').locator('button.aid-confirmButton').first();
+                  if ((await confirmBtn.count()) > 0) {
+                    await confirmBtn.click();
+                    await randomDelay(1500, 2500);
+                  }
                 }
               }
             } else {
@@ -1221,13 +1307,51 @@ export async function createBidBoardProject(
         } catch (e: any) {
           log(`Add Customer failed: ${e.message}`, "playwright");
         }
-        // Only dismiss dialog if one is still open (avoid Escape on main page which breaks SPA)
-        const custDialogStillOpen = await page.locator('[role="dialog"]').isVisible().catch(() => false);
-        if (custDialogStillOpen) {
+        // Ensure customer dialog is fully closed before proceeding to address
+        // Procore's "Available Customers" modal may not use standard [role="dialog"] / MuiDialog — detect it by heading text too
+        const dialogSelectors = '[role="dialog"], .MuiDialog-root, [class*="modal"], [class*="Modal"]';
+        for (let dismissAttempt = 0; dismissAttempt < 3; dismissAttempt++) {
+          const standardDialog = await page.locator(dialogSelectors).first().isVisible().catch(() => false);
+          const availableCustomersModal = await page.locator('text=Available Customers').isVisible().catch(() => false);
+          if (!standardDialog && !availableCustomersModal) break;
+          log(`Customer dialog still open (attempt ${dismissAttempt + 1}/3, standard=${standardDialog}, availableCustomers=${availableCustomersModal}) — dismissing`, "playwright");
           try {
+            // Strategy 1: Click "Close" button within the dialog (shown at bottom of "Available Customers" modal)
+            const closeTextBtn = page.locator(`${dialogSelectors} button, dialog button`).filter({ hasText: /^Close$/i }).first();
+            if ((await closeTextBtn.count()) > 0 && (await closeTextBtn.isVisible().catch(() => false))) {
+              await closeTextBtn.click();
+              await randomDelay(1000, 1500);
+              continue;
+            }
+            // Strategy 2: Cancel button within standard dialog
+            const cancelBtn = page.locator(`${dialogSelectors} button`).filter({ hasText: /Cancel|Close/i }).first();
+            if ((await cancelBtn.count()) > 0) {
+              await cancelBtn.click();
+              await randomDelay(1000, 1500);
+            } else {
+              // Strategy 3: X/close icon button
+              const closeBtn = page.locator('button[aria-label="close"], button[aria-label="Close"], button[aria-label="dismiss"]').first();
+              if ((await closeBtn.count()) > 0) {
+                await closeBtn.click();
+                await randomDelay(1000, 1500);
+              } else {
+                // Strategy 4: Escape key
+                await page.keyboard.press('Escape');
+                await randomDelay(1000, 1500);
+              }
+            }
+          } catch (dismissErr: any) {
+            log(`Dialog dismiss attempt failed: ${dismissErr.message} — trying Escape`, "playwright");
             await page.keyboard.press('Escape');
             await randomDelay(500, 1000);
-          } catch (_) {}
+          }
+        }
+        // Final check — log if any dialog/modal is still stuck
+        const dialogStuck = await page.locator(dialogSelectors).first().isVisible().catch(() => false);
+        const availableCustomersStuck = await page.locator('text=Available Customers').isVisible().catch(() => false);
+        if (dialogStuck || availableCustomersStuck) {
+          log("WARNING: Customer dialog could not be dismissed — address step may fail", "playwright");
+          await takeScreenshot(page, "bidboard-customer-dialog-stuck");
         }
       } else {
         log("Customer: no clientName provided in project data", "playwright");
