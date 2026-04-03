@@ -1251,11 +1251,22 @@ export async function createBidBoardProject(
                 await takeScreenshot(page, "bidboard-available-customers-modal");
               }
 
-              // "Available Customers" modal DOM: dialog > listitem > button (with customer name text)
-              // Target the button inside each listitem, scoped to the dialog — verified April 2026
-              const dialogScope = page.locator('dialog, [role="dialog"], .MuiDialog-root');
-              const listItem = dialogScope.locator('[role="listitem"] button, li button')
-                .filter({ hasText: new RegExp(escapedName, "i") }).first();
+              // "Available Customers" modal DOM: dialog/MUI overlay > listitem > button (with customer name text)
+              // MUI wraps the dialog in role="presentation" so we must also try .MuiModal-root, .aid-itemPickerDialog,
+              // and fall back to page-wide search if the dialog scope doesn't match — verified April 2026
+              const dialogScope = page.locator('dialog, [role="dialog"], .MuiDialog-root, .MuiModal-root, .aid-itemPickerDialog, [role="presentation"]');
+              const nameRegex = new RegExp(escapedName, "i");
+
+              // Try dialog-scoped search first
+              let listItem = dialogScope.locator('[role="listitem"] button, li button')
+                .filter({ hasText: nameRegex }).first();
+
+              // If dialog scope found nothing, fall back to page-wide search (modal may use non-standard selectors)
+              if (!(await listItem.count().catch(() => 0))) {
+                log(`Dialog-scoped selector found 0 matches, trying page-wide search`, "playwright");
+                listItem = page.locator('[role="listitem"] button, li button')
+                  .filter({ hasText: nameRegex }).first();
+              }
 
               let customerFound = false;
               try {
@@ -1264,11 +1275,10 @@ export async function createBidBoardProject(
                 log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
                 customerFound = true;
               } catch (e: any) {
-                // Fallback: any button in the dialog matching the customer name
-                log(`Primary selectors failed for "${projectData.clientName}", trying dialog button fallback`, "playwright");
+                // Fallback: any button on the page matching the customer name (excluding action buttons)
+                log(`Primary selectors failed for "${projectData.clientName}", trying page-wide button fallback`, "playwright");
                 try {
-                  // Broader fallback — match any button in the dialog with customer name (skips listitem scope)
-                  const btnMatch = dialogScope.locator('button').filter({ hasText: new RegExp(escapedName, "i") }).filter({ hasNotText: /Select|Cancel|Close|Search|Create/i }).first();
+                  const btnMatch = page.locator('button').filter({ hasText: nameRegex }).filter({ hasNotText: /Select|Cancel|Close|Search|Create/i }).first();
                   if (await btnMatch.isVisible().catch(() => false)) {
                     await btnMatch.click({ force: true, timeout: 5000 });
                     await randomDelay(500, 1000);
