@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useParams } from 'wouter';
+import { useLocation } from 'wouter';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -50,7 +50,8 @@ function StarRating({ value, hovered, onSelect, onHover, onLeave }: {
 }
 
 export default function SurveyPage() {
-  const { token } = useParams();
+  const [location] = useLocation();
+  const token = location.split('/survey/')[1];
   const { toast } = useToast();
   const [ratings, setRatings] = useState<Record<RatingKey, number>>({
     overallExperience: 0, communication: 0, schedule: 0, quality: 0, hireAgain: 0, referral: 0,
