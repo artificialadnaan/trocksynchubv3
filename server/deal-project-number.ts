@@ -47,10 +47,10 @@ function getNextSuffix(existingSuffix: string | null): string {
   return 'a' + chars.join('');
 }
 
-async function findHighestSuffixForDate(julianDate: string, office: string): Promise<string | null> {
-  // Find the highest suffix across ALL project types for this date+office combo
-  // e.g., search for DFW-%-08326 so DFW-4-08326-aa and DFW-5-08326-ab share the same sequence
-  const pattern = `${office}-%-${julianDate}`;
+async function findHighestSuffixForDate(julianDate: string): Promise<string | null> {
+  // Find the highest suffix across ALL offices and project types for this julian date
+  // The suffix sequence is global per day — DFW and ATL share the same counter
+  const pattern = `%-%-${julianDate}`;
   const existing = await db.select({ suffix: projectNumberRegistry.suffix })
     .from(projectNumberRegistry)
     .where(like(projectNumberRegistry.baseNumber, pattern))
@@ -118,7 +118,7 @@ export async function assignProjectNumber(hubspotDealId: string): Promise<{
   const projectType = resolveProjectTypeCode(props.project_types);
   const julianDate = generateJulianDate(createDate);
   const baseNumber = `${office}-${projectType}-${julianDate}`;
-  const highestSuffix = await findHighestSuffixForDate(julianDate, office);
+  const highestSuffix = await findHighestSuffixForDate(julianDate);
   const suffix = getNextSuffix(highestSuffix);
   const fullProjectNumber = `${baseNumber}-${suffix}`;
 
