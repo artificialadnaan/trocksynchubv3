@@ -6,11 +6,14 @@ import { db } from './db';
 import { projectNumberRegistry } from '@shared/schema';
 import { eq, desc, like } from 'drizzle-orm';
 
-/** Julian date format: DDDYY (e.g. 06326 = 63rd day of 2026) */
+/** Julian date format: DDDYY (e.g. 09326 = 93rd day of 2026) — always in Central time */
 function generateJulianDate(createDate: Date): string {
-  const year = createDate.getFullYear();
+  // Convert to Central time string to get the correct calendar date in CT
+  const ctString = createDate.toLocaleString('en-US', { timeZone: 'America/Chicago' });
+  const ctDate = new Date(ctString);
+  const year = ctDate.getFullYear();
   const startOfYear = new Date(year, 0, 1);
-  const diff = createDate.getTime() - startOfYear.getTime();
+  const diff = ctDate.getTime() - startOfYear.getTime();
   const oneDay = 1000 * 60 * 60 * 24;
   const dayOfYear = Math.floor(diff / oneDay) + 1;
   const dayOfYearFormatted = dayOfYear.toString().padStart(3, '0');
