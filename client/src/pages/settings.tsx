@@ -121,6 +121,7 @@ import {
 import React, { useState, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import type { PollJob } from "@shared/schema";
+import { sanitizeEstimatorList, validateEstimatorList } from "@shared/estimators";
 
 /** Main settings page component with all configuration options */
 export default function SettingsPage() {
@@ -2761,10 +2762,8 @@ function ProjectNumberCard() {
 
 function EstimatorsCard() {
   const { toast } = useToast();
-  const [adding, setAdding] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newEmail, setNewEmail] = useState('');
   const [estimators, setEstimators] = useState<Array<{ name: string; email: string }>>([]);
+  const [savedEstimators, setSavedEstimators] = useState<Array<{ name: string; email: string }>>([]);
 
   const { data, isLoading } = useQuery<{ estimators: Array<{ name: string; email: string }> }>({
     queryKey: ["/api/settings/estimators"],
@@ -2772,16 +2771,24 @@ function EstimatorsCard() {
 
   useEffect(() => {
     if (data?.estimators) {
-      setEstimators(data.estimators);
+      const sanitized = sanitizeEstimatorList(data.estimators);
+      setEstimators(sanitized);
+      setSavedEstimators(sanitized);
     }
   }, [data]);
+
+  const validationErrors = validateEstimatorList(estimators);
+  const hasChanges = JSON.stringify(estimators) !== JSON.stringify(savedEstimators);
 
   const saveMutation = useMutation({
     mutationFn: async (list: Array<{ name: string; email: string }>) => {
       const res = await apiRequest("POST", "/api/settings/estimators", { estimators: list });
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
+      const sanitized = sanitizeEstimatorList(result.estimators || []);
+      setEstimators(sanitized);
+      setSavedEstimators(sanitized);
       queryClient.invalidateQueries({ queryKey: ["/api/settings/estimators"] });
       toast({ title: "Estimators saved" });
     },
@@ -2790,22 +2797,35 @@ function EstimatorsCard() {
     },
   });
 
+  const updateEstimator = (index: number, field: "name" | "email", value: string) => {
+    setEstimators((current) =>
+      current.map((estimator, currentIndex) =>
+        currentIndex === index ? { ...estimator, [field]: value } : estimator
+      )
+    );
+  };
+
   const handleAdd = () => {
-    const name = newName.trim();
-    const email = newEmail.trim();
-    if (!name || !email) return;
-    const updated = [...estimators, { name, email }];
-    setEstimators(updated);
-    setNewName('');
-    setNewEmail('');
-    setAdding(false);
-    saveMutation.mutate(updated);
+    setEstimators((current) => [...current, { name: "", email: "" }]);
   };
 
   const handleRemove = (index: number) => {
     const updated = estimators.filter((_, i) => i !== index);
     setEstimators(updated);
-    saveMutation.mutate(updated);
+  };
+
+  const handleReset = () => {
+    setEstimators(savedEstimators);
+  };
+
+  const handleSave = () => {
+    const sanitized = sanitizeEstimatorList(estimators);
+    const errors = validateEstimatorList(sanitized);
+    if (errors.length > 0) {
+      toast({ title: "Cannot save estimators", description: errors[0], variant: "destructive" });
+      return;
+    }
+    saveMutation.mutate(sanitized);
   };
 
   if (isLoading) return <Skeleton className="h-40" />;
@@ -2818,7 +2838,7 @@ function EstimatorsCard() {
             <Users className="w-4 h-4" />
             Estimators
           </CardTitle>
-          <Button size="sm" variant="outline" onClick={() => setAdding(v => !v)}>
+          <Button size="sm" variant="outline" onClick={handleAdd}>
             <UserPlus className="w-3.5 h-3.5 mr-1.5" />
             Add Estimator
           </Button>
@@ -2828,35 +2848,6 @@ function EstimatorsCard() {
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
-        {adding && (
-          <div className="flex gap-2 items-end border rounded-md p-3 bg-muted/30">
-            <div className="flex-1 space-y-1">
-              <Label className="text-xs">Name</Label>
-              <Input
-                placeholder="Full name"
-                value={newName}
-                onChange={e => setNewName(e.target.value)}
-                className="h-8 text-sm"
-              />
-            </div>
-            <div className="flex-1 space-y-1">
-              <Label className="text-xs">Email</Label>
-              <Input
-                placeholder="email@trockgc.com"
-                value={newEmail}
-                onChange={e => setNewEmail(e.target.value)}
-                className="h-8 text-sm"
-              />
-            </div>
-            <Button size="sm" onClick={handleAdd} disabled={!newName.trim() || !newEmail.trim()}>
-              <Save className="w-3.5 h-3.5 mr-1" />
-              Add
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setNewName(''); setNewEmail(''); }}>
-              Cancel
-            </Button>
-          </div>
-        )}
         {estimators.length === 0 ? (
           <p className="text-sm text-muted-foreground">No estimators configured.</p>
         ) : (
@@ -2872,8 +2863,22 @@ function EstimatorsCard() {
               <tbody>
                 {estimators.map((est, i) => (
                   <tr key={i} className="border-t hover:bg-muted/30 transition-colors">
-                    <td className="px-3 py-2 font-medium">{est.name}</td>
-                    <td className="px-3 py-2 text-muted-foreground">{est.email}</td>
+                    <td className="px-3 py-2">
+                      <Input
+                        value={est.name}
+                        onChange={(e) => updateEstimator(i, "name", e.target.value)}
+                        placeholder="Full name"
+                        className="h-8 text-sm"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <Input
+                        value={est.email}
+                        onChange={(e) => updateEstimator(i, "email", e.target.value)}
+                        placeholder="email@trockgc.com"
+                        className="h-8 text-sm"
+                      />
+                    </td>
                     <td className="px-3 py-2 text-right">
                       <Button
                         size="sm"
@@ -2890,6 +2895,34 @@ function EstimatorsCard() {
             </table>
           </div>
         )}
+        {validationErrors.length > 0 && (
+          <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2">
+            <p className="text-sm font-medium text-destructive">Fix these before saving:</p>
+            <ul className="mt-1 text-sm text-destructive space-y-1">
+              {validationErrors.map((error) => (
+                <li key={error}>{error}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2 border-t pt-3">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleReset}
+            disabled={!hasChanges || saveMutation.isPending}
+          >
+            Reset
+          </Button>
+          <Button
+            size="sm"
+            onClick={handleSave}
+            disabled={!hasChanges || validationErrors.length > 0 || saveMutation.isPending}
+          >
+            <Save className="w-3.5 h-3.5 mr-1.5" />
+            Save Changes
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

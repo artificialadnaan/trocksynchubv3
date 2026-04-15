@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { storage } from "../storage";
+import { sanitizeEstimatorList, validateEstimatorList } from "../../shared/estimators";
 import { syncProcoreRoleAssignments, syncProcoreRoleAssignmentsBatch, runFullProcoreSync } from "../procore";
 import { runFullHubSpotSync } from "../hubspot";
 import { triggerPostSyncProcoreUpdates } from "../hubspot-procore-sync";
@@ -550,12 +551,13 @@ async function seedEstimatorList() {
           { name: 'Eric Williams', email: 'ewilliams@trockgc.com' },
           { name: 'James Helms', email: 'jhelms@trockgc.com' },
           { name: 'Sidney Gibson', email: 'sgibson@trockgc.com' },
+          { name: 'Edward McCarty', email: 'emccarty@trockgc.com' },
           { name: 'Tim Mitchell', email: 'tmitchell@trockgc.com' },
         ],
       },
       description: 'Estimator list for RFP review dropdown',
     });
-    console.log('[Settings] Seeded estimator_list with 8 default estimators');
+    console.log('[Settings] Seeded estimator_list with 9 default estimators');
   }
 }
 
@@ -569,7 +571,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
   app.get("/api/settings/estimators", requireAuth, async (_req, res) => {
     try {
       const config = await storage.getAutomationConfig('estimator_list');
-      const estimators = ((config?.value as any)?.estimators || []) as Array<{ name: string; email: string }>;
+      const estimators = sanitizeEstimatorList(((config?.value as any)?.estimators || []) as Array<{ name: string; email: string }>);
       res.json({ estimators });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -582,12 +584,17 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       if (!Array.isArray(estimators)) {
         return res.status(400).json({ message: 'estimators must be an array' });
       }
+      const errors = validateEstimatorList(estimators);
+      if (errors.length > 0) {
+        return res.status(400).json({ message: errors[0], errors });
+      }
+      const sanitizedEstimators = sanitizeEstimatorList(estimators);
       await storage.upsertAutomationConfig({
         key: 'estimator_list',
-        value: { estimators },
+        value: { estimators: sanitizedEstimators },
         description: 'Estimator list for RFP review dropdown',
       });
-      res.json({ success: true, estimators });
+      res.json({ success: true, estimators: sanitizedEstimators });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
