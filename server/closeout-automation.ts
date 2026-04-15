@@ -61,6 +61,24 @@ interface CloseoutSurveyOptions {
   googleReviewLink?: string;
 }
 
+function resolveCloseoutGreetingName({
+  projectDetail,
+  dealCompanyName,
+  recipientName,
+}: {
+  projectDetail: Awaited<ReturnType<typeof fetchProcoreProjectDetail>>;
+  dealCompanyName?: string | null;
+  recipientName?: string | null;
+}): string {
+  return (
+    dealCompanyName?.trim() ||
+    projectDetail?.client_name?.trim() ||
+    projectDetail?.company?.name?.trim() ||
+    recipientName?.trim() ||
+    'Valued Client'
+  );
+}
+
 export async function generateSurveyToken(): Promise<string> {
   return crypto.randomBytes(32).toString('hex');
 }
@@ -86,6 +104,7 @@ export async function triggerCloseoutSurvey(
     const mapping = await storage.getSyncMappingByProcoreProjectId(projectId);
     let recipientEmail = '';
     let recipientName = '';
+    let dealCompanyName = '';
     
     // Primary: Get deal owner email from HubSpot owners table or user-provided mapping
     if (mapping?.hubspotDealId) {
@@ -114,6 +133,9 @@ export async function triggerCloseoutSurvey(
       // Also get company name for context if available
       if (deal?.associatedCompanyId) {
         const company = await storage.getHubspotCompanyByHubspotId(deal.associatedCompanyId);
+        if (company?.name) {
+          dealCompanyName = company.name;
+        }
         if (company?.name && !recipientName) {
           recipientName = company.name;
         }
@@ -180,13 +202,19 @@ export async function triggerCloseoutSurvey(
       return { success: false, error: 'Closeout survey email template is disabled' };
     }
 
+    const clientDisplayName = resolveCloseoutGreetingName({
+      projectDetail,
+      dealCompanyName,
+      recipientName,
+    });
+
     const surveyToken = await generateSurveyToken();
     const appUrl = process.env.APP_URL || 'http://localhost:5000';
     const surveyUrl = `${appUrl}/survey/${surveyToken}`;
     const googleReviewUrl = options.googleReviewLink || 'https://g.page/r/YOUR_GOOGLE_REVIEW_LINK/review';
 
     const variables: Record<string, string> = {
-      clientName: recipientName,
+      clientName: clientDisplayName,
       projectName: projectDetail.name || projectDetail.display_name || 'Your Project',
       surveyUrl,
       googleReviewUrl,
@@ -201,7 +229,7 @@ export async function triggerCloseoutSurvey(
       hubspotDealId: mapping?.hubspotDealId || null,
       surveyToken,
       clientEmail: recipientEmail,
-      clientName: recipientName,
+      clientName: clientDisplayName,
       googleReviewLink: options.googleReviewLink || null,
       sentAt: new Date(),
     });
