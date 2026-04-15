@@ -50,6 +50,37 @@ import { getDealOwnerInfo } from './hubspot';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchProcoreProjectDetail, getProjectTeamMembers } from './procore';
 
+const HUBSPOT_DEALS_BASE_URL = 'https://app-na2.hubspot.com/contacts/45644695/record/0-3';
+const HUBSPOT_DEALS_FALLBACK_URL = 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3';
+
+function buildHubspotDealUrl(hubspotDealId?: string | null): string {
+  return hubspotDealId
+    ? `${HUBSPOT_DEALS_BASE_URL}/${hubspotDealId}?eschref=%2Fcontacts%2F45644695%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp`
+    : HUBSPOT_DEALS_FALLBACK_URL;
+}
+
+async function resolveRoleAssignmentHubspotDealId(
+  procoreProjectId: string,
+  mappedHubspotDealId?: string | null
+): Promise<string | undefined> {
+  const project = await storage.getProcoreProjectByProcoreId(procoreProjectId).catch(() => undefined);
+  const projectNumber = project?.projectNumber?.trim();
+
+  if (projectNumber) {
+    const exactDeal = await storage.getHubspotDealByProjectNumber(projectNumber).catch(() => undefined);
+    if (exactDeal?.hubspotId) {
+      if (mappedHubspotDealId && mappedHubspotDealId !== exactDeal.hubspotId) {
+        console.warn(
+          `[email] Role assignment HubSpot mapping mismatch for project ${procoreProjectId}: mapping=${mappedHubspotDealId}, project_number=${projectNumber}, exact=${exactDeal.hubspotId}`
+        );
+      }
+      return exactDeal.hubspotId;
+    }
+  }
+
+  return mappedHubspotDealId || undefined;
+}
+
 /**
  * Sends email notifications for new project role assignments.
  * Each assignment triggers an email to the assignee with project details.
@@ -90,6 +121,10 @@ export async function sendRoleAssignmentEmails(
     }
 
     const mapping = await storage.getSyncMappingByProcoreProjectId(assignment.procoreProjectId);
+    const hubspotDealId = await resolveRoleAssignmentHubspotDealId(
+      assignment.procoreProjectId,
+      mapping?.hubspotDealId
+    );
     
     const variables: Record<string, string> = {
       assigneeName: assignment.assigneeName || assignment.assigneeEmail,
@@ -99,7 +134,7 @@ export async function sendRoleAssignmentEmails(
       projectId: assignment.procoreProjectId,
       companyId: DEFAULT_PROCORE_COMPANY_ID,
       procoreUrl: `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${assignment.procoreProjectId}/tools/projecthome`,
-      hubspotUrl: mapping?.hubspotDealId ? `https://app-na2.hubspot.com/contacts/45644695/record/0-3/${mapping.hubspotDealId}?eschref=%2Fcontacts%2F45644695%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp` : 'https://app-na2.hubspot.com/contacts/45644695/objects/0-3',
+      hubspotUrl: buildHubspotDealUrl(hubspotDealId),
       companycamUrl: mapping?.companyCamProjectId ? `https://app.companycam.com/projects/${mapping.companyCamProjectId}` : 'https://app.companycam.com/projects',
     };
 
