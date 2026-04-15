@@ -850,6 +850,7 @@ export async function runFullPortfolioWorkflow(
         result.kickoffEmails = await sendKickoffEmails({
           projectId: portfolioProjectId,
           projectName: projectDetail?.name || projectDetail?.display_name || 'Unknown Project',
+          projectNumber: projectDetail?.project_number || portfolioProjectId,
           clientName: options.clientData?.companyName || projectDetail?.company?.name || 'Unknown Client',
           projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
           scopeSummary: projectDetail?.work_scope || projectDetail?.description || 'See project details in Procore',

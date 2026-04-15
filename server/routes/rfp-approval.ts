@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
+import { resolveRfpDescription } from "../rfp-approval";
 
 // ── HTML helpers ──────────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
   const proposalDueDateRaw = d.proposal_due_date || d.bid_due_date || d.due_date;
   const proposalDueDateFormatted = formatDateForInput(proposalDueDateRaw);
 
-  const projectDescription = (d.project_description__briefly_describe_the_project_ || d.description || '').trim();
+  const projectDescription = resolveRfpDescription(d);
 
   const currentTypeDigit = parseProjectTypeFromNumber(d.project_number || '') ?? d.project_types ?? '2';
 

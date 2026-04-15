@@ -271,6 +271,7 @@ export async function triggerKickoffForNewPmOnPortfolio(
         projectId: kickoffProjectId,
         hubspotDealId: mapping?.hubspotDealId || undefined,
         projectName: projectDetail?.name || projectDetail?.display_name || assignment.projectName || 'Unknown Project',
+        projectNumber: projectDetail?.project_number || mapping?.procoreProjectNumber || kickoffProjectId,
         clientName: projectDetail?.client_name || projectDetail?.company?.name || 'Team',
         projectAddress: projectDetail?.address || projectDetail?.location || 'TBD',
         scopeSummary: projectDetail?.work_scope || projectDetail?.description || 'See project details in Procore',
@@ -450,6 +451,7 @@ export async function sendStageChangeEmail(params: {
 export async function sendKickoffEmails(params: {
   projectId: string;
   projectName: string;
+  projectNumber?: string;
   clientName: string;
   projectAddress?: string;
   scopeSummary?: string;
@@ -495,28 +497,24 @@ export async function sendKickoffEmails(params: {
   const recipients = pm ? [pm] : [];
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.projectId);
+  const hubspotDealId = params.hubspotDealId || mapping?.hubspotDealId;
+  let accountManagerName = 'TBD';
+  let accountManagerEmail = 'TBD';
+  let accountManagerPhone = 'TBD';
 
   // Add HubSpot deal owner as a recipient
-  if (mapping?.hubspotDealId) {
+  if (hubspotDealId) {
     try {
-      const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
-      const ownerIdRaw = (deal?.properties as any)?.hubspot_owner_id;
-      if (ownerIdRaw) {
-        const { getAccessToken } = await import('./hubspot');
-        const accessToken = await getAccessToken();
-        const { fetchWithTimeout } = await import('./lib/fetch-with-timeout');
-        const ownerRes = await fetchWithTimeout(`https://api.hubapi.com/crm/v3/owners/${ownerIdRaw}`, {
-          headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      const ownerInfo = await getDealOwnerInfo(hubspotDealId);
+      if (ownerInfo.ownerName) accountManagerName = ownerInfo.ownerName;
+      if (ownerInfo.ownerEmail) accountManagerEmail = ownerInfo.ownerEmail;
+
+      if (ownerInfo.ownerEmail && (!pm || pm.email?.toLowerCase() !== ownerInfo.ownerEmail.toLowerCase())) {
+        recipients.push({
+          name: ownerInfo.ownerName || ownerInfo.ownerEmail,
+          email: ownerInfo.ownerEmail,
+          role: 'Deal Owner'
         });
-        if (ownerRes.ok) {
-          const owner = await ownerRes.json();
-          const ownerEmail = owner.email;
-          const ownerName = [owner.firstName, owner.lastName].filter(Boolean).join(' ') || owner.email;
-          // Only add if not already the PM
-          if (ownerEmail && (!pm || pm.email?.toLowerCase() !== ownerEmail.toLowerCase())) {
-            recipients.push({ name: ownerName, email: ownerEmail, role: 'Deal Owner' });
-          }
-        }
       }
     } catch (ownerErr: any) {
       console.error(`[email] Could not fetch deal owner for kickoff: ${ownerErr.message}`);
@@ -583,11 +581,10 @@ export async function sendKickoffEmails(params: {
       continue;
     }
 
-    const hubspotDealId = params.hubspotDealId || mapping?.hubspotDealId;
-
     const variables: Record<string, string> = {
       recipientName: member.name || member.email,
       projectName: params.projectName || 'Unknown Project',
+      projectNumber: params.projectNumber || mapping?.procoreProjectNumber || params.projectId || 'TBD',
       clientName: params.clientName || 'Unknown Client',
       projectAddress: params.projectAddress || 'TBD',
       scopeSummary: params.scopeSummary || 'See project details in Procore',
@@ -600,6 +597,9 @@ export async function sendKickoffEmails(params: {
       superName: superName ?? 'TBD',
       superEmail: superEmail ?? 'TBD',
       superPhone: superPhone ?? 'TBD',
+      accountManagerName,
+      accountManagerEmail,
+      accountManagerPhone,
       primaryContact: params.primaryContact || pmName,
       preferredMethod: params.preferredMethod || 'Email',
       statusFrequency: params.statusFrequency || 'Weekly',

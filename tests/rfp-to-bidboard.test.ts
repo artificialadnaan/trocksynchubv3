@@ -246,6 +246,19 @@ describe("Terminal Stage Guard — getTerminalStageGuard", () => {
   });
 });
 
+describe("RFP description resolution", () => {
+  it("uses the double-underscore HubSpot project description field before falling back to notes", async () => {
+    const { resolveRfpDescription } = await import("../server/rfp-approval.ts");
+    const result = resolveRfpDescription({
+      description: "",
+      project_description: "",
+      project_description__briefly_describe_the_project_: "Build out lab space and support areas",
+      notes: "fallback notes",
+    });
+    expect(result).toBe("Build out lab space and support areas");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // #3 – Stage Label Normalization: sync/stage-mapping.ts
 // ---------------------------------------------------------------------------

@@ -2022,22 +2022,20 @@ export class DatabaseStorage implements IStorage {
         templateKey: "project_kickoff",
         name: "Project Kickoff",
         description: "Client kickoff email sent to the Project Manager when assigned – ready to forward to client",
-        subject: "{{projectName}} - Project Kickoff & Team Introduction",
+        subject: "{{projectName}}: {{projectNumber}} – Project Kickoff & Team Introduction",
         bodyHtml: emailWrapper(`
               <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
                 Hello <strong style="color: #1a1a2e;">{{clientName}}</strong>,
               </p>
               
               <p style="color: #374151; font-size: 16px; line-height: 1.6; margin: 0 0 24px 0;">
-                We're excited to officially kick off the <strong>{{projectName}}</strong>. This email serves as an introduction to your project team and outlines how we'll be working together moving forward.
+                We’re excited to officially be working with you on your upcoming project. This email serves as an introduction to your T-Rock team and determines the best time to set up a preconstruction meeting.
               </p>
               
               <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Project Overview</p>
               <ul style="color: #374151; font-size: 15px; line-height: 1.8; margin: 0 0 24px 0; padding-left: 24px;">
-                <li><strong>Project Name:</strong> {{projectName}}</li>
+                <li><strong>Project Name:</strong> {{projectName}}: {{projectNumber}}</li>
                 <li><strong>Scope Summary:</strong> {{scopeSummary}}</li>
-                <li><strong>Start Date:</strong> {{startDate}}</li>
-                <li><strong>Target Completion Date:</strong> {{endDate}}</li>
               </ul>
               
               <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Your Project Team</p>
@@ -2046,36 +2044,27 @@ export class DatabaseStorage implements IStorage {
                 <li><strong>Project Manager:</strong> {{pmName}}<br>Email: {{pmEmail}} | Phone: {{pmPhone}}</li>
                 <li><strong>Superintendent:</strong> {{superName}}<br>Email: {{superEmail}} | Phone: {{superPhone}}</li>
                 <li><strong>Accounts Receivable:</strong> Kristy Scheidegger<br>Email: trockAR@trockgc.com | Phone: 469-927-3209</li>
+                <li><strong>Account Manager:</strong> {{accountManagerName}}<br>Email: {{accountManagerEmail}} | Phone: {{accountManagerPhone}}</li>
               </ul>
               
-              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Communication &amp; Next Steps</p>
+              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Next Steps</p>
               <ul style="color: #374151; font-size: 15px; line-height: 1.8; margin: 0 0 16px 0; padding-left: 24px;">
-                <li><strong>Primary Point of Contact:</strong> {{primaryContact}}</li>
-                <li><strong>Preferred Communication Method:</strong> {{preferredMethod}}</li>
-                <li><strong>Status Update Frequency:</strong> {{statusFrequency}}</li>
+                <li>Project overview call</li>
+                <li>Site visit with trades</li>
+                <li>Pre-con meeting</li>
               </ul>
-              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
-                Our next step will be {{nextStep}}. We will reach out shortly to confirm timelines and any required information.
-              </p>
-              
-              <p style="color: #1a1a2e; font-size: 16px; font-weight: 700; margin: 24px 0 12px 0;">Closing</p>
               <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
                 Thank you for the opportunity to work with you. We look forward to a successful collaboration.
+              </p>
+              <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0 0 24px 0;">
+                If you have any questions in the meantime, please do not hesitate to reach out to your Account Rep or Project Manager.
               </p>
               <p style="color: #374151; font-size: 15px; line-height: 1.6; margin: 0;">
                 Best regards,<br><strong>{{pmName}}</strong>
               </p>
-              
-              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 32px 0 24px 0;">
-              <p style="color: #94a3b8; font-size: 12px; margin: 0 0 12px 0;">Quick Links</p>
-              <p style="margin: 0;">
-                <a href="{{procoreUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none; margin-right: 16px;">Procore</a>
-                <a href="{{hubspotUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none; margin-right: 16px;">HubSpot</a>
-                <a href="{{companycamUrl}}" style="color: #d11921; font-size: 13px; text-decoration: none;">CompanyCam</a>
-              </p>
         `),
         enabled: true,
-        variables: ["clientName", "projectName", "scopeSummary", "startDate", "endDate", "pmName", "pmEmail", "pmPhone", "superName", "superEmail", "superPhone", "primaryContact", "preferredMethod", "statusFrequency", "nextStep", "procoreUrl", "hubspotUrl", "companycamUrl"],
+        variables: ["clientName", "projectName", "projectNumber", "scopeSummary", "pmName", "pmEmail", "pmPhone", "superName", "superEmail", "superPhone", "accountManagerName", "accountManagerEmail", "accountManagerPhone"],
       },
       {
         templateKey: "closeout_survey",

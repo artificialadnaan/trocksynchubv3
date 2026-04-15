@@ -153,6 +153,27 @@ const RFP_DEAL_PROPERTIES = [
   'attachments', 'deal_attachments',
 ];
 
+export function resolveRfpDescription(props: Record<string, any> | null | undefined): string {
+  if (!props) return '';
+
+  const direct =
+    props.project_description__briefly_describe_the_project_
+    || props.project_description_briefly_describe_the_project
+    || props.project_description
+    || props.description
+    || props.hs_project_description
+    || props.hs_description;
+
+  if (direct) return String(direct).trim();
+
+  const matchingKey = Object.keys(props).find((key) => key.toLowerCase().includes('description'));
+  if (matchingKey && props[matchingKey]) {
+    return String(props[matchingKey]).trim();
+  }
+
+  return props.notes ? String(props.notes).trim() : '';
+}
+
 export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<string, any>> {
   const client = await getHubSpotClient();
   const deal = await client.crm.deals.basicApi.getById(
@@ -163,16 +184,12 @@ export async function fetchFullDealFromHubSpot(dealId: string): Promise<Record<s
   );
 
   const props = deal.properties || {};
-  let descriptionFromProps = props.description || props.project_description || props.project_description_briefly_describe_the_project
-    || props.hs_project_description || props.hs_description
-    || (() => { const k = Object.keys(props).find(x => x.toLowerCase().includes('description')); return k ? props[k] : ''; })();
+  let descriptionFromProps = resolveRfpDescription(props);
   if (!descriptionFromProps) {
     try {
       const cached = await storage.getHubspotDealByHubspotId(dealId);
       const cp = (cached?.properties || {}) as Record<string, any>;
-      descriptionFromProps = cp.description || cp.project_description || cp.project_description_briefly_describe_the_project
-        || cp.hs_project_description || cp.hs_description
-        || (() => { const k = Object.keys(cp).find(x => x.toLowerCase().includes('description')); return k ? cp[k] : ''; })() || '';
+      descriptionFromProps = resolveRfpDescription(cp);
     } catch (e) { console.error('[rfp-approval] Failed to load cached deal description:', (e as Error).message); }
   }
   let companyName = props.company_name || '';
@@ -448,7 +465,7 @@ export async function createRfpApprovalRequest(
     const amount = dealData.amount ? `$${Number(dealData.amount).toLocaleString('en-US')}` : 'N/A';
     const companyName = esc(dealData.company_name || 'N/A');
     const location = esc([dealData.address, dealData.city, dealData.state, dealData.zip].filter(Boolean).join(', ') || 'N/A');
-    const description = esc(dealData.description || dealData.notes || 'N/A');
+    const description = esc(resolveRfpDescription(dealData) || 'N/A');
     const estimator = esc(dealData.estimator || 'N/A');
     const ownerName = esc(ownerInfo.ownerName || 'N/A');
 
