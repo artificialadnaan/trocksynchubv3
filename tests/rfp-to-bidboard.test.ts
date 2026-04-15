@@ -419,3 +419,29 @@ describe("createBidBoardProjectFromDeal — contact_name field mapping", () => {
     expect(contactName).toBeUndefined();
   });
 });
+
+describe("Bid Board customer selection", () => {
+  it("rejects create-customer rows even when they contain the company name", async () => {
+    const { isSelectableExistingCustomerOption } = await import("../server/playwright/bidboard.ts");
+
+    expect(
+      isSelectableExistingCustomerOption('Create customer "Acme Construction"', "Acme Construction"),
+    ).toBe(false);
+  });
+
+  it("accepts an existing customer row that matches the company name", async () => {
+    const { isSelectableExistingCustomerOption } = await import("../server/playwright/bidboard.ts");
+
+    expect(
+      isSelectableExistingCustomerOption("Acme Construction", "Acme Construction"),
+    ).toBe(true);
+  });
+
+  it("treats a generic create-new-customer row as a valid create fallback", async () => {
+    const { isCreateCustomerOption } = await import("../server/playwright/bidboard.ts");
+
+    expect(
+      isCreateCustomerOption("Create New Customer", "Acme Construction"),
+    ).toBe(true);
+  });
+});

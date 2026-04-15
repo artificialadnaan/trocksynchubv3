@@ -39,10 +39,10 @@
  * @module playwright/bidboard
  */
 
-import { Page } from "playwright";
+import { Locator, Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
 import { PROCORE_SELECTORS, getBidBoardUrlNew } from "./selectors";
-import { randomDelay, takeScreenshot, withRetry, waitForNavigation } from "./browser";
+import { randomDelay, takeScreenshot, withBrowserLock, withRetry, waitForNavigation } from "./browser";
 import { log } from "../index";
 import { storage } from "../storage";
 
@@ -853,6 +853,87 @@ export interface NewBidBoardProjectData {
   proposalId?: string;
 }
 
+function normalizeCustomerName(value: string | null | undefined): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export function isSelectableExistingCustomerOption(optionText: string, clientName: string): boolean {
+  const normalizedOption = normalizeCustomerName(optionText);
+  const normalizedClient = normalizeCustomerName(clientName);
+
+  if (!normalizedOption || !normalizedClient) return false;
+  if (normalizedOption.includes("create customer")) return false;
+  if (normalizedOption.includes("create new customer")) return false;
+  if (normalizedOption.includes("add customer")) return false;
+
+  return normalizedOption === normalizedClient || normalizedOption.includes(normalizedClient);
+}
+
+export function isCreateCustomerOption(optionText: string, clientName: string): boolean {
+  const normalizedOption = normalizeCustomerName(optionText);
+  const normalizedClient = normalizeCustomerName(clientName);
+
+  if (!normalizedOption) return false;
+  if (!normalizedOption.includes("create customer") && !normalizedOption.includes("create new customer")) {
+    return false;
+  }
+
+  return !normalizedClient || normalizedOption.includes(normalizedClient) || normalizedOption === "create new customer";
+}
+
+async function fillCreateCustomerForm(page: Page, projectData: NewBidBoardProjectData): Promise<boolean> {
+  const createDialog = page
+    .locator('[role="dialog"], .MuiDialog-root, dialog')
+    .filter({ hasText: /Create New Customer/i })
+    .last();
+
+  if (!(await createDialog.isVisible().catch(() => false))) {
+    return false;
+  }
+
+  const fillIfPresent = async (selector: string, value?: string) => {
+    if (!value?.trim()) return;
+    const input = createDialog.locator(selector).first();
+    if (await input.isVisible().catch(() => false)) {
+      await input.fill(value.trim());
+      await randomDelay(150, 300);
+    }
+  };
+
+  await fillIfPresent('input[placeholder*="Smith Cabling"], input[name="name"]', projectData.clientName);
+  await fillIfPresent('input[placeholder*="John Smith"], input[name="contact"], input[name="contactName"]', projectData.contactName);
+  await fillIfPresent('input[placeholder*="john.smith@example.com"], input[type="email"]', projectData.clientEmail);
+  await fillIfPresent('input[placeholder*="+1 123 456 7890"], input[name="phone"]', projectData.clientPhone);
+  await fillIfPresent('input[placeholder*="Comalt"], input[placeholder*="Street"]', projectData.address);
+  await fillIfPresent('input[placeholder*="Austin"], input[placeholder*="City"]', projectData.city);
+  await fillIfPresent('input[placeholder*="Texas"], input[placeholder*="State"]', projectData.state ? normalizeState(projectData.state) : undefined);
+  await fillIfPresent('input[placeholder*="78702"], input[placeholder*="ZIP"]', projectData.zip);
+  await fillIfPresent('input[placeholder*="United States"], input[placeholder*="Country"]', projectData.country);
+
+  const createBtn = createDialog.locator('button').filter({ hasText: /^Create$/i }).first();
+  if (await createBtn.isVisible().catch(() => false)) {
+    await createBtn.click({ force: true });
+    await randomDelay(1500, 2500);
+    if (projectData.clientName?.trim()) {
+      const createdRow = page
+        .locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li')
+        .filter({ hasText: new RegExp(projectData.clientName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") })
+        .first();
+      if (await createdRow.isVisible().catch(() => false)) {
+        await createdRow.click({ force: true });
+        await randomDelay(500, 1000);
+      }
+    }
+    return true;
+  }
+
+  return false;
+}
+
 function formatDateForProcore(val: string): string {
   const d = new Date(val);
   if (isNaN(d.getTime())) return "";
@@ -874,19 +955,20 @@ export interface CreateBidBoardProjectResult {
 export async function createBidBoardProject(
   projectData: NewBidBoardProjectData
 ): Promise<CreateBidBoardProjectResult> {
-  const result: CreateBidBoardProjectResult = {
-    success: false,
-    projectName: projectData.name,
-  };
+  return withBrowserLock("create-bidboard-project", async () => {
+    const result: CreateBidBoardProjectResult = {
+      success: false,
+      projectName: projectData.name,
+    };
 
-  const { page, success, error } = await ensureLoggedIn();
-  
-  if (!success || !page) {
-    result.error = error || "Failed to log in to Procore";
-    return result;
-  }
+    const { page, success, error } = await ensureLoggedIn();
+    
+    if (!success || !page) {
+      result.error = error || "Failed to log in to Procore";
+      return result;
+    }
 
-  try {
+    try {
     // Navigate to BidBoard (optionally with ?status=todo&proposalId=X for RFP flow)
     const navOptions = { status: "todo" as const, proposalId: projectData.proposalId };
     const navigated = await navigateToBidBoard(page, navOptions);
@@ -1242,8 +1324,6 @@ export async function createBidBoardProject(
                 }
               }
 
-              const escapedName = projectData.clientName.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
               // Detect "Available Customers" modal (appears when multiple matches exist in directory)
               const availableCustomersVisible = await page.locator('text=Available Customers').isVisible().catch(() => false);
               if (availableCustomersVisible) {
@@ -1251,39 +1331,62 @@ export async function createBidBoardProject(
                 await takeScreenshot(page, "bidboard-available-customers-modal");
               }
 
-              // Actual BidBoard DOM (verified April 2026):
-              //   <li class="MuiListItem-container">
-              //     <div class="MuiListItem-root aid-listItem" role="button">customer name</div>
-              //   </li>
-              // Use page-wide search — dialog scoping is unreliable due to MUI role="presentation" wrapper
-              const nameRegex = new RegExp(escapedName, "i");
-              const listItem = page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li').filter({ hasText: nameRegex }).first();
-
               let customerFound = false;
               try {
-                await listItem.click({ force: true, timeout: 8000 });
-                await randomDelay(500, 1000);
-                log(`Customer list item clicked: ${projectData.clientName}`, "playwright");
-                customerFound = true;
-              } catch (e: any) {
-                // Fallback: any role="button" element matching the customer name
-                log(`Primary selectors failed for "${projectData.clientName}", trying role=button fallback`, "playwright");
-                try {
-                  const btnMatch = page.locator('[role="button"]').filter({ hasText: nameRegex }).filter({ hasNotText: /Select|Cancel|Close|Search|Create/i }).first();
-                  if (await btnMatch.isVisible().catch(() => false)) {
-                    await btnMatch.click({ force: true, timeout: 5000 });
+                const candidateLocators = [
+                  page.locator('div.aid-listItem, div.MuiListItem-root, [role="option"], li'),
+                  page.locator('[role="button"]'),
+                ];
+                let createCustomerOption: { option: Locator; optionText: string } | null = null;
+                for (const locator of candidateLocators) {
+                  const optionCount = await locator.count();
+                  for (let i = 0; i < optionCount; i++) {
+                    const option = locator.nth(i);
+                    const optionText = (await option.textContent())?.trim() || "";
+                    if (!createCustomerOption && isCreateCustomerOption(optionText, projectData.clientName)) {
+                      createCustomerOption = { option, optionText };
+                    }
+                    if (!isSelectableExistingCustomerOption(optionText, projectData.clientName)) {
+                      continue;
+                    }
+                    await option.click({ force: true, timeout: 8000 });
                     await randomDelay(500, 1000);
-                    log(`Customer selected via button fallback: ${projectData.clientName}`, "playwright");
+                    log(`Customer selected from existing directory entry: ${optionText}`, "playwright");
                     customerFound = true;
-                  } else {
-                    log(`No matching customer button found for "${projectData.clientName}"`, "playwright");
-                    await takeScreenshot(page, "bidboard-customer-selection-failed");
+                    break;
                   }
-                } catch (fallbackErr: any) {
-                  log(`Customer button fallback also failed for "${projectData.clientName}": ${fallbackErr.message}`, "playwright");
+                  if (customerFound) break;
+                }
+
+                if (!createCustomerOption) {
+                  const explicitCreateOption = page
+                    .locator('[role="dialog"], .MuiDialog-root, dialog')
+                    .locator('text=/Create New Customer/i')
+                    .first();
+                  if (await explicitCreateOption.isVisible().catch(() => false)) {
+                    createCustomerOption = {
+                      option: explicitCreateOption,
+                      optionText: (await explicitCreateOption.textContent())?.trim() || "Create New Customer",
+                    };
+                  }
+                }
+
+                if (!customerFound && createCustomerOption) {
+                  await createCustomerOption.option.click({ force: true, timeout: 8000 });
+                  await randomDelay(500, 1000);
+                  log(`No existing customer matched "${projectData.clientName}" — creating new customer entry`, "playwright");
+                  customerFound = await fillCreateCustomerForm(page, projectData);
+                }
+
+                if (!customerFound) {
+                  log(`No customer option matched "${projectData.clientName}"`, "playwright");
                   await takeScreenshot(page, "bidboard-customer-selection-failed");
                 }
+              } catch (e: any) {
+                log(`Customer selection failed for "${projectData.clientName}": ${e.message}`, "playwright");
+                await takeScreenshot(page, "bidboard-customer-selection-failed");
               }
+
               if (customerFound) {
                 const selectBtn = page.locator('[role="dialog"] button, .MuiDialog-root button').filter({ hasText: /Select/i }).first();
                 if ((await selectBtn.count()) > 0) {
@@ -1722,22 +1825,23 @@ export async function createBidBoardProject(
       screenshotPath: result.screenshotPath,
     });
 
-  } catch (err: any) {
-    result.error = err.message || "Unknown error during project creation";
-    result.screenshotPath = await takeScreenshot(page, "create-bidboard-error");
-    log(`Error creating BidBoard project: ${result.error}`, "playwright");
-    
-    await storage.createBidboardAutomationLog({
-      projectName: projectData.name,
-      action: "create_project",
-      status: "failed",
-      details: { stage: projectData.stage },
-      errorMessage: result.error,
-      screenshotPath: result.screenshotPath,
-    });
-  }
+    } catch (err: any) {
+      result.error = err.message || "Unknown error during project creation";
+      result.screenshotPath = await takeScreenshot(page, "create-bidboard-error");
+      log(`Error creating BidBoard project: ${result.error}`, "playwright");
+      
+      await storage.createBidboardAutomationLog({
+        projectName: projectData.name,
+        action: "create_project",
+        status: "failed",
+        details: { stage: projectData.stage },
+        errorMessage: result.error,
+        screenshotPath: result.screenshotPath,
+      });
+    }
 
-  return result;
+    return result;
+  });
 }
 
 // Extended result type to include document sync info
