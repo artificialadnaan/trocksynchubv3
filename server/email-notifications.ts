@@ -407,6 +407,10 @@ export async function sendStageChangeEmail(params: {
   const dedupeKey = `stage_change:${params.hubspotDealId}:${params.oldStage}:${params.newStage}:${Date.now()}`;
 
   const mapping = await storage.getSyncMappingByProcoreProjectId(params.procoreProjectId);
+  const procoreProject = params.procoreProjectId
+    ? await storage.getProcoreProjectByProcoreId(params.procoreProjectId).catch(() => undefined)
+    : undefined;
+  const projectNumber = procoreProject?.projectNumber?.trim() || mapping?.procoreProjectNumber?.trim() || '';
 
   // When no Procore project linked, use deal name instead of "Not yet linked to Procore"
   const displayProjectName = params.procoreProjectId
@@ -429,12 +433,13 @@ export async function sendStageChangeEmail(params: {
     dealName: params.dealName || 'Unknown Deal',
     projectName: displayProjectName,
     procoreProjectName: displayProjectName,
+    projectNumber,
     projectId: params.procoreProjectId,
     previousStage: params.oldStage || 'Unknown',
     newStage: params.newStage || 'Unknown',
     hubspotStage: params.hubspotStageName || params.newStage || 'Unknown',
     hubspotStageName: params.hubspotStageName || 'Unknown',
-    procoreProjectId: params.procoreProjectId,
+    procoreProjectId: params.procoreProjectId || 'Not yet linked',
     hubspotDealId: params.hubspotDealId,
     timestamp: new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }),
     procoreUrl,

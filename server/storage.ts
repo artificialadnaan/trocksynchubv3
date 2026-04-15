@@ -1947,28 +1947,35 @@ export class DatabaseStorage implements IStorage {
               <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;">
                 <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project</span>
                 <h2 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 8px 0 0 0;">{{projectName}}</h2>
-                <p style="color: #64748b; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;">ID: {{projectId}}</p>
+                <p style="color: #64748b; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;">Project #: {{projectNumber}}</p>
+                <p style="color: #64748b; font-size: 12px; margin: 4px 0 0 0; font-family: monospace;">Procore ID: {{procoreProjectId}}</p>
               </div>
               
               <!-- Stage Change Visual -->
               <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 0 0 24px 0;">
                 <tr>
                   <td style="width: 44%; vertical-align: top;">
-                    <div style="background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-radius: 12px; padding: 20px; text-align: center; border: 2px solid #fecaca;">
-                      <span style="color: #991b1b; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Previous Stage</span>
-                      <p style="color: #7f1d1d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{previousStage}}</p>
-                    </div>
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #fff5f5; border: 2px solid #f8b4b4; border-radius: 12px;">
+                      <tr>
+                        <td style="padding: 20px; text-align: center;">
+                          <span style="color: #a61b1b; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Previous Stage</span>
+                          <p style="color: #7f1d1d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{previousStage}}</p>
+                        </td>
+                      </tr>
+                    </table>
                   </td>
                   <td style="width: 12%; vertical-align: middle; text-align: center;">
-                    <div style="background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); width: 36px; height: 36px; border-radius: 50%; margin: 0 auto; line-height: 36px;">
-                      <span style="color: #ffffff; font-size: 18px; font-weight: bold;">→</span>
-                    </div>
+                    <span style="display: inline-block; background-color: #d11921; color: #ffffff; font-size: 18px; font-weight: 700; line-height: 36px; width: 36px; height: 36px; border-radius: 18px; text-align: center;">→</span>
                   </td>
                   <td style="width: 44%; vertical-align: top;">
-                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 20px; text-align: center; border: 2px solid #86efac;">
-                      <span style="color: #166534; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">New Stage</span>
-                      <p style="color: #14532d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{newStage}}</p>
-                    </div>
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f0fff4; border: 2px solid #7ed7a3; border-radius: 12px;">
+                      <tr>
+                        <td style="padding: 20px; text-align: center;">
+                          <span style="color: #0f6b3d; font-size: 10px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">New Stage</span>
+                          <p style="color: #14532d; font-size: 15px; font-weight: 700; margin: 10px 0 0 0; line-height: 1.3;">{{newStage}}</p>
+                        </td>
+                      </tr>
+                    </table>
                   </td>
                 </tr>
               </table>
@@ -1987,17 +1994,17 @@ export class DatabaseStorage implements IStorage {
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
                   <tr>
                     <td style="padding: 6px; width: 33.33%; text-align: center;">
-                      <a href="{{procoreUrl}}" style="display: block; background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                      <a href="{{procoreUrl}}" style="display: block; background-color: #fff7ed; border: 2px solid #ea580c; color: #9a3412; font-size: 13px; font-weight: 700; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
                         🔧 Procore
                       </a>
                     </td>
                     <td style="padding: 6px; width: 33.33%; text-align: center;">
-                      <a href="{{hubspotUrl}}" style="display: block; background: linear-gradient(135deg, #ff5c35 0%, #e04e2d 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                      <a href="{{hubspotUrl}}" style="display: block; background-color: #fff1ed; border: 2px solid #ff5c35; color: #9a3412; font-size: 13px; font-weight: 700; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
                         📊 HubSpot
                       </a>
                     </td>
                     <td style="padding: 6px; width: 33.33%; text-align: center;">
-                      <a href="{{companycamUrl}}" style="display: block; background: linear-gradient(135deg, #0891b2 0%, #0e7490 100%); color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
+                      <a href="{{companycamUrl}}" style="display: block; background-color: #f0f9ff; border: 2px solid #0891b2; color: #155e75; font-size: 13px; font-weight: 700; text-decoration: none; padding: 12px 8px; border-radius: 8px;">
                         📷 CompanyCam
                       </a>
                     </td>
@@ -2016,7 +2023,7 @@ export class DatabaseStorage implements IStorage {
               </div>
         `),
         enabled: true,
-        variables: ["projectName", "projectId", "previousStage", "newStage", "hubspotStage", "timestamp", "procoreUrl", "hubspotUrl", "companycamUrl"],
+        variables: ["projectName", "projectId", "projectNumber", "procoreProjectId", "previousStage", "newStage", "hubspotStage", "timestamp", "procoreUrl", "hubspotUrl", "companycamUrl", "hubspotDealId"],
       },
       {
         templateKey: "project_kickoff",
