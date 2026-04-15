@@ -16,7 +16,7 @@
 import * as fs from "fs";
 import * as XLSX from "xlsx";
 import { storage } from "../storage";
-import { updateHubSpotDealStage } from "../hubspot";
+import { updateHubSpotDeal, updateHubSpotDealStage } from "../hubspot";
 import { resolveHubspotStageId, getTerminalStageGuard } from "../procore-hubspot-sync";
 import { BIDBOARD_TO_HUBSPOT_STAGE, normalizeStageLabel } from "./stage-mapping";
 import { triggerPortfolioAutomationFromStageChange } from "../playwright/portfolio-automation";
@@ -398,6 +398,21 @@ export async function syncStagesToHubSpot(
     );
 
     if (updateResult.success) {
+      const amountResult = await updateHubSpotDeal(change.hubspotDealId, {
+        amount: String(change.totalSales),
+      });
+      if (!amountResult.success) {
+        result.failed++;
+        result.errors.push(
+          `${change.projectName}: stage synced but amount update failed (${amountResult.message})`
+        );
+        log(
+          `Amount sync failed after stage update for ${change.projectName}: ${amountResult.message}`,
+          "sync"
+        );
+        continue;
+      }
+
       result.success++;
       const projectId =
         change.projectNumber ||
@@ -449,6 +464,7 @@ export async function syncStagesToHubSpot(
           previousStage: change.previousStage,
           newStage: change.newStage,
           hubspotStage: resolved.stageName,
+          totalSales: change.totalSales,
         },
       });
 

@@ -104,6 +104,7 @@ vi.mock("../server/hubspot.ts", () => ({
   hubspotClient: {},
   getHubSpotClient: vi.fn(),
   updateHubSpotDealStage: vi.fn(),
+  updateHubSpotDeal: vi.fn(),
 }));
 
 vi.mock("../server/procore.ts", () => ({
@@ -403,7 +404,7 @@ describe("syncStagesToHubSpot", () => {
   }
 
   it("calls updateHubSpotDealStage with the resolved stageId on success", async () => {
-    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
     const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
     const { storage } = await import("../server/storage.ts");
     const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
@@ -411,6 +412,7 @@ describe("syncStagesToHubSpot", () => {
     vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-id-456", stageName: "Internal Review" });
     vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
     vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true, message: "ok" });
     vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
     vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
     vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
@@ -420,6 +422,25 @@ describe("syncStagesToHubSpot", () => {
     expect(vi.mocked(updateHubSpotDealStage)).toHaveBeenCalledWith("hs-deal-111", "stage-id-456");
     expect(result.success).toBe(1);
     expect(result.failed).toBe(0);
+  });
+
+  it("syncs HubSpot amount from Bid Board total sales, including zero", async () => {
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-id-456", stageName: "Internal Review" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+
+    await syncStagesToHubSpot([makeChange({ totalSales: 0 })]);
+
+    expect(vi.mocked(updateHubSpotDeal)).toHaveBeenCalledWith("hs-deal-111", { amount: "0" });
   });
 
   it("increments failed count when resolveHubspotStageId returns null (no mapping)", async () => {
@@ -451,7 +472,7 @@ describe("syncStagesToHubSpot", () => {
   });
 
   it("in dry-run mode increments success but does NOT call updateHubSpotDealStage", async () => {
-    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
     const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
     const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
 
@@ -460,6 +481,7 @@ describe("syncStagesToHubSpot", () => {
     const result = await syncStagesToHubSpot([makeChange()], { dryRun: true });
 
     expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
     expect(result.success).toBe(1);
     expect(result.failed).toBe(0);
   });
