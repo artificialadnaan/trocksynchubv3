@@ -709,63 +709,65 @@ export async function runBidBoardScrape(): Promise<BidBoardSyncResult> {
 
 // Export Excel from BidBoard and parse it
 export async function runBidBoardExportSync(): Promise<BidBoardSyncResult> {
-  const result: BidBoardSyncResult = {
-    projects: [],
-    changes: [],
-    errors: [],
-  };
-  
-  try {
-    log("Starting BidBoard export sync...", "playwright");
+  return withBrowserLock("bidboard-export-sync", async () => {
+    const result: BidBoardSyncResult = {
+      projects: [],
+      changes: [],
+      errors: [],
+    };
     
-    // Ensure we're logged in
-    const { page, success, error } = await ensureLoggedIn();
-    
-    if (!success) {
-      result.errors.push(error || "Failed to log in");
-      return result;
+    try {
+      log("Starting BidBoard export sync...", "playwright");
+      
+      // Ensure we're logged in
+      const { page, success, error } = await ensureLoggedIn();
+      
+      if (!success) {
+        result.errors.push(error || "Failed to log in");
+        return result;
+      }
+      
+      // Navigate to BidBoard
+      const navigated = await navigateToBidBoard(page);
+      if (!navigated) {
+        result.errors.push("Failed to navigate to BidBoard");
+        return result;
+      }
+      
+      // Export the Excel file
+      const excelPath = await exportBidBoardCsv(page);
+      
+      if (!excelPath) {
+        result.errors.push("Failed to export Excel file from BidBoard");
+        return result;
+      }
+      
+      // Parse the Excel file
+      result.projects = await parseExportedExcel(excelPath);
+      
+      if (result.projects.length === 0) {
+        result.errors.push("No projects found in exported Excel");
+        return result;
+      }
+      
+      log(`Parsed ${result.projects.length} projects from Excel export`, "playwright");
+      
+      // Detect changes
+      result.changes = await detectStageChanges(result.projects);
+      
+      // Save current state
+      await saveBidBoardState(result.projects);
+      
+      log(`BidBoard export sync complete: ${result.projects.length} projects, ${result.changes.length} changes`, "playwright");
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      result.errors.push(errorMessage);
+      log(`BidBoard export sync error: ${errorMessage}`, "playwright");
     }
     
-    // Navigate to BidBoard
-    const navigated = await navigateToBidBoard(page);
-    if (!navigated) {
-      result.errors.push("Failed to navigate to BidBoard");
-      return result;
-    }
-    
-    // Export the Excel file
-    const excelPath = await exportBidBoardCsv(page);
-    
-    if (!excelPath) {
-      result.errors.push("Failed to export Excel file from BidBoard");
-      return result;
-    }
-    
-    // Parse the Excel file
-    result.projects = await parseExportedExcel(excelPath);
-    
-    if (result.projects.length === 0) {
-      result.errors.push("No projects found in exported Excel");
-      return result;
-    }
-    
-    log(`Parsed ${result.projects.length} projects from Excel export`, "playwright");
-    
-    // Detect changes
-    result.changes = await detectStageChanges(result.projects);
-    
-    // Save current state
-    await saveBidBoardState(result.projects);
-    
-    log(`BidBoard export sync complete: ${result.projects.length} projects, ${result.changes.length} changes`, "playwright");
-    
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    result.errors.push(errorMessage);
-    log(`BidBoard export sync error: ${errorMessage}`, "playwright");
-  }
-  
-  return result;
+    return result;
+  });
 }
 
 // Parse the exported Excel file from BidBoard

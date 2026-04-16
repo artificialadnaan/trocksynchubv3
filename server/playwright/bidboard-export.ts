@@ -120,7 +120,9 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     }
     if (!menuClicked) {
       log("Could not find three-dot overflow menu; all selectors exhausted", "playwright");
-      await takeScreenshot(page, "bidboard-export-menu-not-found");
+      await takeScreenshot(page, "bidboard-export-menu-not-found").catch((screenshotErr) => {
+        log(`Could not capture menu-not-found screenshot: ${screenshotErr}`, "playwright");
+      });
       throw new Error("Export menu button not found. Procore UI may have changed.");
     }
     await randomDelay(1000, 2000);
@@ -158,7 +160,9 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       if (!exportClicked) throw new Error("Export link not found");
     } catch (clickErr) {
       log(`Export click failed: ${clickErr}`, "playwright");
-      await takeScreenshot(page, "bidboard-export-link-not-found");
+      await takeScreenshot(page, "bidboard-export-link-not-found").catch((screenshotErr) => {
+        log(`Could not capture export-link-not-found screenshot: ${screenshotErr}`, "playwright");
+      });
       throw new Error("Export Project List To Excel link not found. Procore UI may have changed.");
     }
 
@@ -187,11 +191,15 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     }
 
     log("No Excel file received after export click", "playwright");
-    await takeScreenshot(page, "bidboard-export-no-file");
+    await takeScreenshot(page, "bidboard-export-no-file").catch((screenshotErr) => {
+      log(`Could not capture export-no-file screenshot: ${screenshotErr}`, "playwright");
+    });
     return null;
   } catch (err: any) {
     log(`BidBoard export RPA failed: ${err.message}`, "playwright");
-    await takeScreenshot(page, "bidboard-export-error");
+    await takeScreenshot(page, "bidboard-export-error").catch((screenshotErr) => {
+      log(`Could not capture export-error screenshot: ${screenshotErr}`, "playwright");
+    });
     throw err;
   }
 }
