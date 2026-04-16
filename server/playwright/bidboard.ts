@@ -2055,13 +2055,5 @@ export async function createBidBoardProjectFromDeal(
     }
   }
 
-  // Close browser after completion to free resources
-  try {
-    const { closeBrowser } = await import("./browser");
-    await closeBrowser();
-  } catch (e) {
-    log(`Could not close browser: ${e}`, "playwright");
-  }
-  
   return result;
 }
