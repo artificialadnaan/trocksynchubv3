@@ -957,20 +957,19 @@ export interface CreateBidBoardProjectResult {
 export async function createBidBoardProject(
   projectData: NewBidBoardProjectData
 ): Promise<CreateBidBoardProjectResult> {
-  return withBrowserLock("create-bidboard-project", async () => {
-    const result: CreateBidBoardProjectResult = {
-      success: false,
-      projectName: projectData.name,
-    };
+  const result: CreateBidBoardProjectResult = {
+    success: false,
+    projectName: projectData.name,
+  };
 
-    const { page, success, error } = await ensureLoggedIn();
-    
-    if (!success || !page) {
-      result.error = error || "Failed to log in to Procore";
-      return result;
-    }
+  const { page, success, error } = await ensureLoggedIn();
+  
+  if (!success || !page) {
+    result.error = error || "Failed to log in to Procore";
+    return result;
+  }
 
-    try {
+  try {
     // Navigate to BidBoard (optionally with ?status=todo&proposalId=X for RFP flow)
     const navOptions = { status: "todo" as const, proposalId: projectData.proposalId };
     const navigated = await navigateToBidBoard(page, navOptions);
@@ -1840,10 +1839,9 @@ export async function createBidBoardProject(
         errorMessage: result.error,
         screenshotPath: result.screenshotPath,
       });
-    }
+  }
 
-    return result;
-  });
+  return result;
 }
 
 // Extended result type to include document sync info
@@ -1886,47 +1884,48 @@ export async function createBidBoardProjectFromDeal(
     proposalId?: string;
   } = { syncDocuments: true }
 ): Promise<CreateBidBoardProjectFromDealResult> {
-  // Fetch deal data from database
-  const deal = await storage.getHubspotDealByHubspotId(dealId);
-  
-  if (!deal) {
-    return {
-      success: false,
-      error: `HubSpot deal ${dealId} not found in database`,
+  return withBrowserLock("create-bidboard-project-from-deal", async () => {
+    // Fetch deal data from database
+    const deal = await storage.getHubspotDealByHubspotId(dealId);
+    
+    if (!deal) {
+      return {
+        success: false,
+        error: `HubSpot deal ${dealId} not found in database`,
+      };
+    }
+
+    // Extract properties from deal; RFP editedFields override when present
+    const properties = (deal.properties || {}) as Record<string, any>;
+    const ed = options.editedFieldsOverride || {};
+    const get = (dealVal: string | undefined, propKey: string) =>
+      (ed[propKey] && String(ed[propKey]).trim()) || dealVal || properties[propKey];
+
+    const projectNumber = options.projectNumberOverride ?? ed.project_number ?? properties.project_number ?? undefined;
+    const projectData: NewBidBoardProjectData = {
+      name: get(deal.dealName ?? undefined, "dealname") || deal.dealName || `Deal ${dealId}`,
+      projectNumber: projectNumber ?? undefined,
+      stage: initialStage,
+      projectTypes: (ed.project_types ?? properties.project_types) ?? undefined,
+      estimator: get(undefined, "estimator"),
+      clientName: get(deal.associatedCompanyName ?? undefined, "company_name") || deal.associatedCompanyName || properties.company_name || undefined,
+      contactName: get(undefined, "contact_name") || properties.contact_name || await getAssociatedContactName(deal) || undefined,
+      clientEmail: get(undefined, "client_email") || properties.client_email || properties.contact_email || undefined,
+      clientPhone: get(undefined, "client_phone") || properties.client_phone || properties.contact_phone || undefined,
+      address: get(undefined, "address") || properties.address || properties.street_address || undefined,
+      city: get(undefined, "city") || properties.city || undefined,
+      state: get(undefined, "state") || properties.state || properties.state_region || undefined,
+      zip: get(undefined, "zip") || properties.zip || properties.postal_code || undefined,
+      country: get(undefined, "country") || properties.country || undefined,
+      description: get(undefined, "description") || properties.description || properties.project_description__briefly_describe_the_project_ || properties.project_description || properties.notes || undefined,
+      bidDueDate: get(undefined, "bid_due_date") || properties.bid_due_date || properties.due_date || undefined,
+      proposalId: options.proposalId,
     };
-  }
 
-  // Extract properties from deal; RFP editedFields override when present
-  const properties = (deal.properties || {}) as Record<string, any>;
-  const ed = options.editedFieldsOverride || {};
-  const get = (dealVal: string | undefined, propKey: string) =>
-    (ed[propKey] && String(ed[propKey]).trim()) || dealVal || properties[propKey];
-
-  const projectNumber = options.projectNumberOverride ?? ed.project_number ?? properties.project_number ?? undefined;
-  const projectData: NewBidBoardProjectData = {
-    name: get(deal.dealName ?? undefined, "dealname") || deal.dealName || `Deal ${dealId}`,
-    projectNumber: projectNumber ?? undefined,
-    stage: initialStage,
-    projectTypes: (ed.project_types ?? properties.project_types) ?? undefined,
-    estimator: get(undefined, "estimator"),
-    clientName: get(deal.associatedCompanyName ?? undefined, "company_name") || deal.associatedCompanyName || properties.company_name || undefined,
-    contactName: get(undefined, "contact_name") || properties.contact_name || await getAssociatedContactName(deal) || undefined,
-    clientEmail: get(undefined, "client_email") || properties.client_email || properties.contact_email || undefined,
-    clientPhone: get(undefined, "client_phone") || properties.client_phone || properties.contact_phone || undefined,
-    address: get(undefined, "address") || properties.address || properties.street_address || undefined,
-    city: get(undefined, "city") || properties.city || undefined,
-    state: get(undefined, "state") || properties.state || properties.state_region || undefined,
-    zip: get(undefined, "zip") || properties.zip || properties.postal_code || undefined,
-    country: get(undefined, "country") || properties.country || undefined,
-    description: get(undefined, "description") || properties.description || properties.project_description__briefly_describe_the_project_ || properties.project_description || properties.notes || undefined,
-    bidDueDate: get(undefined, "bid_due_date") || properties.bid_due_date || properties.due_date || undefined,
-    proposalId: options.proposalId,
-  };
-
-  log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");
-  log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
-  
-  const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
+    log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");
+    log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
+    
+    const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
   
   // If successful, verify description was saved and retry if missing
   if (result.success && result.projectId && projectData.description) {
@@ -2055,5 +2054,6 @@ export async function createBidBoardProjectFromDeal(
     }
   }
 
-  return result;
+    return result;
+  });
 }

@@ -54,7 +54,7 @@ describe("createBidBoardProjectFromDeal", () => {
 
   it("does not close the shared browser after creating a project", async () => {
     const { storage } = await import("../server/storage.ts");
-    const { closeBrowser } = await import("../server/playwright/browser.ts");
+    const { closeBrowser, withBrowserLock } = await import("../server/playwright/browser.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");
 
     vi.mocked(storage.getHubspotDealByHubspotId).mockResolvedValue({
@@ -84,5 +84,6 @@ describe("createBidBoardProjectFromDeal", () => {
     expect(createSpy).toHaveBeenCalled();
     expect(result.success).toBe(true);
     expect(closeBrowser).not.toHaveBeenCalled();
+    expect(withBrowserLock).toHaveBeenCalledWith("create-bidboard-project-from-deal", expect.any(Function));
   });
 });
