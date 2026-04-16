@@ -126,11 +126,53 @@ export interface BidBoardScrapedData {
 export interface PortfolioAutomationResult {
   success: boolean;
   bidboardProjectId: string;
+  bidboardProjectName?: string;
   portfolioProjectId?: string;
   steps: StepResult[];
   startedAt: Date;
   completedAt?: Date;
   error?: string;
+}
+
+export interface PortfolioIdentityContext {
+  projectName?: string;
+  projectNumber?: string | null;
+  customerName?: string;
+  hubspotDealId?: string;
+}
+
+export interface ExpectedPortfolioIdentity {
+  bidboardProjectId: string;
+  expectedProjectName?: string;
+  expectedProjectNumber?: string | null;
+  expectedHubspotDealId?: string;
+  expectedPortfolioProjectId?: string | null;
+}
+
+export interface ActualPortfolioIdentity {
+  portfolioProjectId: string;
+  actualProjectName?: string | null;
+  actualProjectNumber?: string | null;
+  linkedHubspotDealId?: string | null;
+  linkedProjectName?: string | null;
+  linkedProjectNumber?: string | null;
+}
+
+export interface PortfolioIdentityMismatch {
+  reason:
+    | "portfolio_project_id_mismatch"
+    | "portfolio_project_number_mismatch"
+    | "portfolio_hubspot_deal_mismatch"
+    | "portfolio_project_name_mismatch";
+  expectedProjectName?: string;
+  expectedProjectNumber?: string | null;
+  expectedHubspotDealId?: string;
+  expectedPortfolioProjectId?: string | null;
+  actualProjectName?: string | null;
+  actualProjectNumber?: string | null;
+  linkedHubspotDealId?: string | null;
+  linkedProjectName?: string | null;
+  linkedProjectNumber?: string | null;
 }
 
 interface StepResult {
@@ -188,7 +230,7 @@ async function logStep(
 
   await storage.createBidboardAutomationLog({
     projectId: result.bidboardProjectId,
-    projectName: result.bidboardProjectId,
+    projectName: result.bidboardProjectName || result.bidboardProjectId,
     action: `portfolio_automation:${step}`,
     status,
     details: {
@@ -266,6 +308,45 @@ async function ensureStillLoggedIn(page: Page): Promise<boolean> {
     return false;
   }
   return true;
+}
+
+async function validatePortfolioProjectIdentityOrThrow(
+  page: Page,
+  result: PortfolioAutomationResult,
+  companyId: string,
+  portfolioProjectId: string,
+  stepName: string,
+  identityContext?: PortfolioIdentityContext
+): Promise<ActualPortfolioIdentity> {
+  const start = Date.now();
+  const expected = await buildExpectedPortfolioIdentity(result.bidboardProjectId, identityContext);
+  const actual = await fetchPortfolioProjectIdentity(companyId, portfolioProjectId);
+  const mismatch = detectPortfolioIdentityMismatch(expected, actual);
+
+  if (!mismatch) {
+    await logStep(page, result, stepName, "success", Date.now() - start, {
+      metadata: {
+        portfolioProjectId,
+        actualProjectName: actual.actualProjectName ?? null,
+        actualProjectNumber: actual.actualProjectNumber ?? null,
+      },
+    });
+    return actual;
+  }
+
+  const { screenshotPath, diagnostics } = await captureFailureContext(page, `quarantine-${stepName}`);
+  await quarantinePortfolioIdentityMismatch(expected, actual, mismatch.reason);
+  await logStep(page, result, stepName, "failed", Date.now() - start, {
+    error: `Portfolio identity mismatch: expected ${mismatch.expectedProjectNumber || mismatch.expectedProjectName || expected.bidboardProjectId}, reached ${mismatch.actualProjectNumber || mismatch.actualProjectName || portfolioProjectId}`,
+    screenshotPath,
+    metadata: {
+      diagnostics,
+      quarantineReason: mismatch.reason,
+      expected,
+      actual,
+    },
+  });
+  throw new Error(`Portfolio identity mismatch detected (${mismatch.reason})`);
 }
 
 // ─── Automation summary ─────────────────────────────────────────
@@ -403,6 +484,24 @@ async function clickMenuItem(
   throw new Error(`Could not find ${visibilityText} menu item: ${description}`);
 }
 
+async function isMenuItemEnabled(item: Locator): Promise<boolean> {
+  return item
+    .evaluate((el) => {
+      const self = el as HTMLElement & { disabled?: boolean };
+      const container = (self.closest('[role="menuitem"]') || self) as HTMLElement & { disabled?: boolean };
+      const nodes = [self, container];
+
+      return nodes.every((node) => {
+        const ariaDisabled = node.getAttribute?.("aria-disabled");
+        const hasDisabledAttr = node.hasAttribute?.("disabled") ?? false;
+        const disabledProp = Boolean(node.disabled);
+        const muiDisabled = node.classList?.contains("Mui-disabled") ?? false;
+        return ariaDisabled !== "true" && !hasDisabledAttr && !disabledProp && !muiDisabled;
+      });
+    })
+    .catch(() => false);
+}
+
 async function findMenuItem(
   page: Page,
   selectors: string[],
@@ -419,13 +518,8 @@ async function findMenuItem(
       const isVisible = await item.isVisible().catch(() => false);
       if (!isVisible) continue;
 
-      if (requireEnabled) {
-        const ariaDisabled = await item.getAttribute("aria-disabled").catch(() => null);
-        const disabled = await item.evaluate((el) => {
-          const element = el as HTMLElement & { disabled?: boolean };
-          return Boolean(element.disabled);
-        }).catch(() => false);
-        if (ariaDisabled === "true" || disabled) continue;
+      if (requireEnabled && !(await isMenuItemEnabled(item))) {
+        continue;
       }
 
       return item;
@@ -433,6 +527,162 @@ async function findMenuItem(
   }
 
   return null;
+}
+
+async function openBidBoardFoldersMenu(page: Page): Promise<"sibling" | "hover" | "rightclick"> {
+  const foldersHeader = page.locator('text="Folders"').first();
+  await foldersHeader.waitFor({ state: "visible", timeout: 15000 });
+
+  const siblingEllipsis = foldersHeader
+    .locator("..")
+    .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
+    .first();
+
+  if (await siblingEllipsis.isVisible().catch(() => false)) {
+    await siblingEllipsis.click({ timeout: 8000 });
+    return "sibling";
+  }
+
+  await foldersHeader.hover().catch(() => {});
+  await randomDelay(500, 700);
+
+  const hoverEllipsis = foldersHeader
+    .locator("..")
+    .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
+    .first();
+  if (await hoverEllipsis.isVisible().catch(() => false)) {
+    await hoverEllipsis.click({ timeout: 8000 });
+    return "hover";
+  }
+
+  await foldersHeader.click({ button: "right", timeout: 8000 });
+  return "rightclick";
+}
+
+async function clickSendToDocumentsToolWithRetry(page: Page): Promise<{ openedBy: string }> {
+  let lastError = "Send To Documents Tool menu item not ready";
+
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    await dismissOpenModals(page);
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+    await randomDelay(1500, 2200);
+
+    let openedBy = "unknown";
+    try {
+      openedBy = await openBidBoardFoldersMenu(page);
+      await randomDelay(800, 1200);
+
+      const menuItem = await findMenuItem(
+        page,
+        [SEL.documents.sendToDocumentsTool, '[role="menuitem"]:has-text("Send To Documents Tool")']
+      );
+
+      if (!menuItem) {
+        lastError = `Send To Documents Tool menu item not visible on attempt ${attempt}`;
+      } else {
+        await menuItem.click({ timeout: 15000 });
+        await randomDelay(1000, 1500);
+
+        const started = await page
+          .locator('text=/Preparing export to Documents tool/i')
+          .first()
+          .isVisible({ timeout: 10000 })
+          .catch(() => false);
+
+        if (started) {
+          return { openedBy };
+        }
+
+        lastError = `Documents Tool export confirmation not detected on attempt ${attempt}`;
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+
+    await page.keyboard.press("Escape").catch(() => {});
+    await randomDelay(1500, 2200);
+  }
+
+  throw new Error(lastError);
+}
+
+async function getPortfolioEstimatingMenuState(page: Page): Promise<{
+  sendToBudgetVisible: boolean;
+  sendToBudgetEnabled: boolean;
+  createPrimeContractVisible: boolean;
+  createPrimeContractEnabled: boolean;
+}> {
+  await dismissOpenModals(page);
+  await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
+  await randomDelay(1000, 1500);
+
+  const sendToBudgetVisible = Boolean(
+    await findMenuItem(page, [SEL.portfolioEstimating.sendToBudget, SEL.portfolioEstimating.sendToBudgetFallback])
+  );
+  const sendToBudgetEnabled = Boolean(
+    await findMenuItem(
+      page,
+      [SEL.portfolioEstimating.sendToBudget, SEL.portfolioEstimating.sendToBudgetFallback],
+      { requireEnabled: true }
+    )
+  );
+  const createPrimeContractVisible = Boolean(
+    await findMenuItem(page, [
+      SEL.portfolioEstimating.createPrimeContract,
+      SEL.portfolioEstimating.createPrimeContractFallback,
+    ])
+  );
+  const createPrimeContractEnabled = Boolean(
+    await findMenuItem(
+      page,
+      [SEL.portfolioEstimating.createPrimeContract, SEL.portfolioEstimating.createPrimeContractFallback],
+      { requireEnabled: true }
+    )
+  );
+
+  await page.keyboard.press("Escape").catch(() => {});
+  await randomDelay(400, 700);
+
+  return {
+    sendToBudgetVisible,
+    sendToBudgetEnabled,
+    createPrimeContractVisible,
+    createPrimeContractEnabled,
+  };
+}
+
+async function waitForBudgetProcessingToFinish(page: Page): Promise<{
+  createPrimeContractEnabled: boolean;
+  sendToBudgetStillVisible: boolean;
+}> {
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    const state = await getPortfolioEstimatingMenuState(page);
+    if (!state.sendToBudgetVisible || state.createPrimeContractEnabled) {
+      return {
+        createPrimeContractEnabled: state.createPrimeContractEnabled,
+        sendToBudgetStillVisible: state.sendToBudgetVisible,
+      };
+    }
+
+    if (attempt < 6) {
+      log(
+        `[phase2] Budget processing still in progress (attempt ${attempt}/6): sendToBudgetVisible=${state.sendToBudgetVisible}, createPrimeContractEnabled=${state.createPrimeContractEnabled}`,
+        "playwright"
+      );
+      await page.reload({ waitUntil: "load" }).catch(() => {});
+      await randomDelay(3000, 5000);
+      const estTab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
+      if (estTab) await estTab.click();
+      await randomDelay(2000, 3000);
+      await new Promise((resolve) => setTimeout(resolve, 15000));
+    }
+  }
+
+  const finalState = await getPortfolioEstimatingMenuState(page);
+  return {
+    createPrimeContractEnabled: finalState.createPrimeContractEnabled,
+    sendToBudgetStillVisible: finalState.sendToBudgetVisible,
+  };
 }
 
 // ─── Helper: Wait for Procore SPA content to load ─────────────────
@@ -789,58 +1039,6 @@ export async function runPhase1BidBoardActions(
       if (portfolioProjectId) {
         result.portfolioProjectId = portfolioProjectId;
         log(`[portfolio-auto] Extracted portfolio project ID: ${portfolioProjectId}`, "playwright");
-
-        // Save portfolio project ID to sync mapping for future runs
-        try {
-          const bidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1];
-          if (bidId) {
-            const mapping = await storage.getSyncMappingByBidboardProjectId(bidId);
-            if (mapping && !mapping.portfolioProjectId) {
-              await storage.updateSyncMapping(mapping.id, { portfolioProjectId });
-              log(`[portfolio-auto] Saved portfolio project ID ${portfolioProjectId} to sync mapping ${mapping.id}`, "playwright");
-            }
-          }
-        } catch { /* non-critical */ }
-
-        // Set portfolio project stage to "Buy Out" via Procore API
-        try {
-          const { getAccessToken } = await import("../procore");
-          const procoreConfigRaw = await storage.getAutomationConfig("procore_config");
-          const procoreConfig = procoreConfigRaw?.value as { companyId?: string } | undefined;
-          const cid = procoreConfig?.companyId;
-          if (!cid) throw new Error("Procore company ID not configured");
-          const { fetchWithRateLimitRetry } = await import("../lib/rate-limit-tracker");
-          const accessToken = await getAccessToken();
-          const stagesRes = await fetchWithRateLimitRetry(
-            `https://api.procore.com/rest/v1.0/companies/${cid}/project_stages`,
-            { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": cid } },
-            "procore"
-          );
-          if (stagesRes.ok) {
-            const stages = await stagesRes.json() as Array<{ id: number; name: string }>;
-            const buyOutStage = stages.find((s) => s.name === "Buy Out");
-            if (buyOutStage) {
-              const updateRes = await fetchWithRateLimitRetry(
-                `https://api.procore.com/rest/v1.0/projects/${portfolioProjectId}?company_id=${cid}`,
-                {
-                  method: "PATCH",
-                  headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", "Procore-Company-Id": cid },
-                  body: JSON.stringify({ project: { project_stage_id: buyOutStage.id } }),
-                },
-                "procore"
-              );
-              if (updateRes.ok) {
-                log(`[portfolio-auto] Set portfolio project stage to "Buy Out" (stage ID: ${buyOutStage.id})`, "playwright");
-              } else {
-                log(`[portfolio-auto] WARNING: Failed to set stage to Buy Out: ${updateRes.status}`, "playwright");
-              }
-            } else {
-              log(`[portfolio-auto] WARNING: "Buy Out" stage not found in Procore project stages`, "playwright");
-            }
-          }
-        } catch (stageErr: any) {
-          log(`[portfolio-auto] WARNING: Could not set portfolio stage to Buy Out: ${stageErr.message}`, "playwright");
-        }
       }
 
       await logStep(page, result, "wait_portfolio_creation", "success", Date.now() - step4Start, {
@@ -853,6 +1051,34 @@ export async function runPhase1BidBoardActions(
         screenshotPath,
         metadata: { diagnostics },
       });
+    }
+  }
+
+  if (result.portfolioProjectId) {
+    const procoreConfigRaw = await storage.getAutomationConfig("procore_config");
+    const companyId = (procoreConfigRaw?.value as { companyId?: string } | undefined)?.companyId;
+    if (companyId) {
+      await validatePortfolioProjectIdentityOrThrow(
+        page,
+        result,
+        companyId,
+        result.portfolioProjectId,
+        "validate_portfolio_identity",
+        retryOptions?.identityContext
+      );
+    }
+
+    try {
+      const bidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1];
+      if (bidId) {
+        const mapping = await storage.getSyncMappingByBidboardProjectId(bidId);
+        if (mapping && !mapping.portfolioProjectId) {
+          await storage.updateSyncMapping(mapping.id, { portfolioProjectId: result.portfolioProjectId });
+          log(`[portfolio-auto] Saved portfolio project ID ${result.portfolioProjectId} to sync mapping ${mapping.id}`, "playwright");
+        }
+      }
+    } catch {
+      /* non-critical */
     }
   }
 
@@ -876,6 +1102,18 @@ export async function runPhase1BidBoardActions(
         if (pid) {
           result.portfolioProjectId = pid;
           log(`[portfolio-auto] Extracted portfolio project ID from Estimation tab URL: ${pid}`, "playwright");
+          const procoreConfigRaw = await storage.getAutomationConfig("procore_config");
+          const companyId = (procoreConfigRaw?.value as { companyId?: string } | undefined)?.companyId;
+          if (companyId) {
+            await validatePortfolioProjectIdentityOrThrow(
+              page,
+              result,
+              companyId,
+              pid,
+              "validate_portfolio_identity",
+              retryOptions?.identityContext
+            );
+          }
         }
       }
 
@@ -1091,63 +1329,15 @@ export async function runPhase1BidBoardActions(
   } else {
     const step12Start = Date.now();
     try {
-      await dismissOpenModals(page);
-
-      // Target the ellipsis next to the "Folders" header in the left sidebar (not the page-level ellipsis)
-      const foldersHeader = page.locator('text="Folders"').first();
-      let clicked = false;
-
-      // Try 1: Sibling/adjacent ellipsis next to "Folders" text
-      const foldersEllipsis = foldersHeader
-        .locator("..")
-        .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
-        .first();
-      if (await foldersEllipsis.isVisible().catch(() => false)) {
-        await foldersEllipsis.click({ timeout: 8000 });
-        clicked = true;
-        log("[portfolio-auto] Clicked Folders header ellipsis", "playwright");
-      }
-
-      // Try 2: Hover first in case it's hidden until hover
-      if (!clicked) {
-        await foldersHeader.hover();
-        await randomDelay(500, 500);
-        const hoverEllipsis = foldersHeader
-          .locator("..")
-          .locator('[data-qa="ci-EllipsisVertical"], button:has(svg)')
-          .first();
-        if (await hoverEllipsis.isVisible().catch(() => false)) {
-          await hoverEllipsis.click({ timeout: 8000 });
-          clicked = true;
-          log("[portfolio-auto] Clicked Folders header ellipsis (after hover)", "playwright");
-        }
-      }
-
-      // Try 3: Right-click the Folders header
-      if (!clicked) {
-        await foldersHeader.click({ button: "right", timeout: 8000 });
-        clicked = true;
-        log("[portfolio-auto] Right-clicked Folders header for context menu", "playwright");
-      }
-
-      if (!clicked) {
-        throw new Error("Could not find ellipsis button for Drawings folder");
-      }
-
-      await randomDelay(1000, 2000);
-
-      await clickMenuItem(
-        page,
-        SEL.documents.sendToDocumentsTool,
-        '[role="menuitem"]:has-text("Send To Documents Tool")',
-        "Send To Documents Tool"
-      );
-      await randomDelay(2000, 3000);
+      const clickResult = await clickSendToDocumentsToolWithRetry(page);
+      log(`[portfolio-auto] Sent Drawings folder to Documents Tool via ${clickResult.openedBy} menu open`, "playwright");
 
       await waitForModalToClose(page, 300000);
       await randomDelay(3000, 5000);
 
-      await logStep(page, result, "send_to_documents_tool", "success", Date.now() - step12Start);
+      await logStep(page, result, "send_to_documents_tool", "success", Date.now() - step12Start, {
+        metadata: { menuOpenMethod: clickResult.openedBy },
+      });
     } catch (err: unknown) {
       const { screenshotPath, diagnostics } = await captureFailureContext(page, "step12-send-docs-tool");
       await logStep(page, result, "send_to_documents_tool", "failed", Date.now() - step12Start, {
@@ -1173,9 +1363,19 @@ export async function runPhase2PortfolioActions(
   page: Page,
   companyId: string,
   portfolioProjectId: string,
-  result: PortfolioAutomationResult
+  result: PortfolioAutomationResult,
+  identityContext?: PortfolioIdentityContext
 ): Promise<void> {
   result.portfolioProjectId = portfolioProjectId;
+
+  await validatePortfolioProjectIdentityOrThrow(
+    page,
+    result,
+    companyId,
+    portfolioProjectId,
+    "revalidate_portfolio_identity",
+    identityContext
+  );
 
   // Set portfolio project stage to "Buy Out" via Procore API
   try {
@@ -1318,8 +1518,17 @@ export async function runPhase2PortfolioActions(
       await waitForModalToClose(page, 120000);
       await randomDelay(3000, 5000);
       await dismissOpenModals(page);
+      const budgetState = await waitForBudgetProcessingToFinish(page);
+      if (budgetState.sendToBudgetStillVisible && !budgetState.createPrimeContractEnabled) {
+        throw new Error("Send to Budget completed but Procore did not finish enabling downstream financial actions");
+      }
 
-      await logStep(page, result, "send_to_budget", "success", Date.now() - budgetStart);
+      await logStep(page, result, "send_to_budget", "success", Date.now() - budgetStart, {
+        metadata: {
+          createPrimeContractEnabled: budgetState.createPrimeContractEnabled,
+          sendToBudgetStillVisible: budgetState.sendToBudgetStillVisible,
+        },
+      });
     }
   } catch (err: unknown) {
     const { screenshotPath, diagnostics } = await captureFailureContext(page, "phase2-send-to-budget");
@@ -2177,6 +2386,7 @@ export interface Phase1RetryOptions {
     estimateExcelPath: string | null;
     proposalPdfPath: string | null;
   };
+  identityContext?: PortfolioIdentityContext;
 }
 
 /**
@@ -2192,6 +2402,7 @@ export async function runPhase1(
   const result: PortfolioAutomationResult = {
     success: false,
     bidboardProjectId,
+    bidboardProjectName: retryOptions?.identityContext?.projectName,
     steps: [],
     startedAt: new Date(),
   };
@@ -2246,6 +2457,7 @@ export interface Phase2Input {
   proposalPdfPath?: string | null;
   bidboardProjectUrl?: string;
   customerName?: string;
+  identityContext?: PortfolioIdentityContext;
 }
 
 /**
@@ -2261,6 +2473,7 @@ export async function runPhase2(
   const result: PortfolioAutomationResult = {
     success: false,
     bidboardProjectId: bidboardProjectId || "unknown",
+    bidboardProjectName: phase2Input?.identityContext?.projectName,
     portfolioProjectId,
     steps: [],
     startedAt: new Date(),
@@ -2290,7 +2503,7 @@ export async function runPhase2(
       page = reauth.page;
     }
 
-    await runPhase2PortfolioActions(page, companyId, portfolioProjectId, result);
+    await runPhase2PortfolioActions(page, companyId, portfolioProjectId, result, phase2Input?.identityContext);
 
     result.success = result.steps.every(
       (s) => s.status === "success" || s.status === "skipped"
@@ -2360,6 +2573,214 @@ function normalizeKey(s: string | null | undefined): string {
     .toLowerCase()
     .trim()
     .replace(/\s+/g, " ");
+}
+
+function mergeMetadata(
+  existing: Record<string, unknown> | null | undefined,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    ...(existing || {}),
+    ...patch,
+  };
+}
+
+export function detectPortfolioIdentityMismatch(
+  expected: ExpectedPortfolioIdentity,
+  actual: ActualPortfolioIdentity
+): PortfolioIdentityMismatch | null {
+  const expectedPortfolioProjectId = expected.expectedPortfolioProjectId?.trim() || null;
+  if (expectedPortfolioProjectId && expectedPortfolioProjectId !== actual.portfolioProjectId) {
+    return {
+      reason: "portfolio_project_id_mismatch",
+      expectedProjectName: expected.expectedProjectName,
+      expectedProjectNumber: expected.expectedProjectNumber ?? null,
+      expectedHubspotDealId: expected.expectedHubspotDealId,
+      expectedPortfolioProjectId,
+      actualProjectName: actual.actualProjectName ?? null,
+      actualProjectNumber: actual.actualProjectNumber ?? null,
+      linkedHubspotDealId: actual.linkedHubspotDealId ?? null,
+      linkedProjectName: actual.linkedProjectName ?? null,
+      linkedProjectNumber: actual.linkedProjectNumber ?? null,
+    };
+  }
+
+  const expectedProjectNumber = normalizeKey(expected.expectedProjectNumber);
+  const actualProjectNumber = normalizeKey(actual.actualProjectNumber);
+  const linkedProjectNumber = normalizeKey(actual.linkedProjectNumber);
+  if (
+    expectedProjectNumber &&
+    ((actualProjectNumber && actualProjectNumber !== expectedProjectNumber) ||
+      (linkedProjectNumber && linkedProjectNumber !== expectedProjectNumber))
+  ) {
+    return {
+      reason: "portfolio_project_number_mismatch",
+      expectedProjectName: expected.expectedProjectName,
+      expectedProjectNumber: expected.expectedProjectNumber ?? null,
+      expectedHubspotDealId: expected.expectedHubspotDealId,
+      expectedPortfolioProjectId: expectedPortfolioProjectId,
+      actualProjectName: actual.actualProjectName ?? null,
+      actualProjectNumber: actual.actualProjectNumber ?? null,
+      linkedHubspotDealId: actual.linkedHubspotDealId ?? null,
+      linkedProjectName: actual.linkedProjectName ?? null,
+      linkedProjectNumber: actual.linkedProjectNumber ?? null,
+    };
+  }
+
+  const expectedHubspotDealId = expected.expectedHubspotDealId?.trim() || null;
+  const linkedHubspotDealId = actual.linkedHubspotDealId?.trim() || null;
+  if (expectedHubspotDealId && linkedHubspotDealId && expectedHubspotDealId !== linkedHubspotDealId) {
+    return {
+      reason: "portfolio_hubspot_deal_mismatch",
+      expectedProjectName: expected.expectedProjectName,
+      expectedProjectNumber: expected.expectedProjectNumber ?? null,
+      expectedHubspotDealId,
+      expectedPortfolioProjectId: expectedPortfolioProjectId,
+      actualProjectName: actual.actualProjectName ?? null,
+      actualProjectNumber: actual.actualProjectNumber ?? null,
+      linkedHubspotDealId,
+      linkedProjectName: actual.linkedProjectName ?? null,
+      linkedProjectNumber: actual.linkedProjectNumber ?? null,
+    };
+  }
+
+  const expectedProjectName = normalizeKey(expected.expectedProjectName);
+  const actualProjectName = normalizeKey(actual.actualProjectName);
+  const linkedProjectName = normalizeKey(actual.linkedProjectName);
+  if (
+    !expectedProjectNumber &&
+    expectedProjectName &&
+    ((actualProjectName && actualProjectName !== expectedProjectName) ||
+      (linkedProjectName && linkedProjectName !== expectedProjectName))
+  ) {
+    return {
+      reason: "portfolio_project_name_mismatch",
+      expectedProjectName: expected.expectedProjectName,
+      expectedProjectNumber: expected.expectedProjectNumber ?? null,
+      expectedHubspotDealId: expected.expectedHubspotDealId,
+      expectedPortfolioProjectId: expectedPortfolioProjectId,
+      actualProjectName: actual.actualProjectName ?? null,
+      actualProjectNumber: actual.actualProjectNumber ?? null,
+      linkedHubspotDealId: actual.linkedHubspotDealId ?? null,
+      linkedProjectName: actual.linkedProjectName ?? null,
+      linkedProjectNumber: actual.linkedProjectNumber ?? null,
+    };
+  }
+
+  return null;
+}
+
+async function buildExpectedPortfolioIdentity(
+  bidboardProjectId: string,
+  identityContext?: PortfolioIdentityContext
+): Promise<ExpectedPortfolioIdentity> {
+  const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
+  return {
+    bidboardProjectId,
+    expectedProjectName:
+      identityContext?.projectName ||
+      mapping?.hubspotDealName ||
+      mapping?.bidboardProjectName ||
+      mapping?.procoreProjectName ||
+      undefined,
+    expectedProjectNumber:
+      identityContext?.projectNumber ||
+      mapping?.procoreProjectNumber ||
+      null,
+    expectedHubspotDealId:
+      identityContext?.hubspotDealId ||
+      mapping?.hubspotDealId ||
+      undefined,
+    expectedPortfolioProjectId: mapping?.portfolioProjectId || null,
+  };
+}
+
+async function fetchPortfolioProjectIdentity(
+  companyId: string,
+  portfolioProjectId: string
+): Promise<ActualPortfolioIdentity> {
+  const cachedProject = await storage.getProcoreProjectByProcoreId(portfolioProjectId).catch(() => undefined);
+  const mappedProject = await storage.getSyncMappingByPortfolioProjectId(portfolioProjectId).catch(() => undefined);
+
+  let actualProjectName = cachedProject?.name || cachedProject?.displayName || null;
+  let actualProjectNumber = cachedProject?.projectNumber || null;
+
+  try {
+    const { getAccessToken } = await import("../procore");
+    const { fetchWithRateLimitRetry } = await import("../lib/rate-limit-tracker");
+    const accessToken = await getAccessToken();
+    const resp = await fetchWithRateLimitRetry(
+      `https://api.procore.com/rest/v1.0/projects/${portfolioProjectId}?company_id=${companyId}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId },
+      },
+      "procore"
+    );
+    if (resp.ok) {
+      const data = await resp.json() as Record<string, unknown>;
+      actualProjectName =
+        typeof data.name === "string"
+          ? data.name
+          : typeof data.display_name === "string"
+          ? data.display_name
+          : actualProjectName;
+      actualProjectNumber =
+        typeof data.project_number === "string"
+          ? data.project_number
+          : typeof data.number === "string"
+          ? data.number
+          : actualProjectNumber;
+    }
+  } catch {
+    /* fall back to cached identity */
+  }
+
+  return {
+    portfolioProjectId,
+    actualProjectName,
+    actualProjectNumber,
+    linkedHubspotDealId: mappedProject?.hubspotDealId || null,
+    linkedProjectName:
+      mappedProject?.portfolioProjectName ||
+      mappedProject?.procoreProjectName ||
+      mappedProject?.hubspotDealName ||
+      null,
+    linkedProjectNumber: mappedProject?.procoreProjectNumber || null,
+  };
+}
+
+export async function quarantinePortfolioIdentityMismatch(
+  expected: ExpectedPortfolioIdentity,
+  actual: ActualPortfolioIdentity,
+  reason: PortfolioIdentityMismatch["reason"]
+): Promise<void> {
+  const mapping = await storage.getSyncMappingByBidboardProjectId(expected.bidboardProjectId);
+  if (mapping?.id) {
+    await storage.updateSyncMapping(mapping.id, {
+      metadata: mergeMetadata((mapping.metadata as Record<string, unknown> | undefined) ?? {}, {
+        portfolioIdentityQuarantine: {
+          status: "active",
+          reason,
+          detectedAt: new Date().toISOString(),
+          expected,
+          actual,
+        },
+      }),
+    });
+  }
+
+  await storage.createAuditLog({
+    action: "portfolio_automation_identity_quarantined",
+    entityType: "bidboard_project",
+    entityId: expected.bidboardProjectId,
+    source: "automation",
+    status: "error",
+    details: {
+      reason,
+      expected,
+      actual,
+    },
+  });
 }
 
 /**
