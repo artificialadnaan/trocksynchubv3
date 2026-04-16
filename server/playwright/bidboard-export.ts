@@ -19,11 +19,66 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { ensureLoggedIn } from "./auth";
 import { randomDelay, takeScreenshot } from "./browser";
+import { PROCORE_SELECTORS } from "./selectors";
 import { log } from "../index";
 import { storage } from "../storage";
 
 const EXPORTS_DIR = path.join(process.cwd(), "data", "exports");
 const EXPORT_TIMEOUT_MS = 60000;
+
+export async function openBidBoardExportMenu(page: any): Promise<boolean> {
+  const menuSelectors: { name: string; selector: string }[] = [
+    { name: '[data-qa="ci-EllipsisVertical"]', selector: '[data-qa="ci-EllipsisVertical"]' },
+    { name: 'span:has([data-qa="ci-EllipsisVertical"])', selector: 'span:has([data-qa="ci-EllipsisVertical"])' },
+    { name: 'button:has([data-qa="ci-EllipsisVertical"])', selector: 'button:has([data-qa="ci-EllipsisVertical"])' },
+    { name: 'svg[name="EllipsisVertical"]', selector: 'svg[name="EllipsisVertical"]' },
+    { name: "PROCORE_SELECTORS.bidboard.moreOptionsMenu", selector: PROCORE_SELECTORS.bidboard.moreOptionsMenu },
+  ];
+
+  for (const { name, selector } of menuSelectors) {
+    try {
+      const loc = page.locator(selector);
+      const count = await loc.count();
+      log(`Trying three-dot menu selector: ${name} (found ${count} elements)`, "playwright");
+      if (count === 0) continue;
+
+      const first = loc.first();
+      let isVisible = await first.isVisible().catch(() => false);
+      log(`Selector ${name}: first element visible=${isVisible}`, "playwright");
+
+      if (!isVisible && typeof first.hover === "function") {
+        await first.hover().catch(() => {});
+        await randomDelay(300, 600);
+        isVisible = await first.isVisible().catch(() => false);
+      }
+
+      if (!isVisible) continue;
+
+      await first.click({ timeout: 8000, force: true });
+      await randomDelay(1500, 2500);
+      if (await page.locator("text=Export").first().isVisible().catch(() => false)) {
+        log(`Three-dot menu opened successfully with selector: ${name}`, "playwright");
+        return true;
+      }
+      log(`Selector ${name}: clicked but Export text not visible`, "playwright");
+    } catch (err: any) {
+      log(`Selector ${name} failed: ${err?.message || String(err)}`, "playwright");
+    }
+  }
+
+  try {
+    await page.keyboard.press("Shift+F10");
+    await randomDelay(1000, 1500);
+    if (await page.locator("text=Export").first().isVisible().catch(() => false)) {
+      log("Three-dot menu opened successfully with keyboard fallback", "playwright");
+      return true;
+    }
+  } catch (err: any) {
+    log(`Keyboard export-menu fallback failed: ${err?.message || String(err)}`, "playwright");
+  }
+
+  return false;
+}
 
 async function getCompanyId(): Promise<string | null> {
   const config = await storage.getAutomationConfig("procore_config");
@@ -86,38 +141,7 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     await randomDelay(500, 1000);
 
     // Step 1: Click three-dot overflow menu
-    // DOM: <span class="StyledContent-..."><svg data-qa="ci-EllipsisVertical" name="EllipsisVertical" ...></span>
-    const menuSelectors: { name: string; fn: () => ReturnType<typeof page.locator> }[] = [
-      { name: '[data-qa="ci-EllipsisVertical"]', fn: () => page.locator('[data-qa="ci-EllipsisVertical"]') },
-      { name: 'span:has([data-qa="ci-EllipsisVertical"])', fn: () => page.locator('span:has([data-qa="ci-EllipsisVertical"])') },
-      { name: 'button:has([data-qa="ci-EllipsisVertical"])', fn: () => page.locator('button:has([data-qa="ci-EllipsisVertical"])') },
-      { name: 'svg[name="EllipsisVertical"]', fn: () => page.locator('svg[name="EllipsisVertical"]') },
-    ];
-    let menuClicked = false;
-    for (const { name, fn } of menuSelectors) {
-      try {
-        const loc = fn();
-        const count = await loc.count();
-        log(`Trying three-dot menu selector: ${name} (found ${count} elements)`, "playwright");
-        if (count > 0) {
-          const first = loc.first();
-          const isVisible = await first.isVisible().catch(() => false);
-          log(`Selector ${name}: first element visible=${isVisible}`, "playwright");
-          if (isVisible) {
-            await first.click({ timeout: 8000 });
-            await randomDelay(1500, 2500);
-            if (await page.locator("text=Export").first().isVisible().catch(() => false)) {
-              log(`Three-dot menu opened successfully with selector: ${name}`, "playwright");
-              menuClicked = true;
-              break;
-            }
-            log(`Selector ${name}: clicked but Export text not visible`, "playwright");
-          }
-        }
-      } catch (err: any) {
-        log(`Selector ${name} failed: ${err?.message || String(err)}`, "playwright");
-      }
-    }
+    const menuClicked = await openBidBoardExportMenu(page);
     if (!menuClicked) {
       log("Could not find three-dot overflow menu; all selectors exhausted", "playwright");
       await takeScreenshot(page, "bidboard-export-menu-not-found").catch((screenshotErr) => {
