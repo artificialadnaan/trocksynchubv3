@@ -8,6 +8,7 @@
 import { storage } from './storage';
 import { sendEmail } from './email-service';
 import { getDealOwnerInfo } from './hubspot';
+import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 
 export interface StageNotificationRoute {
   key: string;
@@ -117,7 +118,18 @@ function findRoute(stage: string, source: 'bidboard' | 'portfolio' | 'hubspot'):
   );
 }
 
-export function buildStageNotificationEmail(dealName: string, oldStage: string | null, newStage: string, procoreId: string): string {
+export function buildStageNotificationEmail(
+  dealName: string,
+  oldStage: string | null,
+  newStage: string,
+  procoreId: string,
+  procoreUrl?: string,
+): string {
+  const procoreIdDisplay = procoreId || 'Unknown';
+  const procoreIdHtml = procoreUrl
+    ? `<a href="${procoreUrl}" style="color: #ea580c; text-decoration: underline; font-weight: 600;">${procoreIdDisplay}</a>`
+    : procoreIdDisplay;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -163,7 +175,7 @@ export function buildStageNotificationEmail(dealName: string, oldStage: string |
                 </tr>
                 <tr>
                   <td style="padding: 14px 20px; color: #64748b; font-size: 13px;">Procore ID</td>
-                  <td style="padding: 14px 20px; color: #374151; font-size: 14px;">${procoreId}</td>
+                  <td style="padding: 14px 20px; color: #374151; font-size: 14px;">${procoreIdHtml}</td>
                 </tr>
               </table>
             </td>
@@ -264,6 +276,9 @@ export async function processStageNotification(params: {
     params.oldStage,
     params.stage,
     params.procoreProjectId,
+    params.procoreProjectId
+      ? `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${params.procoreProjectId}/tools/projecthome`
+      : undefined,
   );
 
   let sent = 0;

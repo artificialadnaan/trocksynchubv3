@@ -423,6 +423,10 @@ export async function sendStageChangeEmail(params: {
   const procoreUrl = trimmedProcoreId
     ? `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${trimmedProcoreId}/tools/projecthome`
     : PROCORE_PORTFOLIO_URL;
+  const projectNumberDisplay = projectNumber || 'Not yet assigned';
+  const projectNumberHtml = trimmedProcoreId
+    ? `<a href="${procoreUrl}" style="color: #93c5fd; text-decoration: underline;">${projectNumberDisplay}</a>`
+    : projectNumberDisplay;
 
   // HubSpot: Use correct portal ID 45644695 with eschref for RFP deals list
   const HUBSPOT_PORTAL_ID = '45644695';
@@ -433,7 +437,7 @@ export async function sendStageChangeEmail(params: {
     dealName: params.dealName || 'Unknown Deal',
     projectName: displayProjectName,
     procoreProjectName: displayProjectName,
-    projectNumber,
+    projectNumber: projectNumberHtml,
     projectId: params.procoreProjectId,
     previousStage: params.oldStage || 'Unknown',
     newStage: params.newStage || 'Unknown',
