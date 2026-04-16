@@ -1944,11 +1944,11 @@ export class DatabaseStorage implements IStorage {
               </p>
               
               <!-- Project Name Card -->
-              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;">
+              <div style="background-color: #1a1a2e; background-image: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;">
                 <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project</span>
                 <h2 style="color: #ffffff; font-size: 22px; font-weight: 700; margin: 8px 0 0 0;">{{projectName}}</h2>
-                <p style="color: #64748b; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;">Project #: {{projectNumber}}</p>
-                <p style="color: #64748b; font-size: 12px; margin: 4px 0 0 0; font-family: monospace;">Procore ID: {{procoreProjectId}}</p>
+                <p style="color: #cbd5e1; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;">Project #: {{projectNumber}}</p>
+                <p style="color: #cbd5e1; font-size: 12px; margin: 4px 0 0 0; font-family: monospace;">Procore ID: {{procoreProjectId}}</p>
               </div>
               
               <!-- Stage Change Visual -->

@@ -59,6 +59,22 @@ function buildHubspotDealUrl(hubspotDealId?: string | null): string {
     : HUBSPOT_DEALS_FALLBACK_URL;
 }
 
+function normalizeStageChangeTemplate(templateHtml: string): string {
+  return templateHtml
+    .replace(
+      'background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;',
+      'background-color: #1a1a2e; background-image: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0; text-align: center;'
+    )
+    .replace(
+      'color: #64748b; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;',
+      'color: #cbd5e1; font-size: 12px; margin: 8px 0 0 0; font-family: monospace;'
+    )
+    .replace(
+      'color: #64748b; font-size: 12px; margin: 4px 0 0 0; font-family: monospace;',
+      'color: #cbd5e1; font-size: 12px; margin: 4px 0 0 0; font-family: monospace;'
+    );
+}
+
 async function resolveRoleAssignmentHubspotDealId(
   procoreProjectId: string,
   mappedHubspotDealId?: string | null
@@ -406,11 +422,15 @@ export async function sendStageChangeEmail(params: {
   // Old format stage_change:{dealId}:{stageName} caused duplicate key on revisit — each insert needs a unique key.
   const dedupeKey = `stage_change:${params.hubspotDealId}:${params.oldStage}:${params.newStage}:${Date.now()}`;
 
-  const mapping = await storage.getSyncMappingByProcoreProjectId(params.procoreProjectId);
+  const hubspotDeal = await storage.getHubspotDealByHubspotId(params.hubspotDealId).catch(() => undefined);
+  const mapping = params.procoreProjectId
+    ? await storage.getSyncMappingByProcoreProjectId(params.procoreProjectId)
+    : await storage.getSyncMappingByHubspotDealId(params.hubspotDealId);
   const procoreProject = params.procoreProjectId
     ? await storage.getProcoreProjectByProcoreId(params.procoreProjectId).catch(() => undefined)
     : undefined;
-  const projectNumber = procoreProject?.projectNumber?.trim() || mapping?.procoreProjectNumber?.trim() || '';
+  const hubspotProjectNumber = String((hubspotDeal?.properties as any)?.project_number || '').trim();
+  const projectNumber = procoreProject?.projectNumber?.trim() || mapping?.procoreProjectNumber?.trim() || hubspotProjectNumber;
 
   // When no Procore project linked, use deal name instead of "Not yet linked to Procore"
   const displayProjectName = params.procoreProjectId
@@ -452,7 +472,7 @@ export async function sendStageChangeEmail(params: {
   };
 
   const subject = renderTemplate(template.subject, variables);
-  const htmlBody = renderTemplate(template.bodyHtml, variables);
+  const htmlBody = renderTemplate(normalizeStageChangeTemplate(template.bodyHtml), variables);
 
   const result = await sendEmail({
     to: ownerInfo.ownerEmail,
