@@ -4,6 +4,8 @@ import { storage } from "../storage";
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import { resolveRfpDescription } from "../rfp-approval";
 
+const inFlightApprovalTokens = new Set<string>();
+
 // ── HTML helpers ──────────────────────────────────────────────────────────────
 
 const RFP_LOGO_HTML = `<img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock GC" referrerpolicy="no-referrer" onerror="this.style.display='none';var s=this.nextElementSibling;s.style.display='inline';" style="max-width:140px;height:auto;vertical-align:middle;"><span style="display:none;color:#fff;font-size:22px;font-weight:700;letter-spacing:0.5px;vertical-align:middle;">T-Rock GC</span>`;
@@ -348,9 +350,16 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
           method: 'POST',
           body: fd,
         });
-        const data = await resp.json();
+        const raw = await resp.text();
+        let data;
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error(raw || ('Request failed with status ' + resp.status));
+        }
         if (data.success) {
-          showResult('<strong>Approved!</strong> The deal has been updated in HubSpot and a BidBoard project is being created.' + (data.bidboardProjectId ? ' BidBoard Project ID: ' + data.bidboardProjectId : ''), 'success');
+          const message = data.message || 'The deal has been updated in HubSpot and a BidBoard project is being created in the background.';
+          showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + data.bidboardProjectId : ''), 'success');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
           showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
@@ -380,7 +389,13 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ declinerEmail: email }),
         });
-        const data = await resp.json();
+        const raw = await resp.text();
+        let data;
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error(raw || ('Request failed with status ' + resp.status));
+        }
         if (data.success) {
           showResult('This RFP has been <strong>declined</strong>. No BidBoard project will be created. The deal remains at RFP stage in HubSpot.', 'declined');
           document.getElementById('rfpForm').style.display = 'none';
@@ -480,16 +495,45 @@ export function registerRfpApprovalRoutes(app: Express) {
           attachmentsOverride = typeof ao === 'string' ? JSON.parse(ao || '[]') : ao || [];
         } catch { /* fallback to empty */ }
         const newFiles = files.newFiles ? (Array.isArray(files.newFiles) ? files.newFiles : [files.newFiles]) : [];
-        const { processRfpApproval } = await import('../rfp-approval');
-        const result = await processRfpApproval(token, editedFields, approverEmail, { attachmentsOverride, newFiles });
-        if (!result.success) {
-          return res.status(500).json({
-            success: false,
-            error: result.error || 'Approval failed',
-            details: result.error,
+
+        const request = await storage.getRfpApprovalRequestByToken(token);
+        if (!request) {
+          return res.status(404).json({ success: false, error: 'Approval request not found' });
+        }
+        if (request.status !== 'pending') {
+          return res.status(409).json({ success: false, error: `Request already ${request.status}` });
+        }
+
+        if (inFlightApprovalTokens.has(token)) {
+          return res.status(202).json({
+            success: true,
+            queued: true,
+            alreadyProcessing: true,
+            message: 'This approval is already being processed in the background.',
           });
         }
-        res.json(result);
+
+        inFlightApprovalTokens.add(token);
+
+        res.status(202).json({
+          success: true,
+          queued: true,
+          message: 'The deal is being updated in HubSpot now, and BidBoard project creation will continue in the background.',
+        });
+
+        setImmediate(async () => {
+          try {
+            const { processRfpApproval } = await import('../rfp-approval');
+            const result = await processRfpApproval(token, editedFields, approverEmail, { attachmentsOverride, newFiles });
+            if (!result.success) {
+              console.error(`[rfp-approval] Background approval failed for token ${token}: ${result.error || 'Approval failed'}`);
+            }
+          } catch (backgroundErr: any) {
+            console.error(`[rfp-approval] Background approval error for token ${token}:`, backgroundErr.message);
+          } finally {
+            inFlightApprovalTokens.delete(token);
+          }
+        });
       } catch (e: any) {
         console.error('[rfp-approval] Approve error:', e.message);
         res.status(500).json({ success: false, error: e.message });
