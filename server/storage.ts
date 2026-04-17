@@ -1860,24 +1860,24 @@ export class DatabaseStorage implements IStorage {
               </p>
               
               <!-- Info Card -->
-              <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
+              <div style="background-color: #1a1a2e; background-image: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
                   <tr>
                     <td style="padding: 12px 0;">
-                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Name</span><br>
+                      <span style="color: #cbd5e1; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Project Name</span><br>
                       <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{projectName}}</span>
                     </td>
                   </tr>
                   <tr>
                     <td style="padding: 12px 0; border-top: 1px solid #334155;">
-                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Your Role</span><br>
+                      <span style="color: #cbd5e1; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Your Role</span><br>
                       <span style="color: #d11921; font-size: 18px; font-weight: 700;">{{roleName}}</span>
                     </td>
                   </tr>
                   <tr>
                     <td style="padding: 12px 0; border-top: 1px solid #334155;">
-                      <span style="color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project ID</span><br>
-                      <span style="color: #e2e8f0; font-size: 14px; font-family: monospace;">{{projectId}}</span>
+                      <span style="color: #cbd5e1; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Project ID</span><br>
+                      <span style="color: #f8fafc; font-size: 14px; font-family: monospace;">{{projectId}}</span>
                     </td>
                   </tr>
                 </table>
@@ -1885,7 +1885,7 @@ export class DatabaseStorage implements IStorage {
               
               <!-- Primary CTA Button -->
               <div style="text-align: center; margin: 24px 0;">
-                <a href="{{procoreUrl}}" style="display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 32px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);">
+                <a href="{{procoreUrl}}" style="display: inline-block; background-color: #d11921; border: 2px solid #b71c1c; color: #ffffff; font-size: 16px; font-weight: 700; text-decoration: none; padding: 16px 32px; border-radius: 8px;">
                   Open in Procore →
                 </a>
               </div>

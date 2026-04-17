@@ -75,6 +75,30 @@ function normalizeStageChangeTemplate(templateHtml: string): string {
     );
 }
 
+function normalizeProjectRoleAssignmentTemplate(templateHtml: string): string {
+  return templateHtml
+    .replace(
+      'background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;',
+      'background-color: #1a1a2e; background-image: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 24px; margin: 0 0 24px 0;'
+    )
+    .replace(
+      'color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project Name</span><br>\n                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{projectName}}</span>',
+      'color: #cbd5e1; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Project Name</span><br>\n                      <span style="color: #ffffff; font-size: 20px; font-weight: 700;">{{projectName}}</span>'
+    )
+    .replace(
+      'color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Your Role</span><br>',
+      'color: #cbd5e1; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Your Role</span><br>'
+    )
+    .replace(
+      'color: #94a3b8; font-size: 11px; text-transform: uppercase; font-weight: 600; letter-spacing: 1px;">Project ID</span><br>\n                      <span style="color: #e2e8f0; font-size: 14px; font-family: monospace;">{{projectId}}</span>',
+      'color: #cbd5e1; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;">Project ID</span><br>\n                      <span style="color: #f8fafc; font-size: 14px; font-family: monospace;">{{projectId}}</span>'
+    )
+    .replace(
+      'display: inline-block; background: linear-gradient(135deg, #d11921 0%, #b71c1c 100%); color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; padding: 16px 32px; border-radius: 8px; box-shadow: 0 4px 14px rgba(209, 25, 33, 0.4);',
+      'display: inline-block; background-color: #d11921; border: 2px solid #b71c1c; color: #ffffff; font-size: 16px; font-weight: 700; text-decoration: none; padding: 16px 32px; border-radius: 8px;'
+    );
+}
+
 async function resolveRoleAssignmentHubspotDealId(
   procoreProjectId: string,
   mappedHubspotDealId?: string | null
@@ -155,7 +179,7 @@ export async function sendRoleAssignmentEmails(
     };
 
     const subject = renderTemplate(template.subject, variables);
-    const htmlBody = renderTemplate(template.bodyHtml, variables);
+    const htmlBody = renderTemplate(normalizeProjectRoleAssignmentTemplate(template.bodyHtml), variables);
 
     const result = await sendEmail({
       to: assignment.assigneeEmail,
