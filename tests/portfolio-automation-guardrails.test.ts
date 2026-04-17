@@ -78,6 +78,17 @@ describe("portfolio automation guard rails", () => {
         createPrimeContractVisible: true,
         createPrimeContractEnabled: true,
         hasModal: false,
+        hasLoadingSpinner: true,
+      })
+    ).toBe(true);
+
+    expect(
+      isPortfolioFinancialWorkflowReady({
+        sendToBudgetVisible: true,
+        sendToBudgetEnabled: false,
+        createPrimeContractVisible: true,
+        createPrimeContractEnabled: true,
+        hasModal: false,
         hasLoadingSpinner: false,
       })
     ).toBe(true);

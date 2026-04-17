@@ -160,8 +160,10 @@ export function isDocumentsToolUiSettled(state: DocumentsToolUiState): boolean {
 export function isPortfolioFinancialWorkflowReady(
   state: PortfolioFinancialWorkflowState
 ): boolean {
-  if (state.hasModal || state.hasLoadingSpinner) return false;
-  return state.createPrimeContractEnabled || !state.sendToBudgetVisible;
+  if (state.hasModal) return false;
+  if (state.createPrimeContractEnabled) return true;
+  if (state.hasLoadingSpinner) return false;
+  return !state.sendToBudgetVisible;
 }
 
 export interface ExpectedPortfolioIdentity {
