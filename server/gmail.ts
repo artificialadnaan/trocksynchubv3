@@ -263,11 +263,18 @@ function encodeSubject(subject: string): string {
   return `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`;
 }
 
-function buildRawEmail(to: string, subject: string, htmlBody: string, fromName?: string): string {
+function buildRawEmail(
+  to: string,
+  subject: string,
+  htmlBody: string,
+  fromName?: string,
+  cc?: string[]
+): string {
   const boundary = `boundary_${Date.now()}`;
   const lines = [
     `From: ${fromName ? `${fromName} <me>` : 'me'}`,
     `To: ${to}`,
+    ...(cc && cc.length > 0 ? [`Cc: ${cc.join(', ')}`] : []),
     `Subject: ${encodeSubject(subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
@@ -289,16 +296,28 @@ export async function sendEmail(params: {
   subject: string;
   htmlBody: string;
   fromName?: string;
-}): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  cc?: string[];
+}): Promise<{ success: boolean; messageId?: string; error?: string; to?: string; cc?: string[] }> {
   try {
     const gmail = await getUncachableGmailClient();
-    const raw = buildRawEmail(params.to, params.subject, params.htmlBody, params.fromName);
+    const raw = buildRawEmail(
+      params.to,
+      params.subject,
+      params.htmlBody,
+      params.fromName,
+      params.cc
+    );
     const result = await gmail.users.messages.send({
       userId: 'me',
       requestBody: { raw },
     });
     console.log(`[Email] Sent to ${params.to}: "${params.subject}" (ID: ${result.data.id})`);
-    return { success: true, messageId: result.data.id || undefined };
+    return {
+      success: true,
+      messageId: result.data.id || undefined,
+      to: params.to,
+      cc: params.cc || [],
+    };
   } catch (error: any) {
     console.error(`[Email] Failed to send to ${params.to}:`, error.message);
     return { success: false, error: error.message };

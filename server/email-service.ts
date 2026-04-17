@@ -115,6 +115,16 @@ const GLOBAL_CC_RECIPIENTS = [
   'bbell@trockgc.com',
 ];
 
+function buildFinalCcList(to: string, cc?: string[]): string[] {
+  const ccSet = new Set(
+    [...GLOBAL_CC_RECIPIENTS, ...(cc || [])]
+      .map((email) => email?.trim())
+      .filter((email): email is string => Boolean(email))
+  );
+  ccSet.delete(to);
+  return Array.from(ccSet);
+}
+
 export async function sendEmail(params: {
   to: string;
   subject: string;
@@ -122,14 +132,9 @@ export async function sendEmail(params: {
   fromName?: string;
   provider?: EmailProvider;
   cc?: string[];
-}): Promise<{ success: boolean; messageId?: string; error?: string; provider: string }> {
+}): Promise<{ success: boolean; messageId?: string; error?: string; provider: string; to?: string; cc?: string[] }> {
   const config = await getEmailConfig();
   const provider = params.provider || config.activeProvider;
-
-  // Build CC list: merge global CC with any per-email CC, excluding the primary recipient
-  const ccSet = new Set([...GLOBAL_CC_RECIPIENTS, ...(params.cc || [])]);
-  ccSet.delete(params.to); // Don't CC someone who is already the To recipient
-  const finalCc = Array.from(ccSet);
 
   // Check for testing mode - redirect all emails to test address
   const testingMode = await storage.getTestingMode();
@@ -173,9 +178,11 @@ export async function sendEmail(params: {
     console.log(`[Email] Testing mode: Redirecting email from ${originalRecipient} to ${finalTo}`);
   }
 
-  const sendWithGmailFallback = async (fallbackReason: string): Promise<{ success: boolean; messageId?: string; error?: string; provider: string }> => {
+  const finalCc = testingMode.enabled ? [] : buildFinalCcList(finalTo, params.cc);
+
+  const sendWithGmailFallback = async (fallbackReason: string): Promise<{ success: boolean; messageId?: string; error?: string; provider: string; to?: string; cc?: string[] }> => {
     if (!config.gmailConnected) {
-      return { success: false, error: fallbackReason, provider: 'outlook' };
+      return { success: false, error: fallbackReason, provider: 'outlook', to: finalTo, cc: finalCc };
     }
 
     console.warn(`[Email] Outlook unavailable, falling back to Gmail: ${fallbackReason}`);
@@ -184,11 +191,14 @@ export async function sendEmail(params: {
       to: finalTo,
       subject: finalSubject,
       htmlBody: finalBody,
+      cc: finalCc,
     });
 
     return {
       ...gmailResult,
       provider: 'gmail',
+      to: gmailResult.to || finalTo,
+      cc: gmailResult.cc || finalCc,
       error: gmailResult.success ? undefined : `${fallbackReason}; Gmail fallback failed: ${gmailResult.error || 'Unknown Gmail error'}`,
     };
   };
@@ -197,19 +207,19 @@ export async function sendEmail(params: {
     if (!config.outlookConnected) {
       return sendWithGmailFallback('Outlook not connected');
     }
-    const result = await sendOutlookEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody, cc: testingMode.enabled ? [] : finalCc });
+    const result = await sendOutlookEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody, cc: finalCc });
     if (result.success) {
-      return { ...result, provider: 'outlook' };
+      return { ...result, provider: 'outlook', to: finalTo, cc: finalCc };
     }
     return sendWithGmailFallback(result.error || 'Outlook send failed');
   }
 
   // Default to Gmail
   if (!config.gmailConnected) {
-    return { success: false, error: 'Gmail not connected', provider: 'gmail' };
+    return { success: false, error: 'Gmail not connected', provider: 'gmail', to: finalTo, cc: finalCc };
   }
-  const result = await sendGmailEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody });
-  return { ...result, provider: 'gmail' };
+  const result = await sendGmailEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody, cc: finalCc });
+  return { ...result, provider: 'gmail', to: result.to || finalTo, cc: result.cc || finalCc };
 }
 
 export async function getEmailStats(): Promise<{

@@ -304,20 +304,41 @@ export async function processStageNotification(params: {
   let sent = 0;
   for (const recipient of recipients) {
     try {
-      await sendEmail({
+      const emailResult = await sendEmail({
         to: recipient,
         subject: `Stage Update: ${params.projectName} → ${params.stage}`,
         htmlBody,
         fromName: 'T-Rock Sync Hub',
       });
+      if (!emailResult.success) {
+        throw new Error(emailResult.error || 'Unknown email send failure');
+      }
       sent++;
+      await storage.createEmailSendLog({
+        templateKey: `stage_notify_${route.key}`,
+        recipientEmail: recipient,
+        subject: `Stage Update: ${params.projectName} → ${params.stage}`,
+        dedupeKey: `${dedupeKey}:${recipient}`,
+        status: 'sent',
+        metadata: {
+          route: route.key,
+          stage: params.stage,
+          oldStage: params.oldStage,
+          projectId: notificationEntityId,
+          identifierLabel,
+          identifierValue,
+          provider: emailResult.provider,
+          finalTo: emailResult.to || recipient,
+          finalCc: emailResult.cc || [],
+        },
+        sentAt: new Date(),
+      });
       console.log(`[stage-notify] ${route.key} email sent to ${recipient} for ${params.projectName}`);
     } catch (err: any) {
       console.error(`[stage-notify] Failed to send to ${recipient}:`, err.message);
     }
   }
 
-  // Record dedup key so this exact transition won't fire again
   if (sent > 0) {
     try {
       await storage.createEmailSendLog({
@@ -333,6 +354,7 @@ export async function processStageNotification(params: {
           projectId: notificationEntityId,
           identifierLabel,
           identifierValue,
+          deliveryCount: sent,
         },
         sentAt: new Date(),
       });
