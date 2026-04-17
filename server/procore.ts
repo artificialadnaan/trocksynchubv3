@@ -248,6 +248,93 @@ function projectDataFromApi(project: any): any {
   };
 }
 
+type RoleSyncProjectEntry = {
+  procoreId: string;
+  name: string;
+  lastRoleCheckAt?: Date | null;
+  procoreUpdatedAt?: Date | null;
+  active?: boolean | null;
+};
+
+async function resolveRoleSyncProjectEntry(projectId: string): Promise<RoleSyncProjectEntry | null> {
+  const existing = await storage.getProcoreProjectByProcoreId(projectId);
+  if (existing) {
+    return {
+      procoreId: existing.procoreId,
+      name: existing.name || '',
+      lastRoleCheckAt: existing.lastRoleCheckAt,
+      procoreUpdatedAt: existing.procoreUpdatedAt ?? null,
+      active: existing.active,
+    };
+  }
+
+  try {
+    const detail = await fetchProcoreProjectDetail(projectId);
+    const data = projectDataFromApi(detail);
+    await storage.upsertProcoreProject(data);
+    return {
+      procoreId: data.procoreId,
+      name: data.name || '',
+      lastRoleCheckAt: data.lastRoleCheckAt ?? null,
+      procoreUpdatedAt: data.procoreUpdatedAt ?? null,
+      active: data.active ?? null,
+    };
+  } catch (err: any) {
+    if (err.message?.includes('403') || err.message?.includes('404')) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+export function collectMappedRoleSyncProjectIds(
+  mappings: Array<{
+    portfolioProjectId?: string | null;
+    procoreProjectId?: string | null;
+    bidboardProjectId?: string | null;
+    projectPhase?: string | null;
+  }>
+): string[] {
+  const ids = new Set<string>();
+  for (const mapping of mappings) {
+    const portfolioId = String(mapping.portfolioProjectId || '').trim();
+    const legacyProcoreId = String(mapping.procoreProjectId || '').trim();
+    const bidboardId = String(mapping.bidboardProjectId || '').trim();
+
+    if (portfolioId) {
+      ids.add(portfolioId);
+      continue;
+    }
+
+    if (
+      legacyProcoreId &&
+      legacyProcoreId !== bidboardId &&
+      String(mapping.projectPhase || '').trim().toLowerCase() !== 'bidboard'
+    ) {
+      ids.add(legacyProcoreId);
+    }
+  }
+  return Array.from(ids);
+}
+
+export async function mergeMappedRoleSyncProjects(
+  existingProjects: Map<string, RoleSyncProjectEntry>,
+  mappings: Array<{
+    portfolioProjectId?: string | null;
+    procoreProjectId?: string | null;
+    bidboardProjectId?: string | null;
+    projectPhase?: string | null;
+  }>,
+  resolver: (projectId: string) => Promise<RoleSyncProjectEntry | null> = resolveRoleSyncProjectEntry
+): Promise<Map<string, RoleSyncProjectEntry>> {
+  for (const pid of collectMappedRoleSyncProjectIds(mappings)) {
+    if (existingProjects.has(pid)) continue;
+    const project = await resolver(pid);
+    if (project) existingProjects.set(pid, project);
+  }
+  return existingProjects;
+}
+
 // Export helper functions for external use (e.g., procore-documents.ts)
 export async function getCompanyId(): Promise<string> {
   const config = await getProcoreConfig();
@@ -1113,14 +1200,14 @@ async function performRoleAssignmentSync(projectIds?: string[], fullSync: boolea
   const config = await getProcoreConfig();
   const companyId = config.companyId;
 
-  type ProjectEntry = { procoreId: string; name: string };
+  type ProjectEntry = RoleSyncProjectEntry;
   let projectsToSync: ProjectEntry[] = [];
 
   if (projectIds && projectIds.length > 0) {
     // Explicit project IDs always sync (webhooks, closeout automation)
     for (const pid of projectIds) {
-      const p = await storage.getProcoreProjectByProcoreId(pid);
-      if (p) projectsToSync.push({ procoreId: pid, name: p.name || '' });
+      const p = await resolveRoleSyncProjectEntry(pid);
+      if (p) projectsToSync.push(p);
     }
   } else {
     const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
@@ -1137,22 +1224,7 @@ async function performRoleAssignmentSync(projectIds?: string[], fullSync: boolea
     // Also include any projects referenced in sync mappings that aren't in the main list
     const byId = new Map(allWithMeta.map(p => [p.procoreId, p]));
     const mappings = await storage.getSyncMappings();
-    for (const m of mappings) {
-      for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
-        if (pid && !byId.has(pid)) {
-          const p = await storage.getProcoreProjectByProcoreId(pid);
-          if (p) {
-            byId.set(pid, {
-              procoreId: pid,
-              name: p.name || '',
-              lastRoleCheckAt: p.lastRoleCheckAt,
-              procoreUpdatedAt: p.procoreUpdatedAt ?? null,
-              active: p.active,
-            });
-          }
-        }
-      }
-    }
+    await mergeMappedRoleSyncProjects(byId, mappings);
     const allProjectsMeta = Array.from(byId.values());
 
     if (fullSync) {
@@ -1348,7 +1420,7 @@ export async function syncProcoreRoleAssignmentsBatch(
     const config = await getProcoreConfig();
     const companyId = config.companyId;
 
-    type ProjectEntry = { procoreId: string; name: string };
+    type ProjectEntry = RoleSyncProjectEntry;
     const { data: allProjects } = await storage.getProcoreProjects({ limit: 10000 });
     const activeWithMeta = allProjects
       .filter(p => p.active !== false)
@@ -1360,21 +1432,7 @@ export async function syncProcoreRoleAssignmentsBatch(
       }));
     const byId = new Map(activeWithMeta.map(p => [p.procoreId, p]));
     const mappings = await storage.getSyncMappings();
-    for (const m of mappings) {
-      for (const pid of [m.portfolioProjectId, m.procoreProjectId, m.bidboardProjectId]) {
-        if (pid && !byId.has(pid)) {
-          const p = await storage.getProcoreProjectByProcoreId(pid);
-          if (p) {
-            byId.set(pid, {
-              procoreId: pid,
-              name: p.name || '',
-              lastRoleCheckAt: p.lastRoleCheckAt,
-              procoreUpdatedAt: p.procoreUpdatedAt ?? null,
-            });
-          }
-        }
-      }
-    }
+    await mergeMappedRoleSyncProjects(byId, mappings);
     const fullList: ProjectEntry[] = Array.from(byId.values())
       .map(p => ({ procoreId: p.procoreId, name: p.name }))
       .sort((a, b) => String(a.procoreId).localeCompare(String(b.procoreId), undefined, { numeric: true }));
