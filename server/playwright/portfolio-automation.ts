@@ -141,6 +141,29 @@ export interface PortfolioIdentityContext {
   hubspotDealId?: string;
 }
 
+export interface DocumentsToolUiState {
+  hasModal: boolean;
+  hasLoadingSpinner: boolean;
+}
+
+export interface PortfolioFinancialWorkflowState extends DocumentsToolUiState {
+  sendToBudgetVisible: boolean;
+  sendToBudgetEnabled: boolean;
+  createPrimeContractVisible: boolean;
+  createPrimeContractEnabled: boolean;
+}
+
+export function isDocumentsToolUiSettled(state: DocumentsToolUiState): boolean {
+  return !state.hasModal && !state.hasLoadingSpinner;
+}
+
+export function isPortfolioFinancialWorkflowReady(
+  state: PortfolioFinancialWorkflowState
+): boolean {
+  if (state.hasModal || state.hasLoadingSpinner) return false;
+  return state.createPrimeContractEnabled || !state.sendToBudgetVisible;
+}
+
 export interface ExpectedPortfolioIdentity {
   bidboardProjectId: string;
   expectedProjectName?: string;
@@ -266,9 +289,10 @@ async function captureFailureContext(
     diagnostics.hasErrorToast =
       (await page.locator('[class*="error"], [role="alert"], .toast-error').count()) > 0;
     diagnostics.hasModal =
-      (await page.locator('[role="dialog"], [role="presentation"]').count()) > 0;
+      (await page.locator('.MuiDialog-root, [role="presentation"].MuiModal-root, [role="dialog"]').count()) > 0;
     diagnostics.hasLoadingSpinner =
       (await page.locator('[role="img"][aria-label="Loading"], .ajax-loader').count()) > 0;
+    diagnostics.visibleMenuItems = await getVisibleMenuItems(page);
 
     const errorEl = await page.$('[class*="error"], [role="alert"]');
     if (errorEl) {
@@ -276,7 +300,7 @@ async function captureFailureContext(
     }
 
     const modalTitle = await page.$(
-      '[role="dialog"] h2, [role="dialog"] h3, [role="presentation"] h2'
+      '.MuiDialog-root h2, .MuiDialog-root h3, [role="dialog"] h2, [role="dialog"] h3, [role="presentation"].MuiModal-root h2'
     );
     if (modalTitle) {
       diagnostics.modalTitle = await modalTitle.textContent().catch(() => null);
@@ -464,6 +488,54 @@ async function waitForConfirmButtonEnabled(page: Page, timeoutMs: number = 60000
   await randomDelay(500, 1000);
 }
 
+async function getBlockingUiState(page: Page): Promise<DocumentsToolUiState> {
+  const hasModal = await page
+    .locator('.MuiDialog-root, [role="presentation"].MuiModal-root, [role="dialog"]')
+    .count()
+    .then((count) => count > 0)
+    .catch(() => false);
+  const hasLoadingSpinner = await page
+    .locator(`${SEL.modal.loadingSpinner}, .ajax-loader`)
+    .count()
+    .then((count) => count > 0)
+    .catch(() => false);
+
+  return { hasModal, hasLoadingSpinner };
+}
+
+async function waitForBlockingUiToSettle(
+  page: Page,
+  context: string,
+  attempts: number,
+  delayRange: [number, number]
+): Promise<DocumentsToolUiState> {
+  let state = await getBlockingUiState(page);
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (isDocumentsToolUiSettled(state)) return state;
+
+    log(
+      `[portfolio-auto] ${context} still busy (attempt ${attempt}/${attempts}): hasModal=${state.hasModal}, hasLoadingSpinner=${state.hasLoadingSpinner}`,
+      "playwright"
+    );
+    await randomDelay(delayRange[0], delayRange[1]);
+    state = await getBlockingUiState(page);
+  }
+
+  return state;
+}
+
+async function getVisibleMenuItems(page: Page): Promise<string[]> {
+  return page
+    .locator('[role="menuitem"]')
+    .evaluateAll((nodes) =>
+      nodes
+        .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+    )
+    .catch(() => []);
+}
+
 // ─── Helper: Click menu item with fallback ──────────────────────
 
 async function clickMenuItem(
@@ -562,10 +634,20 @@ async function openBidBoardFoldersMenu(page: Page): Promise<"sibling" | "hover" 
 async function clickSendToDocumentsToolWithRetry(page: Page): Promise<{ openedBy: string }> {
   let lastError = "Send To Documents Tool menu item not ready";
 
-  for (let attempt = 1; attempt <= 5; attempt++) {
+  for (let attempt = 1; attempt <= 8; attempt++) {
     await dismissOpenModals(page);
     await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
-    await randomDelay(1500, 2200);
+    const uiState = await waitForBlockingUiToSettle(page, "Documents Tool page", 3, [2500, 3500]);
+    await randomDelay(1200, 1800);
+
+    const exportAlreadyStarted = await page
+      .locator('text=/Preparing export to Documents tool/i')
+      .first()
+      .isVisible({ timeout: 1000 })
+      .catch(() => false);
+    if (exportAlreadyStarted) {
+      return { openedBy: "already-started" };
+    }
 
     let openedBy = "unknown";
     try {
@@ -578,7 +660,8 @@ async function clickSendToDocumentsToolWithRetry(page: Page): Promise<{ openedBy
       );
 
       if (!menuItem) {
-        lastError = `Send To Documents Tool menu item not visible on attempt ${attempt}`;
+        const visibleMenuItems = await getVisibleMenuItems(page);
+        lastError = `Send To Documents Tool menu item not visible on attempt ${attempt} (busy: modal=${uiState.hasModal}, spinner=${uiState.hasLoadingSpinner}, visibleMenuItems=${visibleMenuItems.join(" | ") || "none"})`;
       } else {
         await menuItem.click({ timeout: 15000 });
         await randomDelay(1000, 1500);
@@ -586,33 +669,32 @@ async function clickSendToDocumentsToolWithRetry(page: Page): Promise<{ openedBy
         const started = await page
           .locator('text=/Preparing export to Documents tool/i')
           .first()
-          .isVisible({ timeout: 10000 })
+          .isVisible({ timeout: 15000 })
           .catch(() => false);
 
         if (started) {
           return { openedBy };
         }
 
-        lastError = `Documents Tool export confirmation not detected on attempt ${attempt}`;
+        const postClickState = await getBlockingUiState(page);
+        lastError = `Documents Tool export confirmation not detected on attempt ${attempt} (busy: modal=${postClickState.hasModal}, spinner=${postClickState.hasLoadingSpinner})`;
       }
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
 
     await page.keyboard.press("Escape").catch(() => {});
-    await randomDelay(1500, 2200);
+    await randomDelay(2500, 3500);
   }
 
   throw new Error(lastError);
 }
 
-async function getPortfolioEstimatingMenuState(page: Page): Promise<{
-  sendToBudgetVisible: boolean;
-  sendToBudgetEnabled: boolean;
-  createPrimeContractVisible: boolean;
-  createPrimeContractEnabled: boolean;
+async function getPortfolioEstimatingMenuState(page: Page): Promise<PortfolioFinancialWorkflowState & {
+  visibleMenuItems: string[];
 }> {
   await dismissOpenModals(page);
+  const blockingUiState = await getBlockingUiState(page);
   await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
   await randomDelay(1000, 1500);
 
@@ -639,34 +721,31 @@ async function getPortfolioEstimatingMenuState(page: Page): Promise<{
       { requireEnabled: true }
     )
   );
+  const visibleMenuItems = await getVisibleMenuItems(page);
 
   await page.keyboard.press("Escape").catch(() => {});
   await randomDelay(400, 700);
 
   return {
+    ...blockingUiState,
     sendToBudgetVisible,
     sendToBudgetEnabled,
     createPrimeContractVisible,
     createPrimeContractEnabled,
+    visibleMenuItems,
   };
 }
 
-async function waitForBudgetProcessingToFinish(page: Page): Promise<{
-  createPrimeContractEnabled: boolean;
-  sendToBudgetStillVisible: boolean;
+async function waitForBudgetProcessingToFinish(page: Page): Promise<PortfolioFinancialWorkflowState & {
+  visibleMenuItems: string[];
 }> {
-  for (let attempt = 1; attempt <= 6; attempt++) {
+  for (let attempt = 1; attempt <= 8; attempt++) {
     const state = await getPortfolioEstimatingMenuState(page);
-    if (!state.sendToBudgetVisible || state.createPrimeContractEnabled) {
-      return {
-        createPrimeContractEnabled: state.createPrimeContractEnabled,
-        sendToBudgetStillVisible: state.sendToBudgetVisible,
-      };
-    }
+    if (isPortfolioFinancialWorkflowReady(state)) return state;
 
-    if (attempt < 6) {
+    if (attempt < 8) {
       log(
-        `[phase2] Budget processing still in progress (attempt ${attempt}/6): sendToBudgetVisible=${state.sendToBudgetVisible}, createPrimeContractEnabled=${state.createPrimeContractEnabled}`,
+        `[phase2] Budget processing still in progress (attempt ${attempt}/8): sendToBudgetVisible=${state.sendToBudgetVisible}, sendToBudgetEnabled=${state.sendToBudgetEnabled}, createPrimeContractVisible=${state.createPrimeContractVisible}, createPrimeContractEnabled=${state.createPrimeContractEnabled}, hasModal=${state.hasModal}, hasLoadingSpinner=${state.hasLoadingSpinner}`,
         "playwright"
       );
       await page.reload({ waitUntil: "load" }).catch(() => {});
@@ -674,15 +753,11 @@ async function waitForBudgetProcessingToFinish(page: Page): Promise<{
       const estTab = await page.$(SEL.portfolioEstimating.estimatingTab) || await page.$('.aid-tab:has-text("Estimating")');
       if (estTab) await estTab.click();
       await randomDelay(2000, 3000);
-      await new Promise((resolve) => setTimeout(resolve, 15000));
+      await new Promise((resolve) => setTimeout(resolve, 20000));
     }
   }
 
-  const finalState = await getPortfolioEstimatingMenuState(page);
-  return {
-    createPrimeContractEnabled: finalState.createPrimeContractEnabled,
-    sendToBudgetStillVisible: finalState.sendToBudgetVisible,
-  };
+  return getPortfolioEstimatingMenuState(page);
 }
 
 // ─── Helper: Wait for Procore SPA content to load ─────────────────
@@ -1519,14 +1594,21 @@ export async function runPhase2PortfolioActions(
       await randomDelay(3000, 5000);
       await dismissOpenModals(page);
       const budgetState = await waitForBudgetProcessingToFinish(page);
-      if (budgetState.sendToBudgetStillVisible && !budgetState.createPrimeContractEnabled) {
-        throw new Error("Send to Budget completed but Procore did not finish enabling downstream financial actions");
+      if (!isPortfolioFinancialWorkflowReady(budgetState)) {
+        throw new Error(
+          `Send to Budget completed but Procore did not finish enabling downstream financial actions (sendToBudgetVisible=${budgetState.sendToBudgetVisible}, sendToBudgetEnabled=${budgetState.sendToBudgetEnabled}, createPrimeContractVisible=${budgetState.createPrimeContractVisible}, createPrimeContractEnabled=${budgetState.createPrimeContractEnabled}, hasModal=${budgetState.hasModal}, hasLoadingSpinner=${budgetState.hasLoadingSpinner}, visibleMenuItems=${budgetState.visibleMenuItems.join(" | ") || "none"})`
+        );
       }
 
       await logStep(page, result, "send_to_budget", "success", Date.now() - budgetStart, {
         metadata: {
           createPrimeContractEnabled: budgetState.createPrimeContractEnabled,
-          sendToBudgetStillVisible: budgetState.sendToBudgetStillVisible,
+          sendToBudgetStillVisible: budgetState.sendToBudgetVisible,
+          sendToBudgetEnabled: budgetState.sendToBudgetEnabled,
+          createPrimeContractVisible: budgetState.createPrimeContractVisible,
+          hasModal: budgetState.hasModal,
+          hasLoadingSpinner: budgetState.hasLoadingSpinner,
+          visibleMenuItems: budgetState.visibleMenuItems,
         },
       });
     }
@@ -1552,6 +1634,8 @@ export async function runPhase2PortfolioActions(
     if (estTab) await estTab.click();
     await randomDelay(2000, 3000);
 
+    const financialState = await waitForBudgetProcessingToFinish(page);
+
     await dismissOpenModals(page);
     await page.click(SEL.portfolioEstimating.actionsButton, { timeout: 10000 });
     await randomDelay(1000, 2000);
@@ -1567,7 +1651,10 @@ export async function runPhase2PortfolioActions(
       log(`[phase2] Create Prime Contract not in Actions menu — already created, skipping`, "playwright");
       await page.keyboard.press("Escape");
       await logStep(page, result, "create_prime_contract", "skipped", Date.now() - primeStart, {
-        metadata: { reason: "Prime contract already exists" },
+        metadata: {
+          reason: "Prime contract already exists",
+          financialState,
+        },
       });
     } else {
       // Check if enabled; if disabled, wait and retry
@@ -1608,7 +1695,9 @@ export async function runPhase2PortfolioActions(
 
         if (!primeEnabled) {
           await page.keyboard.press("Escape").catch(() => {});
-          throw new Error("Create Prime Contract remained disabled after 5 retries");
+          throw new Error(
+            `Create Prime Contract remained disabled after 5 retries (sendToBudgetVisible=${financialState.sendToBudgetVisible}, sendToBudgetEnabled=${financialState.sendToBudgetEnabled}, createPrimeContractVisible=${financialState.createPrimeContractVisible}, createPrimeContractEnabled=${financialState.createPrimeContractEnabled}, hasModal=${financialState.hasModal}, hasLoadingSpinner=${financialState.hasLoadingSpinner}, visibleMenuItems=${financialState.visibleMenuItems.join(" | ") || "none"})`
+          );
         }
       }
 
