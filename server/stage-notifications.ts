@@ -122,13 +122,14 @@ export function buildStageNotificationEmail(
   dealName: string,
   oldStage: string | null,
   newStage: string,
-  procoreId: string,
-  procoreUrl?: string,
+  identifierLabel: string,
+  identifierValue: string,
+  identifierUrl?: string,
 ): string {
-  const procoreIdDisplay = procoreId || 'Unknown';
-  const procoreIdHtml = procoreUrl
-    ? `<a href="${procoreUrl}" style="color: #ea580c; text-decoration: underline; font-weight: 600;">${procoreIdDisplay}</a>`
-    : procoreIdDisplay;
+  const identifierDisplay = identifierValue || 'Unknown';
+  const identifierHtml = identifierUrl
+    ? `<a href="${identifierUrl}" style="color: #ea580c; text-decoration: underline; font-weight: 600;">${identifierDisplay}</a>`
+    : identifierDisplay;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -174,8 +175,8 @@ export function buildStageNotificationEmail(
                   <td style="padding: 14px 20px; border-bottom: 1px solid #e2e8f0; color: #d11921; font-weight: 700; font-size: 14px;">${newStage}</td>
                 </tr>
                 <tr>
-                  <td style="padding: 14px 20px; color: #64748b; font-size: 13px;">Procore ID</td>
-                  <td style="padding: 14px 20px; color: #374151; font-size: 14px;">${procoreIdHtml}</td>
+                  <td style="padding: 14px 20px; color: #64748b; font-size: 13px;">${identifierLabel}</td>
+                  <td style="padding: 14px 20px; color: #374151; font-size: 14px;">${identifierHtml}</td>
                 </tr>
               </table>
             </td>
@@ -211,7 +212,9 @@ export async function processStageNotification(params: {
   source: 'bidboard' | 'portfolio';
   projectName: string;
   oldStage: string | null;
-  procoreProjectId: string;
+  procoreProjectId?: string | null;
+  bidboardProjectId?: string | null;
+  bidboardProjectNumber?: string | null;
   hubspotDealId?: string | null;
 }): Promise<{ sent: number; skipped: boolean; route?: string }> {
   const route = findRoute(params.stage, params.source);
@@ -228,7 +231,10 @@ export async function processStageNotification(params: {
   }
 
   // Dedup: prevent same notification from being sent twice for same project + stage transition
-  const dedupeKey = `stage_notify:${route.key}:${params.procoreProjectId}:${params.oldStage}:${params.stage}`;
+  const notificationEntityId = params.source === 'bidboard'
+    ? (params.bidboardProjectId || params.bidboardProjectNumber || params.hubspotDealId || params.projectName)
+    : (params.procoreProjectId || params.projectName);
+  const dedupeKey = `stage_notify:${route.key}:${notificationEntityId}:${params.oldStage}:${params.stage}`;
   const alreadySent = await storage.checkEmailDedupeKey(dedupeKey);
   if (alreadySent) {
     console.log(`[stage-notify] Duplicate skipped: ${dedupeKey}`);
@@ -252,6 +258,9 @@ export async function processStageNotification(params: {
   // Add role-based recipients if required
   if (route.includeProjectRoles && route.includeProjectRoles.length > 0) {
     try {
+      if (!params.procoreProjectId) {
+        throw new Error('Procore project ID required for role-based stage notification recipients');
+      }
       const assignments = await storage.getProcoreRoleAssignmentsByProject(params.procoreProjectId);
       for (const assignment of assignments) {
         const roleMatch = route.includeProjectRoles.some(
@@ -262,7 +271,7 @@ export async function processStageNotification(params: {
         }
       }
     } catch (err: any) {
-      console.error(`[stage-notify] Failed to get role assignments for ${params.procoreProjectId}:`, err.message);
+      console.error(`[stage-notify] Failed to get role assignments for ${params.procoreProjectId || notificationEntityId}:`, err.message);
     }
   }
 
@@ -271,14 +280,25 @@ export async function processStageNotification(params: {
     return { sent: 0, skipped: false, route: route.key };
   }
 
+  const identifierLabel = params.source === 'bidboard' ? 'BidBoard ID' : 'Procore ID';
+  const identifierValue = params.source === 'bidboard'
+    ? (params.bidboardProjectId || params.bidboardProjectNumber || 'Unknown')
+    : (params.procoreProjectId || 'Unknown');
+  const identifierUrl = params.source === 'bidboard'
+    ? (params.bidboardProjectId
+        ? `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/tools/bid-board/project/${params.bidboardProjectId}/details`
+        : undefined)
+    : (params.procoreProjectId
+        ? `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${params.procoreProjectId}/tools/projecthome`
+        : undefined);
+
   const htmlBody = buildStageNotificationEmail(
     params.projectName,
     params.oldStage,
     params.stage,
-    params.procoreProjectId,
-    params.procoreProjectId
-      ? `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${params.procoreProjectId}/tools/projecthome`
-      : undefined,
+    identifierLabel,
+    identifierValue,
+    identifierUrl,
   );
 
   let sent = 0;
@@ -306,7 +326,14 @@ export async function processStageNotification(params: {
         subject: `Stage Update: ${params.projectName} → ${params.stage}`,
         dedupeKey,
         status: 'sent',
-        metadata: { route: route.key, stage: params.stage, oldStage: params.oldStage, projectId: params.procoreProjectId },
+        metadata: {
+          route: route.key,
+          stage: params.stage,
+          oldStage: params.oldStage,
+          projectId: notificationEntityId,
+          identifierLabel,
+          identifierValue,
+        },
         sentAt: new Date(),
       });
     } catch (logErr: any) {
@@ -317,7 +344,7 @@ export async function processStageNotification(params: {
   await storage.createAuditLog({
     action: 'stage_notification_sent',
     entityType: 'project_stage',
-    entityId: params.procoreProjectId,
+    entityId: notificationEntityId,
     source: params.source === 'bidboard' ? 'bidboard_stage_sync' : 'procore',
     status: 'success',
     details: {

@@ -478,7 +478,9 @@ export async function syncStagesToHubSpot(
             source: 'bidboard',
             projectName: change.projectName,
             oldStage: change.previousStage,
-            procoreProjectId: mapping?.procoreProjectId || change.hubspotDealId,
+            procoreProjectId: mapping?.procoreProjectId || null,
+            bidboardProjectId: mapping?.bidboardProjectId || null,
+            bidboardProjectNumber: change.projectNumber,
             hubspotDealId: change.hubspotDealId,
           });
         } catch (notifyErr: any) {
