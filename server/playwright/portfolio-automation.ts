@@ -141,6 +141,48 @@ export interface PortfolioIdentityContext {
   hubspotDealId?: string;
 }
 
+const SEND_TO_BUDGET_FALSE_NEGATIVE =
+  "Send to Budget completed but Procore did not finish enabling downstream financial actions";
+
+export function reconcilePortfolioAutomationResult(
+  result: PortfolioAutomationResult
+): PortfolioAutomationResult {
+  const sendToBudgetStep = result.steps.find((s) => s.step === "send_to_budget");
+  const createPrimeContractStep = result.steps.find(
+    (s) => s.step === "create_prime_contract"
+  );
+
+  if (
+    sendToBudgetStep?.status === "failed" &&
+    createPrimeContractStep &&
+    (createPrimeContractStep.status === "success" ||
+      createPrimeContractStep.status === "skipped")
+  ) {
+    sendToBudgetStep.status =
+      createPrimeContractStep.status === "success" ? "success" : "skipped";
+    sendToBudgetStep.metadata = {
+      ...(sendToBudgetStep.metadata || {}),
+      reconciledAfterPrimeContract: true,
+      reconciliationReason:
+        createPrimeContractStep.status === "success"
+          ? "Create Prime Contract succeeded, so budget send completed"
+          : "Prime contract already existed, so budget send was already complete",
+    };
+    delete sendToBudgetStep.error;
+    delete sendToBudgetStep.screenshotPath;
+
+    if (result.error?.includes(SEND_TO_BUDGET_FALSE_NEGATIVE)) {
+      result.error = undefined;
+    }
+  }
+
+  result.success = result.steps.every(
+    (s) => s.status === "success" || s.status === "skipped"
+  );
+
+  return result;
+}
+
 export interface DocumentsToolUiState {
   hasModal: boolean;
   hasLoadingSpinner: boolean;
@@ -2594,7 +2636,14 @@ export async function runPhase2(
       page = reauth.page;
     }
 
-    await runPhase2PortfolioActions(page, companyId, portfolioProjectId, result, phase2Input?.identityContext);
+    await runPhase2PortfolioActions(
+      page,
+      companyId,
+      portfolioProjectId,
+      result,
+      phase2Input?.identityContext
+    );
+    reconcilePortfolioAutomationResult(result);
 
     result.success = result.steps.every(
       (s) => s.status === "success" || s.status === "skipped"

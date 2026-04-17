@@ -94,6 +94,46 @@ describe("portfolio automation guard rails", () => {
     ).toBe(true);
   });
 
+  it("reconciles a send_to_budget false negative when create_prime_contract succeeds", async () => {
+    const { reconcilePortfolioAutomationResult } = await import("../server/playwright/portfolio-automation.ts");
+
+    const result = reconcilePortfolioAutomationResult({
+      success: false,
+      bidboardProjectId: "562949955724561",
+      portfolioProjectId: "598134326569125",
+      steps: [
+        {
+          step: "send_to_budget",
+          status: "failed",
+          duration: 219529,
+          error:
+            "Send to Budget completed but Procore did not finish enabling downstream financial actions",
+          screenshotPath: ".playwright-storage/fail-send-to-budget.png",
+        },
+        {
+          step: "create_prime_contract",
+          status: "success",
+          duration: 231876,
+        },
+      ],
+      startedAt: new Date("2026-04-17T13:37:41.000Z"),
+      error:
+        "Send to Budget completed but Procore did not finish enabling downstream financial actions",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.steps[0]).toMatchObject({
+      step: "send_to_budget",
+      status: "success",
+      metadata: expect.objectContaining({
+        reconciledAfterPrimeContract: true,
+      }),
+    });
+    expect(result.steps[0].error).toBeUndefined();
+    expect(result.steps[0].screenshotPath).toBeUndefined();
+  });
+
   it("detects a mismatch when the actual portfolio project number belongs to a different job", async () => {
     const { detectPortfolioIdentityMismatch } = await import("../server/playwright/portfolio-automation.ts");
 
