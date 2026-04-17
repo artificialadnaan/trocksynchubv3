@@ -1782,7 +1782,7 @@ export class DatabaseStorage implements IStorage {
           
           <!-- Header with Logo -->
           <tr>
-            <td style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 30px 40px; border-radius: 12px 12px 0 0; text-align: center;">
+            <td style="background-color: #1a1a2e; background-image: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); padding: 30px 40px; border-radius: 12px 12px 0 0; text-align: center;">
               <img src="https://trockgc.com/wp-content/uploads/2020/12/TRock-CONTRACTING_Icon-dark-1-150x150.png" alt="T-Rock Construction" width="50" style="max-width: 50px; height: auto; display: block; margin: 0 auto 10px auto;">
               <span style="color: #ffffff; font-size: 20px; font-weight: 700; letter-spacing: 1px;">T-ROCK CONSTRUCTION</span>
             </td>
@@ -1790,7 +1790,7 @@ export class DatabaseStorage implements IStorage {
           
           <!-- Orange Accent Bar -->
           <tr>
-            <td style="background: linear-gradient(90deg, #d11921 0%, #e53935 100%); height: 4px;"></td>
+            <td style="background-color: #d11921; background-image: linear-gradient(90deg, #d11921 0%, #e53935 100%); height: 4px;"></td>
           </tr>
           
           <!-- Main Content -->
@@ -1806,15 +1806,15 @@ export class DatabaseStorage implements IStorage {
               <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
                 <tr>
                   <td style="text-align: center;">
-                    <p style="color: #94a3b8; font-size: 13px; margin: 0 0 10px 0; line-height: 1.5;">
+                    <p style="color: #cbd5e1; font-size: 13px; margin: 0 0 10px 0; line-height: 1.5;">
                       T-Rock Construction, LLC<br>
                       3001 Long Prairie Rd. Ste. 200, Flower Mound, TX 75022
                     </p>
-                    <p style="color: #64748b; font-size: 12px; margin: 0;">
+                    <p style="color: #94a3b8; font-size: 12px; margin: 0;">
                       <a href="tel:2145484733" style="color: #d11921; text-decoration: none;">(214) 548-4733</a> &nbsp;|&nbsp;
                       <a href="https://trockgc.com" style="color: #d11921; text-decoration: none;">trockgc.com</a>
                     </p>
-                    <p style="color: #475569; font-size: 11px; margin: 20px 0 0 0;">
+                    <p style="color: #94a3b8; font-size: 11px; margin: 20px 0 0 0;">
                       © ${new Date().getFullYear()} T-Rock Construction. All rights reserved.
                     </p>
                   </td>

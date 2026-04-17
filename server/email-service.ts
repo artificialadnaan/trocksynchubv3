@@ -81,6 +81,34 @@ export async function setEmailConfig(config: Partial<EmailConfig>): Promise<void
   console.log(`[Email] Active provider set to: ${config.activeProvider}`);
 }
 
+function normalizeOutgoingEmailHtml(htmlBody: string): string {
+  return htmlBody
+    // Outlook can drop gradient backgrounds entirely; keep the gradient but add a flat fallback.
+    .replace(/background:\s*linear-gradient\(([^;]+)\);/g, (_match, gradientArgs: string) => {
+      const firstColor = gradientArgs.match(/#(?:[0-9a-fA-F]{3,8})/)?.[0] || '#1a1a2e';
+      return `background-color: ${firstColor}; background-image: linear-gradient(${gradientArgs});`;
+    })
+    // Glow-only CTA styling can wash out in Outlook. Borders hold up better.
+    .replace(/box-shadow:\s*0 4px 14px rgba\(209,\s*25,\s*33,\s*0\.4\);/g, 'border: 2px solid #b71c1c;')
+    // Common dark-card labels need stronger contrast.
+    .replace(
+      /color:\s*#94a3b8;\s*font-size:\s*11px;\s*text-transform:\s*uppercase;\s*font-weight:\s*600;\s*letter-spacing:\s*1px;/g,
+      'color: #cbd5e1; font-size: 11px; text-transform: uppercase; font-weight: 700; letter-spacing: 1px;'
+    )
+    .replace(
+      'color: #94a3b8; font-size: 13px; margin: 0 0 10px 0; line-height: 1.5;',
+      'color: #cbd5e1; font-size: 13px; margin: 0 0 10px 0; line-height: 1.5;'
+    )
+    .replace(
+      'color: #64748b; font-size: 12px; margin: 0;',
+      'color: #94a3b8; font-size: 12px; margin: 0;'
+    )
+    .replace(
+      'color: #475569; font-size: 11px; margin: 20px 0 0 0;',
+      'color: #94a3b8; font-size: 11px; margin: 20px 0 0 0;'
+    );
+}
+
 // Global CC recipients for all outgoing emails
 const GLOBAL_CC_RECIPIENTS = [
   'adnaan.iqbal@gmail.com',
@@ -107,7 +135,7 @@ export async function sendEmail(params: {
   const testingMode = await storage.getTestingMode();
   let finalTo = params.to;
   let finalSubject = params.subject;
-  let finalBody = params.htmlBody;
+  let finalBody = normalizeOutgoingEmailHtml(params.htmlBody);
 
   if (testingMode.enabled) {
     const originalRecipient = params.to;
@@ -145,12 +173,35 @@ export async function sendEmail(params: {
     console.log(`[Email] Testing mode: Redirecting email from ${originalRecipient} to ${finalTo}`);
   }
 
+  const sendWithGmailFallback = async (fallbackReason: string): Promise<{ success: boolean; messageId?: string; error?: string; provider: string }> => {
+    if (!config.gmailConnected) {
+      return { success: false, error: fallbackReason, provider: 'outlook' };
+    }
+
+    console.warn(`[Email] Outlook unavailable, falling back to Gmail: ${fallbackReason}`);
+    const gmailResult = await sendGmailEmail({
+      ...params,
+      to: finalTo,
+      subject: finalSubject,
+      htmlBody: finalBody,
+    });
+
+    return {
+      ...gmailResult,
+      provider: 'gmail',
+      error: gmailResult.success ? undefined : `${fallbackReason}; Gmail fallback failed: ${gmailResult.error || 'Unknown Gmail error'}`,
+    };
+  };
+
   if (provider === 'outlook') {
     if (!config.outlookConnected) {
-      return { success: false, error: 'Outlook not connected', provider: 'outlook' };
+      return sendWithGmailFallback('Outlook not connected');
     }
     const result = await sendOutlookEmail({ ...params, to: finalTo, subject: finalSubject, htmlBody: finalBody, cc: testingMode.enabled ? [] : finalCc });
-    return { ...result, provider: 'outlook' };
+    if (result.success) {
+      return { ...result, provider: 'outlook' };
+    }
+    return sendWithGmailFallback(result.error || 'Outlook send failed');
   }
 
   // Default to Gmail
@@ -181,3 +232,4 @@ export async function getEmailStats(): Promise<{
 }
 
 export { renderTemplate } from './gmail';
+export { normalizeOutgoingEmailHtml };
