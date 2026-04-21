@@ -1308,12 +1308,24 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         }
       }
 
-      // Try change order packages
+      // Try change order packages - top-level endpoint works on live projects where the
+      // project-scoped path returns 404
       try {
-        const coResponse = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, { params: { company_id: compId } });
+        const coResponse = await client.get(`/rest/v1.0/change_order_packages`, {
+          params: { project_id: projectId, company_id: compId },
+        });
         rawChangeOrders = coResponse.data;
       } catch (e: any) {
-        rawError = (rawError ? rawError + ' | ' : '') + `Change orders: ${e.message}`;
+        rawError = (rawError ? rawError + ' | ' : '') + `Change orders top-level: ${e.message}`;
+        try {
+          const coResponse2 = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
+            params: { company_id: compId },
+          });
+          rawChangeOrders = coResponse2.data;
+          rawError = (rawError || '') + ' | project-scoped change orders endpoint worked!';
+        } catch (e2: any) {
+          rawError = (rawError || '') + ` | Change orders project-scoped: ${e2.message}`;
+        }
       }
 
       const contractValue = await calculateTotalContractValue(projectId);

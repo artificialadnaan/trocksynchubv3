@@ -1926,6 +1926,26 @@ export async function createBidBoardProjectFromDeal(
     log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
     
     const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
+
+    if (result.success && result.projectId) {
+      try {
+        await storage.upsertBidboardSyncState({
+          projectId: result.projectId,
+          projectName: projectData.name,
+          currentStage: initialStage,
+          metadata: {
+            projectNumber: projectData.projectNumber || null,
+            seededFromCreation: true,
+            hubspotDealId: dealId,
+          },
+        });
+      } catch (stateErr: any) {
+        log(
+          `Failed to seed BidBoard sync state for created project ${result.projectId}: ${stateErr.message}`,
+          "playwright"
+        );
+      }
+    }
   
   // If successful, verify description was saved and retry if missing
   if (result.success && result.projectId && projectData.description) {

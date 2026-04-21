@@ -19,7 +19,7 @@
  * orders are tracked separately in the change_order_pending field.
  * 
  * Data Flow:
- * 1. Fetch change order packages from Procore API
+ * 1. Fetch change orders from Procore API
  * 2. Calculate approved and pending amounts
  * 3. Update HubSpot deal with total contract value
  * 4. Store change order details for reference
@@ -70,17 +70,29 @@ export async function getProjectChangeOrders(projectId: string): Promise<ChangeO
 
   let packages: any[] = [];
   try {
-    const response = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
-      params: { company_id: companyId },
+    // Use the top-level endpoint — the project-scoped path 404s on some live projects
+    const response = await client.get(`/rest/v1.0/change_order_packages`, {
+      params: { project_id: projectId, company_id: companyId },
     });
     packages = response.data || [];
   } catch (err: any) {
-    // Procore returns 404 when Change Orders tool isn't enabled on the project
     if (err?.message?.includes('404')) {
-      console.log(`[ChangeOrder] Change orders not available for project ${projectId} (404 — tool may not be enabled)`);
-      return [];
+      try {
+        const response2 = await client.get(`/rest/v1.0/projects/${projectId}/change_order_packages`, {
+          params: { company_id: companyId },
+        });
+        packages = response2.data || [];
+      } catch (err2: any) {
+        // Procore returns 404 when Change Orders tool isn't enabled on the project
+        if (err2?.message?.includes('404')) {
+          console.log(`[ChangeOrder] Change orders not available for project ${projectId} (404 — tool may not be enabled)`);
+          return [];
+        }
+        throw err2;
+      }
+    } else {
+      throw err;
     }
-    throw err;
   }
 
   const changeOrders: ChangeOrder[] = [];
@@ -176,7 +188,10 @@ export async function updateHubSpotDealAmount(
     if (pendingChangeOrders !== undefined) {
       properties.change_order_pending = String(pendingChangeOrders);
     }
-    await updateHubSpotDeal(dealId, properties);
+    const result = await updateHubSpotDeal(dealId, properties);
+    if (!result.success) {
+      return { success: false, error: result.message };
+    }
 
     console.log(`[ChangeOrder] Updated HubSpot deal ${dealId} — amount: $${amount.toLocaleString()}, approved COs: $${(approvedChangeOrders ?? 0).toLocaleString()}, pending COs: $${(pendingChangeOrders ?? 0).toLocaleString()}`);
     return { success: true };

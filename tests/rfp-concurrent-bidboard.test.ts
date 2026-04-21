@@ -8,6 +8,7 @@ vi.mock("../server/storage.ts", () => ({
     getHubspotContactByHubspotId: vi.fn(),
     createSyncMapping: vi.fn(),
     createBidboardAutomationLog: vi.fn(),
+    upsertBidboardSyncState: vi.fn(),
   },
 }));
 
@@ -85,5 +86,15 @@ describe("createBidBoardProjectFromDeal", () => {
     expect(result.success).toBe(true);
     expect(closeBrowser).not.toHaveBeenCalled();
     expect(withBrowserLock).toHaveBeenCalledWith("create-bidboard-project-from-deal", expect.any(Function));
+    expect(vi.mocked(storage.upsertBidboardSyncState)).toHaveBeenCalledWith({
+      projectId: "562949955999999",
+      projectName: "Infinity on Sunnyvale - Concrete Repair",
+      currentStage: "Service – Estimating",
+      metadata: expect.objectContaining({
+        projectNumber: "DFW-4-10626-ac",
+        seededFromCreation: true,
+        hubspotDealId: "321011906262",
+      }),
+    });
   });
 });
