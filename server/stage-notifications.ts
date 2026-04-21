@@ -68,7 +68,7 @@ export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
     stage: 'Close Out',
     source: 'portfolio',
     label: 'Close Out',
-    staticRecipients: ['jhelms@trockgc.com', 'kscheidegger@trockgc.com', 'sbohen@trockgc.com'],
+    staticRecipients: ['jhelms@trockgc.com', 'kscheidegger@trockgc.com'],
     includeDealOwner: false,
   },
   {
@@ -76,7 +76,7 @@ export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
     stage: 'Close Out - Final Invoice',
     source: 'portfolio',
     label: 'Close Out - Final Invoice',
-    staticRecipients: ['jhelms@trockgc.com', 'kscheidegger@trockgc.com', 'sbohen@trockgc.com'],
+    staticRecipients: ['jhelms@trockgc.com', 'kscheidegger@trockgc.com'],
     includeDealOwner: false,
   },
   {
@@ -84,7 +84,7 @@ export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
     stage: 'Closed',
     source: 'portfolio',
     label: 'Closed',
-    staticRecipients: ['kscheidegger@trockgc.com', 'sbohen@trockgc.com'],
+    staticRecipients: ['kscheidegger@trockgc.com'],
     includeDealOwner: false,
   },
   {
@@ -301,11 +301,16 @@ export async function processStageNotification(params: {
     identifierUrl,
   );
 
+  const primaryRecipients = Array.from(recipients);
+  const primaryTo = primaryRecipients[0];
+  const primaryCc = primaryRecipients.slice(1);
+
   let sent = 0;
-  for (const recipient of recipients) {
+  if (primaryTo) {
     try {
       const emailResult = await sendEmail({
-        to: recipient,
+        to: primaryTo,
+        cc: primaryCc,
         subject: `Stage Update: ${params.projectName} → ${params.stage}`,
         htmlBody,
         fromName: 'T-Rock Sync Hub',
@@ -313,29 +318,38 @@ export async function processStageNotification(params: {
       if (!emailResult.success) {
         throw new Error(emailResult.error || 'Unknown email send failure');
       }
-      sent++;
-      await storage.createEmailSendLog({
-        templateKey: `stage_notify_${route.key}`,
-        recipientEmail: recipient,
-        subject: `Stage Update: ${params.projectName} → ${params.stage}`,
-        dedupeKey: `${dedupeKey}:${recipient}`,
-        status: 'sent',
-        metadata: {
-          route: route.key,
-          stage: params.stage,
-          oldStage: params.oldStage,
-          projectId: notificationEntityId,
-          identifierLabel,
-          identifierValue,
-          provider: emailResult.provider,
-          finalTo: emailResult.to || recipient,
-          finalCc: emailResult.cc || [],
-        },
-        sentAt: new Date(),
-      });
-      console.log(`[stage-notify] ${route.key} email sent to ${recipient} for ${params.projectName}`);
+      sent = primaryRecipients.length;
+
+      try {
+        await storage.createEmailSendLog({
+          templateKey: `stage_notify_${route.key}`,
+          recipientEmail: primaryTo,
+          subject: `Stage Update: ${params.projectName} → ${params.stage}`,
+          dedupeKey: `${dedupeKey}:${primaryTo}`,
+          status: 'sent',
+          metadata: {
+            route: route.key,
+            stage: params.stage,
+            oldStage: params.oldStage,
+            projectId: notificationEntityId,
+            identifierLabel,
+            identifierValue,
+            provider: emailResult.provider,
+            finalTo: emailResult.to || primaryTo,
+            finalCc: emailResult.cc || [],
+            deliveryMode: 'single_message_multi_recipient',
+          },
+          sentAt: new Date(),
+        });
+      } catch (logErr: any) {
+        console.error(`[stage-notify] Sent email to ${primaryTo} but failed to write delivery log:`, logErr.message);
+      }
+
+      console.log(
+        `[stage-notify] ${route.key} email sent to ${primaryTo} (cc: ${primaryCc.join(', ') || 'none'}) for ${params.projectName}`
+      );
     } catch (err: any) {
-      console.error(`[stage-notify] Failed to send to ${recipient}:`, err.message);
+      console.error(`[stage-notify] Failed to send to ${primaryTo}:`, err.message);
     }
   }
 
@@ -343,7 +357,7 @@ export async function processStageNotification(params: {
     try {
       await storage.createEmailSendLog({
         templateKey: `stage_notify_${route.key}`,
-        recipientEmail: Array.from(recipients).join(', '),
+        recipientEmail: primaryRecipients.join(', '),
         subject: `Stage Update: ${params.projectName} → ${params.stage}`,
         dedupeKey,
         status: 'sent',
@@ -355,6 +369,8 @@ export async function processStageNotification(params: {
           identifierLabel,
           identifierValue,
           deliveryCount: sent,
+          primaryTo,
+          primaryCc,
         },
         sentAt: new Date(),
       });

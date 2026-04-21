@@ -33,7 +33,7 @@ describe('buildStageNotificationEmail', () => {
       success: true,
       provider: 'outlook',
       to: 'sgibson@trockgc.com',
-      cc: ['adnaan.iqbal@gmail.com', 'bbell@trockgc.com'],
+      cc: ['adnaan.iqbal@gmail.com', 'bbell@trockgc.com', 'jhelms@trockgc.com'],
     });
   });
 
@@ -67,21 +67,7 @@ describe('buildStageNotificationEmail', () => {
     expect(html).not.toContain('/tools/projecthome');
   });
 
-  it('logs one row per actual stage-notification delivery with provider and final recipients', async () => {
-    mockSendEmail
-      .mockResolvedValueOnce({
-        success: true,
-        provider: 'outlook',
-        to: 'sgibson@trockgc.com',
-        cc: ['adnaan.iqbal@gmail.com', 'bbell@trockgc.com'],
-      })
-      .mockResolvedValueOnce({
-        success: true,
-        provider: 'gmail',
-        to: 'jhelms@trockgc.com',
-        cc: ['adnaan.iqbal@gmail.com', 'bbell@trockgc.com'],
-      });
-
+  it('sends one stage-notification email with primary recipients merged into cc and logs the actual delivery', async () => {
     const result = await processStageNotification({
       stage: 'Estimate Under Review',
       source: 'bidboard',
@@ -92,7 +78,14 @@ describe('buildStageNotificationEmail', () => {
     });
 
     expect(result).toMatchObject({ sent: 2, skipped: false, route: 'bb_internal_review' });
-    expect(mockStorage.createEmailSendLog).toHaveBeenCalledTimes(3);
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockSendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'sgibson@trockgc.com',
+        cc: ['jhelms@trockgc.com'],
+      })
+    );
+    expect(mockStorage.createEmailSendLog).toHaveBeenCalledTimes(2);
     expect(mockStorage.createEmailSendLog).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -101,7 +94,8 @@ describe('buildStageNotificationEmail', () => {
         metadata: expect.objectContaining({
           provider: 'outlook',
           finalTo: 'sgibson@trockgc.com',
-          finalCc: ['adnaan.iqbal@gmail.com', 'bbell@trockgc.com'],
+          finalCc: ['adnaan.iqbal@gmail.com', 'bbell@trockgc.com', 'jhelms@trockgc.com'],
+          deliveryMode: 'single_message_multi_recipient',
         }),
       })
     );
@@ -109,24 +103,38 @@ describe('buildStageNotificationEmail', () => {
       2,
       expect.objectContaining({
         templateKey: 'stage_notify_bb_internal_review',
-        recipientEmail: 'jhelms@trockgc.com',
-        metadata: expect.objectContaining({
-          provider: 'gmail',
-          finalTo: 'jhelms@trockgc.com',
-          finalCc: ['adnaan.iqbal@gmail.com', 'bbell@trockgc.com'],
-        }),
-      })
-    );
-    expect(mockStorage.createEmailSendLog).toHaveBeenNthCalledWith(
-      3,
-      expect.objectContaining({
-        templateKey: 'stage_notify_bb_internal_review',
         recipientEmail: 'sgibson@trockgc.com, jhelms@trockgc.com',
         dedupeKey:
           'stage_notify:bb_internal_review:321010655946:Estimate in Progress:Estimate Under Review',
         metadata: expect.objectContaining({
           deliveryCount: 2,
+          primaryTo: 'sgibson@trockgc.com',
+          primaryCc: ['jhelms@trockgc.com'],
         }),
+      })
+    );
+  });
+
+  it('omits Stephanie from portfolio stage change notifications', async () => {
+    const result = await processStageNotification({
+      stage: 'Close Out',
+      source: 'portfolio',
+      projectName: 'Willow Creek',
+      oldStage: 'In Production',
+      procoreProjectId: '12345',
+    });
+
+    expect(result).toMatchObject({ sent: 2, skipped: false, route: 'pf_close_out' });
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockSendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'jhelms@trockgc.com',
+        cc: ['kscheidegger@trockgc.com'],
+      })
+    );
+    expect(mockSendEmail).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        cc: expect.arrayContaining(['sbohen@trockgc.com']),
       })
     );
   });
