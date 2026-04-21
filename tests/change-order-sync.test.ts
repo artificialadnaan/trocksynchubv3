@@ -5,6 +5,10 @@ const mockClient = {
 };
 
 const mockUpdateHubSpotDeal = vi.fn();
+const mockStorage = {
+  getSyncMappings: vi.fn(),
+  getProcoreProjectByProcoreId: vi.fn(),
+};
 
 vi.mock('../server/procore.ts', () => ({
   getProcoreClient: vi.fn(async () => mockClient),
@@ -15,7 +19,18 @@ vi.mock('../server/hubspot.ts', () => ({
   updateHubSpotDeal: mockUpdateHubSpotDeal,
 }));
 
-import { getProjectChangeOrders, updateHubSpotDealAmount } from '../server/change-order-sync';
+vi.mock('../server/storage.ts', async () => {
+  const actual = await vi.importActual('../server/storage.ts');
+  return {
+    ...actual,
+    storage: {
+      ...(actual as any).storage,
+      ...mockStorage,
+    },
+  };
+});
+
+import { getProjectChangeOrders, syncAllProjectChangeOrders, updateHubSpotDealAmount } from '../server/change-order-sync';
 
 describe('getProjectChangeOrders', () => {
   beforeEach(() => {
@@ -99,6 +114,51 @@ describe('getProjectChangeOrders', () => {
       success: false,
       error: 'HubSpot not connected',
     });
+    expect(mockUpdateHubSpotDeal).toHaveBeenCalledWith('321711034098', {
+      amount: '30071.43',
+      change_order_approved: '1500',
+      change_order_pending: '0',
+    });
+  });
+
+  it('polling includes mappings that only have a procoreProjectId', async () => {
+    mockStorage.getSyncMappings.mockResolvedValue([
+      {
+        hubspotDealId: '321711034098',
+        portfolioProjectId: null,
+        procoreProjectId: '598134326572477',
+      },
+    ]);
+    mockStorage.getProcoreProjectByProcoreId.mockResolvedValue({ active: true });
+
+    mockClient.get.mockImplementation(async (path: string) => {
+      if (path === '/rest/v1.0/prime_contracts') {
+        return {
+          data: [{ grand_total: '28571.43' }],
+        };
+      }
+      if (path === '/rest/v1.0/change_order_packages') {
+        return {
+          data: [
+            {
+              id: 1,
+              number: '001',
+              title: 'Additional Asphalt',
+              status: 'approved',
+              grand_total: '1500.0',
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected endpoint: ${path}`);
+    });
+    mockUpdateHubSpotDeal.mockResolvedValue({ success: true, message: 'ok' });
+
+    const result = await syncAllProjectChangeOrders();
+
+    expect(result.projectsChecked).toBe(1);
+    expect(result.projectsUpdated).toBe(1);
+    expect(mockStorage.getProcoreProjectByProcoreId).toHaveBeenCalledWith('598134326572477');
     expect(mockUpdateHubSpotDeal).toHaveBeenCalledWith('321711034098', {
       amount: '30071.43',
       change_order_approved: '1500',

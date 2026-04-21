@@ -341,23 +341,26 @@ export async function syncAllProjectChangeOrders(): Promise<{
 
   try {
     const mappings = await storage.getSyncMappings();
-    // Only sync projects that have a Portfolio project ID — change orders and prime contracts
-    // live on Portfolio projects, not Bid Board projects. Bid Board IDs return 404 from Procore API.
-    const projectsWithPortfolio = mappings.filter(m => m.portfolioProjectId && m.hubspotDealId);
+    // Prefer explicit portfolio IDs, but include bare Procore project IDs as a fallback.
+    // Some live mappings are linked by Procore project number before portfolioProjectId
+    // is backfilled, and those projects still need CO polling coverage.
+    const projectsWithMapping = mappings.filter(m => (m.portfolioProjectId || m.procoreProjectId) && m.hubspotDealId);
 
     // Filter to active projects only — skip closed/inactive projects to reduce API calls
     const activeProjects = [];
-    for (const m of projectsWithPortfolio) {
-      const project = await storage.getProcoreProjectByProcoreId(m.portfolioProjectId!);
+    for (const m of projectsWithMapping) {
+      const resolvedProjectId = m.portfolioProjectId || m.procoreProjectId;
+      if (!resolvedProjectId) continue;
+      const project = await storage.getProcoreProjectByProcoreId(resolvedProjectId);
       if (!project || project.active !== false) {
-        activeProjects.push(m);
+        activeProjects.push({ mapping: m, projectId: resolvedProjectId });
       }
     }
 
-    console.log(`[ChangeOrder] Found ${activeProjects.length} active Portfolio projects to check (skipped ${projectsWithPortfolio.length - activeProjects.length} inactive, ${mappings.length - projectsWithPortfolio.length} without Portfolio ID)`);
+    console.log(`[ChangeOrder] Found ${activeProjects.length} active mapped projects to check (skipped ${projectsWithMapping.length - activeProjects.length} inactive, ${mappings.length - projectsWithMapping.length} without usable project ID)`);
 
-    for (const mapping of activeProjects) {
-      const projectId = mapping.portfolioProjectId!;
+    for (const entry of activeProjects) {
+      const projectId = entry.projectId;
       if (!projectId) continue;
       
       result.projectsChecked++;
