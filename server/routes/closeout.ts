@@ -1,6 +1,7 @@
 import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
+import { DEFAULT_GOOGLE_REVIEW_LINK } from "../closeout-automation";
 
 export function registerCloseoutRoutes(app: Express, requireAuth: RequestHandler) {
   // Get closeout surveys list
@@ -32,8 +33,8 @@ export function registerCloseoutRoutes(app: Express, requireAuth: RequestHandler
       clientName: survey.clientName,
       submitted: !!survey.submittedAt,
       ratingAverage: survey.ratingAverage ? parseFloat(survey.ratingAverage) : null,
-      // Only reveal Google review link after submission if average > 4
-      googleReviewLink: survey.submittedAt && survey.ratingAverage && parseFloat(survey.ratingAverage) > 4
+      // Only reveal Google review link after submission if average >= 4
+      googleReviewLink: survey.submittedAt && survey.ratingAverage && parseFloat(survey.ratingAverage) >= 4
         ? survey.googleReviewLink
         : null,
     });
@@ -97,7 +98,7 @@ export function registerCloseoutRoutes(app: Express, requireAuth: RequestHandler
       surveyToken,
       clientEmail: email,
       clientName,
-      googleReviewLink: 'https://g.page/r/test-review/review',
+      googleReviewLink: DEFAULT_GOOGLE_REVIEW_LINK,
       sentAt: new Date(),
     });
 
@@ -106,7 +107,12 @@ export function registerCloseoutRoutes(app: Express, requireAuth: RequestHandler
       return res.status(500).json({ error: 'closeout_survey email template not found or disabled' });
     }
 
-    const variables: Record<string, string> = { clientName, projectName, surveyUrl, googleReviewUrl: 'https://g.page/r/test-review/review' };
+    const variables: Record<string, string> = {
+      clientName,
+      projectName,
+      surveyUrl,
+      googleReviewUrl: DEFAULT_GOOGLE_REVIEW_LINK,
+    };
     const subject = renderTemplate(template.subject, variables);
     const htmlBody = renderTemplate(template.bodyHtml, variables);
     const result = await sendEmail({ to: email, subject, htmlBody, fromName: 'T-Rock Construction' });

@@ -2,6 +2,7 @@ import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
 import { DEFAULT_PROCORE_COMPANY_ID } from "../constants";
+import { DEFAULT_GOOGLE_REVIEW_LINK } from "../closeout-automation";
 
 export function registerTestingRoutes(app: Express, requireAuth: RequestHandler) {
   // ==================== TESTING MODE ====================
@@ -76,7 +77,7 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       nextSyncTime: '1 hour',
       changedProjects: '',
       surveyUrl: `${process.env.APP_URL || 'http://localhost:5000'}/survey/test-token`,
-      googleReviewUrl: 'https://g.page/r/YOUR_GOOGLE_REVIEW_LINK/review',
+      googleReviewUrl: DEFAULT_GOOGLE_REVIEW_LINK,
       ownerName: 'Deal Owner',
       dealName: 'Sample Deal - Test',
     };

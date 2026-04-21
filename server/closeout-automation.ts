@@ -55,6 +55,8 @@ import { deactivateProject, fetchProcoreProjectDetail, syncProcoreRoleAssignment
 import { startProjectArchive, getArchiveProgress } from './project-archive';
 import crypto from 'crypto';
 
+export const DEFAULT_GOOGLE_REVIEW_LINK = 'https://g.page/r/CUNQR2SdSZivEAE/review';
+
 /** Options for triggering closeout survey */
 interface CloseoutSurveyOptions {
   includeExecs?: boolean;
@@ -211,7 +213,7 @@ export async function triggerCloseoutSurvey(
     const surveyToken = await generateSurveyToken();
     const appUrl = process.env.APP_URL || 'http://localhost:5000';
     const surveyUrl = `${appUrl}/survey/${surveyToken}`;
-    const googleReviewUrl = options.googleReviewLink || 'https://g.page/r/YOUR_GOOGLE_REVIEW_LINK/review';
+    const googleReviewUrl = options.googleReviewLink || DEFAULT_GOOGLE_REVIEW_LINK;
 
     const variables: Record<string, string> = {
       clientName: clientDisplayName,
@@ -230,7 +232,7 @@ export async function triggerCloseoutSurvey(
       surveyToken,
       clientEmail: recipientEmail,
       clientName: clientDisplayName,
-      googleReviewLink: options.googleReviewLink || null,
+      googleReviewLink: options.googleReviewLink || DEFAULT_GOOGLE_REVIEW_LINK,
       sentAt: new Date(),
     });
 
@@ -345,7 +347,7 @@ export async function submitSurveyResponse(
       console.error(`[closeout] Survey results notification failed:`, notifErr.message);
     }
 
-    const showGoogleReview = average > 4;
+    const showGoogleReview = average >= 4;
     console.log(`[closeout] Survey submitted for project ${survey.procoreProjectId} - Average: ${ratingAverage}`);
     return {
       success: true,
@@ -390,7 +392,7 @@ async function sendSurveyResultsNotification(
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const starColor = (val: number) => val >= 4 ? '#16a34a' : val >= 3 ? '#ca8a04' : '#dc2626';
   const stars = (val: number) => '★'.repeat(val) + '☆'.repeat(5 - val);
-  const avgColor = avg > 4 ? '#16a34a' : avg >= 3 ? '#ca8a04' : '#dc2626';
+  const avgColor = avg >= 4 ? '#16a34a' : avg >= 3 ? '#ca8a04' : '#dc2626';
   const projectName = survey.procoreProjectName || 'Unknown Project';
 
   const subject = `Survey Results: ${esc(projectName)} — ${ratingAverage}/5.00`;
@@ -407,8 +409,8 @@ async function sendSurveyResultsNotification(
       </tr>
       <tr><td style="background:#d11921;height:4px;font-size:0;line-height:0;">&nbsp;</td></tr>
       <tr>
-        <td style="background:${avg > 4 ? '#f0fdf4;border-left:1px solid #bbf7d0;border-right:1px solid #bbf7d0' : '#fffbeb;border-left:1px solid #fde68a;border-right:1px solid #fde68a'};padding:12px 24px;color:${avgColor};font-weight:600;font-size:15px;">
-          Average Rating: ${ratingAverage} / 5.00 ${avg > 4 ? '— Google Review Prompted' : ''}
+        <td style="background:${avg >= 4 ? '#f0fdf4;border-left:1px solid #bbf7d0;border-right:1px solid #bbf7d0' : '#fffbeb;border-left:1px solid #fde68a;border-right:1px solid #fde68a'};padding:12px 24px;color:${avgColor};font-weight:600;font-size:15px;">
+          Average Rating: ${ratingAverage} / 5.00 ${avg >= 4 ? '— Google Review Prompted' : ''}
         </td>
       </tr>
       <tr>

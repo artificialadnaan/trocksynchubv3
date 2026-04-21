@@ -4,6 +4,7 @@ vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
 
 const mockStorage = {
   getCloseoutSurveyByProjectId: vi.fn(),
+  getCloseoutSurveyByToken: vi.fn(),
   getSyncMappingByProcoreProjectId: vi.fn(),
   getHubspotDealByHubspotId: vi.fn(),
   getHubspotOwnerByHubspotId: vi.fn(),
@@ -13,6 +14,7 @@ const mockStorage = {
   getProcoreUserByProcoreId: vi.fn(),
   getEmailTemplate: vi.fn(),
   createCloseoutSurvey: vi.fn(),
+  updateCloseoutSurvey: vi.fn(),
   createEmailSendLog: vi.fn(),
   createAuditLog: vi.fn(),
 };
@@ -41,6 +43,16 @@ describe("closeout survey greeting", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockStorage.getCloseoutSurveyByProjectId.mockResolvedValue(undefined);
+    mockStorage.getCloseoutSurveyByToken.mockResolvedValue({
+      id: 101,
+      procoreProjectId: "project-1",
+      procoreProjectName: "Test 4.8",
+      hubspotDealId: null,
+      clientEmail: "bbell@trockgc.com",
+      clientName: "Highland Meadows Owner LLC",
+      googleReviewLink: "https://g.page/r/CUNQR2SdSZivEAE/review",
+      submittedAt: null,
+    });
     mockStorage.getSyncMappingByProcoreProjectId.mockResolvedValue({
       hubspotDealId: "deal-1",
     });
@@ -60,12 +72,13 @@ describe("closeout survey greeting", () => {
     mockStorage.getEmailTemplate.mockResolvedValue({
       enabled: true,
       subject: "How did we do? {{projectName}}",
-      bodyHtml: "Dear {{clientName}}",
+      bodyHtml: "Dear {{clientName}} {{googleReviewUrl}}",
     });
     mockStorage.createCloseoutSurvey.mockImplementation(async (data) => ({
       id: 101,
       ...data,
     }));
+    mockStorage.updateCloseoutSurvey.mockResolvedValue({});
     mockStorage.createEmailSendLog.mockResolvedValue({});
     mockStorage.createAuditLog.mockResolvedValue({});
     mockSendEmail.mockResolvedValue({ success: true, messageId: "msg-1" });
@@ -108,6 +121,49 @@ describe("closeout survey greeting", () => {
     expect(mockStorage.createCloseoutSurvey).toHaveBeenCalledWith(
       expect.objectContaining({
         clientName: "Fallback Procore Client",
+      }),
+    );
+  });
+
+  it("uses the production Google review URL by default", async () => {
+    const { triggerCloseoutSurvey } = await import("../server/closeout-automation.ts");
+
+    const result = await triggerCloseoutSurvey("project-1");
+
+    expect(result.success).toBe(true);
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockSendEmail.mock.calls[0][0].htmlBody).toContain("https://g.page/r/CUNQR2SdSZivEAE/review");
+    expect(mockStorage.createCloseoutSurvey).toHaveBeenCalledWith(
+      expect.objectContaining({
+        googleReviewLink: "https://g.page/r/CUNQR2SdSZivEAE/review",
+      }),
+    );
+  });
+
+  it("prompts for a Google review when the average rating is exactly 4.00", async () => {
+    const { submitSurveyResponse } = await import("../server/closeout-automation.ts");
+
+    const result = await submitSurveyResponse("survey-token", {
+      ratings: {
+        overallExperience: 4,
+        communication: 4,
+        schedule: 4,
+        quality: 4,
+        hireAgain: 5,
+        referral: 5,
+      },
+      feedback: "Solid job",
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      showGoogleReview: true,
+      googleReviewLink: "https://g.page/r/CUNQR2SdSZivEAE/review",
+    });
+    expect(mockStorage.updateCloseoutSurvey).toHaveBeenCalledWith(
+      101,
+      expect.objectContaining({
+        ratingAverage: "4.00",
       }),
     );
   });
