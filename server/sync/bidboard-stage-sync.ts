@@ -60,7 +60,7 @@ function compositeKey(name: string, customer: string): string {
 /**
  * Parse the exported Excel file and return project rows from Active Projects sheet.
  */
-function parseActiveProjectsSheet(filePath: string): BidBoardExcelRow[] {
+export function parseActiveProjectsSheet(filePath: string): BidBoardExcelRow[] {
   const buffer = fs.readFileSync(filePath);
   const workbook = XLSX.read(buffer, { type: "buffer" });
 

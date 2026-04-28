@@ -17,7 +17,13 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { exportBidBoardProjectList } from "../playwright/bidboard-export";
-import { diffBidBoardStages, syncStagesToHubSpot, type StageChange } from "./bidboard-stage-sync";
+import {
+  diffBidBoardStages,
+  parseActiveProjectsSheet,
+  syncStagesToHubSpot,
+  type StageChange,
+} from "./bidboard-stage-sync";
+import { pushBidBoardRowsToCrm } from "./bidboard-crm-ingestion";
 import { log } from "../index";
 import { storage } from "../storage";
 
@@ -99,6 +105,16 @@ export async function runBidBoardStageSync(
   }
 
   try {
+    const rows = parseActiveProjectsSheet(exportPath);
+    const pushResult = await pushBidBoardRowsToCrm({
+      rows,
+      sourceFilename: exportPath,
+      extractedAt: new Date().toISOString(),
+    });
+    if (!pushResult.ok && !pushResult.skipped) {
+      log(`[BidBoardCRM] CRM ingestion push failed after ${pushResult.attempts} attempts; continuing stage sync`, "sync");
+    }
+
     if (initialize) {
       await diffBidBoardStages(exportPath, { initializeOnly: true });
       log("Initialization complete: populated bidboard_status for all projects", "sync");
