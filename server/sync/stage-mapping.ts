@@ -46,6 +46,7 @@ export interface StageMappingResolutionContext {
   projectNumber?: string | null;
   previousStage?: string | null;
   cycleId?: string;
+  suppressFallbackDbLog?: boolean;
 }
 
 function configAllowsFallback(value: unknown): boolean {
@@ -94,6 +95,8 @@ async function logMappingFallback(
     projectName: context.projectName ?? null,
     ...details,
   })}`);
+
+  if (context.suppressFallbackDbLog) return;
 
   try {
     await storage.createBidboardAutomationLog({
