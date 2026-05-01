@@ -368,8 +368,20 @@ async function runBidboardPollingCycle() {
 
 function startBidboardPolling(intervalMinutes: number) {
   stopBidboardPolling();
+  console.info('[BidBoardPolling]', {
+    action: 'bidboard_automation:scheduler_enabled',
+    enabled: true,
+    intervalMinutes,
+  });
   console.log(`[BidBoardPolling] Starting automatic polling every ${intervalMinutes} minutes`);
   bidboardPollingTimer = setInterval(() => runBidboardPollingCycle(), intervalMinutes * 60 * 1000);
+}
+
+function logBidboardPollingDisabled() {
+  console.info('[BidBoardPolling]', {
+    action: 'bidboard_automation:scheduler_disabled',
+    enabled: false,
+  });
 }
 
 function stopBidboardPolling() {
@@ -504,6 +516,8 @@ export async function initPolling() {
     const val = (config?.value as any);
     if (val?.enabled) {
       startBidboardPolling(val.pollingIntervalMinutes || 61);
+    } else if (config) {
+      logBidboardPollingDisabled();
     }
   } catch (e) {
     console.log('[BidBoardPolling] No saved config, BidBoard polling disabled by default');
@@ -1157,13 +1171,11 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       }
       results["bidboard_stage_sync"] = "enabled (15 min, live)";
 
-      // BidBoard automation — 60 min
-      await storage.upsertAutomationConfig({ key: "bidboard_automation", value: { enabled: true, pollingIntervalMinutes: 60 }, description: "BidBoard Playwright automation (auto-enabled)" });
-      await enableBidBoardAutomation(true);
-      if (!bidboardPollingTimer) {
-        startBidboardPolling(60);
-      }
-      results["bidboard_automation"] = "enabled (60 min)";
+      // BidBoard automation — legacy Playwright poller stays disabled.
+      await storage.upsertAutomationConfig({ key: "bidboard_automation", value: { enabled: false, pollingIntervalMinutes: 60 }, description: "BidBoard Playwright automation (legacy poller disabled; use bidboard_stage_sync)" });
+      stopBidboardPolling();
+      logBidboardPollingDisabled();
+      results["bidboard_automation"] = "disabled (legacy poller)";
 
       // Change order polling — 15 min
       await storage.upsertAutomationConfig({ key: "sync_change_orders", value: { enabled: true, intervalMinutes: 15 }, description: "Change order sync (auto-enabled)" });

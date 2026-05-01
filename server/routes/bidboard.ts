@@ -54,8 +54,20 @@ async function runBidboardPollingCycle() {
 
 function startBidboardPolling(intervalMinutes: number) {
   stopBidboardPolling();
+  console.info('[BidBoardPolling]', {
+    action: 'bidboard_automation:scheduler_enabled',
+    enabled: true,
+    intervalMinutes,
+  });
   console.log(`[BidBoardPolling] Starting automatic polling every ${intervalMinutes} minutes`);
   bidboardPollingTimer = setInterval(() => runBidboardPollingCycle(), intervalMinutes * 60 * 1000);
+}
+
+function logBidboardPollingDisabled() {
+  console.info('[BidBoardPolling]', {
+    action: 'bidboard_automation:scheduler_disabled',
+    enabled: false,
+  });
 }
 
 function stopBidboardPolling() {
@@ -1050,6 +1062,8 @@ export function registerBidboardRoutes(app: Express, requireAuth: RequestHandler
         const val = (config?.value as any);
         if (val?.enabled) {
           startBidboardPolling(val.pollingIntervalMinutes || 60);
+        } else if (config) {
+          logBidboardPollingDisabled();
         }
       } catch {
         console.log('[BidBoardPolling] No saved config, BidBoard polling disabled by default');
