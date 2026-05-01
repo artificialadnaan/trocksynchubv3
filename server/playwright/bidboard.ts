@@ -41,7 +41,7 @@
 
 import { Locator, Page } from "playwright";
 import { ensureLoggedIn } from "./auth";
-import { PROCORE_SELECTORS, getBidBoardUrlNew } from "./selectors";
+import { BIDBOARD_STAGE_TAB_LABELS, type BidBoardStageTabKind, PROCORE_SELECTORS, getBidBoardUrlNew } from "./selectors";
 import { randomDelay, takeScreenshot, withBrowserLock, withRetry, waitForNavigation } from "./browser";
 import { log } from "../index";
 import { storage } from "../storage";
@@ -835,7 +835,7 @@ async function parseExportedExcel(filePath: string): Promise<BidBoardProject[]> 
 export interface NewBidBoardProjectData {
   name: string;
   projectNumber?: string;
-  stage: string; // "Estimate in Progress" or "Service – Estimating"
+  stage: string; // Default write labels stay legacy during the transition window.
   /** Project type number: 4 = Service, use Service - Estimating tab */
   projectTypes?: string;
   /** Estimator name from RFP form */
@@ -885,6 +885,30 @@ export function isCreateCustomerOption(optionText: string, clientName: string): 
   }
 
   return !normalizedClient || normalizedOption.includes(normalizedClient) || normalizedOption === "create new customer";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function exactTabLabelRegex(label: string): RegExp {
+  return new RegExp(`^\\s*${escapeRegExp(label).replace(/\\ /g, "\\s+")}\\s*$`, "i");
+}
+
+export async function clickBidBoardStageTab(page: Page, kind: BidBoardStageTabKind): Promise<string | null> {
+  for (const label of BIDBOARD_STAGE_TAB_LABELS[kind]) {
+    try {
+      const tab = page.locator('button.aid-tab').filter({ hasText: exactTabLabelRegex(label) }).first();
+      await tab.click({ timeout: 2500 });
+      log(`BidBoard stage tab matched: "${label}"`, "playwright");
+      return label;
+    } catch (err: any) {
+      log(`BidBoard stage tab variant not matched: "${label}" (${err.message})`, "playwright");
+    }
+  }
+
+  log(`BidBoard stage tab not found for ${kind}`, "playwright");
+  return null;
 }
 
 async function fillCreateCustomerForm(page: Page, projectData: NewBidBoardProjectData): Promise<boolean> {
@@ -988,14 +1012,11 @@ export async function createBidBoardProject(
 
       // Note: description fill moved to after project form opens (line ~1312)
       log(`Tab selection: projectNumber=${projectData.projectNumber}, typeDigit=${projectNumberTypeDigit ?? "none"}, isService=${isService}`, "playwright");
-      try {
-        const tab = isService
-          ? page.locator('button.aid-tab').filter({ hasText: /Service\s*-\s*Estimating/i })
-          : page.locator('button.aid-tab').filter({ hasText: /Estimate\s*in\s*Progress/i });
-        await tab.first().click({ timeout: 8000 });
+      const matchedTabLabel = await clickBidBoardStageTab(page, isService ? "serviceEstimating" : "estimating");
+      if (matchedTabLabel) {
         await randomDelay(1500, 2500);
-      } catch (e: any) {
-        log(`Could not click stage tab: ${e.message}`, "playwright");
+      } else {
+        log(`Could not click stage tab for ${isService ? "service estimating" : "estimating"}`, "playwright");
       }
 
       const createBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.createNewProjectButton);
