@@ -7,6 +7,7 @@ import {
   readSnapshotManifest,
   validateSnapshotManifest,
   type Queryable,
+  type TransactionClient,
 } from "./bidboard-stage-rename-common";
 
 export type RollbackOptions = {
@@ -100,27 +101,27 @@ async function restoreSyncMappings(db: Queryable, snapshotTable: string): Promis
   return result.rowCount || 0;
 }
 
-export async function runBidBoardStageRenameRollback(db: Queryable, options: RollbackOptions): Promise<RollbackResult> {
+export async function runBidBoardStageRenameRollback(client: TransactionClient, options: RollbackOptions): Promise<RollbackResult> {
   if (!options.snapshotManifestPath) {
     throw new Error("--snapshot-manifest is required");
   }
   const manifest = readSnapshotManifest(options.snapshotManifestPath);
-  await validateSnapshotManifest(db, manifest, options.includeSyncMappings === true);
+  await validateSnapshotManifest(client, manifest, options.includeSyncMappings === true);
 
-  await db.query("BEGIN");
+  await client.query("BEGIN");
   try {
     const restored: RollbackResult["restored"] = {
-      bidboard_sync_state: await restoreBidboardSyncState(db, manifest.tables.bidboard_sync_state.snapshotTable),
-      stage_mappings: await restoreStageMappings(db, manifest.tables.stage_mappings.snapshotTable),
-      automation_config: await restoreAutomationConfig(db, manifest.tables.automation_config.snapshotTable),
+      bidboard_sync_state: await restoreBidboardSyncState(client, manifest.tables.bidboard_sync_state.snapshotTable),
+      stage_mappings: await restoreStageMappings(client, manifest.tables.stage_mappings.snapshotTable),
+      automation_config: await restoreAutomationConfig(client, manifest.tables.automation_config.snapshotTable),
     };
     if (options.includeSyncMappings) {
-      restored.sync_mappings = await restoreSyncMappings(db, manifest.tables.sync_mappings.snapshotTable);
+      restored.sync_mappings = await restoreSyncMappings(client, manifest.tables.sync_mappings.snapshotTable);
     }
-    await db.query("COMMIT");
+    await client.query("COMMIT");
     return { restored };
   } catch (error) {
-    await db.query("ROLLBACK");
+    await client.query("ROLLBACK");
     throw error;
   }
 }
@@ -131,14 +132,16 @@ async function main() {
   if (!snapshotManifestPath) throw new Error("--snapshot-manifest is required");
   const includeSyncMappings = args["include-sync-mappings"] === true;
   const pool = createPgPool();
+  const client = await pool.connect();
   try {
-    const result = await runBidBoardStageRenameRollback(pool, { snapshotManifestPath, includeSyncMappings });
+    const result = await runBidBoardStageRenameRollback(client, { snapshotManifestPath, includeSyncMappings });
     console.log("[BidBoard Stage Rename Rollback] Restore complete");
     for (const [table, count] of Object.entries(result.restored)) {
       console.log(`  ${table}: ${count} rows restored`);
     }
     console.log("Next: verify BidBoard stage sync in migration mode before resuming rollout.");
   } finally {
+    client.release();
     await pool.end();
   }
 }

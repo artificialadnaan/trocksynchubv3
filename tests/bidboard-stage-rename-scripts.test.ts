@@ -17,6 +17,8 @@ type Row = Record<string, any>;
 
 class InMemoryRenameDb {
   tables: Record<string, Row[]>;
+  failOnLogInsertAfter: number | null = null;
+  failOnStageMappingRestore = false;
   private txBackup: Record<string, Row[]> | null = null;
 
   constructor(seed?: Partial<Record<string, Row[]>>) {
@@ -95,6 +97,9 @@ class InMemoryRenameDb {
     }
 
     if (normalized.startsWith("INSERT INTO bidboard_automation_logs")) {
+      if (this.failOnLogInsertAfter !== null && this.tables.bidboard_automation_logs.length >= this.failOnLogInsertAfter) {
+        throw new Error("Injected log insert failure");
+      }
       const [projectId, projectName, details] = params;
       this.tables.bidboard_automation_logs.push({
         project_id: projectId,
@@ -120,6 +125,9 @@ class InMemoryRenameDb {
     }
 
     if (normalized.startsWith("UPDATE stage_mappings AS target")) {
+      if (this.failOnStageMappingRestore) {
+        throw new Error("Injected stage mapping restore failure");
+      }
       const snapshot = normalized.match(/FROM "([^"]+)" AS snapshot/)?.[1] || params[0];
       let count = 0;
       for (const target of this.tables.stage_mappings) {
@@ -159,6 +167,10 @@ class InMemoryRenameDb {
     }
 
     throw new Error(`Unhandled SQL in test DB: ${normalized}`);
+  }
+
+  release() {
+    // Test double for pg.PoolClient.release().
   }
 
   private getTable(name: string) {
@@ -269,6 +281,31 @@ describe("BidBoard stage rename operational scripts", () => {
     expect(db.tables.bidboard_automation_logs).toHaveLength(6);
   });
 
+  it("rolls back the full backfill transaction when a mid-run log insert fails", async () => {
+    const db = new InMemoryRenameDb({
+      bidboard_sync_state: makeRows(),
+      stage_mappings: [{ id: 1 }],
+      automation_config: [{ key: "bidboard_automation" }],
+      sync_mappings: [],
+    });
+    const snapshot = await createBidBoardStageRenameSnapshot(db, {
+      timestamp: "20260501_1312",
+      manifestDir: dir,
+      gitSha: "test-sha",
+    });
+    db.failOnLogInsertAfter = 1;
+
+    await expect(runBidBoardStageRenameBackfill(db, {
+      apply: true,
+      snapshotManifestPath: snapshot.manifestPath,
+      expectedProductionRange: [1, 10],
+      expectedLostRange: [1, 10],
+    })).rejects.toThrow("Injected log insert failure");
+
+    expect(db.tables.bidboard_sync_state.map((row) => row.current_stage)).toEqual(makeRows().map((row) => row.current_stage));
+    expect(db.tables.bidboard_automation_logs).toHaveLength(0);
+  });
+
   it("refuses apply without a snapshot manifest", async () => {
     const db = new InMemoryRenameDb({ bidboard_sync_state: makeRows() });
 
@@ -348,6 +385,28 @@ describe("BidBoard stage rename operational scripts", () => {
     expect(db.tables.stage_mappings[0].procore_stage_label).toBe("Old");
     expect(db.tables.automation_config[0].value).toEqual({ enabled: false });
     expect(db.tables.sync_mappings[0].project_phase).toBe("portfolio");
+  });
+
+  it("rolls back the full rollback transaction when a mid-restore failure occurs", async () => {
+    const db = new InMemoryRenameDb({
+      bidboard_sync_state: makeRows(),
+      stage_mappings: [{ id: 1, procore_stage_label: "Old" }],
+      automation_config: [{ id: 1, key: "bidboard_automation", value: { enabled: false } }],
+      sync_mappings: [],
+    });
+    const snapshot = await createBidBoardStageRenameSnapshot(db, {
+      timestamp: "20260501_1327",
+      manifestDir: dir,
+      gitSha: "test-sha",
+    });
+    db.tables.bidboard_sync_state[0].current_stage = "Won";
+    db.tables.stage_mappings[0].procore_stage_label = "Changed";
+    db.failOnStageMappingRestore = true;
+
+    await expect(runBidBoardStageRenameRollback(db, { snapshotManifestPath: snapshot.manifestPath })).rejects.toThrow("Injected stage mapping restore failure");
+
+    expect(db.tables.bidboard_sync_state[0].current_stage).toBe("Won");
+    expect(db.tables.stage_mappings[0].procore_stage_label).toBe("Changed");
   });
 
   it("refuses rollback when snapshot tables are missing", async () => {
