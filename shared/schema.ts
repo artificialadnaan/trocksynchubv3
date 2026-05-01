@@ -124,6 +124,35 @@ export const bidboardAutomationLogs = pgTable("bidboard_automation_logs", {
 
 export type BidboardAutomationLog = typeof bidboardAutomationLogs.$inferSelect;
 
+// Manual review queue for sync cases that must not auto-create downstream records.
+export const manualReviewQueue = pgTable("manual_review_queue", {
+  id: serial("id").primaryKey(),
+  projectNumber: text("project_number").notNull(),
+  projectName: text("project_name").notNull(),
+  customer: text("customer"),
+  currentStage: text("current_stage").notNull(),
+  previousStage: text("previous_stage"),
+  cycleId: text("cycle_id").notNull(),
+  reason: text("reason").notNull(),
+  details: jsonb("details"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  resolvedAt: timestamp("resolved_at"),
+  resolvedBy: text("resolved_by"),
+  resolutionNotes: text("resolution_notes"),
+}, (table) => [
+  unique().on(table.projectNumber, table.cycleId),
+  index("IDX_manual_review_project_number").on(table.projectNumber),
+  index("IDX_manual_review_cycle_id").on(table.cycleId),
+  index("IDX_manual_review_unresolved").on(table.resolvedAt).where(sql`resolved_at IS NULL`),
+]);
+
+export const insertManualReviewQueueSchema = createInsertSchema(manualReviewQueue).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertManualReviewQueue = z.infer<typeof insertManualReviewQueueSchema>;
+export type ManualReviewQueue = typeof manualReviewQueue.$inferSelect;
+
 // Pending Phase 2 jobs — database-backed queue for portfolio automation
 // Replaces the in-memory array to survive restarts and prevent race conditions
 export const pendingPhase2Jobs = pgTable("pending_phase2_jobs", {

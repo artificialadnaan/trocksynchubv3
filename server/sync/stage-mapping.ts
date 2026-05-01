@@ -122,7 +122,7 @@ export async function resolveBidBoardHubSpotStage(
   context: StageMappingResolutionContext = {}
 ): Promise<ResolvedBidBoardStage | null> {
   const normalizedStage = normalizeStageLabel(stage);
-  const mappings = await storage.getStageMappings();
+  const mappings = (await storage.getStageMappings()) ?? [];
   const matchingMappings = mappings.filter((mapping) => {
     if (mapping.isActive === false) return false;
     const direction = (mapping.direction || "").toLowerCase();

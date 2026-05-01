@@ -31,6 +31,8 @@ vi.mock("../server/storage.ts", () => ({
     getBidboardSyncStates: vi.fn(),
     upsertBidboardSyncState: vi.fn(),
     createBidboardAutomationLog: vi.fn(),
+    getManualReviewQueueEntry: vi.fn(),
+    createManualReviewQueueEntry: vi.fn(),
 
     // Mapping lookups
     getSyncMappings: vi.fn(),
@@ -842,6 +844,7 @@ describe("Portfolio automation trigger", () => {
 
     await syncStagesToHubSpot([makeProductionChange("Contract")]);
 
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).not.toHaveBeenCalled();
     expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledWith(
       "Production Project",
       "TP-PROD",
@@ -1108,7 +1111,7 @@ describe("Portfolio automation trigger", () => {
     expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
   });
 
-  it('triggers portfolio automation even when no HubSpot deal mapping exists for "Sent to Production"', async () => {
+  it('queues manual review and does NOT trigger portfolio automation when no HubSpot deal mapping exists for "Contract"', async () => {
     const { storage } = await import("../server/storage.ts");
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
@@ -1118,63 +1121,117 @@ describe("Portfolio automation trigger", () => {
       { projectId: "TP-NOHUB", currentStage: "Estimate in Progress", projectName: "No HubSpot Project", metadata: {} } as any,
     ]);
 
-    // No mapping exists anywhere
+    // No HubSpot mapping exists anywhere, but Contract is a mapped Portfolio trigger stage.
     vi.mocked(storage.getSyncMappingByProcoreProjectNumber).mockResolvedValue(undefined);
     vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
     vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
     vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Contract",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({
+      key: "bidboard_stage_sync",
+      value: { cycleId: "cycle-manual-review" },
+    } as any);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
     vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
     vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
     vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
 
     const xlsxPath = writeTempXlsx([
-      { Name: "No HubSpot Project", Status: "Sent to Production", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc" },
+      { Name: "No HubSpot Project", Status: "Contract", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc" },
     ]);
 
-    await diffBidBoardStages(xlsxPath);
+    const changes = await diffBidBoardStages(xlsxPath);
 
-    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledWith(
-      "No HubSpot Project",
-      "TP-NOHUB",
-      "Omega Inc"
+    expect(changes).toHaveLength(0);
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectNumber: "TP-NOHUB",
+        projectName: "No HubSpot Project",
+        customer: "Omega Inc",
+        currentStage: "Contract",
+        previousStage: "Estimate in Progress",
+        cycleId: "cycle-manual-review",
+        reason: "unmapped_contract_no_hubspot_deal",
+      })
+    );
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-NOHUB",
+        projectName: "No HubSpot Project",
+        action: "bidboard_stage_sync:manual_review_queued",
+        status: "queued",
+        details: expect.objectContaining({
+          projectNumber: "TP-NOHUB",
+          currentStage: "Contract",
+          previousStage: "Estimate in Progress",
+          cycleId: "cycle-manual-review",
+          reason: "unmapped_contract_no_hubspot_deal",
+          mappingSource: "stage_mappings",
+        }),
+      })
     );
 
     fs.unlinkSync(xlsxPath);
   });
 
-  it('triggers portfolio automation even when no HubSpot deal mapping exists for "Service - Sent to Production"', async () => {
+  it("does not create a duplicate manual review queue entry for the same project and cycle", async () => {
     const { storage } = await import("../server/storage.ts");
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
 
     vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([
-      { projectId: "TP-SVC", currentStage: "Service - Estimating", projectName: "Service Project", metadata: {} } as any,
+      { projectId: "TP-NOHUB", currentStage: "Estimate in Progress", projectName: "No HubSpot Project", metadata: {} } as any,
     ]);
-
     vi.mocked(storage.getSyncMappingByProcoreProjectNumber).mockResolvedValue(undefined);
     vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
     vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
     vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Contract",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({
+      key: "bidboard_stage_sync",
+      value: { cycleId: "cycle-dedupe" },
+    } as any);
+    vi.mocked(storage.getManualReviewQueueEntry)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ id: 1, projectNumber: "TP-NOHUB", cycleId: "cycle-dedupe" } as any);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
     vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
     vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
     vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
 
     const xlsxPath = writeTempXlsx([
-      { Name: "Service Project", Status: "Service - Sent to Production", "Project #": "TP-SVC", "Total Sales": 30000, "Customer Name": "Phi Partners" },
+      { Name: "No HubSpot Project", Status: "Contract", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc" },
     ]);
 
     await diffBidBoardStages(xlsxPath);
+    await diffBidBoardStages(xlsxPath);
 
-    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledWith(
-      "Service Project",
-      "TP-SVC",
-      "Phi Partners"
-    );
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.getManualReviewQueueEntry)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledTimes(1);
 
     fs.unlinkSync(xlsxPath);
   });
 
-  it("in migration mode suppresses the no-HubSpot production fallback trigger and still advances state", async () => {
+  it("in migration mode still queues manual review for unmapped Portfolio trigger rows", async () => {
     const { storage } = await import("../server/storage.ts");
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
@@ -1187,9 +1244,12 @@ describe("Portfolio automation trigger", () => {
             mode: "migration",
             suppressPortfolioTriggers: true,
             logSuppressedActions: true,
-            cycleId: "cycle-nohub",
+            cycleId: "cycle-nohub-migration",
           },
         } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
       }
       return undefined;
     });
@@ -1200,11 +1260,22 @@ describe("Portfolio automation trigger", () => {
     vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
     vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
     vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Contract",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
     vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
     vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
 
     const xlsxPath = writeTempXlsx([
-      { Name: "No HubSpot Project", Status: "Sent to Production", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc" },
+      { Name: "No HubSpot Project", Status: "Contract", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc" },
     ]);
 
     const changes = await diffBidBoardStages(xlsxPath);
@@ -1212,22 +1283,31 @@ describe("Portfolio automation trigger", () => {
     expect(changes).toHaveLength(0);
     expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
     expect(vi.mocked(storage.upsertBidboardSyncState)).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: "TP-NOHUB", currentStage: "Sent to Production" })
+      expect.objectContaining({ projectId: "TP-NOHUB", currentStage: "Contract" })
+    );
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectNumber: "TP-NOHUB",
+        projectName: "No HubSpot Project",
+        customer: "Omega Inc",
+        currentStage: "Contract",
+        previousStage: "Estimate in Progress",
+        cycleId: "cycle-nohub-migration",
+        reason: "unmapped_contract_no_hubspot_deal",
+      })
     );
     expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "TP-NOHUB",
         projectName: "No HubSpot Project",
-        action: "bidboard_stage_sync:suppressed_portfolio_trigger",
-        status: "suppressed",
+        action: "bidboard_stage_sync:manual_review_queued",
+        status: "queued",
         details: expect.objectContaining({
-          cycleId: "cycle-nohub",
+          cycleId: "cycle-nohub-migration",
           previousStage: "Estimate in Progress",
-          newStage: "Sent to Production",
-          wouldHaveAction: "portfolio_create_phase1",
-          targetValue: "Sent to Production",
-          hubspotDealId: null,
-          mappingSource: "hardcoded_fallback",
+          currentStage: "Contract",
+          reason: "unmapped_contract_no_hubspot_deal",
+          mappingSource: "stage_mappings",
           mode: "migration",
         }),
       })
