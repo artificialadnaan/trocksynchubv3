@@ -50,6 +50,7 @@ export interface StageMappingResolutionContext {
   projectNumber?: string | null;
   previousStage?: string | null;
   cycleId?: string;
+  canaryRunId?: string;
   suppressFallbackDbLog?: boolean;
 }
 
@@ -87,6 +88,7 @@ async function logMappingFallback(
 ): Promise<void> {
   const details = {
     cycleId: context.cycleId,
+    ...(context.canaryRunId ? { canaryRunId: context.canaryRunId } : {}),
     oldLabel,
     normalizedStage,
     resolvedLabel,
