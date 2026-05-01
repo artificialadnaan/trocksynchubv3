@@ -9,6 +9,7 @@ import {
   validateSnapshotManifest,
   type BackfillTransition,
   type Queryable,
+  type TransactionClient,
 } from "./bidboard-stage-rename-common";
 
 export type BackfillOptions = {
@@ -96,13 +97,13 @@ async function backfillTransition(db: Queryable, transition: BackfillTransition)
   return rows.rows.length;
 }
 
-export async function runBidBoardStageRenameBackfill(db: Queryable, options: BackfillOptions = {}): Promise<BackfillResult> {
+export async function runBidBoardStageRenameBackfill(client: TransactionClient, options: BackfillOptions = {}): Promise<BackfillResult> {
   const apply = options.apply === true;
   if (apply && !options.snapshotManifestPath) {
     throw new Error("--snapshot-manifest is required when using --apply");
   }
 
-  const countsByTransition = await getCountsByTransition(db);
+  const countsByTransition = await getCountsByTransition(client);
   const totalProductionRows = totalForBucket(countsByTransition, "production");
   const totalLostRows = totalForBucket(countsByTransition, "lost");
   const result: BackfillResult = {
@@ -120,20 +121,20 @@ export async function runBidBoardStageRenameBackfill(db: Queryable, options: Bac
   assertInRange("Lost", totalLostRows, options.expectedLostRange || [100, 115]);
 
   const manifest = readSnapshotManifest(options.snapshotManifestPath!);
-  await validateSnapshotManifest(db, manifest);
+  await validateSnapshotManifest(client, manifest);
 
-  await db.query("BEGIN");
+  await client.query("BEGIN");
   try {
     for (const transition of BACKFILL_TRANSITIONS) {
-      result.updatedRows += await backfillTransition(db, transition);
+      result.updatedRows += await backfillTransition(client, transition);
     }
-    await db.query("COMMIT");
+    await client.query("COMMIT");
   } catch (error) {
-    await db.query("ROLLBACK");
+    await client.query("ROLLBACK");
     throw error;
   }
 
-  result.finalCountsByStage = await getCountsByTransitionForStages(db, ["Won", "Lost"]);
+  result.finalCountsByStage = await getCountsByTransitionForStages(client, ["Won", "Lost"]);
 
   return result;
 }
@@ -158,8 +159,9 @@ async function main() {
   const apply = args.apply === true;
   const snapshotManifestPath = typeof args["snapshot-manifest"] === "string" ? args["snapshot-manifest"] : undefined;
   const pool = createPgPool();
+  const client = await pool.connect();
   try {
-    const result = await runBidBoardStageRenameBackfill(pool, {
+    const result = await runBidBoardStageRenameBackfill(client, {
       apply,
       dryRun: !apply,
       snapshotManifestPath,
@@ -183,6 +185,7 @@ async function main() {
       console.log(`Rollback: npx tsx scripts/bidboard-stage-rename-rollback.ts --snapshot-manifest ${snapshotManifestPath}`);
     }
   } finally {
+    client.release();
     await pool.end();
   }
 }

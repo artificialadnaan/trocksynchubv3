@@ -10,6 +10,10 @@ export type Queryable = {
   query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>>;
 };
 
+export type TransactionClient = Queryable & {
+  release(): void;
+};
+
 export const SNAPSHOT_SOURCES = [
   "bidboard_sync_state",
   "stage_mappings",
