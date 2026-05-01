@@ -7,7 +7,7 @@ import { processNewDealWebhook } from "../deal-project-number";
 import { processHubspotWebhookForProcore } from "../hubspot-procore-sync";
 import { mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber, getTerminalStageGuard } from "../procore-hubspot-sync";
 import { handleProcoreProjectWebhook } from "../webhooks/procore-webhook";
-import { getWebhookMigrationModeConfig, isMigrationMode, logWebhookSuppressedAction } from "../webhooks/migration-mode";
+import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMigrationMode, logWebhookSuppressedAction } from "../webhooks/migration-mode";
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
@@ -450,15 +450,43 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
         const resourceId = event.resource_id != null ? String(event.resource_id) : "";
         if (resourceId) {
           try {
-            const { takeNextPendingPhase2, markPhase2Complete, markPhase2Failed } = await import('../orchestrator/portfolio-orchestrator');
+            const { takeNextPendingPhase2, markPhase2Complete, markPhase2Failed, markPhase2Skipped } = await import('../orchestrator/portfolio-orchestrator');
             const pending = await takeNextPendingPhase2();
             if (pending) {
               const companyId = String(event.company_id || "");
               const portfolioProjectId = resourceId;
               const jobId = pending.id;
-              console.log(`[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId}, job #${jobId})`);
-              const webhookPayload = event;
-              setTimeout(async () => {
+              const phase2GateConfig = await getWebhookMigrationModeConfig();
+              const phase2Gate = await evaluateWebhookPortfolioPhase2Gate({
+                bidboardProjectId: pending.bidboardProjectId,
+                portfolioProjectId,
+                modeConfig: phase2GateConfig,
+              });
+              if (!phase2Gate.allowed) {
+                await markPhase2Skipped(jobId, "portfolio_trigger_disabled_not_allowlisted");
+                await logWebhookSuppressedAction(phase2GateConfig, {
+                  action: "procore_webhook:suppressed_portfolio_phase2",
+                  projectId: portfolioProjectId,
+                  projectNumber: phase2Gate.projectNumber,
+                  previousStage: null,
+                  newStage: null,
+                  wouldHaveAction: "portfolio_phase2_webhook",
+                  targetValue: "phase2",
+                  mappingSource: phase2Gate.mappingSource,
+                  webhookEventId: String(event.id || ""),
+                  webhookResourceName: resourceName,
+                  webhookEventType: eventType,
+                  details: {
+                    bidboardProjectId: pending.bidboardProjectId,
+                    jobId,
+                    portfolioTriggerEnabled: phase2Gate.enabled,
+                    allowlist: phase2Gate.allowlist,
+                  },
+                });
+              } else {
+                console.log(`[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId}, job #${jobId})`);
+                const webhookPayload = event;
+                setTimeout(async () => {
                 try {
                   const { runPhase2WithRetry } = await import('../portfolio-automation-runner');
                   const phase2Input =
@@ -502,7 +530,8 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   await markPhase2Failed(jobId, errMsg).catch(() => {});
                   console.error(`[webhook] Phase 2 failed: ${errMsg} (job #${jobId})`);
                 }
-              }, 15000);
+                }, 15000);
+              }
             } else {
               console.log(`[webhook] Project create for ${resourceId}, no pending Phase 2 job`);
               // Store portfolio project ID in sync mapping so Phase 1 retries can find it
@@ -554,8 +583,9 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   const roleResult = await syncProcoreRoleAssignments([projectId]);
                   if (roleResult.newAssignments.length > 0) {
                     console.log(`[webhook] Role check found ${roleResult.newAssignments.length} new assignment(s) for project ${projectId}, sending notifications`);
-                    if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
-                      await logWebhookSuppressedAction(webhookMigrationConfig, {
+                    const delayedWebhookMigrationConfig = await getWebhookMigrationModeConfig();
+                    if (isMigrationMode(delayedWebhookMigrationConfig) && delayedWebhookMigrationConfig.suppressStageNotifications) {
+                      await logWebhookSuppressedAction(delayedWebhookMigrationConfig, {
                         action: "procore_webhook:suppressed_stage_notification",
                         projectId,
                         previousStage: null,
@@ -582,15 +612,43 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
               }, 5000);
             }
 
-            const { takeNextPendingPhase2, markPhase2Complete, markPhase2Failed } = await import('../orchestrator/portfolio-orchestrator');
+            const { takeNextPendingPhase2, markPhase2Complete, markPhase2Failed, markPhase2Skipped } = await import('../orchestrator/portfolio-orchestrator');
             const pending = await takeNextPendingPhase2();
             if (pending) {
               const companyId = String(event.company_id || "");
               const portfolioProjectId = projectId;
               const jobId = pending.id;
-              console.log(`[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId}, job #${jobId})`);
-              const webhookPayload = event;
-              setTimeout(async () => {
+              const phase2GateConfig = await getWebhookMigrationModeConfig();
+              const phase2Gate = await evaluateWebhookPortfolioPhase2Gate({
+                bidboardProjectId: pending.bidboardProjectId,
+                portfolioProjectId,
+                modeConfig: phase2GateConfig,
+              });
+              if (!phase2Gate.allowed) {
+                await markPhase2Skipped(jobId, "portfolio_trigger_disabled_not_allowlisted");
+                await logWebhookSuppressedAction(phase2GateConfig, {
+                  action: "procore_webhook:suppressed_portfolio_phase2",
+                  projectId: portfolioProjectId,
+                  projectNumber: phase2Gate.projectNumber,
+                  previousStage: null,
+                  newStage: null,
+                  wouldHaveAction: "portfolio_phase2_webhook",
+                  targetValue: "phase2",
+                  mappingSource: phase2Gate.mappingSource,
+                  webhookEventId: String(event.id || ""),
+                  webhookResourceName: resourceName,
+                  webhookEventType: eventType,
+                  details: {
+                    bidboardProjectId: pending.bidboardProjectId,
+                    jobId,
+                    portfolioTriggerEnabled: phase2Gate.enabled,
+                    allowlist: phase2Gate.allowlist,
+                  },
+                });
+              } else {
+                console.log(`[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId}, job #${jobId})`);
+                const webhookPayload = event;
+                setTimeout(async () => {
                 try {
                   const { runPhase2WithRetry } = await import('../portfolio-automation-runner');
                   const phase2Input =
@@ -634,7 +692,8 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   await markPhase2Failed(jobId, errMsg).catch(() => {});
                   console.error(`[webhook] Phase 2 failed: ${errMsg} (job #${jobId})`);
                 }
-              }, 15000);
+                }, 15000);
+              }
             }
 
             const project = await storage.getProcoreProjectByProcoreId(projectId);

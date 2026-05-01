@@ -9,7 +9,11 @@ export type WebhookMigrationModeConfig = {
 };
 
 export type WebhookSuppressedAction = {
-  action: "procore_webhook:suppressed_hubspot_write" | "procore_webhook:suppressed_stage_notification" | "hubspot_webhook:suppressed_stage_notification";
+  action:
+    | "procore_webhook:suppressed_hubspot_write"
+    | "procore_webhook:suppressed_stage_notification"
+    | "procore_webhook:suppressed_portfolio_phase2"
+    | "hubspot_webhook:suppressed_stage_notification";
   projectId?: string | null;
   projectName?: string | null;
   projectNumber?: string | null;
@@ -23,6 +27,15 @@ export type WebhookSuppressedAction = {
   webhookResourceName?: string | null;
   webhookEventType?: string | null;
   details?: Record<string, unknown>;
+};
+
+export type WebhookPortfolioPhase2Gate = {
+  enabled: boolean;
+  allowlist: string[];
+  allowlistMatch: boolean;
+  allowed: boolean;
+  projectNumber: string | null;
+  mappingSource: "sync_mappings" | "none";
 };
 
 export async function getWebhookMigrationModeConfig(): Promise<WebhookMigrationModeConfig> {
@@ -45,6 +58,43 @@ export async function getWebhookMigrationModeConfig(): Promise<WebhookMigrationM
 
 export function isMigrationMode(config: WebhookMigrationModeConfig): boolean {
   return config.mode === "migration";
+}
+
+function normalizeKey(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+export async function evaluateWebhookPortfolioPhase2Gate(input: {
+  bidboardProjectId?: string | null;
+  portfolioProjectId?: string | null;
+  modeConfig: WebhookMigrationModeConfig;
+}): Promise<WebhookPortfolioPhase2Gate> {
+  const config = await storage.getAutomationConfig("bidboard_portfolio_trigger");
+  const value = (config?.value ?? {}) as Record<string, unknown>;
+  const enabled = config ? value.enabled === true : input.modeConfig.mode !== "migration";
+  const allowlist = Array.isArray(value.allowlist)
+    ? value.allowlist.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+
+  const mapping = input.bidboardProjectId
+    ? await storage.getSyncMappingByBidboardProjectId(input.bidboardProjectId)
+    : input.portfolioProjectId
+      ? await storage.getSyncMappingByProcoreProjectId(input.portfolioProjectId)
+      : undefined;
+  const projectNumber = mapping?.procoreProjectNumber ?? null;
+  const normalizedProjectNumber = normalizeKey(projectNumber);
+  const allowlistMatch =
+    Boolean(normalizedProjectNumber) &&
+    allowlist.some((item) => normalizeKey(item) === normalizedProjectNumber);
+
+  return {
+    enabled,
+    allowlist,
+    allowlistMatch,
+    allowed: enabled || allowlistMatch,
+    projectNumber,
+    mappingSource: mapping ? "sync_mappings" : "none",
+  };
 }
 
 export async function logWebhookSuppressedAction(
