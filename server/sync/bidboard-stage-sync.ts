@@ -141,6 +141,58 @@ async function logSuppressedAction(input: SuppressedActionLogInput): Promise<voi
   }
 }
 
+interface ManualReviewQueueInput {
+  projectId: string;
+  projectNumber: string;
+  projectName: string;
+  customerName: string;
+  currentStage: string;
+  previousStage: string;
+  cycleId: string;
+  reason: string;
+  mappingSource: StageMappingSource;
+  modeConfig: Required<BidBoardStageSyncModeConfig>;
+}
+
+async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQueueInput): Promise<void> {
+  const details = {
+    projectNumber: input.projectNumber,
+    projectName: input.projectName,
+    customer: input.customerName,
+    currentStage: input.currentStage,
+    previousStage: input.previousStage,
+    cycleId: input.cycleId,
+    reason: input.reason,
+    mappingSource: input.mappingSource,
+    mode: input.modeConfig.mode,
+    hubspotDealId: null,
+  };
+
+  log(`[BidBoardStageSync] manual review queued ${JSON.stringify(details)}`, "sync");
+
+  const existing = await storage.getManualReviewQueueEntry(input.projectNumber, input.cycleId);
+  if (!existing) {
+    await storage.createManualReviewQueueEntry({
+      projectNumber: input.projectNumber,
+      projectName: input.projectName,
+      customer: input.customerName,
+      currentStage: input.currentStage,
+      previousStage: input.previousStage,
+      cycleId: input.cycleId,
+      reason: input.reason,
+      details,
+    });
+  }
+
+  await storage.createBidboardAutomationLog({
+    projectId: input.projectId,
+    projectName: input.projectName,
+    action: "bidboard_stage_sync:manual_review_queued",
+    status: "queued",
+    details,
+  });
+}
+
 /**
  * Parse the exported Excel file and return project rows from Active Projects sheet.
  */
@@ -283,23 +335,23 @@ export async function diffBidBoardStages(
     const hubspotDealId = match?.mapping?.hubspotDealId;
 
     if (!hubspotDealId) {
-      // No HubSpot deal found — can't sync stage to HubSpot.
-      // BUT: still trigger portfolio automation if stage is "Sent to Production"
-      const normalizedNewStage = normalizeStageLabel(newStatus);
-      if (
-        normalizedNewStage === "Sent to Production" ||
-        normalizedNewStage === "Service - Sent to Production"
-      ) {
-        const projectName = row.Name?.toString()?.trim() || "";
-        const projectNumber = row["Project #"]?.toString()?.trim() || null;
-        const customerName = row["Customer Name"]?.toString()?.trim() || "";
+      const projectName = row.Name?.toString()?.trim() || "";
+      const projectNumber = row["Project #"]?.toString()?.trim() || null;
+      const customerName = row["Customer Name"]?.toString()?.trim() || "";
+      const modeConfig = await getBidBoardStageSyncModeConfig();
+      const resolvedMapping = await resolveBidBoardHubSpotStage(newStatus, {
+        projectName,
+        projectNumber,
+        previousStage: previousStage || "(new)",
+        cycleId: modeConfig.cycleId,
+      });
 
+      if (resolvedMapping?.triggerPortfolio) {
         log(
-          `[sync] No HubSpot deal for "${projectName}" but stage changed to "${newStatus}" — triggering portfolio automation directly`,
+          `[sync] No HubSpot deal for "${projectName}" at Portfolio trigger stage "${newStatus}" — queueing manual review instead of auto-creating Portfolio`,
           "sync"
         );
 
-        // Update sync state so we don't re-trigger on next cycle
         await storage.upsertBidboardSyncState({
           projectId,
           projectName,
@@ -310,58 +362,23 @@ export async function diffBidBoardStages(
           },
         });
 
-        const modeConfig = await getBidBoardStageSyncModeConfig();
-        if (modeConfig.mode === "migration" && modeConfig.suppressPortfolioTriggers) {
-          await logSuppressedAction({
-            action: "bidboard_stage_sync:suppressed_portfolio_trigger",
-            change: {
-              projectName,
-              projectNumber,
-              customerName,
-              previousStage: previousStage || "(new)",
-              newStage: newStatus,
-              totalSales: parseFloat(String(row["Total Sales"] || 0)) || 0,
-              synchubRecordId: projectId,
-              hubspotDealId: null,
-            },
-            wouldHaveAction: "portfolio_create_phase1",
-            targetValue: newStatus,
-            mappingSource: "hardcoded_fallback",
-            modeConfig,
-          });
-        } else {
-          // Log the event
-          await storage.createBidboardAutomationLog({
-            projectId,
-            projectName,
-            action: "bidboard_stage_sync",
-            status: "success",
-            details: {
-              previousStage: previousStage || "(new)",
-              newStage: newStatus,
-              note: "No HubSpot deal mapping — portfolio automation triggered without HubSpot sync",
-            },
-          });
-
-          // Trigger portfolio automation (fire and forget — don't block the sync loop)
-          try {
-            await triggerPortfolioAutomationFromStageChange(
-              projectName,
-              projectNumber,
-              customerName
-            );
-          } catch (err) {
-            log(
-              `[sync] Portfolio automation trigger failed for ${projectName} (no HubSpot deal): ${err instanceof Error ? err.message : String(err)}`,
-              "sync"
-            );
-          }
-        }
+        await queueManualReviewForUnmappedPortfolioTrigger({
+          projectId,
+          projectNumber: projectNumber || projectId,
+          projectName,
+          customerName,
+          currentStage: newStatus,
+          previousStage: previousStage || "(new)",
+          cycleId: modeConfig.cycleId,
+          reason: "unmapped_contract_no_hubspot_deal",
+          mappingSource: resolvedMapping.mappingSource,
+          modeConfig,
+        });
       } else {
-        // Not a production stage and no HubSpot deal — just update sync state and move on
+        // No HubSpot deal and not a Portfolio trigger — just update sync state and move on
         await storage.upsertBidboardSyncState({
           projectId,
-          projectName: row.Name?.toString()?.trim(),
+          projectName,
           currentStage: newStatus,
           metadata: {
             projectNumber: row["Project #"],
@@ -370,7 +387,7 @@ export async function diffBidBoardStages(
         });
 
         log(
-          `[sync] Stage change detected for "${row.Name}" (${previousStage || "(new)"} → ${newStatus}) but no HubSpot deal found — skipping HubSpot sync`,
+          `[sync] Stage change detected for "${projectName}" (${previousStage || "(new)"} → ${newStatus}) but no HubSpot deal found — skipping HubSpot sync`,
           "sync"
         );
       }

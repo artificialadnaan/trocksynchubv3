@@ -88,6 +88,7 @@ import {
   bidboardSyncState, type BidboardSyncState,
   bidboardStageSyncRuns, type BidboardStageSyncRun,
   bidboardAutomationLogs, type BidboardAutomationLog,
+  manualReviewQueue, type ManualReviewQueue, type InsertManualReviewQueue,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
   rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
   rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
@@ -301,6 +302,8 @@ export interface IStorage {
   getBidboardAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
   getPortfolioAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
   createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog>;
+  getManualReviewQueueEntry(projectNumber: string, cycleId: string): Promise<ManualReviewQueue | undefined>;
+  createManualReviewQueueEntry(data: InsertManualReviewQueue): Promise<ManualReviewQueue>;
 
   createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey>;
   getCloseoutSurveyByToken(token: string): Promise<CloseoutSurvey | undefined>;
@@ -1626,6 +1629,33 @@ export class DatabaseStorage implements IStorage {
         details: data.details,
         errorMessage: data.errorMessage,
         screenshotPath: data.screenshotPath,
+      })
+      .returning();
+    return result;
+  }
+
+  async getManualReviewQueueEntry(projectNumber: string, cycleId: string): Promise<ManualReviewQueue | undefined> {
+    const [result] = await db
+      .select()
+      .from(manualReviewQueue)
+      .where(and(eq(manualReviewQueue.projectNumber, projectNumber), eq(manualReviewQueue.cycleId, cycleId)));
+    return result;
+  }
+
+  async createManualReviewQueueEntry(data: InsertManualReviewQueue): Promise<ManualReviewQueue> {
+    const [result] = await db
+      .insert(manualReviewQueue)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [manualReviewQueue.projectNumber, manualReviewQueue.cycleId],
+        set: {
+          projectName: data.projectName,
+          customer: data.customer,
+          currentStage: data.currentStage,
+          previousStage: data.previousStage,
+          reason: data.reason,
+          details: data.details,
+        },
       })
       .returning();
     return result;
