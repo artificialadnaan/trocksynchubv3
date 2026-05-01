@@ -1094,6 +1094,285 @@ describe("Portfolio automation trigger", () => {
     expect(result.suppressed).toBeGreaterThanOrEqual(2);
   });
 
+  it("fires Portfolio when global trigger is disabled but the project is allowlisted", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: false, allowlist: ["TP-PROD"], requireHubspotDeal: true } } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Won",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Won")]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledWith(
+      "Production Project",
+      "TP-PROD",
+      "Zeta Corp",
+      "hs-deal-prod"
+    );
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-PROD",
+        action: "bidboard_stage_sync:portfolio_trigger_allowlist_match",
+        status: "success",
+        details: expect.objectContaining({
+          projectNumber: "TP-PROD",
+          targetValue: "Won",
+          mappingSource: "stage_mappings",
+          portfolioTriggerEnabled: false,
+        }),
+      })
+    );
+  });
+
+  it("suppresses Portfolio when global trigger is disabled and the project is not allowlisted", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: false, allowlist: ["OTHER"], requireHubspotDeal: true } } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Won",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Won")]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-PROD",
+        action: "bidboard_stage_sync:portfolio_trigger_disabled_skip",
+        status: "skipped",
+      })
+    );
+  });
+
+  it("fires Portfolio when global trigger is enabled regardless of allowlist", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: true, allowlist: [], requireHubspotDeal: true } } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Won",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Won")]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses all Portfolio triggers when global trigger is disabled and allowlist is empty", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: false, allowlist: [], requireHubspotDeal: true } } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Won",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Won")]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+  });
+
+  it("queues manual review instead of firing when an allowlisted trigger project has no HubSpot deal", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([
+      { projectId: "TP-PROD", currentStage: "Estimate in Progress", projectName: "Production Project", metadata: {} } as any,
+    ]);
+    vi.mocked(storage.getSyncMappingByProcoreProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
+    vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return { key, value: { cycleId: "cycle-allowlist-no-hs" } } as any;
+      }
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: false, allowlist: ["TP-PROD"], requireHubspotDeal: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Won",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const xlsxPath = writeTempXlsx([
+      { Name: "Production Project", Status: "Won", "Project #": "TP-PROD", "Total Sales": 100000, "Customer Name": "Zeta Corp" },
+    ]);
+
+    const changes = await diffBidBoardStages(xlsxPath);
+
+    expect(changes).toHaveLength(0);
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectNumber: "TP-PROD",
+        currentStage: "Won",
+        previousStage: "Estimate in Progress",
+      })
+    );
+  });
+
+  it("in migration mode fires Portfolio for an allowlisted project even when suppressPortfolioTriggers is true", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "migration",
+            suppressHubSpotWrites: true,
+            suppressPortfolioTriggers: true,
+            suppressStageNotifications: true,
+            logSuppressedActions: true,
+            cycleId: "cycle-allowlist-precedence",
+          },
+        } as any;
+      }
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: false, allowlist: ["TP-PROD"], requireHubspotDeal: true } } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Won",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Won")]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(storage.createBidboardAutomationLog)).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "bidboard_stage_sync:suppressed_portfolio_trigger",
+      })
+    );
+  });
+
   it('triggers portfolio automation when newStage is "Service - Sent to Production"', async () => {
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     const { updateHubSpotDealStage } = await import("../server/hubspot.ts");

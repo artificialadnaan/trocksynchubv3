@@ -150,6 +150,108 @@ async function logSuppressedAction(input: SuppressedActionLogInput): Promise<voi
   }
 }
 
+interface PortfolioTriggerConfig {
+  enabled: boolean;
+  allowlist: string[];
+  requireHubspotDeal: boolean;
+  configExists: boolean;
+}
+
+async function getPortfolioTriggerConfig(
+  modeConfig: ResolvedBidBoardStageSyncModeConfig
+): Promise<PortfolioTriggerConfig> {
+  const config = await storage.getAutomationConfig("bidboard_portfolio_trigger");
+  const value = ((config?.value || {}) as Record<string, unknown>);
+  return {
+    // Preserve legacy live behavior if the config row is absent, but fail closed in migration mode.
+    enabled: config ? value.enabled === true : modeConfig.mode !== "migration",
+    allowlist: Array.isArray(value.allowlist)
+      ? value.allowlist.map((item) => String(item).trim()).filter(Boolean)
+      : [],
+    requireHubspotDeal: value.requireHubspotDeal !== false,
+    configExists: Boolean(config),
+  };
+}
+
+function isPortfolioTriggerAllowlisted(change: StageChange, allowlist: string[]): boolean {
+  const projectNumber = normalizeKey(change.projectNumber);
+  if (!projectNumber) return false;
+  return allowlist.some((item) => normalizeKey(item) === projectNumber);
+}
+
+async function logPortfolioTriggerAllowlistMatch(input: {
+  change: StageChange;
+  targetValue: string;
+  mappingSource: StageMappingSource;
+  modeConfig: ResolvedBidBoardStageSyncModeConfig;
+  portfolioConfig: PortfolioTriggerConfig;
+}): Promise<void> {
+  const projectId = getProjectIdFromChange(input.change);
+  const details = {
+    cycleId: input.modeConfig.cycleId,
+    previousStage: input.change.previousStage,
+    newStage: input.change.newStage,
+    targetValue: input.targetValue,
+    hubspotDealId: input.change.hubspotDealId,
+    mappingSource: input.mappingSource,
+    mode: input.modeConfig.mode,
+    projectNumber: input.change.projectNumber,
+    portfolioTriggerEnabled: input.portfolioConfig.enabled,
+    allowlist: input.portfolioConfig.allowlist,
+    ...(input.modeConfig.canaryRunId ? { canaryRunId: input.modeConfig.canaryRunId } : {}),
+  };
+
+  log(`[BidBoardStageSync] portfolio trigger allowlist match ${JSON.stringify({
+    projectName: input.change.projectName,
+    ...details,
+  })}`, "sync");
+
+  await storage.createBidboardAutomationLog({
+    projectId,
+    projectName: input.change.projectName,
+    action: "bidboard_stage_sync:portfolio_trigger_allowlist_match",
+    status: "success",
+    details,
+  });
+}
+
+async function logPortfolioTriggerDisabledSkip(input: {
+  change: StageChange;
+  targetValue: string;
+  mappingSource: StageMappingSource;
+  modeConfig: ResolvedBidBoardStageSyncModeConfig;
+  portfolioConfig: PortfolioTriggerConfig;
+}): Promise<void> {
+  const projectId = getProjectIdFromChange(input.change);
+  const details = {
+    cycleId: input.modeConfig.cycleId,
+    previousStage: input.change.previousStage,
+    newStage: input.change.newStage,
+    targetValue: input.targetValue,
+    hubspotDealId: input.change.hubspotDealId,
+    mappingSource: input.mappingSource,
+    mode: input.modeConfig.mode,
+    projectNumber: input.change.projectNumber,
+    portfolioTriggerEnabled: input.portfolioConfig.enabled,
+    allowlist: input.portfolioConfig.allowlist,
+    reason: "portfolio_trigger_disabled_not_allowlisted",
+    ...(input.modeConfig.canaryRunId ? { canaryRunId: input.modeConfig.canaryRunId } : {}),
+  };
+
+  log(`[BidBoardStageSync] portfolio trigger disabled skip ${JSON.stringify({
+    projectName: input.change.projectName,
+    ...details,
+  })}`, "sync");
+
+  await storage.createBidboardAutomationLog({
+    projectId,
+    projectName: input.change.projectName,
+    action: "bidboard_stage_sync:portfolio_trigger_disabled_skip",
+    status: "skipped",
+    details,
+  });
+}
+
 interface ManualReviewQueueInput {
   projectId: string;
   projectNumber: string;
@@ -506,17 +608,21 @@ export async function syncStagesToHubSpot(
     // from resolveBidBoardHubSpotStage once Procore rename is complete and bidboard_sync_state is backfilled.
     let portfolioTriggerSucceeded = true;
     if (shouldTriggerPortfolio) {
-      if (modeConfig.suppressPortfolioTriggers) {
-        result.suppressed++;
-        await logSuppressedAction({
-          action: "bidboard_stage_sync:suppressed_portfolio_trigger",
-          change,
-          wouldHaveAction: "portfolio_create_phase1",
-          targetValue: change.newStage,
-          mappingSource,
-          modeConfig,
-        });
-      } else {
+      const portfolioConfig = await getPortfolioTriggerConfig(modeConfig);
+      const allowlistMatch = isPortfolioTriggerAllowlisted(change, portfolioConfig.allowlist);
+      const shouldFirePortfolio = portfolioConfig.enabled || allowlistMatch;
+
+      if (shouldFirePortfolio) {
+        if (allowlistMatch && !portfolioConfig.enabled) {
+          await logPortfolioTriggerAllowlistMatch({
+            change,
+            targetValue: change.newStage,
+            mappingSource,
+            modeConfig,
+            portfolioConfig,
+          });
+        }
+
         try {
           await triggerPortfolioAutomationFromStageChange(
             change.projectName,
@@ -531,6 +637,24 @@ export async function syncStagesToHubSpot(
             "sync"
           );
         }
+      } else if (modeConfig.suppressPortfolioTriggers) {
+        result.suppressed++;
+        await logSuppressedAction({
+          action: "bidboard_stage_sync:suppressed_portfolio_trigger",
+          change,
+          wouldHaveAction: "portfolio_create_phase1",
+          targetValue: change.newStage,
+          mappingSource,
+          modeConfig,
+        });
+      } else {
+        await logPortfolioTriggerDisabledSkip({
+          change,
+          targetValue: change.newStage,
+          mappingSource,
+          modeConfig,
+          portfolioConfig,
+        });
       }
     }
 
