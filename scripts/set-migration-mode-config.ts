@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 
 import { execFileSync } from "child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "fs";

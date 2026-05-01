@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * Add reconciliation tables for the Data Health / reconciliation engine.
  * Run: npx tsx scripts/migrate-reconciliation-tables.ts

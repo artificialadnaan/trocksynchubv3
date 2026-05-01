@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * Add category column to audit_logs and backfill sync vs system.
  * Run: npx tsx scripts/migrate-audit-log-category.ts

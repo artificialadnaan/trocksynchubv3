@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * RFP Reporting & Scheduled Email migrations.
  * Run: npx tsx scripts/migrate-rfp-reporting.ts
