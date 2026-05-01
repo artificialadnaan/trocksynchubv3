@@ -671,6 +671,7 @@ describe("Portfolio automation trigger", () => {
 
     await syncStagesToHubSpot([makeProductionChange("Sent to Production")]);
 
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledWith(
       "Production Project",
       "TP-PROD",

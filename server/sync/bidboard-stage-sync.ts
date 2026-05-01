@@ -445,7 +445,9 @@ export async function syncStagesToHubSpot(
       continue;
     }
 
-    // Trigger portfolio automation BEFORE terminal guard — production stages always fire regardless of HubSpot block
+    // Trigger portfolio automation BEFORE terminal guard — production stages always fire regardless of HubSpot block.
+    // TODO(ticket-9/stage-rename-cleanup): remove legacy Sent to Production trigger preservation
+    // from resolveBidBoardHubSpotStage once Procore rename is complete and bidboard_sync_state is backfilled.
     let portfolioTriggerSucceeded = true;
     if (shouldTriggerPortfolio) {
       if (migrationMode && modeConfig.suppressPortfolioTriggers) {
