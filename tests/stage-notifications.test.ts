@@ -1,21 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockStorage = {
-  getAutomationConfig: vi.fn(),
-  checkEmailDedupeKey: vi.fn(),
-  createEmailSendLog: vi.fn(),
-  createAuditLog: vi.fn(),
-  getProcoreRoleAssignmentsByProject: vi.fn(),
-};
-
-const mockSendEmail = vi.fn();
-const mockGetDealOwnerInfo = vi.fn();
+const { mockStorage, mockSendEmail, mockGetDealOwnerInfo } = vi.hoisted(() => ({
+  mockStorage: {
+    getAutomationConfig: vi.fn(),
+    checkEmailDedupeKey: vi.fn(),
+    createEmailSendLog: vi.fn(),
+    createAuditLog: vi.fn(),
+    createBidboardAutomationLog: vi.fn(),
+    upsertAutomationConfig: vi.fn(),
+    getProcoreRoleAssignmentsByProject: vi.fn(),
+  },
+  mockSendEmail: vi.fn(),
+  mockGetDealOwnerInfo: vi.fn(),
+}));
 
 vi.mock('../server/storage.ts', () => ({ storage: mockStorage }));
 vi.mock('../server/email-service.ts', () => ({ sendEmail: mockSendEmail }));
 vi.mock('../server/hubspot.ts', () => ({ getDealOwnerInfo: mockGetDealOwnerInfo }));
 
-import { buildStageNotificationEmail, processStageNotification } from '../server/stage-notifications';
+import { buildStageNotificationEmail, processStageNotification, setStageNotificationEnabled } from '../server/stage-notifications';
 
 describe('buildStageNotificationEmail', () => {
   beforeEach(() => {
@@ -24,6 +27,8 @@ describe('buildStageNotificationEmail', () => {
     mockStorage.checkEmailDedupeKey.mockResolvedValue(false);
     mockStorage.createEmailSendLog.mockResolvedValue({});
     mockStorage.createAuditLog.mockResolvedValue({});
+    mockStorage.createBidboardAutomationLog.mockResolvedValue({});
+    mockStorage.upsertAutomationConfig.mockResolvedValue({});
     mockStorage.getProcoreRoleAssignmentsByProject.mockResolvedValue([]);
     mockGetDealOwnerInfo.mockResolvedValue({
       ownerEmail: 'owner@trockgc.com',
@@ -105,7 +110,7 @@ describe('buildStageNotificationEmail', () => {
         templateKey: 'stage_notify_bb_internal_review',
         recipientEmail: 'sgibson@trockgc.com, jhelms@trockgc.com',
         dedupeKey:
-          'stage_notify:bb_internal_review:321010655946:Estimate in Progress:Estimate Under Review',
+          'stage_notify:bb_internal_review:562949955723964:Estimate in Progress:Estimate Under Review',
         metadata: expect.objectContaining({
           deliveryCount: 2,
           primaryTo: 'sgibson@trockgc.com',
@@ -135,6 +140,178 @@ describe('buildStageNotificationEmail', () => {
     expect(mockSendEmail).not.toHaveBeenCalledWith(
       expect.objectContaining({
         cc: expect.arrayContaining(['sbohen@trockgc.com']),
+      })
+    );
+  });
+
+  it('does not send the new Contract closed-won route by default and logs route_disabled_skip', async () => {
+    mockStorage.getAutomationConfig.mockResolvedValue(undefined);
+
+    const result = await processStageNotification({
+      stage: 'Contract',
+      source: 'bidboard',
+      projectName: 'Contract Project',
+      oldStage: 'Estimate Sent to Client',
+      bidboardProjectNumber: 'DFW-1-12326-aa',
+      hubspotDealId: 'deal-contract',
+    });
+
+    expect(result).toMatchObject({ sent: 0, skipped: true, route: 'bb_closed_won' });
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockStorage.createBidboardAutomationLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'DFW-1-12326-aa',
+        projectName: 'Contract Project',
+        action: 'stage_notify:route_disabled_skip',
+        status: 'skipped',
+        details: expect.objectContaining({
+          route: 'bb_closed_won',
+          configKey: 'stage_notify_bb_closed_won_contract',
+          stage: 'Contract',
+          oldStage: 'Estimate Sent to Client',
+          source: 'bidboard',
+        }),
+      })
+    );
+  });
+
+  it('sends the new Contract closed-won route when explicitly enabled', async () => {
+    mockStorage.getAutomationConfig.mockImplementation(async (key: string) => {
+      if (key === 'stage_notify_bb_closed_won_contract') return { key, value: { enabled: true } };
+      return undefined;
+    });
+
+    const result = await processStageNotification({
+      stage: 'Contract',
+      source: 'bidboard',
+      projectName: 'Contract Project',
+      oldStage: 'Estimate Sent to Client',
+      bidboardProjectNumber: 'DFW-1-12326-aa',
+      hubspotDealId: 'deal-contract',
+    });
+
+    expect(result).toMatchObject({ sent: 2, skipped: false, route: 'bb_closed_won' });
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockStorage.createEmailSendLog).toHaveBeenCalledWith(
+      expect.objectContaining({ templateKey: 'stage_notify_bb_closed_won' })
+    );
+  });
+
+  it('does not send the new Lost closed-lost route by default and logs route_disabled_skip', async () => {
+    mockStorage.getAutomationConfig.mockResolvedValue(undefined);
+
+    const result = await processStageNotification({
+      stage: 'Lost',
+      source: 'bidboard',
+      projectName: 'Lost Project',
+      oldStage: 'Estimate Sent to Client',
+      bidboardProjectNumber: 'DFW-1-99926-aa',
+      hubspotDealId: 'deal-lost',
+    });
+
+    expect(result).toMatchObject({ sent: 0, skipped: true, route: 'bb_closed_lost' });
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockStorage.createBidboardAutomationLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'DFW-1-99926-aa',
+        projectName: 'Lost Project',
+        action: 'stage_notify:route_disabled_skip',
+        status: 'skipped',
+        details: expect.objectContaining({
+          route: 'bb_closed_lost',
+          configKey: 'stage_notify_bb_closed_lost_lost',
+          stage: 'Lost',
+        }),
+      })
+    );
+  });
+
+  it('sends the new Lost closed-lost route when explicitly enabled', async () => {
+    mockStorage.getAutomationConfig.mockImplementation(async (key: string) => {
+      if (key === 'stage_notify_bb_closed_lost_lost') return { key, value: { enabled: true } };
+      return undefined;
+    });
+
+    const result = await processStageNotification({
+      stage: 'Lost',
+      source: 'bidboard',
+      projectName: 'Lost Project',
+      oldStage: 'Estimate Sent to Client',
+      bidboardProjectNumber: 'DFW-1-99926-aa',
+      hubspotDealId: 'deal-lost',
+    });
+
+    expect(result).toMatchObject({ sent: 1, skipped: false, route: 'bb_closed_lost' });
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockStorage.createEmailSendLog).toHaveBeenCalledWith(
+      expect.objectContaining({ templateKey: 'stage_notify_bb_closed_lost' })
+    );
+  });
+
+  it('does not route inert Won stage notifications', async () => {
+    const result = await processStageNotification({
+      stage: 'Won',
+      source: 'bidboard',
+      projectName: 'Won Project',
+      oldStage: 'Contract',
+      bidboardProjectNumber: 'DFW-1-77726-aa',
+      hubspotDealId: 'deal-won',
+    });
+
+    expect(result).toMatchObject({ sent: 0, skipped: true });
+    expect(result.route).toBeUndefined();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockStorage.createBidboardAutomationLog).not.toHaveBeenCalled();
+  });
+
+  it.each(['Sent to Production', 'Service - Sent to Production'])('keeps old closed-won route active for %s', async (stage) => {
+    const result = await processStageNotification({
+      stage,
+      source: 'bidboard',
+      projectName: 'Legacy Won Project',
+      oldStage: 'Estimate Sent to Client',
+      bidboardProjectNumber: 'DFW-1-55526-aa',
+      hubspotDealId: 'deal-legacy-won',
+    });
+
+    expect(result).toMatchObject({ sent: 2, skipped: false, route: 'bb_closed_won' });
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['Production Lost', 'Service - Lost'])('keeps old closed-lost route active for %s', async (stage) => {
+    const result = await processStageNotification({
+      stage,
+      source: 'bidboard',
+      projectName: 'Legacy Lost Project',
+      oldStage: 'Estimate Sent to Client',
+      bidboardProjectNumber: 'DFW-1-55626-aa',
+      hubspotDealId: 'deal-legacy-lost',
+    });
+
+    expect(result).toMatchObject({ sent: 1, skipped: false, route: 'bb_closed_lost' });
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps legacy toggle keys pointed at the old closed-won route', async () => {
+    await expect(setStageNotificationEnabled('bb_closed_won', false)).resolves.toBe(true);
+
+    expect(mockStorage.upsertAutomationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'stage_notify_bb_closed_won',
+        value: { enabled: false },
+        description: 'Stage notification: Sent to Production → Closed Won',
+      })
+    );
+  });
+
+  it('allows the new Contract route to be toggled by its explicit config key', async () => {
+    await expect(setStageNotificationEnabled('stage_notify_bb_closed_won_contract', true)).resolves.toBe(true);
+
+    expect(mockStorage.upsertAutomationConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'stage_notify_bb_closed_won_contract',
+        value: { enabled: true },
+        description: 'Stage notification: Contract → Closed Won',
       })
     );
   });

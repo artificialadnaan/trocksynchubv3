@@ -45,7 +45,7 @@
  * @module storage
  */
 
-import { eq, desc, and, gte, lte, sql, ilike, or } from "drizzle-orm";
+import { eq, desc, and, gte, lte, sql, ilike, or, isNull } from "drizzle-orm";
 
 /** Escape LIKE/ILIKE wildcards so user input is treated literally */
 function escapeLike(input: string): string {
@@ -1655,9 +1655,16 @@ export class DatabaseStorage implements IStorage {
           previousStage: data.previousStage,
           reason: data.reason,
           details: data.details,
+          updatedAt: new Date(),
         },
+        setWhere: isNull(manualReviewQueue.resolvedAt),
       })
       .returning();
+    if (!result) {
+      const existing = await this.getManualReviewQueueEntry(data.projectNumber, data.cycleId);
+      if (existing) return existing;
+      throw new Error(`Manual review queue upsert returned no row for ${data.projectNumber}/${data.cycleId}`);
+    }
     return result;
   }
 
