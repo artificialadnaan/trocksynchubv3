@@ -13,7 +13,11 @@ import { storage } from "../storage";
 
 /** Normalize Unicode dashes to ASCII hyphen for consistent stage lookup */
 export function normalizeStageLabel(s: string): string {
-  return s.replace(/[\u2013\u2014\u2212\uFE58\uFE63\uFF0D]/g, "-").trim();
+  const normalized = s.replace(/[\u2013\u2014\u2212\uFE58\uFE63\uFF0D]/g, "-").trim();
+  if (/^service\s+estimating$/i.test(normalized)) {
+    return "Service - Estimating";
+  }
+  return normalized;
 }
 
 /** Bid Board Status (Excel column) → HubSpot stage label (use hyphen in keys) */
