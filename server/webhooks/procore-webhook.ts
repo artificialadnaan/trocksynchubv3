@@ -34,8 +34,9 @@ import {
   takeNextPendingPhase2,
   markPhase2Complete,
   markPhase2Failed,
+  markPhase2Skipped,
 } from "../orchestrator/portfolio-orchestrator";
-import { getWebhookMigrationModeConfig, isMigrationMode, logWebhookSuppressedAction } from "./migration-mode";
+import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMigrationMode, logWebhookSuppressedAction } from "./migration-mode";
 
 export { registerPendingPhase2 };
 
@@ -122,14 +123,42 @@ export async function handleProcoreProjectWebhook(
 
       const pending = await takeNextPendingPhase2();
       if (pending) {
-        log(
-          `[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId}, job #${pending.id})`,
-          "webhook"
-        );
+        const phase2GateConfig = await getWebhookMigrationModeConfig();
+        const phase2Gate = await evaluateWebhookPortfolioPhase2Gate({
+          bidboardProjectId: pending.bidboardProjectId,
+          portfolioProjectId,
+          modeConfig: phase2GateConfig,
+        });
+        if (!phase2Gate.allowed) {
+          await markPhase2Skipped(pending.id, "portfolio_trigger_disabled_not_allowlisted");
+          await logWebhookSuppressedAction(phase2GateConfig, {
+            action: "procore_webhook:suppressed_portfolio_phase2",
+            projectId: portfolioProjectId,
+            projectNumber: phase2Gate.projectNumber,
+            previousStage: null,
+            newStage: null,
+            wouldHaveAction: "portfolio_phase2_webhook",
+            targetValue: "phase2",
+            mappingSource: phase2Gate.mappingSource,
+            webhookEventId: webhookId,
+            webhookResourceName: payload.resource_type,
+            webhookEventType: reason,
+            details: {
+              bidboardProjectId: pending.bidboardProjectId,
+              jobId: pending.id,
+              portfolioTriggerEnabled: phase2Gate.enabled,
+              allowlist: phase2Gate.allowlist,
+            },
+          });
+        } else {
+          log(
+            `[webhook] Triggering Phase 2 for portfolio project ${portfolioProjectId} (bidboard: ${pending.bidboardProjectId}, job #${pending.id})`,
+            "webhook"
+          );
 
-        const webhookPayload = payload;
-        const jobId = pending.id;
-        setTimeout(async () => {
+          const webhookPayload = payload;
+          const jobId = pending.id;
+          setTimeout(async () => {
           try {
             const phase2Input =
               pending.bidboardProjectUrl || pending.proposalPdfPath != null || pending.customerName
@@ -182,17 +211,46 @@ export async function handleProcoreProjectWebhook(
               "webhook"
             );
           }
-        }, 15000);
+          }, 15000);
+        }
       } else {
         const autoConfig = await storage.getAutomationConfig("portfolio_auto_trigger");
         const autoEnabled = (autoConfig?.value as { enabled?: boolean })?.enabled === true;
 
         if (autoEnabled) {
-          log(
-            `[webhook] Auto-triggering Phase 2 for project ${portfolioProjectId} (no pending Phase 1)`,
-            "webhook"
-          );
-          setTimeout(async () => {
+          const phase2GateConfig = await getWebhookMigrationModeConfig();
+          const phase2Gate = await evaluateWebhookPortfolioPhase2Gate({
+            portfolioProjectId,
+            modeConfig: phase2GateConfig,
+          });
+          if (!phase2Gate.allowed) {
+            await logWebhookSuppressedAction(phase2GateConfig, {
+              action: "procore_webhook:suppressed_portfolio_phase2",
+              projectId: portfolioProjectId,
+              projectNumber: phase2Gate.projectNumber,
+              previousStage: null,
+              newStage: null,
+              wouldHaveAction: "portfolio_phase2_webhook_auto_trigger",
+              targetValue: "phase2",
+              mappingSource: phase2Gate.mappingSource,
+              webhookEventId: webhookId,
+              webhookResourceName: payload.resource_type,
+              webhookEventType: reason,
+              details: {
+                portfolioTriggerEnabled: phase2Gate.enabled,
+                allowlist: phase2Gate.allowlist,
+              },
+            });
+            log(
+              `[webhook] Auto Phase 2 suppressed for project ${portfolioProjectId}: portfolio trigger disabled and project not allowlisted`,
+              "webhook"
+            );
+          } else {
+            log(
+              `[webhook] Auto-triggering Phase 2 for project ${portfolioProjectId} (no pending Phase 1)`,
+              "webhook"
+            );
+            setTimeout(async () => {
             try {
               const result = await runPhase2WithRetry(
                 companyId,
@@ -211,7 +269,8 @@ export async function handleProcoreProjectWebhook(
                 "webhook"
               );
             }
-          }, 15000);
+            }, 15000);
+          }
         } else {
           log(
             `[webhook] No pending Phase 1 and auto-trigger disabled for project ${portfolioProjectId}`,
@@ -234,8 +293,9 @@ export async function handleProcoreProjectWebhook(
             const result = await syncProcoreRoleAssignments([resourceId]);
             if (result.newAssignments.length > 0) {
               log(`[webhook] Role check found ${result.newAssignments.length} new assignment(s) for project ${resourceId}, sending notifications`, "webhook");
-              if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
-                await logWebhookSuppressedAction(webhookMigrationConfig, {
+              const delayedWebhookMigrationConfig = await getWebhookMigrationModeConfig();
+              if (isMigrationMode(delayedWebhookMigrationConfig) && delayedWebhookMigrationConfig.suppressStageNotifications) {
+                await logWebhookSuppressedAction(delayedWebhookMigrationConfig, {
                   action: "procore_webhook:suppressed_stage_notification",
                   projectId: resourceId,
                   previousStage: null,

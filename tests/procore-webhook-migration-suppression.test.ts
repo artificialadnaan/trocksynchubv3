@@ -13,6 +13,7 @@ const mockStorage = {
   getProcoreProjectByProcoreId: vi.fn(),
   upsertProcoreProject: vi.fn(),
   getSyncMappingByProcoreProjectId: vi.fn(),
+  getSyncMappingByBidboardProjectId: vi.fn(),
   getSyncMappingByHubspotDealId: vi.fn(),
   getHubspotDealByHubspotId: vi.fn(),
 };
@@ -56,6 +57,11 @@ vi.mock("../server/orchestrator/portfolio-orchestrator.ts", () => ({
   takeNextPendingPhase2: vi.fn().mockResolvedValue(null),
   markPhase2Complete: vi.fn(),
   markPhase2Failed: vi.fn(),
+  markPhase2Skipped: vi.fn(),
+}));
+
+vi.mock("../server/portfolio-automation-runner.ts", () => ({
+  runPhase2WithRetry: vi.fn().mockResolvedValue({ success: true, steps: [] }),
 }));
 
 vi.mock("../server/project-archive.ts", () => ({
@@ -156,7 +162,18 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
     mockStorage.getSyncMappingByProcoreProjectId.mockResolvedValue({
       id: 501,
       procoreProjectId: "598134326587649",
+      procoreProjectNumber: "DFW-1-12126-ad",
       procoreProjectName: "Canary Project",
+      bidboardProjectId: "bb-12126",
+      hubspotDealId: "323528245957",
+      hubspotDealName: "Canary Deal",
+    });
+    mockStorage.getSyncMappingByBidboardProjectId.mockResolvedValue({
+      id: 501,
+      procoreProjectId: "598134326587649",
+      procoreProjectNumber: "DFW-1-12126-ad",
+      procoreProjectName: "Canary Project",
+      bidboardProjectId: "bb-12126",
       hubspotDealId: "323528245957",
       hubspotDealName: "Canary Deal",
     });
@@ -358,5 +375,123 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
     } finally {
       server.close();
     }
+  });
+
+  it("uses fresh migration-mode config inside the delayed role notification callback", async () => {
+    const { syncProcoreRoleAssignments } = await import("../server/procore.ts");
+    const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import("../server/email-notifications.ts");
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let migrationMode = false;
+    mockStorage.getAutomationConfig.mockImplementation(async (key: string) => {
+      if (key === "procore_webhook_processing") return { key, value: { enabled: true } };
+      if (key === "procore_hubspot_stage_sync") return { key, value: { enabled: true } };
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: migrationMode
+            ? {
+                mode: "migration",
+                suppressHubSpotWrites: true,
+                suppressStageNotifications: true,
+                logSuppressedActions: true,
+                cycleId: "cycle-delayed-toggle",
+              }
+            : {
+                mode: "live",
+                suppressHubSpotWrites: false,
+                suppressStageNotifications: false,
+                logSuppressedActions: true,
+              },
+        };
+      }
+      return undefined;
+    });
+    vi.mocked(syncProcoreRoleAssignments).mockResolvedValue({
+      synced: 1,
+      newAssignments: [{ procoreProjectId: "598134326587649", projectName: "Canary Project" }],
+    } as any);
+
+    await postProcoreWebhook({
+      id: "evt-delayed-role",
+      resource_name: "projects",
+      event_type: "update",
+      resource_id: "role-project-1",
+      project_id: "role-project-1",
+      company_id: "598134325683880",
+    });
+
+    migrationMode = true;
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(vi.mocked(sendRoleAssignmentEmails)).not.toHaveBeenCalled();
+    expect(vi.mocked(triggerKickoffForNewPmOnPortfolio)).not.toHaveBeenCalled();
+    expect(mockStorage.createBidboardAutomationLog).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "role-project-1",
+      action: "procore_webhook:suppressed_stage_notification",
+      status: "suppressed",
+      details: expect.objectContaining({
+        cycleId: "cycle-delayed-toggle",
+        wouldHaveAction: "send_role_assignment_emails",
+        targetValue: "role_assignment_notifications",
+        mode: "migration",
+      }),
+    }));
+  });
+
+  it("skips webhook-driven Phase 2 when portfolio triggers are disabled and the pending job is not allowlisted", async () => {
+    const { takeNextPendingPhase2, markPhase2Skipped } = await import("../server/orchestrator/portfolio-orchestrator.ts");
+    const { runPhase2WithRetry } = await import("../server/portfolio-automation-runner.ts");
+
+    vi.mocked(takeNextPendingPhase2).mockResolvedValue({
+      id: 77,
+      bidboardProjectId: "bb-not-allowed",
+      bidboardProjectUrl: "https://procore.example/bidboard/bb-not-allowed",
+      proposalPdfPath: null,
+      estimateExcelPath: null,
+      customerName: "Customer",
+      timestamp: Date.now(),
+    });
+    mockStorage.getAutomationConfig.mockImplementation(async (key: string) => {
+      if (key === "procore_webhook_processing") return { key, value: { enabled: true } };
+      if (key === "procore_hubspot_stage_sync") return { key, value: { enabled: true } };
+      if (key === "bidboard_stage_sync") return { key, value: { mode: "migration", suppressHubSpotWrites: true, suppressStageNotifications: true, logSuppressedActions: true, cycleId: "cycle-phase2-gate" } };
+      if (key === "bidboard_portfolio_trigger") return { key, value: { enabled: false, allowlist: ["DFW-1-12126-ad"] } };
+      return undefined;
+    });
+    mockStorage.getSyncMappingByBidboardProjectId.mockResolvedValue({
+      id: 502,
+      procoreProjectId: "598134326000000",
+      procoreProjectNumber: "DFW-1-99999-xx",
+      bidboardProjectId: "bb-not-allowed",
+    });
+
+    const response = await postProcoreWebhook({
+      id: "evt-phase2-denied",
+      resource_name: "projects",
+      event_type: "update",
+      resource_id: "598134326587649",
+      project_id: "598134326587649",
+      company_id: "598134325683880",
+    });
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(runPhase2WithRetry)).not.toHaveBeenCalled();
+    expect(vi.mocked(markPhase2Skipped)).toHaveBeenCalledWith(77, "portfolio_trigger_disabled_not_allowlisted");
+    expect(mockStorage.createBidboardAutomationLog).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "598134326587649",
+      action: "procore_webhook:suppressed_portfolio_phase2",
+      status: "suppressed",
+      details: expect.objectContaining({
+        cycleId: "cycle-phase2-gate",
+        wouldHaveAction: "portfolio_phase2_webhook",
+        projectNumber: "DFW-1-99999-xx",
+        allowlist: ["DFW-1-12126-ad"],
+      }),
+    }));
+    expect(mockStorage.upsertProcoreProject).toHaveBeenCalledWith(expect.objectContaining({
+      stage: "Buy Out",
+      projectStageName: "Buy Out",
+    }));
   });
 });

@@ -144,6 +144,16 @@ export async function markPhase2Complete(jobId: number): Promise<void> {
 }
 
 /**
+ * Mark a Phase 2 job as intentionally skipped so it is not retried.
+ */
+export async function markPhase2Skipped(jobId: number, reason: string): Promise<void> {
+  await db.update(pendingPhase2Jobs)
+    .set({ status: "skipped", error: reason, completedAt: new Date() })
+    .where(eq(pendingPhase2Jobs.id, jobId));
+  log(`[orchestrator] Phase 2 job #${jobId} skipped: ${reason}`, "webhook");
+}
+
+/**
  * Mark a Phase 2 job as failed. If under max attempts, reset to pending for retry.
  */
 export async function markPhase2Failed(jobId: number, error: string, maxAttempts: number = 3): Promise<void> {
