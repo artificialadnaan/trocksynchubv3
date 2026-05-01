@@ -7,6 +7,7 @@ import { processNewDealWebhook } from "../deal-project-number";
 import { processHubspotWebhookForProcore } from "../hubspot-procore-sync";
 import { mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber, getTerminalStageGuard } from "../procore-hubspot-sync";
 import { handleProcoreProjectWebhook } from "../webhooks/procore-webhook";
+import { getWebhookMigrationModeConfig, isMigrationMode, logWebhookSuppressedAction } from "../webhooks/migration-mode";
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
@@ -193,15 +194,33 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                 if (oldStageName.toLowerCase().trim() === newStageName.toLowerCase().trim()) {
                   console.log(`[hubspot-webhook] Skipping stage change email for deal ${objectId} — stage unchanged: "${oldStageName}"`);
                 } else {
-                  await sendStageChangeEmail({
-                    hubspotDealId: objectId,
-                    dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
-                    procoreProjectId: mapping?.procoreProjectId || "",
-                    procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
-                    oldStage: oldStageName,
-                    newStage: newStageName,
-                    hubspotStageName: newStageName,
-                  });
+                  const webhookMigrationConfig = await getWebhookMigrationModeConfig();
+                  if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
+                    await logWebhookSuppressedAction(webhookMigrationConfig, {
+                      action: "hubspot_webhook:suppressed_stage_notification",
+                      projectId: mapping?.procoreProjectId || null,
+                      projectName: mapping?.procoreProjectName || "Not yet linked to Procore",
+                      previousStage: oldStageName,
+                      newStage: newStageName,
+                      wouldHaveAction: "send_stage_change_email",
+                      targetValue: newStageName,
+                      hubspotDealId: objectId,
+                      mappingSource: mapping ? "sync_mappings" : "none",
+                      webhookEventId: String(event.eventId || ""),
+                      webhookResourceName: objectType,
+                      webhookEventType: eventType,
+                    });
+                  } else {
+                    await sendStageChangeEmail({
+                      hubspotDealId: objectId,
+                      dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
+                      procoreProjectId: mapping?.procoreProjectId || "",
+                      procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
+                      oldStage: oldStageName,
+                      newStage: newStageName,
+                      hubspotStageName: newStageName,
+                    });
+                  }
                 }
               } catch (emailErr: any) {
                 console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
@@ -369,6 +388,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
       // Procore may send resource_type/reason (e.g. v4.0) instead of resource_name/event_type
       const resourceName = ((event.resource_name || event.resource_type || "").toString()).toLowerCase().replace(/\s+/g, '_');
       const eventType = ((event.event_type || event.reason || "").toString()).toLowerCase();
+      const webhookMigrationConfig = await getWebhookMigrationModeConfig();
 
       const roleRelatedResources = ["project_role_assignments", "project_roles", "project_users"];
       if (roleRelatedResources.includes(resourceName) && (eventType === "create" || eventType === "update")) {
@@ -379,12 +399,28 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             console.log(`[webhook] ${resourceName} ${eventType} for project ${projectId}, syncing role assignments...`);
             const result = await syncProcoreRoleAssignments([projectId]);
             if (result.newAssignments.length > 0) {
-              const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('../email-notifications');
-              const emailResult = await sendRoleAssignmentEmails(result.newAssignments);
-              console.log(`[webhook] Role assignment email result: ${emailResult.sent} sent, ${emailResult.skipped} skipped, ${emailResult.failed} failed`);
-              const kickoffResult = await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
-              if (kickoffResult.triggered > 0 || kickoffResult.failed > 0) {
-                console.log(`[webhook] Kickoff for new PM on Portfolio: ${kickoffResult.triggered} sent, ${kickoffResult.failed} failed`);
+              if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
+                await logWebhookSuppressedAction(webhookMigrationConfig, {
+                  action: "procore_webhook:suppressed_stage_notification",
+                  projectId,
+                  previousStage: null,
+                  newStage: null,
+                  wouldHaveAction: "send_role_assignment_emails",
+                  targetValue: "role_assignment_notifications",
+                  mappingSource: "procore_role_assignments",
+                  webhookEventId: String(event.id || ""),
+                  webhookResourceName: resourceName,
+                  webhookEventType: eventType,
+                  details: { assignmentCount: result.newAssignments.length },
+                });
+              } else {
+                const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('../email-notifications');
+                const emailResult = await sendRoleAssignmentEmails(result.newAssignments);
+                console.log(`[webhook] Role assignment email result: ${emailResult.sent} sent, ${emailResult.skipped} skipped, ${emailResult.failed} failed`);
+                const kickoffResult = await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
+                if (kickoffResult.triggered > 0 || kickoffResult.failed > 0) {
+                  console.log(`[webhook] Kickoff for new PM on Portfolio: ${kickoffResult.triggered} sent, ${kickoffResult.failed} failed`);
+                }
               }
             }
             await storage.createAuditLog({
@@ -518,9 +554,25 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   const roleResult = await syncProcoreRoleAssignments([projectId]);
                   if (roleResult.newAssignments.length > 0) {
                     console.log(`[webhook] Role check found ${roleResult.newAssignments.length} new assignment(s) for project ${projectId}, sending notifications`);
-                    const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('../email-notifications');
-                    await sendRoleAssignmentEmails(roleResult.newAssignments);
-                    await triggerKickoffForNewPmOnPortfolio(roleResult.newAssignments);
+                    if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
+                      await logWebhookSuppressedAction(webhookMigrationConfig, {
+                        action: "procore_webhook:suppressed_stage_notification",
+                        projectId,
+                        previousStage: null,
+                        newStage: null,
+                        wouldHaveAction: "send_role_assignment_emails",
+                        targetValue: "role_assignment_notifications",
+                        mappingSource: "procore_role_assignments",
+                        webhookEventId: String(event.id || ""),
+                        webhookResourceName: resourceName,
+                        webhookEventType: eventType,
+                        details: { assignmentCount: roleResult.newAssignments.length },
+                      });
+                    } else {
+                      const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import('../email-notifications');
+                      await sendRoleAssignmentEmails(roleResult.newAssignments);
+                      await triggerKickoffForNewPmOnPortfolio(roleResult.newAssignments);
+                    }
                   } else {
                     console.log(`[webhook] Role check complete for project ${projectId}: no new assignments`);
                   }
@@ -636,15 +688,42 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                         } else {
                           const resolvedStage = await resolveHubspotStageId(hubspotStageLabel);
                           if (resolvedStage) {
-                            const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, resolvedStage.stageId);
-                            console.log(`[webhook] Project ${projectId} not in local DB - synced stage "${newStage}" to HubSpot deal ${mapping.hubspotDealId}: ${updateResult.message}`);
+                            let updateResult: { success: boolean | null; message: string };
+                            if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressHubSpotWrites) {
+                              await logWebhookSuppressedAction(webhookMigrationConfig, {
+                                action: "procore_webhook:suppressed_hubspot_write",
+                                projectId,
+                                projectName: freshProject?.name || "Unknown Project",
+                                projectNumber: freshProject?.project_number || (freshProject?.properties as any)?.project_number || null,
+                                previousStage: null,
+                                newStage,
+                                wouldHaveAction: "hubspot_stage_update",
+                                targetValue: resolvedStage.stageName,
+                                hubspotDealId: mapping.hubspotDealId,
+                                mappingSource: "sync_mappings",
+                                webhookEventId: String(event.id || ""),
+                                webhookResourceName: resourceName,
+                                webhookEventType: eventType,
+                              });
+                              updateResult = { success: null, message: "suppressed by bidboard_stage_sync migration mode" };
+                            } else {
+                              updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, resolvedStage.stageId);
+                            }
+                            console.log(`[webhook] Project ${projectId} not in local DB - ${updateResult.success === null ? "suppressed stage sync" : "synced stage"} "${newStage}" to HubSpot deal ${mapping.hubspotDealId}: ${updateResult.message}`);
                             await storage.createAuditLog({
                               action: 'webhook_stage_change_processed',
                               entityType: 'project_stage',
                               entityId: projectId,
                               source: 'procore',
                               status: 'success',
-                              details: { projectId, newStage, hubspotDealId: mapping.hubspotDealId, reason: 'project_not_in_local_db' },
+                              details: {
+                                projectId,
+                                newStage,
+                                hubspotDealId: mapping.hubspotDealId,
+                                reason: 'project_not_in_local_db',
+                                hubspotUpdateSuccess: updateResult.success,
+                                hubspotUpdateSuppressed: updateResult.success === null,
+                              },
                             });
                           }
                         }
@@ -794,20 +873,60 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                       const hubspotStageId = resolvedStage.stageId;
                       const hubspotStageName = resolvedStage.stageName;
 
-                      const updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
-                      console.log(`[webhook] HubSpot deal ${mapping.hubspotDealId} stage updated: ${updateResult.message}`);
+                      let updateResult: { success: boolean | null; message: string };
+                      if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressHubSpotWrites) {
+                        await logWebhookSuppressedAction(webhookMigrationConfig, {
+                          action: "procore_webhook:suppressed_hubspot_write",
+                          projectId,
+                          projectName: project.name,
+                          projectNumber: project.projectNumber ?? null,
+                          previousStage: oldStage,
+                          newStage,
+                          wouldHaveAction: "hubspot_stage_update",
+                          targetValue: hubspotStageName,
+                          hubspotDealId: mapping.hubspotDealId,
+                          mappingSource: "sync_mappings",
+                          webhookEventId: String(event.id || ""),
+                          webhookResourceName: resourceName,
+                          webhookEventType: eventType,
+                        });
+                        updateResult = { success: null, message: "suppressed by bidboard_stage_sync migration mode" };
+                      } else {
+                        updateResult = await updateHubSpotDealStage(mapping.hubspotDealId, hubspotStageId);
+                      }
+                      console.log(`[webhook] HubSpot deal ${mapping.hubspotDealId} stage ${updateResult.success === null ? "suppressed" : "updated"}: ${updateResult.message}`);
 
                       const deal = await storage.getHubspotDealByHubspotId(mapping.hubspotDealId);
 
-                      const emailResult = await sendStageChangeEmail({
-                        hubspotDealId: mapping.hubspotDealId,
-                        dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
-                        procoreProjectId: projectId,
-                        procoreProjectName: project.name || 'Unknown Project',
-                        oldStage: oldStage,
-                        newStage: newStage,
-                        hubspotStageName,
-                      });
+                      let emailResult: { sent: boolean; ownerEmail?: string | null };
+                      if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
+                        await logWebhookSuppressedAction(webhookMigrationConfig, {
+                          action: "procore_webhook:suppressed_stage_notification",
+                          projectId,
+                          projectName: project.name,
+                          projectNumber: project.projectNumber ?? null,
+                          previousStage: oldStage,
+                          newStage,
+                          wouldHaveAction: "send_stage_change_email",
+                          targetValue: hubspotStageName,
+                          hubspotDealId: mapping.hubspotDealId,
+                          mappingSource: "sync_mappings",
+                          webhookEventId: String(event.id || ""),
+                          webhookResourceName: resourceName,
+                          webhookEventType: eventType,
+                        });
+                        emailResult = { sent: false, ownerEmail: null };
+                      } else {
+                        emailResult = await sendStageChangeEmail({
+                          hubspotDealId: mapping.hubspotDealId,
+                          dealName: deal?.dealName || mapping.hubspotDealName || 'Unknown Deal',
+                          procoreProjectId: projectId,
+                          procoreProjectName: project.name || 'Unknown Project',
+                          oldStage: oldStage,
+                          newStage: newStage,
+                          hubspotStageName,
+                        });
+                      }
 
                       await storage.createAuditLog({
                         action: 'webhook_stage_change_processed',
@@ -824,7 +943,9 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                           hubspotStageId,
                           hubspotStageName,
                           hubspotUpdateSuccess: updateResult.success,
+                          hubspotUpdateSuppressed: updateResult.success === null,
                           emailSent: emailResult.sent,
+                          emailSuppressed: isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications,
                           emailRecipient: emailResult.ownerEmail,
                         },
                       });
@@ -847,16 +968,34 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
               // Send stage-specific notifications (portfolio stages)
               try {
-                const { processStageNotification } = await import('../stage-notifications');
                 const stageMapping = await storage.getSyncMappingByProcoreProjectId(projectId);
-                await processStageNotification({
-                  stage: newStage,
-                  source: 'portfolio',
-                  projectName: project.name || 'Unknown Project',
-                  oldStage,
-                  procoreProjectId: projectId,
-                  hubspotDealId: stageMapping?.hubspotDealId,
-                });
+                if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
+                  await logWebhookSuppressedAction(webhookMigrationConfig, {
+                    action: "procore_webhook:suppressed_stage_notification",
+                    projectId,
+                    projectName: project.name,
+                    projectNumber: project.projectNumber ?? null,
+                    previousStage: oldStage,
+                    newStage,
+                    wouldHaveAction: "send_stage_notification",
+                    targetValue: newStage,
+                    hubspotDealId: stageMapping?.hubspotDealId ?? null,
+                    mappingSource: stageMapping ? "sync_mappings" : "none",
+                    webhookEventId: String(event.id || ""),
+                    webhookResourceName: resourceName,
+                    webhookEventType: eventType,
+                  });
+                } else {
+                  const { processStageNotification } = await import('../stage-notifications');
+                  await processStageNotification({
+                    stage: newStage,
+                    source: 'portfolio',
+                    projectName: project.name || 'Unknown Project',
+                    oldStage,
+                    procoreProjectId: projectId,
+                    hubspotDealId: stageMapping?.hubspotDealId,
+                  });
+                }
               } catch (notifyErr: any) {
                 console.error(`[webhook] Stage notification failed for project ${projectId}:`, notifyErr.message);
               }

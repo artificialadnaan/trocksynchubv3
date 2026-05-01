@@ -35,6 +35,7 @@ import {
   markPhase2Complete,
   markPhase2Failed,
 } from "../orchestrator/portfolio-orchestrator";
+import { getWebhookMigrationModeConfig, isMigrationMode, logWebhookSuppressedAction } from "./migration-mode";
 
 export { registerPendingPhase2 };
 
@@ -109,6 +110,7 @@ export async function handleProcoreProjectWebhook(
     const resourceId = String(payload.resource_id);
     const companyId = String(payload.company_id);
     const reason = payload.reason;
+    const webhookMigrationConfig = await getWebhookMigrationModeConfig();
 
     log(
       `[webhook] Projects ${reason} event: resource_id=${resourceId}, company_id=${companyId}`,
@@ -232,9 +234,25 @@ export async function handleProcoreProjectWebhook(
             const result = await syncProcoreRoleAssignments([resourceId]);
             if (result.newAssignments.length > 0) {
               log(`[webhook] Role check found ${result.newAssignments.length} new assignment(s) for project ${resourceId}, sending notifications`, "webhook");
-              const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import("../email-notifications");
-              await sendRoleAssignmentEmails(result.newAssignments);
-              await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
+              if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
+                await logWebhookSuppressedAction(webhookMigrationConfig, {
+                  action: "procore_webhook:suppressed_stage_notification",
+                  projectId: resourceId,
+                  previousStage: null,
+                  newStage: null,
+                  wouldHaveAction: "send_role_assignment_emails",
+                  targetValue: "role_assignment_notifications",
+                  mappingSource: "procore_role_assignments",
+                  webhookEventId: webhookId,
+                  webhookResourceName: payload.resource_type,
+                  webhookEventType: reason,
+                  details: { assignmentCount: result.newAssignments.length },
+                });
+              } else {
+                const { sendRoleAssignmentEmails, triggerKickoffForNewPmOnPortfolio } = await import("../email-notifications");
+                await sendRoleAssignmentEmails(result.newAssignments);
+                await triggerKickoffForNewPmOnPortfolio(result.newAssignments);
+              }
             } else {
               log(`[webhook] Role check complete for project ${resourceId}: no new assignments`, "webhook");
             }
