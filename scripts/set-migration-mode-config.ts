@@ -280,8 +280,25 @@ async function upsertTargetConfigs(client: pg.PoolClient): Promise<void> {
   }
 }
 
-function valuesEqual(actual: unknown, expected: unknown): boolean {
-  return JSON.stringify(actual) === JSON.stringify(expected);
+export function deepSemanticEqual(actual: unknown, expected: unknown): boolean {
+  if (actual === expected) return true;
+  if (actual === null || expected === null) return actual === expected;
+  if (typeof actual !== typeof expected) return false;
+  if (typeof actual !== "object") return actual === expected;
+  if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+  if (Array.isArray(actual)) {
+    if (actual.length !== (expected as unknown[]).length) return false;
+    return actual.every((value, index) => deepSemanticEqual(value, (expected as unknown[])[index]));
+  }
+
+  const actualObject = actual as Record<string, unknown>;
+  const expectedObject = expected as Record<string, unknown>;
+  const actualKeys = Object.keys(actualObject).sort();
+  const expectedKeys = Object.keys(expectedObject).sort();
+
+  if (actualKeys.length !== expectedKeys.length) return false;
+  if (!actualKeys.every((key, index) => key === expectedKeys[index])) return false;
+  return actualKeys.every((key) => deepSemanticEqual(actualObject[key], expectedObject[key]));
 }
 
 async function verifyTargets(client: pg.PoolClient): Promise<string[]> {
@@ -294,7 +311,7 @@ async function verifyTargets(client: pg.PoolClient): Promise<string[]> {
       drift.push(`${target.key}: row missing`);
       continue;
     }
-    if (!valuesEqual(row.value, target.value)) {
+    if (!deepSemanticEqual(row.value, target.value)) {
       drift.push(`${target.key}: value drift actual=${JSON.stringify(row.value)} expected=${JSON.stringify(target.value)}`);
     }
     if (row.is_active !== true) {
