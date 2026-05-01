@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * Add approved_attachments column to rfp_approval_requests.
  * Run: npx tsx scripts/migrate-approved-attachments.ts

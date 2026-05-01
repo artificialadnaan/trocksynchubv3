@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 
 import { parseArgs, parseRange } from "./bidboard-stage-rename-common";
 import { buildBidBoardCanaryReport } from "../server/reports/bidboard-canary-report";

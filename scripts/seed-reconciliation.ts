@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * Seed reconciliation tables from existing sync mappings.
  * Run: npx tsx scripts/seed-reconciliation.ts

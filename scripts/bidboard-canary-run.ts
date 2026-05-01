@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 
 import { createTimestamp, parseArgs } from "./bidboard-stage-rename-common";
 import type {

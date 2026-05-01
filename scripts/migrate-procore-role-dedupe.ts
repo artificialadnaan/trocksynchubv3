@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * Deduplicate procore_role_assignments before adding unique constraint.
  * Required for Railway deploy: avoids interactive truncate prompt when db:push adds unique.

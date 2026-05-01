@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * Seed historical audit log data for dashboard and Sync Activity (7 Days) chart.
  * Run: npm run db:seed-dashboard

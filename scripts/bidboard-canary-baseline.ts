@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";

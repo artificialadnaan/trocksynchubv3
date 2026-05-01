@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env -S npx tsx
 /**
  * Create hubspot_owners and hubspot_owner_mappings tables if missing.
  * Run: npx tsx scripts/migrate-hubspot-owner-tables.ts
