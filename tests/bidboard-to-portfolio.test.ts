@@ -1249,7 +1249,7 @@ describe("Portfolio automation trigger", () => {
     fs.unlinkSync(xlsxPath);
   });
 
-  it("does not create a duplicate manual review queue entry for the same project and cycle", async () => {
+  it("refreshes an unresolved manual review queue entry for the same project and cycle", async () => {
     const { storage } = await import("../server/storage.ts");
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
@@ -1276,7 +1276,89 @@ describe("Portfolio automation trigger", () => {
     } as any);
     vi.mocked(storage.getManualReviewQueueEntry)
       .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({ id: 1, projectNumber: "TP-NOHUB", cycleId: "cycle-dedupe" } as any);
+      .mockResolvedValueOnce({
+        id: 1,
+        projectNumber: "TP-NOHUB",
+        cycleId: "cycle-dedupe",
+        currentStage: "Contract",
+        previousStage: "Estimate in Progress",
+        createdAt: new Date("2026-05-01T10:00:00Z"),
+        resolvedAt: null,
+      } as any);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
+
+    const firstXlsxPath = writeTempXlsx([
+      { Name: "No HubSpot Project", Status: "Contract", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc" },
+    ]);
+    const secondXlsxPath = writeTempXlsx([
+      { Name: "No HubSpot Project Updated", Status: "Contract", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc Updated" },
+    ]);
+
+    await diffBidBoardStages(firstXlsxPath);
+
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([
+      { projectId: "TP-NOHUB", currentStage: "Estimate Sent to Client", projectName: "No HubSpot Project Updated", metadata: {} } as any,
+    ]);
+
+    await diffBidBoardStages(secondXlsxPath);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.getManualReviewQueueEntry)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        projectNumber: "TP-NOHUB",
+        projectName: "No HubSpot Project Updated",
+        customer: "Omega Inc Updated",
+        currentStage: "Contract",
+        previousStage: "Estimate Sent to Client",
+        cycleId: "cycle-dedupe",
+      })
+    );
+
+    fs.unlinkSync(firstXlsxPath);
+    fs.unlinkSync(secondXlsxPath);
+  });
+
+  it("skips re-queueing an already resolved manual review entry in the same cycle", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([
+      { projectId: "TP-NOHUB", currentStage: "Estimate in Progress", projectName: "No HubSpot Project", metadata: {} } as any,
+    ]);
+    vi.mocked(storage.getSyncMappingByProcoreProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
+    vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Contract",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({
+      key: "bidboard_stage_sync",
+      value: { cycleId: "cycle-resolved" },
+    } as any);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue({
+      id: 1,
+      projectNumber: "TP-NOHUB",
+      cycleId: "cycle-resolved",
+      currentStage: "Contract",
+      previousStage: "Estimate in Progress",
+      createdAt: new Date("2026-05-01T10:00:00Z"),
+      resolvedAt: new Date("2026-05-01T10:30:00Z"),
+      resolvedBy: "ops@example.com",
+      resolutionNotes: "Handled manually",
+    } as any);
     vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
     vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
     vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
@@ -1287,11 +1369,26 @@ describe("Portfolio automation trigger", () => {
     ]);
 
     await diffBidBoardStages(xlsxPath);
-    await diffBidBoardStages(xlsxPath);
 
     expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
-    expect(vi.mocked(storage.getManualReviewQueueEntry)).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-NOHUB",
+        projectName: "No HubSpot Project",
+        action: "bidboard_stage_sync:manual_review_already_resolved_skip",
+        status: "skipped",
+        details: expect.objectContaining({
+          projectNumber: "TP-NOHUB",
+          currentStage: "Contract",
+          previousStage: "Estimate in Progress",
+          cycleId: "cycle-resolved",
+          reason: "unmapped_contract_no_hubspot_deal",
+          resolvedAt: expect.any(Date),
+          resolvedBy: "ops@example.com",
+        }),
+      })
+    );
 
     fs.unlinkSync(xlsxPath);
   });

@@ -171,18 +171,33 @@ async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQ
   log(`[BidBoardStageSync] manual review queued ${JSON.stringify(details)}`, "sync");
 
   const existing = await storage.getManualReviewQueueEntry(input.projectNumber, input.cycleId);
-  if (!existing) {
-    await storage.createManualReviewQueueEntry({
-      projectNumber: input.projectNumber,
+  if (existing?.resolvedAt) {
+    const skipDetails = {
+      ...details,
+      resolvedAt: existing.resolvedAt,
+      resolvedBy: existing.resolvedBy,
+    };
+    log(`[BidBoardStageSync] manual review already resolved, skipping re-queue ${JSON.stringify(skipDetails)}`, "sync");
+    await storage.createBidboardAutomationLog({
+      projectId: input.projectId,
       projectName: input.projectName,
-      customer: input.customerName,
-      currentStage: input.currentStage,
-      previousStage: input.previousStage,
-      cycleId: input.cycleId,
-      reason: input.reason,
-      details,
+      action: "bidboard_stage_sync:manual_review_already_resolved_skip",
+      status: "skipped",
+      details: skipDetails,
     });
+    return;
   }
+
+  await storage.createManualReviewQueueEntry({
+    projectNumber: input.projectNumber,
+    projectName: input.projectName,
+    customer: input.customerName,
+    currentStage: input.currentStage,
+    previousStage: input.previousStage,
+    cycleId: input.cycleId,
+    reason: input.reason,
+    details,
+  });
 
   await storage.createBidboardAutomationLog({
     projectId: input.projectId,

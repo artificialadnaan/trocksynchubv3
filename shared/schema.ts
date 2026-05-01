@@ -136,6 +136,7 @@ export const manualReviewQueue = pgTable("manual_review_queue", {
   reason: text("reason").notNull(),
   details: jsonb("details"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
   resolvedAt: timestamp("resolved_at"),
   resolvedBy: text("resolved_by"),
   resolutionNotes: text("resolution_notes"),
@@ -149,6 +150,7 @@ export const manualReviewQueue = pgTable("manual_review_queue", {
 export const insertManualReviewQueueSchema = createInsertSchema(manualReviewQueue).omit({
   id: true,
   createdAt: true,
+  updatedAt: true,
 });
 export type InsertManualReviewQueue = z.infer<typeof insertManualReviewQueueSchema>;
 export type ManualReviewQueue = typeof manualReviewQueue.$inferSelect;
