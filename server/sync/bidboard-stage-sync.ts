@@ -44,6 +44,7 @@ export interface BidBoardStageSyncModeConfig {
   suppressStageNotifications?: boolean;
   logSuppressedActions?: boolean;
   cycleId?: string;
+  canaryRunId?: string;
 }
 
 export interface StageSyncResult {
@@ -77,19 +78,26 @@ function getProjectIdFromChange(change: Pick<StageChange, "projectNumber" | "pro
   return change.projectNumber || compositeKey(change.projectName, change.customerName);
 }
 
-async function getBidBoardStageSyncModeConfig(): Promise<Required<BidBoardStageSyncModeConfig>> {
+type ResolvedBidBoardStageSyncModeConfig = Required<Omit<BidBoardStageSyncModeConfig, "canaryRunId">> & {
+  canaryRunId?: string;
+};
+
+async function getBidBoardStageSyncModeConfig(
+  override?: BidBoardStageSyncModeConfig
+): Promise<ResolvedBidBoardStageSyncModeConfig> {
   const config = await storage.getAutomationConfig("bidboard_stage_sync");
   const value = ((config?.value || {}) as Record<string, unknown>);
   const mode = String(value.mode || "live");
   return {
-    mode,
-    suppressHubSpotWrites: value.suppressHubSpotWrites === true,
-    suppressPortfolioTriggers: value.suppressPortfolioTriggers === true,
-    suppressStageNotifications: value.suppressStageNotifications === true,
-    logSuppressedActions: value.logSuppressedActions !== false,
-    cycleId: typeof value.cycleId === "string" && value.cycleId
+    mode: override?.mode ?? mode,
+    suppressHubSpotWrites: override?.suppressHubSpotWrites ?? (value.suppressHubSpotWrites === true),
+    suppressPortfolioTriggers: override?.suppressPortfolioTriggers ?? (value.suppressPortfolioTriggers === true),
+    suppressStageNotifications: override?.suppressStageNotifications ?? (value.suppressStageNotifications === true),
+    logSuppressedActions: override?.logSuppressedActions ?? (value.logSuppressedActions !== false),
+    cycleId: override?.cycleId ?? (typeof value.cycleId === "string" && value.cycleId
       ? value.cycleId
-      : `bidboard-stage-sync-${Date.now()}`,
+      : `bidboard-stage-sync-${Date.now()}`),
+    canaryRunId: override?.canaryRunId ?? (typeof value.canaryRunId === "string" ? value.canaryRunId : undefined),
   };
 }
 
@@ -99,7 +107,7 @@ interface SuppressedActionLogInput {
   wouldHaveAction: string;
   targetValue: string;
   mappingSource: StageMappingSource;
-  modeConfig: Required<BidBoardStageSyncModeConfig>;
+  modeConfig: ResolvedBidBoardStageSyncModeConfig;
 }
 
 async function logSuppressedAction(input: SuppressedActionLogInput): Promise<void> {
@@ -115,6 +123,7 @@ async function logSuppressedAction(input: SuppressedActionLogInput): Promise<voi
     hubspotDealId: input.change.hubspotDealId ?? null,
     mappingSource: input.mappingSource,
     mode: input.modeConfig.mode,
+    ...(input.modeConfig.canaryRunId ? { canaryRunId: input.modeConfig.canaryRunId } : {}),
   };
 
   log(`[BidBoardStageSync] suppressed action ${JSON.stringify({
@@ -151,7 +160,7 @@ interface ManualReviewQueueInput {
   cycleId: string;
   reason: string;
   mappingSource: StageMappingSource;
-  modeConfig: Required<BidBoardStageSyncModeConfig>;
+  modeConfig: ResolvedBidBoardStageSyncModeConfig;
 }
 
 async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQueueInput): Promise<void> {
@@ -165,6 +174,7 @@ async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQ
     reason: input.reason,
     mappingSource: input.mappingSource,
     mode: input.modeConfig.mode,
+    ...(input.modeConfig.canaryRunId ? { canaryRunId: input.modeConfig.canaryRunId } : {}),
     hubspotDealId: null,
   };
 
@@ -317,9 +327,20 @@ function getProjectId(row: BidBoardExcelRow): string {
  */
 export async function diffBidBoardStages(
   exportFilePath: string,
-  options?: { initializeOnly?: boolean }
+  options?: {
+    initializeOnly?: boolean;
+    projectNumbers?: string[];
+    modeConfigOverride?: BidBoardStageSyncModeConfig;
+  }
 ): Promise<StageChange[]> {
-  const rows = parseActiveProjectsSheet(exportFilePath);
+  const projectFilter = options?.projectNumbers
+    ? new Set(options.projectNumbers.map((projectNumber) => normalizeKey(projectNumber)))
+    : null;
+  const rows = parseActiveProjectsSheet(exportFilePath).filter((row) => {
+    if (!projectFilter) return true;
+    const projectNumber = row["Project #"]?.toString()?.trim();
+    return Boolean(projectNumber && projectFilter.has(normalizeKey(projectNumber)));
+  });
   const changes: StageChange[] = [];
   const prevStates = await storage.getBidboardSyncStates();
   const prevMap = new Map(prevStates.map((s) => [s.projectId, s]));
@@ -353,12 +374,13 @@ export async function diffBidBoardStages(
       const projectName = row.Name?.toString()?.trim() || "";
       const projectNumber = row["Project #"]?.toString()?.trim() || null;
       const customerName = row["Customer Name"]?.toString()?.trim() || "";
-      const modeConfig = await getBidBoardStageSyncModeConfig();
+      const modeConfig = await getBidBoardStageSyncModeConfig(options?.modeConfigOverride);
       const resolvedMapping = await resolveBidBoardHubSpotStage(newStatus, {
         projectName,
         projectNumber,
         previousStage: previousStage || "(new)",
         cycleId: modeConfig.cycleId,
+        canaryRunId: modeConfig.canaryRunId,
       });
 
       if (resolvedMapping?.triggerPortfolio) {
@@ -432,10 +454,10 @@ export async function diffBidBoardStages(
  */
 export async function syncStagesToHubSpot(
   changes: StageChange[],
-  options?: { dryRun?: boolean }
+  options?: { dryRun?: boolean; modeConfigOverride?: BidBoardStageSyncModeConfig }
 ): Promise<StageSyncResult> {
   const result = { success: 0, failed: 0, suppressed: 0, errors: [] as string[] };
-  const modeConfig = await getBidBoardStageSyncModeConfig();
+  const modeConfig = await getBidBoardStageSyncModeConfig(options?.modeConfigOverride);
   const migrationMode = modeConfig.mode === "migration";
 
   for (const change of changes) {
@@ -444,6 +466,7 @@ export async function syncStagesToHubSpot(
       projectNumber: change.projectNumber,
       previousStage: change.previousStage,
       cycleId: modeConfig.cycleId,
+      canaryRunId: modeConfig.canaryRunId,
       suppressFallbackDbLog: options?.dryRun === true,
     });
     const normalizedStage = resolvedMapping?.normalizedStage ?? normalizeStageLabel(change.newStage);
@@ -483,7 +506,7 @@ export async function syncStagesToHubSpot(
     // from resolveBidBoardHubSpotStage once Procore rename is complete and bidboard_sync_state is backfilled.
     let portfolioTriggerSucceeded = true;
     if (shouldTriggerPortfolio) {
-      if (migrationMode && modeConfig.suppressPortfolioTriggers) {
+      if (modeConfig.suppressPortfolioTriggers) {
         result.suppressed++;
         await logSuppressedAction({
           action: "bidboard_stage_sync:suppressed_portfolio_trigger",
@@ -588,6 +611,7 @@ export async function syncStagesToHubSpot(
           totalSales: change.totalSales,
           mode: modeConfig.mode,
           suppressed: true,
+          ...(modeConfig.canaryRunId ? { canaryRunId: modeConfig.canaryRunId } : {}),
         },
       });
       if (
@@ -696,6 +720,7 @@ export async function syncStagesToHubSpot(
           newStage: change.newStage,
           hubspotStage: resolved.stageName,
           totalSales: change.totalSales,
+          ...(modeConfig.canaryRunId ? { canaryRunId: modeConfig.canaryRunId } : {}),
         },
       });
 

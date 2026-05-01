@@ -1619,6 +1619,7 @@ describe("DB-driven BidBoard stage mapping", () => {
       projectNumber: "TP-FB",
       previousStage: "Estimate in Progress",
       cycleId: "cycle-map",
+      canaryRunId: "canary-map",
     });
 
     expect(result?.stageLabel).toBe("Internal Review");
@@ -1632,6 +1633,7 @@ describe("DB-driven BidBoard stage mapping", () => {
         status: "warning",
         details: expect.objectContaining({
           cycleId: "cycle-map",
+          canaryRunId: "canary-map",
           oldLabel: "Estimate Under Review",
           resolvedLabel: "Internal Review",
           mappingSource: "hardcoded_fallback",
