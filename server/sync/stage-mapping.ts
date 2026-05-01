@@ -38,6 +38,7 @@ export interface ResolvedBidBoardStage {
   stageLabel: string;
   mappingSource: StageMappingSource;
   normalizedStage: string;
+  triggerPortfolio: boolean;
 }
 
 export interface StageMappingResolutionContext {
@@ -53,6 +54,24 @@ function configAllowsFallback(value: unknown): boolean {
   if (typeof config.allowHardcodedFallback === "boolean") return config.allowHardcodedFallback;
   if (typeof config.allow_hardcoded_fallback === "boolean") return config.allow_hardcoded_fallback;
   return true;
+}
+
+function isServiceContext(context: StageMappingResolutionContext, stage: string): boolean {
+  const projectNumber = context.projectNumber ?? "";
+  const previousStage = context.previousStage ?? "";
+  return (
+    /^[A-Z]{2,4}-4-/i.test(projectNumber) ||
+    normalizeStageLabel(stage).toLowerCase().includes("service") ||
+    normalizeStageLabel(previousStage).toLowerCase().includes("service")
+  );
+}
+
+function prefersServiceHubSpotLabel(stageLabel: string): boolean {
+  return normalizeStageLabel(stageLabel).toLowerCase().startsWith("service ");
+}
+
+function isFallbackPortfolioTrigger(normalizedStage: string): boolean {
+  return normalizedStage === "Sent to Production" || normalizedStage === "Service - Sent to Production";
 }
 
 async function logMappingFallback(
@@ -97,7 +116,7 @@ export async function resolveBidBoardHubSpotStage(
 ): Promise<ResolvedBidBoardStage | null> {
   const normalizedStage = normalizeStageLabel(stage);
   const mappings = await storage.getStageMappings();
-  const dbMapping = mappings.find((mapping) => {
+  const matchingMappings = mappings.filter((mapping) => {
     if (mapping.isActive === false) return false;
     const direction = (mapping.direction || "").toLowerCase();
     if (direction && direction !== "bidirectional" && direction !== "procore_to_hubspot" && direction !== "bidboard_to_hubspot") {
@@ -105,12 +124,16 @@ export async function resolveBidBoardHubSpotStage(
     }
     return normalizeStageLabel(mapping.procoreStageLabel) === normalizedStage;
   });
+  const dbMapping =
+    matchingMappings.find((mapping) => prefersServiceHubSpotLabel(mapping.hubspotStageLabel) === isServiceContext(context, stage)) ??
+    matchingMappings[0];
 
   if (dbMapping?.hubspotStageLabel) {
     return {
       stageLabel: dbMapping.hubspotStageLabel,
       mappingSource: "stage_mappings",
       normalizedStage,
+      triggerPortfolio: dbMapping.triggerPortfolio === true || isFallbackPortfolioTrigger(normalizedStage),
     };
   }
 
@@ -124,5 +147,6 @@ export async function resolveBidBoardHubSpotStage(
     stageLabel: fallbackLabel,
     mappingSource: "hardcoded_fallback",
     normalizedStage,
+    triggerPortfolio: isFallbackPortfolioTrigger(normalizedStage),
   };
 }

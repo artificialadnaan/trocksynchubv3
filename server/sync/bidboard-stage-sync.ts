@@ -424,6 +424,7 @@ export async function syncStagesToHubSpot(
     }
     const label = resolvedMapping.stageLabel;
     const mappingSource = resolvedMapping.mappingSource;
+    const shouldTriggerPortfolio = resolvedMapping.triggerPortfolio;
 
     const resolved = await resolveHubspotStageId(label);
     if (!resolved) {
@@ -444,13 +445,11 @@ export async function syncStagesToHubSpot(
       continue;
     }
 
-    // Trigger portfolio automation BEFORE terminal guard — production stages always fire regardless of HubSpot block
-    const normalizedNewStageEarly = normalizeStageLabel(change.newStage);
+    // Trigger portfolio automation BEFORE terminal guard — production stages always fire regardless of HubSpot block.
+    // TODO(ticket-9/stage-rename-cleanup): remove legacy Sent to Production trigger preservation
+    // from resolveBidBoardHubSpotStage once Procore rename is complete and bidboard_sync_state is backfilled.
     let portfolioTriggerSucceeded = true;
-    if (
-      normalizedNewStageEarly === "Sent to Production" ||
-      normalizedNewStageEarly === "Service - Sent to Production"
-    ) {
+    if (shouldTriggerPortfolio) {
       if (migrationMode && modeConfig.suppressPortfolioTriggers) {
         result.suppressed++;
         await logSuppressedAction({
@@ -603,10 +602,7 @@ export async function syncStagesToHubSpot(
         compositeKey(change.projectName, change.customerName);
 
       // If Phase 1 failed for a production stage, use cross-cycle retry instead of advancing state
-      if (!portfolioTriggerSucceeded && (
-        normalizedNewStageEarly === "Sent to Production" ||
-        normalizedNewStageEarly === "Service - Sent to Production"
-      )) {
+      if (!portfolioTriggerSucceeded && shouldTriggerPortfolio) {
         const prevState = (await storage.getBidboardSyncStates()).find(s => s.projectId === projectId);
         const attempts = ((prevState?.metadata as any)?.portfolioTriggerAttempts ?? 0) + 1;
         const MAX_CROSS_CYCLE_RETRIES = 3;
