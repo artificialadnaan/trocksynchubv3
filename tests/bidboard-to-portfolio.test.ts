@@ -207,6 +207,26 @@ describe("BIDBOARD_TO_HUBSPOT_STAGE stage mapping", () => {
     const { normalizeStageLabel } = await import("../server/sync/stage-mapping.ts");
     expect(normalizeStageLabel("Estimate in Progress")).toBe("Estimate in Progress");
   });
+
+  it('normalizeStageLabel leaves canonical "Service - Estimating" unchanged', async () => {
+    const { normalizeStageLabel } = await import("../server/sync/stage-mapping.ts");
+    expect(normalizeStageLabel("Service - Estimating")).toBe("Service - Estimating");
+  });
+
+  it('normalizeStageLabel canonicalizes "Service Estimating" to "Service - Estimating"', async () => {
+    const { normalizeStageLabel } = await import("../server/sync/stage-mapping.ts");
+    expect(normalizeStageLabel("Service Estimating")).toBe("Service - Estimating");
+  });
+
+  it("normalizeStageLabel canonicalizes multi-space service estimating aliases", async () => {
+    const { normalizeStageLabel } = await import("../server/sync/stage-mapping.ts");
+    expect(normalizeStageLabel("Service   Estimating")).toBe("Service - Estimating");
+  });
+
+  it("normalizeStageLabel canonicalizes service estimating aliases case-insensitively", async () => {
+    const { normalizeStageLabel } = await import("../server/sync/stage-mapping.ts");
+    expect(normalizeStageLabel("service estimating")).toBe("Service - Estimating");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1304,6 +1324,41 @@ describe("DB-driven BidBoard stage mapping", () => {
 
     expect(result?.stageLabel).toBe("Service \u2013 Won");
     expect(result?.triggerPortfolio).toBe(true);
+  });
+
+  it.each([
+    "Service Estimating",
+    "Service - Estimating",
+    "Service \u2013 Estimating",
+    "Service   Estimating",
+    "service estimating",
+  ])('resolves service estimating alias "%s" to the same DB mapping row', async (stageLabel) => {
+    const { storage } = await import("../server/storage.ts");
+    const { resolveBidBoardHubSpotStage } = await import("../server/sync/stage-mapping.ts");
+
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Service - Estimating",
+        hubspotStageLabel: "Service \u2013 Estimating",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: false,
+      } as any,
+    ]);
+
+    const result = await resolveBidBoardHubSpotStage(stageLabel, {
+      projectName: "Service Alias Project",
+      projectNumber: "DFW-4-12326-aa",
+      previousStage: "Estimate in Progress",
+      cycleId: "cycle-alias",
+    });
+
+    expect(result).toEqual({
+      stageLabel: "Service \u2013 Estimating",
+      mappingSource: "stage_mappings",
+      normalizedStage: "Service - Estimating",
+      triggerPortfolio: false,
+    });
   });
 
   it("uses hardcoded fallback when enabled and logs fallback usage with mapping source", async () => {
