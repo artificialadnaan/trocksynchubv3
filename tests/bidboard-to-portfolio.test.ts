@@ -19,7 +19,11 @@ import * as XLSX from "xlsx";
 // Module-level mocks – must come before any server-module imports
 // ---------------------------------------------------------------------------
 
-vi.mock("../server/db.ts", () => ({ db: {} }));
+vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
+
+vi.mock("../server/index.ts", () => ({
+  log: vi.fn(),
+}));
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
@@ -376,8 +380,18 @@ describe("diffBidBoardStages", () => {
 // ---------------------------------------------------------------------------
 
 describe("syncStagesToHubSpot", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
+    const { storage } = await import("../server/storage.ts");
+    const { updateHubSpotDeal } = await import("../server/hubspot.ts");
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true, message: "ok" });
   });
 
   function makeChange(overrides: Partial<{
@@ -443,13 +457,26 @@ describe("syncStagesToHubSpot", () => {
     expect(vi.mocked(updateHubSpotDeal)).toHaveBeenCalledWith("hs-deal-111", { amount: "0" });
   });
 
-  it("increments failed count when resolveHubspotStageId returns null (no mapping)", async () => {
+  it("increments failed count when no BidBoard stage mapping exists", async () => {
     const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
     const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
 
     vi.mocked(resolveHubspotStageId).mockResolvedValue(null);
 
     const result = await syncStagesToHubSpot([makeChange({ newStage: "Unknown Stage" })]);
+
+    expect(result.failed).toBe(1);
+    expect(result.success).toBe(0);
+    expect(result.errors[0]).toContain("No BidBoard stage mapping");
+  });
+
+  it("increments failed count when mapped HubSpot stage cannot be resolved", async () => {
+    const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue(null);
+
+    const result = await syncStagesToHubSpot([makeChange({ newStage: "Estimate Under Review" })]);
 
     expect(result.failed).toBe(1);
     expect(result.success).toBe(0);
@@ -474,6 +501,7 @@ describe("syncStagesToHubSpot", () => {
   it("in dry-run mode increments success but does NOT call updateHubSpotDealStage", async () => {
     const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
     const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
     const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
 
     vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-id-ir", stageName: "Internal Review" });
@@ -482,8 +510,70 @@ describe("syncStagesToHubSpot", () => {
 
     expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
     expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.upsertBidboardSyncState)).not.toHaveBeenCalled();
     expect(result.success).toBe(1);
     expect(result.failed).toBe(0);
+  });
+
+  it("in migration mode suppresses HubSpot writes, logs the suppression, and still advances local state", async () => {
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "migration",
+            suppressHubSpotWrites: true,
+            suppressPortfolioTriggers: true,
+            suppressStageNotifications: true,
+            logSuppressedActions: true,
+            cycleId: "cycle-001",
+          },
+        } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-id-ir", stageName: "Internal Review" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const result = await syncStagesToHubSpot([makeChange()]);
+
+    expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.upsertBidboardSyncState)).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "TP-001", projectName: "Test Project", currentStage: "Estimate Under Review" })
+    );
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-001",
+        projectName: "Test Project",
+        action: "bidboard_stage_sync:suppressed_hubspot_write",
+        status: "suppressed",
+        details: expect.objectContaining({
+          cycleId: "cycle-001",
+          previousStage: "Estimate in Progress",
+          newStage: "Estimate Under Review",
+          wouldHaveAction: "hubspot_stage_update",
+          targetValue: "Internal Review",
+          hubspotDealId: "hs-deal-111",
+          mappingSource: "hardcoded_fallback",
+          mode: "migration",
+        }),
+      })
+    );
+    expect(result.success).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(result.suppressed).toBe(2);
   });
 
   it("processes multiple changes and sums success/failed independently", async () => {
@@ -537,8 +627,18 @@ describe("syncStagesToHubSpot", () => {
 // ---------------------------------------------------------------------------
 
 describe("Portfolio automation trigger", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
+    const { storage } = await import("../server/storage.ts");
+    const { updateHubSpotDeal } = await import("../server/hubspot.ts");
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true, message: "ok" });
   });
 
   function makeProductionChange(newStage: string) {
@@ -577,6 +677,65 @@ describe("Portfolio automation trigger", () => {
       "Zeta Corp",
       "hs-deal-prod"
     );
+  });
+
+  it("in migration mode suppresses mapped portfolio trigger and logs the would-have action", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "migration",
+            suppressHubSpotWrites: true,
+            suppressPortfolioTriggers: true,
+            suppressStageNotifications: true,
+            logSuppressedActions: true,
+            cycleId: "cycle-prod",
+          },
+        } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const result = await syncStagesToHubSpot([makeProductionChange("Sent to Production")]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-PROD",
+        projectName: "Production Project",
+        action: "bidboard_stage_sync:suppressed_portfolio_trigger",
+        status: "suppressed",
+        details: expect.objectContaining({
+          cycleId: "cycle-prod",
+          previousStage: "Estimate in Progress",
+          newStage: "Sent to Production",
+          wouldHaveAction: "portfolio_create_phase1",
+          targetValue: "Sent to Production",
+          hubspotDealId: "hs-deal-prod",
+          mappingSource: "hardcoded_fallback",
+          mode: "migration",
+        }),
+      })
+    );
+    expect(result.success).toBe(1);
+    expect(result.suppressed).toBeGreaterThanOrEqual(2);
   });
 
   it('triggers portfolio automation when newStage is "Service - Sent to Production"', async () => {
@@ -727,6 +886,68 @@ describe("Portfolio automation trigger", () => {
     fs.unlinkSync(xlsxPath);
   });
 
+  it("in migration mode suppresses the no-HubSpot production fallback trigger and still advances state", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "migration",
+            suppressPortfolioTriggers: true,
+            logSuppressedActions: true,
+            cycleId: "cycle-nohub",
+          },
+        } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([
+      { projectId: "TP-NOHUB", currentStage: "Estimate in Progress", projectName: "No HubSpot Project", metadata: {} } as any,
+    ]);
+    vi.mocked(storage.getSyncMappingByProcoreProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
+    vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const xlsxPath = writeTempXlsx([
+      { Name: "No HubSpot Project", Status: "Sent to Production", "Project #": "TP-NOHUB", "Total Sales": 75000, "Customer Name": "Omega Inc" },
+    ]);
+
+    const changes = await diffBidBoardStages(xlsxPath);
+
+    expect(changes).toHaveLength(0);
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.upsertBidboardSyncState)).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "TP-NOHUB", currentStage: "Sent to Production" })
+    );
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-NOHUB",
+        projectName: "No HubSpot Project",
+        action: "bidboard_stage_sync:suppressed_portfolio_trigger",
+        status: "suppressed",
+        details: expect.objectContaining({
+          cycleId: "cycle-nohub",
+          previousStage: "Estimate in Progress",
+          newStage: "Sent to Production",
+          wouldHaveAction: "portfolio_create_phase1",
+          targetValue: "Sent to Production",
+          hubspotDealId: null,
+          mappingSource: "hardcoded_fallback",
+          mode: "migration",
+        }),
+      })
+    );
+
+    fs.unlinkSync(xlsxPath);
+  });
+
   it("does NOT trigger portfolio automation when no HubSpot deal and stage is not a production stage", async () => {
     const { storage } = await import("../server/storage.ts");
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
@@ -748,5 +969,96 @@ describe("Portfolio automation trigger", () => {
     expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
 
     fs.unlinkSync(xlsxPath);
+  });
+});
+
+describe("DB-driven BidBoard stage mapping", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("resolves a HubSpot stage label from stage_mappings before using hardcoded fallback", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { resolveBidBoardHubSpotStage } = await import("../server/sync/stage-mapping.ts");
+
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Estimate Under Review",
+        hubspotStageLabel: "Internal Review From DB",
+        direction: "bidirectional",
+        isActive: true,
+      } as any,
+    ]);
+
+    const result = await resolveBidBoardHubSpotStage("Estimate Under Review", {
+      projectName: "Test Project",
+      projectNumber: "TP-001",
+      previousStage: "Estimate in Progress",
+      cycleId: "cycle-map",
+    });
+
+    expect(result).toEqual({
+      stageLabel: "Internal Review From DB",
+      mappingSource: "stage_mappings",
+      normalizedStage: "Estimate Under Review",
+    });
+    expect(vi.mocked(storage.createBidboardAutomationLog)).not.toHaveBeenCalled();
+  });
+
+  it("uses hardcoded fallback when enabled and logs fallback usage with mapping source", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { resolveBidBoardHubSpotStage } = await import("../server/sync/stage-mapping.ts");
+
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({
+      key: "bidboard_stage_mapping",
+      value: { allowHardcodedFallback: true },
+    } as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const result = await resolveBidBoardHubSpotStage("Estimate Under Review", {
+      projectName: "Fallback Project",
+      projectNumber: "TP-FB",
+      previousStage: "Estimate in Progress",
+      cycleId: "cycle-map",
+    });
+
+    expect(result?.stageLabel).toBe("Internal Review");
+    expect(result?.mappingSource).toBe("hardcoded_fallback");
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-FB",
+        projectName: "Fallback Project",
+        action: "bidboard_stage_sync:mapping_fallback_used",
+        status: "warning",
+        details: expect.objectContaining({
+          cycleId: "cycle-map",
+          oldLabel: "Estimate Under Review",
+          resolvedLabel: "Internal Review",
+          mappingSource: "hardcoded_fallback",
+        }),
+      })
+    );
+  });
+
+  it("does not use hardcoded fallback when fallback is disabled", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { resolveBidBoardHubSpotStage } = await import("../server/sync/stage-mapping.ts");
+
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({
+      key: "bidboard_stage_mapping",
+      value: { allowHardcodedFallback: false },
+    } as any);
+
+    const result = await resolveBidBoardHubSpotStage("Estimate Under Review", {
+      projectName: "No Fallback Project",
+      projectNumber: "TP-NOFB",
+      previousStage: "Estimate in Progress",
+      cycleId: "cycle-map",
+    });
+
+    expect(result).toBeNull();
+    expect(vi.mocked(storage.createBidboardAutomationLog)).not.toHaveBeenCalled();
   });
 });
