@@ -18,6 +18,8 @@ export interface StageNotificationRoute {
   staticRecipients: string[];
   includeDealOwner: boolean;
   includeProjectRoles?: string[];
+  configKey?: string;
+  defaultEnabled?: boolean;
 }
 
 export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
@@ -47,12 +49,48 @@ export const STAGE_NOTIFICATION_ROUTES: StageNotificationRoute[] = [
     includeDealOwner: true,
   },
   {
+    key: 'bb_closed_won',
+    stage: 'Service - Sent to Production',
+    source: 'bidboard',
+    label: 'Service - Sent to Production → Service – Won',
+    staticRecipients: ['jhelms@trockgc.com'],
+    includeDealOwner: true,
+  },
+  {
+    key: 'bb_closed_won',
+    stage: 'Contract',
+    source: 'bidboard',
+    label: 'Contract → Closed Won',
+    staticRecipients: ['jhelms@trockgc.com'],
+    includeDealOwner: true,
+    configKey: 'stage_notify_bb_closed_won_contract',
+    defaultEnabled: false,
+  },
+  {
     key: 'bb_closed_lost',
     stage: 'Production Lost',
     source: 'bidboard',
     label: 'Production Lost → Closed Lost',
     staticRecipients: [],
     includeDealOwner: true,
+  },
+  {
+    key: 'bb_closed_lost',
+    stage: 'Service - Lost',
+    source: 'bidboard',
+    label: 'Service - Lost → Service – Lost',
+    staticRecipients: [],
+    includeDealOwner: true,
+  },
+  {
+    key: 'bb_closed_lost',
+    stage: 'Lost',
+    source: 'bidboard',
+    label: 'Lost → Closed Lost',
+    staticRecipients: [],
+    includeDealOwner: true,
+    configKey: 'stage_notify_bb_closed_lost_lost',
+    defaultEnabled: false,
   },
   // Portfolio stage notifications
   {
@@ -223,10 +261,36 @@ export async function processStageNotification(params: {
   }
 
   // Check if this notification is enabled
-  const configKey = `stage_notify_${route.key}`;
+  const configKey = route.configKey || `stage_notify_${route.key}`;
   const config = await storage.getAutomationConfig(configKey);
-  if (config && (config.value as any)?.enabled === false) {
+  const enabled = config ? (config.value as any)?.enabled !== false : route.defaultEnabled !== false;
+  if (!enabled) {
     console.log(`[stage-notify] ${route.key} is disabled, skipping`);
+    try {
+      const notificationEntityId = params.source === 'bidboard'
+        ? (params.bidboardProjectId || params.bidboardProjectNumber || params.hubspotDealId || params.projectName)
+        : (params.procoreProjectId || params.projectName);
+      await storage.createBidboardAutomationLog({
+        projectId: notificationEntityId,
+        projectName: params.projectName,
+        action: 'stage_notify:route_disabled_skip',
+        status: 'skipped',
+        details: {
+          route: route.key,
+          configKey,
+          stage: params.stage,
+          oldStage: params.oldStage,
+          source: params.source,
+          projectName: params.projectName,
+          bidboardProjectId: params.bidboardProjectId ?? null,
+          bidboardProjectNumber: params.bidboardProjectNumber ?? null,
+          hubspotDealId: params.hubspotDealId ?? null,
+          procoreProjectId: params.procoreProjectId ?? null,
+        },
+      });
+    } catch (err: any) {
+      console.error(`[stage-notify] Failed to log disabled route skip for ${route.key}:`, err.message);
+    }
     return { sent: 0, skipped: true, route: route.key };
   }
 
@@ -402,9 +466,9 @@ export async function processStageNotification(params: {
 export async function getStageNotificationConfigs(): Promise<Array<StageNotificationRoute & { enabled: boolean }>> {
   const results: Array<StageNotificationRoute & { enabled: boolean }> = [];
   for (const route of STAGE_NOTIFICATION_ROUTES) {
-    const configKey = `stage_notify_${route.key}`;
+    const configKey = route.configKey || `stage_notify_${route.key}`;
     const config = await storage.getAutomationConfig(configKey);
-    const enabled = config ? (config.value as any)?.enabled !== false : true; // default enabled
+    const enabled = config ? (config.value as any)?.enabled !== false : route.defaultEnabled !== false;
     results.push({ ...route, enabled });
   }
   return results;
@@ -412,9 +476,9 @@ export async function getStageNotificationConfigs(): Promise<Array<StageNotifica
 
 /** Toggle a specific stage notification on/off */
 export async function setStageNotificationEnabled(key: string, enabled: boolean): Promise<boolean> {
-  const route = STAGE_NOTIFICATION_ROUTES.find(r => r.key === key);
+  const route = STAGE_NOTIFICATION_ROUTES.find(r => r.configKey === key || r.key === key);
   if (!route) return false;
-  const configKey = `stage_notify_${route.key}`;
+  const configKey = route.configKey || `stage_notify_${route.key}`;
   await storage.upsertAutomationConfig({
     key: configKey,
     value: { enabled },

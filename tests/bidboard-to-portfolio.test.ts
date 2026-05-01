@@ -680,6 +680,71 @@ describe("syncStagesToHubSpot", () => {
     expect(result.suppressed).toBe(1);
   });
 
+  it("in migration mode suppresses Contract stage notification with the standard suppression log shape", async () => {
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { processStageNotification } = await import("../server/stage-notifications.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "migration",
+            suppressHubSpotWrites: true,
+            suppressPortfolioTriggers: true,
+            suppressStageNotifications: true,
+            logSuppressedActions: true,
+            cycleId: "cycle-contract-notify",
+          },
+        } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Contract",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: true,
+      } as any,
+    ]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const result = await syncStagesToHubSpot([makeChange({ newStage: "Contract" })]);
+
+    expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(processStageNotification)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-001",
+        projectName: "Test Project",
+        action: "bidboard_stage_sync:suppressed_stage_notification",
+        status: "suppressed",
+        details: expect.objectContaining({
+          cycleId: "cycle-contract-notify",
+          previousStage: "Estimate in Progress",
+          newStage: "Contract",
+          wouldHaveAction: "send_stage_notification",
+          targetValue: "Contract",
+          hubspotDealId: "hs-deal-111",
+          mappingSource: "stage_mappings",
+          mode: "migration",
+        }),
+      })
+    );
+    expect(result.success).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(result.suppressed).toBe(3);
+  });
+
   it("processes multiple changes and sums success/failed independently", async () => {
     const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
     const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
