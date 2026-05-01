@@ -18,7 +18,7 @@ import * as XLSX from "xlsx";
 import { storage } from "../storage";
 import { updateHubSpotDeal, updateHubSpotDealStage } from "../hubspot";
 import { resolveHubspotStageId, getTerminalStageGuard } from "../procore-hubspot-sync";
-import { BIDBOARD_TO_HUBSPOT_STAGE, normalizeStageLabel } from "./stage-mapping";
+import { normalizeStageLabel, resolveBidBoardHubSpotStage, type StageMappingSource } from "./stage-mapping";
 import { triggerPortfolioAutomationFromStageChange } from "../playwright/portfolio-automation";
 import { log } from "../index";
 
@@ -35,6 +35,22 @@ export interface StageChange {
   totalSales: number;
   synchubRecordId: string;
   hubspotDealId: string;
+}
+
+export interface BidBoardStageSyncModeConfig {
+  mode?: "live" | "dry_run" | "migration" | string;
+  suppressHubSpotWrites?: boolean;
+  suppressPortfolioTriggers?: boolean;
+  suppressStageNotifications?: boolean;
+  logSuppressedActions?: boolean;
+  cycleId?: string;
+}
+
+export interface StageSyncResult {
+  success: number;
+  failed: number;
+  suppressed: number;
+  errors: string[];
 }
 
 export interface BidBoardExcelRow {
@@ -55,6 +71,74 @@ function normalizeKey(s: string | null | undefined): string {
 
 function compositeKey(name: string, customer: string): string {
   return `${normalizeKey(name)}|||${normalizeKey(customer)}`;
+}
+
+function getProjectIdFromChange(change: Pick<StageChange, "projectNumber" | "projectName" | "customerName">): string {
+  return change.projectNumber || compositeKey(change.projectName, change.customerName);
+}
+
+async function getBidBoardStageSyncModeConfig(): Promise<Required<BidBoardStageSyncModeConfig>> {
+  const config = await storage.getAutomationConfig("bidboard_stage_sync");
+  const value = ((config?.value || {}) as Record<string, unknown>);
+  const mode = String(value.mode || "live");
+  return {
+    mode,
+    suppressHubSpotWrites: value.suppressHubSpotWrites === true,
+    suppressPortfolioTriggers: value.suppressPortfolioTriggers === true,
+    suppressStageNotifications: value.suppressStageNotifications === true,
+    logSuppressedActions: value.logSuppressedActions !== false,
+    cycleId: typeof value.cycleId === "string" && value.cycleId
+      ? value.cycleId
+      : `bidboard-stage-sync-${Date.now()}`,
+  };
+}
+
+interface SuppressedActionLogInput {
+  action: "bidboard_stage_sync:suppressed_hubspot_write" | "bidboard_stage_sync:suppressed_portfolio_trigger" | "bidboard_stage_sync:suppressed_stage_notification";
+  change: StageChange | (Omit<StageChange, "hubspotDealId"> & { hubspotDealId: string | null });
+  wouldHaveAction: string;
+  targetValue: string;
+  mappingSource: StageMappingSource;
+  modeConfig: Required<BidBoardStageSyncModeConfig>;
+}
+
+async function logSuppressedAction(input: SuppressedActionLogInput): Promise<void> {
+  if (!input.modeConfig.logSuppressedActions) return;
+
+  const projectId = getProjectIdFromChange(input.change);
+  const details = {
+    cycleId: input.modeConfig.cycleId,
+    previousStage: input.change.previousStage,
+    newStage: input.change.newStage,
+    wouldHaveAction: input.wouldHaveAction,
+    targetValue: input.targetValue,
+    hubspotDealId: input.change.hubspotDealId ?? null,
+    mappingSource: input.mappingSource,
+    mode: input.modeConfig.mode,
+  };
+
+  log(`[BidBoardStageSync] suppressed action ${JSON.stringify({
+    projectNumber: input.change.projectNumber,
+    projectName: input.change.projectName,
+    action: input.action,
+    status: "suppressed",
+    ...details,
+  })}`, "sync");
+
+  try {
+    await storage.createBidboardAutomationLog({
+      projectId,
+      projectName: input.change.projectName,
+      action: input.action,
+      status: "suppressed",
+      details,
+    });
+  } catch (err) {
+    log(
+      `[BidBoardStageSync] failed to persist suppressed-action log: ${err instanceof Error ? err.message : String(err)}`,
+      "sync"
+    );
+  }
 }
 
 /**
@@ -226,30 +310,52 @@ export async function diffBidBoardStages(
           },
         });
 
-        // Log the event
-        await storage.createBidboardAutomationLog({
-          projectName,
-          action: "bidboard_stage_sync",
-          status: "success",
-          details: {
-            previousStage: previousStage || "(new)",
-            newStage: newStatus,
-            note: "No HubSpot deal mapping — portfolio automation triggered without HubSpot sync",
-          },
-        });
-
-        // Trigger portfolio automation (fire and forget — don't block the sync loop)
-        try {
-          await triggerPortfolioAutomationFromStageChange(
+        const modeConfig = await getBidBoardStageSyncModeConfig();
+        if (modeConfig.mode === "migration" && modeConfig.suppressPortfolioTriggers) {
+          await logSuppressedAction({
+            action: "bidboard_stage_sync:suppressed_portfolio_trigger",
+            change: {
+              projectName,
+              projectNumber,
+              customerName,
+              previousStage: previousStage || "(new)",
+              newStage: newStatus,
+              totalSales: parseFloat(String(row["Total Sales"] || 0)) || 0,
+              synchubRecordId: projectId,
+              hubspotDealId: null,
+            },
+            wouldHaveAction: "portfolio_create_phase1",
+            targetValue: newStatus,
+            mappingSource: "hardcoded_fallback",
+            modeConfig,
+          });
+        } else {
+          // Log the event
+          await storage.createBidboardAutomationLog({
+            projectId,
             projectName,
-            projectNumber,
-            customerName
-          );
-        } catch (err) {
-          log(
-            `[sync] Portfolio automation trigger failed for ${projectName} (no HubSpot deal): ${err instanceof Error ? err.message : String(err)}`,
-            "sync"
-          );
+            action: "bidboard_stage_sync",
+            status: "success",
+            details: {
+              previousStage: previousStage || "(new)",
+              newStage: newStatus,
+              note: "No HubSpot deal mapping — portfolio automation triggered without HubSpot sync",
+            },
+          });
+
+          // Trigger portfolio automation (fire and forget — don't block the sync loop)
+          try {
+            await triggerPortfolioAutomationFromStageChange(
+              projectName,
+              projectNumber,
+              customerName
+            );
+          } catch (err) {
+            log(
+              `[sync] Portfolio automation trigger failed for ${projectName} (no HubSpot deal): ${err instanceof Error ? err.message : String(err)}`,
+              "sync"
+            );
+          }
         }
       } else {
         // Not a production stage and no HubSpot deal — just update sync state and move on
@@ -295,13 +401,29 @@ export async function diffBidBoardStages(
 export async function syncStagesToHubSpot(
   changes: StageChange[],
   options?: { dryRun?: boolean }
-): Promise<{ success: number; failed: number; errors: string[] }> {
-  const result = { success: 0, failed: 0, errors: [] as string[] };
+): Promise<StageSyncResult> {
+  const result = { success: 0, failed: 0, suppressed: 0, errors: [] as string[] };
+  const modeConfig = await getBidBoardStageSyncModeConfig();
+  const migrationMode = modeConfig.mode === "migration";
 
   for (const change of changes) {
-    const normalizedStage = normalizeStageLabel(change.newStage);
-    const hubspotLabel = BIDBOARD_TO_HUBSPOT_STAGE[normalizedStage];
-    const label = hubspotLabel || normalizedStage;
+    const resolvedMapping = await resolveBidBoardHubSpotStage(change.newStage, {
+      projectName: change.projectName,
+      projectNumber: change.projectNumber,
+      previousStage: change.previousStage,
+      cycleId: modeConfig.cycleId,
+    });
+    const normalizedStage = resolvedMapping?.normalizedStage ?? normalizeStageLabel(change.newStage);
+    if (!resolvedMapping) {
+      result.failed++;
+      result.errors.push(
+        `No BidBoard stage mapping for "${change.newStage}" (${change.projectName})`
+      );
+      log(`Stage sync skip: no BidBoard mapping for "${change.newStage}"`, "sync");
+      continue;
+    }
+    const label = resolvedMapping.stageLabel;
+    const mappingSource = resolvedMapping.mappingSource;
 
     const resolved = await resolveHubspotStageId(label);
     if (!resolved) {
@@ -329,19 +451,31 @@ export async function syncStagesToHubSpot(
       normalizedNewStageEarly === "Sent to Production" ||
       normalizedNewStageEarly === "Service - Sent to Production"
     ) {
-      try {
-        await triggerPortfolioAutomationFromStageChange(
-          change.projectName,
-          change.projectNumber,
-          change.customerName,
-          change.hubspotDealId
-        );
-      } catch (err) {
-        portfolioTriggerSucceeded = false;
-        log(
-          `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
-          "sync"
-        );
+      if (migrationMode && modeConfig.suppressPortfolioTriggers) {
+        result.suppressed++;
+        await logSuppressedAction({
+          action: "bidboard_stage_sync:suppressed_portfolio_trigger",
+          change,
+          wouldHaveAction: "portfolio_create_phase1",
+          targetValue: change.newStage,
+          mappingSource,
+          modeConfig,
+        });
+      } else {
+        try {
+          await triggerPortfolioAutomationFromStageChange(
+            change.projectName,
+            change.projectNumber,
+            change.customerName,
+            change.hubspotDealId
+          );
+        } catch (err) {
+          portfolioTriggerSucceeded = false;
+          log(
+            `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
+            "sync"
+          );
+        }
       }
     }
 
@@ -387,6 +521,56 @@ export async function syncStagesToHubSpot(
           projectId,
           projectName: change.projectName,
           currentStage: change.newStage,
+        });
+      }
+      continue;
+    }
+
+    if (migrationMode && modeConfig.suppressHubSpotWrites) {
+      result.success++;
+      result.suppressed++;
+      const projectId = getProjectIdFromChange(change);
+      await logSuppressedAction({
+        action: "bidboard_stage_sync:suppressed_hubspot_write",
+        change,
+        wouldHaveAction: "hubspot_stage_update",
+        targetValue: resolved.stageName,
+        mappingSource,
+        modeConfig,
+      });
+      await storage.upsertBidboardSyncState({
+        projectId,
+        projectName: change.projectName,
+        currentStage: change.newStage,
+      });
+      await storage.createBidboardAutomationLog({
+        projectId,
+        projectName: change.projectName,
+        action: "bidboard_stage_sync",
+        status: "success",
+        details: {
+          hubspotDealId: change.hubspotDealId,
+          previousStage: change.previousStage,
+          newStage: change.newStage,
+          hubspotStage: resolved.stageName,
+          totalSales: change.totalSales,
+          mode: modeConfig.mode,
+          suppressed: true,
+        },
+      });
+      if (
+        modeConfig.suppressStageNotifications &&
+        change.previousStage &&
+        change.previousStage !== "(new)"
+      ) {
+        result.suppressed++;
+        await logSuppressedAction({
+          action: "bidboard_stage_sync:suppressed_stage_notification",
+          change,
+          wouldHaveAction: "send_stage_notification",
+          targetValue: change.newStage,
+          mappingSource,
+          modeConfig,
         });
       }
       continue;
@@ -471,18 +655,30 @@ export async function syncStagesToHubSpot(
       // Send stage-specific notifications (BidBoard) — only on real transitions, not first-time baseline
       if (change.previousStage && change.previousStage !== '(new)') {
         try {
-          const { processStageNotification } = await import('../stage-notifications');
-          const mapping = await storage.getSyncMappingByHubspotDealId(change.hubspotDealId);
-          await processStageNotification({
-            stage: change.newStage,
-            source: 'bidboard',
-            projectName: change.projectName,
-            oldStage: change.previousStage,
-            procoreProjectId: mapping?.procoreProjectId || null,
-            bidboardProjectId: mapping?.bidboardProjectId || null,
-            bidboardProjectNumber: change.projectNumber,
-            hubspotDealId: change.hubspotDealId,
-          });
+          if (migrationMode && modeConfig.suppressStageNotifications) {
+            result.suppressed++;
+            await logSuppressedAction({
+              action: "bidboard_stage_sync:suppressed_stage_notification",
+              change,
+              wouldHaveAction: "send_stage_notification",
+              targetValue: change.newStage,
+              mappingSource,
+              modeConfig,
+            });
+          } else {
+            const { processStageNotification } = await import('../stage-notifications');
+            const mapping = await storage.getSyncMappingByHubspotDealId(change.hubspotDealId);
+            await processStageNotification({
+              stage: change.newStage,
+              source: 'bidboard',
+              projectName: change.projectName,
+              oldStage: change.previousStage,
+              procoreProjectId: mapping?.procoreProjectId || null,
+              bidboardProjectId: mapping?.bidboardProjectId || null,
+              bidboardProjectNumber: change.projectNumber,
+              hubspotDealId: change.hubspotDealId,
+            });
+          }
         } catch (notifyErr: any) {
           log(`[sync] Stage notification failed for ${change.projectName}: ${notifyErr.message}`, "sync");
         }

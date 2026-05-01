@@ -1,3 +1,5 @@
+import { storage } from "../storage";
+
 /**
  * Bid Board → HubSpot Stage Mapping
  * ==================================
@@ -25,3 +27,102 @@ export const BIDBOARD_TO_HUBSPOT_STAGE: Record<string, string> = {
   "Service - Lost": "Service – Lost",
   "Production Lost": "Closed Lost",
 };
+
+function logStageMapping(message: string): void {
+  console.log(message);
+}
+
+export type StageMappingSource = "stage_mappings" | "hardcoded_fallback";
+
+export interface ResolvedBidBoardStage {
+  stageLabel: string;
+  mappingSource: StageMappingSource;
+  normalizedStage: string;
+}
+
+export interface StageMappingResolutionContext {
+  projectName?: string;
+  projectNumber?: string | null;
+  previousStage?: string | null;
+  cycleId?: string;
+}
+
+function configAllowsFallback(value: unknown): boolean {
+  if (!value || typeof value !== "object") return true;
+  const config = value as Record<string, unknown>;
+  if (typeof config.allowHardcodedFallback === "boolean") return config.allowHardcodedFallback;
+  if (typeof config.allow_hardcoded_fallback === "boolean") return config.allow_hardcoded_fallback;
+  return true;
+}
+
+async function logMappingFallback(
+  oldLabel: string,
+  resolvedLabel: string,
+  normalizedStage: string,
+  context: StageMappingResolutionContext
+): Promise<void> {
+  const details = {
+    cycleId: context.cycleId,
+    oldLabel,
+    normalizedStage,
+    resolvedLabel,
+    mappingSource: "hardcoded_fallback" as const,
+    previousStage: context.previousStage ?? null,
+  };
+
+  logStageMapping(`[BidBoardStageSync] mapping fallback used ${JSON.stringify({
+    projectNumber: context.projectNumber ?? null,
+    projectName: context.projectName ?? null,
+    ...details,
+  })}`);
+
+  try {
+    await storage.createBidboardAutomationLog({
+      projectId: context.projectNumber ?? undefined,
+      projectName: context.projectName,
+      action: "bidboard_stage_sync:mapping_fallback_used",
+      status: "warning",
+      details,
+    });
+  } catch (err) {
+    logStageMapping(
+      `[BidBoardStageSync] failed to persist mapping fallback log: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+export async function resolveBidBoardHubSpotStage(
+  stage: string,
+  context: StageMappingResolutionContext = {}
+): Promise<ResolvedBidBoardStage | null> {
+  const normalizedStage = normalizeStageLabel(stage);
+  const mappings = await storage.getStageMappings();
+  const dbMapping = mappings.find((mapping) => {
+    if (mapping.isActive === false) return false;
+    const direction = (mapping.direction || "").toLowerCase();
+    if (direction && direction !== "bidirectional" && direction !== "procore_to_hubspot" && direction !== "bidboard_to_hubspot") {
+      return false;
+    }
+    return normalizeStageLabel(mapping.procoreStageLabel) === normalizedStage;
+  });
+
+  if (dbMapping?.hubspotStageLabel) {
+    return {
+      stageLabel: dbMapping.hubspotStageLabel,
+      mappingSource: "stage_mappings",
+      normalizedStage,
+    };
+  }
+
+  const fallbackConfig = await storage.getAutomationConfig("bidboard_stage_mapping");
+  const allowFallback = configAllowsFallback(fallbackConfig?.value);
+  const fallbackLabel = BIDBOARD_TO_HUBSPOT_STAGE[normalizedStage];
+  if (!allowFallback || !fallbackLabel) return null;
+
+  await logMappingFallback(stage, fallbackLabel, normalizedStage, context);
+  return {
+    stageLabel: fallbackLabel,
+    mappingSource: "hardcoded_fallback",
+    normalizedStage,
+  };
+}
