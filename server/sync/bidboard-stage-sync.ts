@@ -412,6 +412,7 @@ export async function syncStagesToHubSpot(
       projectNumber: change.projectNumber,
       previousStage: change.previousStage,
       cycleId: modeConfig.cycleId,
+      suppressFallbackDbLog: options?.dryRun === true,
     });
     const normalizedStage = resolvedMapping?.normalizedStage ?? normalizeStageLabel(change.newStage);
     if (!resolvedMapping) {
@@ -558,19 +559,37 @@ export async function syncStagesToHubSpot(
         },
       });
       if (
-        modeConfig.suppressStageNotifications &&
         change.previousStage &&
         change.previousStage !== "(new)"
       ) {
-        result.suppressed++;
-        await logSuppressedAction({
-          action: "bidboard_stage_sync:suppressed_stage_notification",
-          change,
-          wouldHaveAction: "send_stage_notification",
-          targetValue: change.newStage,
-          mappingSource,
-          modeConfig,
-        });
+        try {
+          if (modeConfig.suppressStageNotifications) {
+            result.suppressed++;
+            await logSuppressedAction({
+              action: "bidboard_stage_sync:suppressed_stage_notification",
+              change,
+              wouldHaveAction: "send_stage_notification",
+              targetValue: change.newStage,
+              mappingSource,
+              modeConfig,
+            });
+          } else {
+            const { processStageNotification } = await import('../stage-notifications');
+            const mapping = await storage.getSyncMappingByHubspotDealId(change.hubspotDealId);
+            await processStageNotification({
+              stage: change.newStage,
+              source: 'bidboard',
+              projectName: change.projectName,
+              oldStage: change.previousStage,
+              procoreProjectId: mapping?.procoreProjectId || null,
+              bidboardProjectId: mapping?.bidboardProjectId || null,
+              bidboardProjectNumber: change.projectNumber,
+              hubspotDealId: change.hubspotDealId,
+            });
+          }
+        } catch (notifyErr: any) {
+          log(`[sync] Stage notification failed for ${change.projectName}: ${notifyErr.message}`, "sync");
+        }
       }
       continue;
     }

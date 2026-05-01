@@ -515,6 +515,30 @@ describe("syncStagesToHubSpot", () => {
     expect(result.failed).toBe(0);
   });
 
+  it("in dry-run mode resolves hardcoded fallback without writing fallback audit logs", async () => {
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-id-ir", stageName: "Internal Review" });
+
+    const result = await syncStagesToHubSpot([makeChange()], { dryRun: true });
+
+    expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createBidboardAutomationLog)).not.toHaveBeenCalled();
+    expect(result.success).toBe(1);
+    expect(result.failed).toBe(0);
+  });
+
   it("in migration mode suppresses HubSpot writes, logs the suppression, and still advances local state", async () => {
     const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
     const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
@@ -574,6 +598,64 @@ describe("syncStagesToHubSpot", () => {
     expect(result.success).toBe(1);
     expect(result.failed).toBe(0);
     expect(result.suppressed).toBe(2);
+  });
+
+  it("in migration mode can suppress HubSpot writes while still sending stage notifications", async () => {
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { processStageNotification } = await import("../server/stage-notifications.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "migration",
+            suppressHubSpotWrites: true,
+            suppressPortfolioTriggers: true,
+            suppressStageNotifications: false,
+            logSuppressedActions: true,
+            cycleId: "cycle-independent-flags",
+          },
+        } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-id-ir", stageName: "Internal Review" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue({
+      procoreProjectId: "procore-123",
+      bidboardProjectId: "bidboard-123",
+    } as any);
+
+    const result = await syncStagesToHubSpot([makeChange()]);
+
+    expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(processStageNotification)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(processStageNotification)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "Estimate Under Review",
+        source: "bidboard",
+        projectName: "Test Project",
+        oldStage: "Estimate in Progress",
+        procoreProjectId: "procore-123",
+        bidboardProjectId: "bidboard-123",
+        bidboardProjectNumber: "TP-001",
+        hubspotDealId: "hs-deal-111",
+      })
+    );
+    expect(result.success).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(result.suppressed).toBe(1);
   });
 
   it("processes multiple changes and sums success/failed independently", async () => {
