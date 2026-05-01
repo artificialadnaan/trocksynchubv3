@@ -40,6 +40,22 @@
 // Centralized selectors for Procore UI elements
 // These may need to be updated if Procore changes their UI
 
+export type BidBoardStageTabKind = "estimating" | "serviceEstimating";
+
+export const BIDBOARD_STAGE_TAB_LABELS: Record<BidBoardStageTabKind, readonly string[]> = {
+  estimating: ["Estimating", "Estimate in Progress"],
+  serviceEstimating: ["Service Estimating", "Service - Estimating", "Service – Estimating"],
+};
+
+function stageTabSelectorFor(labels: readonly string[]): string {
+  return labels
+    .flatMap((label) => [
+      `button.aid-tab:has-text("${label}")`,
+      `[class*="aid-tab"]:has-text("${label}")`,
+    ])
+    .join(", ");
+}
+
 export const PROCORE_SELECTORS = {
   // Login page - Procore uses a two-step login flow
   login: {
@@ -85,8 +101,8 @@ export const PROCORE_SELECTORS = {
     // New BidBoard UI (us02.procore.com/.../tools/bid-board) - stable aid-* attributes
     newUi: {
       app: 'bid-board-app#spaContent, #spaContent',
-      tabEstimateInProgress: 'button.aid-tab:has-text("Estimate in Progress"), [class*="aid-tab"]:has-text("Estimate in Progress")',
-      tabServiceEstimating: 'button.aid-tab:has-text("Service - Estimating"), [class*="aid-tab"]:has-text("Service - Estimating")',
+      tabEstimateInProgress: stageTabSelectorFor(BIDBOARD_STAGE_TAB_LABELS.estimating),
+      tabServiceEstimating: stageTabSelectorFor(BIDBOARD_STAGE_TAB_LABELS.serviceEstimating),
       createNewProjectButton: 'button.aid-addNewProject, button[label="Create New Project"]',
       createDialogConfirm: 'button.aid-confirmButton, [role="dialog"] button:has-text("Confirm")',
       createDialogEmptyProject: 'input[type="radio"][value="false"], [role="dialog"] label:has-text("Empty"), [role="dialog"] label:has-text("empty")',
