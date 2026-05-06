@@ -58,7 +58,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique, uuid, time } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique, uniqueIndex, uuid, time } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -193,6 +193,8 @@ export type User = typeof users.$inferSelect;
 
 export const syncMappings = pgTable("sync_mappings", {
   id: serial("id").primaryKey(),
+  sourceSystem: text("source_system").notNull().default("hubspot"),
+  sourceDealId: text("source_deal_id").notNull(),
   hubspotDealId: text("hubspot_deal_id"),
   hubspotCompanyId: text("hubspot_company_id"),
   procoreProjectId: text("procore_project_id"),
@@ -213,7 +215,10 @@ export const syncMappings = pgTable("sync_mappings", {
   lastSyncDirection: text("last_sync_direction"),
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("idx_sync_mappings_source_deal").on(table.sourceSystem, table.sourceDealId),
+  uniqueIndex("idx_sync_mappings_bidboard_project_id").on(table.bidboardProjectId).where(sql`bidboard_project_id IS NOT NULL`),
+]);
 
 export const insertSyncMappingSchema = createInsertSchema(syncMappings).omit({
   id: true,
@@ -950,8 +955,13 @@ export type CloseoutSurvey = typeof closeoutSurveys.$inferSelect;
 
 export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
   id: serial("id").primaryKey(),
-  hubspotDealId: text("hubspot_deal_id").notNull(),
+  sourceSystem: text("source_system").notNull().default("hubspot"),
+  sourceDealId: text("source_deal_id").notNull(),
+  sourceEventId: text("source_event_id"),
+  projectNumber: text("project_number"),
+  hubspotDealId: text("hubspot_deal_id"),
   token: text("token").notNull().unique(),
+  tokenExpiresAt: timestamp("token_expires_at"),
   status: text("status").notNull().default("pending"),
   dealData: jsonb("deal_data").notNull(),
   editedFields: jsonb("edited_fields"),
@@ -963,10 +973,55 @@ export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
   declinedAt: timestamp("declined_at"),
   bidboardProjectId: text("bidboard_project_id"),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("idx_rfp_approval_pending_source_deal").on(table.sourceSystem, table.sourceDealId).where(sql`status = 'pending'`),
+  uniqueIndex("idx_rfp_approval_pending_project_number").on(table.projectNumber).where(sql`status = 'pending'`),
+  index("idx_rfp_approval_project_number").on(table.projectNumber),
+]);
 export const insertRfpApprovalRequestSchema = createInsertSchema(rfpApprovalRequests).omit({ id: true, createdAt: true });
 export type InsertRfpApprovalRequest = z.infer<typeof insertRfpApprovalRequestSchema>;
 export type RfpApprovalRequest = typeof rfpApprovalRequests.$inferSelect;
+export const RFP_REQUEST_STATUSES = ['pending', 'approved', 'declined', 'cancelled_source_ineligible'] as const;
+export type RfpRequestStatus = typeof RFP_REQUEST_STATUSES[number];
+
+export const rfpApprovalEdits = pgTable("rfp_approval_edits", {
+  id: serial("id").primaryKey(),
+  rfpApprovalRequestId: integer("rfp_approval_request_id")
+    .notNull()
+    .references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
+  editedFields: jsonb("edited_fields").notNull(),
+  editedAt: timestamp("edited_at").defaultNow(),
+}, (table) => [
+  index("idx_rfp_approval_edits_request_id").on(table.rfpApprovalRequestId),
+]);
+export const insertRfpApprovalEditSchema = createInsertSchema(rfpApprovalEdits).omit({ id: true, editedAt: true });
+export type InsertRfpApprovalEdit = z.infer<typeof insertRfpApprovalEditSchema>;
+export type RfpApprovalEdit = typeof rfpApprovalEdits.$inferSelect;
+
+export const bidboardCallbackOutbox = pgTable("bidboard_callback_outbox", {
+  id: serial("id").primaryKey(),
+  sourceSystem: text("source_system").notNull(),
+  sourceDealId: text("source_deal_id").notNull(),
+  rfpApprovalRequestId: integer("rfp_approval_request_id")
+    .notNull()
+    .references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
+  payload: jsonb("payload").notNull(),
+  targetUrl: text("target_url").notNull(),
+  status: text("status").notNull().default("pending"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
+  lastError: text("last_error"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  sentAt: timestamp("sent_at"),
+}, (table) => [
+  uniqueIndex("idx_bidboard_callback_outbox_rfp_request").on(table.rfpApprovalRequestId),
+  index("idx_bidboard_callback_outbox_pending").on(table.status, table.nextAttemptAt).where(sql`status = 'pending'`),
+]);
+export const insertBidboardCallbackOutboxSchema = createInsertSchema(bidboardCallbackOutbox).omit({ id: true, createdAt: true, sentAt: true });
+export type InsertBidboardCallbackOutbox = z.infer<typeof insertBidboardCallbackOutboxSchema>;
+export type BidboardCallbackOutbox = typeof bidboardCallbackOutbox.$inferSelect;
 
 // RFP Reporting & Scheduled Email
 export const rfpChangeLog = pgTable("rfp_change_log", {
@@ -992,6 +1047,21 @@ export const rfpApprovals = pgTable("rfp_approvals", {
 });
 export type RfpApproval = typeof rfpApprovals.$inferSelect;
 export type InsertRfpApproval = typeof rfpApprovals.$inferInsert;
+
+export const rfpApproverConfig = pgTable("rfp_approver_config", {
+  id: serial("id").primaryKey(),
+  projectType: text("project_type").notNull(),
+  sourceSystem: text("source_system"),
+  approverEmails: text("approver_emails").array().notNull(),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => [
+  uniqueIndex("idx_rfp_approver_config_project_source").on(table.projectType, sql`COALESCE(${table.sourceSystem}, '__all__')`),
+]);
+export const insertRfpApproverConfigSchema = createInsertSchema(rfpApproverConfig).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertRfpApproverConfig = z.infer<typeof insertRfpApproverConfigSchema>;
+export type RfpApproverConfig = typeof rfpApproverConfig.$inferSelect;
 
 export const reportScheduleConfig = pgTable("report_schedule_config", {
   id: uuid("id").defaultRandom().primaryKey(),

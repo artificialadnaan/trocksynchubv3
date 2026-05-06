@@ -2,11 +2,47 @@ import type { Express } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
-import { resolveRfpDescription } from "../rfp-approval";
+import {
+  buildExpiredRfpMessage,
+  cancelIneligibleRfpApproval,
+  checkRfpApprovalSourceEligibility,
+  isRfpApprovalRequestExpired,
+  resolveRfpDescription,
+} from "../rfp-approval";
 
 const inFlightApprovalTokens = new Set<string>();
 
 // ── HTML helpers ──────────────────────────────────────────────────────────────
+
+function sourceIdentityForRouteAudit(request: any) {
+  const d = (request.dealData || {}) as Record<string, any>;
+  return {
+    sourceSystem: request.sourceSystem || 'hubspot',
+    sourceDealId: request.sourceSystem === 'hubspot' ? (request.hubspotDealId || request.sourceDealId) : request.sourceDealId,
+    projectNumber: request.projectNumber || d.project_number || '',
+  };
+}
+
+async function auditRouteAttempt(request: any, action: string, outcome: string, approverEmail?: string, failureReason?: string) {
+  const identity = sourceIdentityForRouteAudit(request);
+  await storage.createAuditLog({
+    action,
+    entityType: 'deal',
+    entityId: identity.sourceDealId,
+    source: 'rfp-approval',
+    status: outcome === 'expired' || outcome === 'cancelled_source_ineligible' ? 'failed' : 'success',
+    details: {
+      approverEmail: approverEmail || null,
+      sourceSystem: identity.sourceSystem,
+      sourceDealId: identity.sourceDealId,
+      projectNumber: identity.projectNumber,
+      requestId: request.id,
+      tokenId: request.token,
+      outcome,
+      failureReason: failureReason || null,
+    },
+  });
+}
 
 const RFP_LOGO_HTML = `<img src="https://trockgc.com/wp-content/uploads/2024/10/T-Rock-Logo-Main-2.png" alt="T-Rock GC" referrerpolicy="no-referrer" onerror="this.style.display='none';var s=this.nextElementSibling;s.style.display='inline';" style="max-width:140px;height:auto;vertical-align:middle;"><span style="display:none;color:#fff;font-size:22px;font-weight:700;letter-spacing:0.5px;vertical-align:middle;">T-Rock GC</span>`;
 
@@ -41,7 +77,11 @@ function renderRfpPage(title: string, content: string): string {
 </html>`;
 }
 
-async function renderRfpReviewPage(token: string, d: Record<string, any>): Promise<string> {
+async function renderRfpReviewPage(
+  token: string,
+  d: Record<string, any>,
+  source: { system: string; label: string; url?: string | null }
+): Promise<string> {
   const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const formatDateForInput = (val: any): string => {
     if (val == null || val === '') return '';
@@ -182,7 +222,7 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
       <p class="subtitle">Review the deal details below. Edit any fields as needed, then approve or decline.</p>
 
       <div class="info-banner">
-        <p>Fields you edit here will be updated in HubSpot upon approval. If project type is <strong>4 (Service)</strong>, the deal moves to <strong>Service - Estimating</strong>; otherwise it moves to <strong>Estimating</strong>.</p>
+        <p>Fields you edit here will be updated in ${esc(source.label)} upon approval. If project type is <strong>4 (Service)</strong>, the deal moves to <strong>Service - Estimating</strong>; otherwise it moves to <strong>Estimating</strong>.</p>
       </div>
 
       <form id="rfpForm">
@@ -194,7 +234,7 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
         </div>
         <div class="highlight-field">
           ${field('Project Type', 'project_types', currentTypeDigit)}
-          <small style="display:block;color:#64748b;font-size:12px;margin-top:6px;">Changing the project type will update the project number in HubSpot.</small>
+          <small style="display:block;color:#64748b;font-size:12px;margin-top:6px;">Changing the project type will update the project number in ${esc(source.label)}.</small>
         </div>
         <div class="row">
           ${selectField('Estimator', 'estimator', d.estimator, estimators)}
@@ -222,7 +262,7 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
         ${field('Notes', 'notes', d.notes, 'textarea')}
 
         <div class="section-title">Attachments</div>
-        <p class="attachments-intro">Attachments from the HubSpot deal. Remove any you don't need and add additional files before approval.</p>
+        <p class="attachments-intro">Attachments from the ${esc(source.label)} deal. Remove any you don't need and add additional files before approval.</p>
         <div id="attachmentsList" class="attachments-list"></div>
         <div class="add-attachments">
           <label class="add-attachments-label">
@@ -243,7 +283,7 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
         </div>
       </form>
 
-      ${d.hubspotDealUrl ? `<div class="hubspot-link"><a href="${esc(d.hubspotDealUrl)}" target="_blank">View Deal in HubSpot</a></div>` : ''}
+      ${source.url ? `<div class="hubspot-link"><a href="${esc(source.url)}" target="_blank">View Deal in ${esc(source.label)}</a></div>` : ''}
 
       <div id="result" class="result"></div>
     </div>
@@ -358,7 +398,7 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
           throw new Error(raw || ('Request failed with status ' + resp.status));
         }
         if (data.success) {
-          const message = data.message || 'The deal has been updated in HubSpot and a BidBoard project is being created in the background.';
+          const message = data.message || 'The deal has been updated in ${esc(source.label)} and a BidBoard project is being created in the background.';
           showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + data.bidboardProjectId : ''), 'success');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
@@ -397,7 +437,7 @@ async function renderRfpReviewPage(token: string, d: Record<string, any>): Promi
           throw new Error(raw || ('Request failed with status ' + resp.status));
         }
         if (data.success) {
-          showResult('This RFP has been <strong>declined</strong>. No BidBoard project will be created. The deal remains at RFP stage in HubSpot.', 'declined');
+          showResult('This RFP has been <strong>declined</strong>. No BidBoard project will be created. The deal remains in ${esc(source.label)}.', 'declined');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
           showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
@@ -421,9 +461,12 @@ export function registerRfpApprovalRoutes(app: Express) {
   // PUBLIC — no auth required
 
   app.get("/rfp-review/:token", asyncHandler(async (req, res) => {
-    const { token } = req.params;
+    const { token } = req.params as { token: string };
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).send(renderRfpPage('Not Found', '<p>This review link is invalid or has expired.</p>'));
+    if (isRfpApprovalRequestExpired(request)) {
+      return res.status(410).send(renderRfpPage('Link Expired', `<p>${buildExpiredRfpMessage(request)}</p>`));
+    }
     if (request.status !== 'pending') {
       const statusMsg = request.status === 'approved'
         ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>`
@@ -435,10 +478,12 @@ export function registerRfpApprovalRoutes(app: Express) {
     const hasDesc = !!(d.description || d.notes);
     const attCount = (d.attachments || []).length;
     const needsRefresh = !hasDesc || !attCount;
-    if (needsRefresh) {
+    if (needsRefresh && request.sourceSystem === 'hubspot') {
+      // HubSpot review refresh only runs for HubSpot-sourced RFP requests, which carry hubspotDealId.
+      const hubspotDealId = request.hubspotDealId!;
       try {
         const { fetchFullDealFromHubSpot } = await import("../rfp-approval");
-        const fresh = await fetchFullDealFromHubSpot(request.hubspotDealId);
+        const fresh = await fetchFullDealFromHubSpot(hubspotDealId);
         d = { ...d, ...fresh };
         if (!(d.description || d.notes)) {
           d.description = fresh.description || d.description;
@@ -449,13 +494,15 @@ export function registerRfpApprovalRoutes(app: Express) {
         }
         await storage.updateRfpApprovalRequest(request.id, { dealData: d });
       } catch (refreshErr: any) {
-        console.warn(`[rfp-review] Could not refresh deal data for ${request.hubspotDealId}:`, refreshErr.message);
+        console.warn(`[rfp-review] Could not refresh deal data for ${hubspotDealId}:`, refreshErr.message);
       }
     }
     const needsEnrichment = !(d.proposal_due_date || d.project_description__briefly_describe_the_project_);
-    if (needsEnrichment) {
+    if (needsEnrichment && request.sourceSystem === 'hubspot') {
+      // HubSpot enrichment only runs for HubSpot-sourced RFP requests, which carry hubspotDealId.
+      const hubspotDealId = request.hubspotDealId!;
       try {
-        const cached = await storage.getHubspotDealByHubspotId(request.hubspotDealId);
+        const cached = await storage.getHubspotDealByHubspotId(hubspotDealId);
         const cp = (cached?.properties || {}) as Record<string, any>;
         if (cp) {
           if (!d.proposal_due_date && cp.proposal_due_date) d = { ...d, proposal_due_date: cp.proposal_due_date };
@@ -465,7 +512,9 @@ export function registerRfpApprovalRoutes(app: Express) {
         }
       } catch { /* ignore */ }
     }
-    res.send(await renderRfpReviewPage(token, d));
+    const sourceLabel = request.sourceSystem === 'trock_crm' ? 'T Rock CRM' : 'HubSpot';
+    const sourceUrl = (d.sourceDealUrl || d.hubspotDealUrl) as string | undefined;
+    res.send(await renderRfpReviewPage(token, d, { system: request.sourceSystem, label: sourceLabel, url: sourceUrl }));
   }));
 
   app.post("/api/rfp-approval/:token/approve", async (req, res, next) => {
@@ -479,7 +528,7 @@ export function registerRfpApprovalRoutes(app: Express) {
     ])(req as any, res, async (err: any) => {
       if (err) return res.status(400).json({ success: false, error: err.message || 'Upload error' });
       try {
-        const { token } = req.params;
+        const { token } = req.params as { token: string };
         const body = (req as any).body || {};
         const files = (req as any).files || {};
         let editedFields: Record<string, string> = {};
@@ -500,8 +549,28 @@ export function registerRfpApprovalRoutes(app: Express) {
         if (!request) {
           return res.status(404).json({ success: false, error: 'Approval request not found' });
         }
+        if (isRfpApprovalRequestExpired(request)) {
+          const message = buildExpiredRfpMessage(request);
+          await auditRouteAttempt(request, 'rfp_approval_attempt', 'expired', approverEmail, 'Token expired');
+          return res.status(410).json({
+            success: false,
+            error: 'expired',
+            message,
+            expiredAt: request.tokenExpiresAt,
+          });
+        }
         if (request.status !== 'pending') {
           return res.status(409).json({ success: false, error: `Request already ${request.status}` });
+        }
+
+        const eligibility = await checkRfpApprovalSourceEligibility(request);
+        if (!eligibility.eligible) {
+          const result = await cancelIneligibleRfpApproval(
+            request,
+            approverEmail,
+            eligibility.reason || 'Source deal is no longer eligible'
+          );
+          return res.status(409).json(result);
         }
 
         if (inFlightApprovalTokens.has(token)) {
@@ -515,10 +584,19 @@ export function registerRfpApprovalRoutes(app: Express) {
 
         inFlightApprovalTokens.add(token);
 
+        if (request.sourceSystem === 'trock_crm') {
+          await storage.createRfpApprovalEdit({
+            rfpApprovalRequestId: request.id,
+            editedFields,
+          });
+        }
+
         res.status(202).json({
           success: true,
           queued: true,
-          message: 'The deal is being updated in HubSpot now, and BidBoard project creation will continue in the background.',
+          message: request.sourceSystem === 'trock_crm'
+            ? 'The deal edits were logged for T Rock CRM write-back, and BidBoard project creation will continue in the background.'
+            : 'The deal is being updated in HubSpot now, and BidBoard project creation will continue in the background.',
         });
 
         setImmediate(async () => {
@@ -542,9 +620,22 @@ export function registerRfpApprovalRoutes(app: Express) {
   });
 
   app.post("/api/rfp-approval/:token/decline", asyncHandler(async (req, res) => {
-    const { token } = req.params;
+    const { token } = req.params as { token: string };
     const { declinerEmail } = req.body;
     if (!declinerEmail) return res.status(400).json({ success: false, error: 'Email is required' });
+
+    const request = await storage.getRfpApprovalRequestByToken(token);
+    if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
+    if (isRfpApprovalRequestExpired(request)) {
+      const message = buildExpiredRfpMessage(request);
+      await auditRouteAttempt(request, 'rfp_decline_attempt', 'expired', declinerEmail, 'Token expired');
+      return res.status(410).json({
+        success: false,
+        error: 'expired',
+        message,
+        expiredAt: request.tokenExpiresAt,
+      });
+    }
 
     const { processRfpDecline } = await import('../rfp-approval');
     const result = await processRfpDecline(token, declinerEmail);

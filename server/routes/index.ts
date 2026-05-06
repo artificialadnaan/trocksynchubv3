@@ -32,6 +32,7 @@ import { registerEmailRoutes } from "./email";
 import { registerReportsRoutes } from "./reports";
 import { registerTestingRoutes } from "./testing";
 import { registerRfpApprovalRoutes } from "./rfp-approval";
+import { registerRfpRequestRoutes } from "./rfp-requests";
 import { registerSettingsRoutes, initPolling } from "./settings";
 import { registerCloseoutRoutes } from "./closeout";
 
@@ -45,6 +46,7 @@ import { startReconciliationScheduler } from "../cron/reconciliationScheduler";
 import { startCleanupScheduler } from "../cron/cleanupScheduler";
 import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
+import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
 
 const PgSession = connectPgSimple(session);
 
@@ -98,7 +100,8 @@ export async function registerRoutes(
   registerEmailRoutes(app, requireAuth);
   registerReportsRoutes(app, requireAuth);
   registerTestingRoutes(app, requireAuth);
-  registerRfpApprovalRoutes(app, requireAuth);
+  registerRfpRequestRoutes(app);
+  registerRfpApprovalRoutes(app);
   registerSettingsRoutes(app, requireAuth);
   registerCloseoutRoutes(app, requireAuth);
 
@@ -111,6 +114,7 @@ export async function registerRoutes(
   startCleanupScheduler();
   startWebhookRetryScheduler();
   startAlertScheduler();
+  startBidBoardCallbackWorker();
 
   // Initialize polling systems from saved config
   initPolling().catch((err: any) => {

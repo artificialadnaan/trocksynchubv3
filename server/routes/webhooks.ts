@@ -165,6 +165,11 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
             console.log(`[hubspot-webhook] Deal ${objectId} stage change: stageId="${stageId}", resolved="${stageName}", changeSource="${changeSource || 'unknown'}"`);
             const isRfpStage = stageName.includes('rfp') || stageId.includes('rfp');
             if (isRfpStage) {
+              const hubspotRfpTriggerEnabled = process.env.HUBSPOT_RFP_TRIGGER_ENABLED !== "false";
+              if (!hubspotRfpTriggerEnabled) {
+                console.info(`HubSpot RFP trigger disabled — ignoring deal ${objectId} stage change to RFP`);
+                continue;
+              }
               try {
                 const { createRfpApprovalRequest } = await import("../rfp-approval");
                 const result = await createRfpApprovalRequest(objectId);
