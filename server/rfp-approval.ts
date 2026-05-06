@@ -94,9 +94,36 @@ function normalizeStageForEligibility(stage: string | null | undefined): string 
   return String(stage || '').trim().toLowerCase().replace(/[–—−]/g, '-');
 }
 
-function isHubSpotRfpEligibleStage(stage: string | null | undefined): boolean {
+function isHubSpotRfpEligibleStageLabel(stage: string | null | undefined): boolean {
   const normalized = normalizeStageForEligibility(stage);
   return normalized.includes('rfp') || normalized.includes('estimating') || normalized.includes('estimate in progress');
+}
+
+async function isHubSpotRfpEligibleStageId(
+  stageId: string | null | undefined,
+  pipelineId: string | null | undefined
+): Promise<{ eligible: boolean; resolvedLabel: string | null }> {
+  if (!stageId) return { eligible: false, resolvedLabel: null };
+
+  const pipelines = await storage.getHubspotPipelines();
+  for (const pipeline of pipelines) {
+    const currentPipelineId = (pipeline as any).hubspotId ?? (pipeline as any).hubspot_id ?? null;
+    if (pipelineId && currentPipelineId !== pipelineId) continue;
+
+    const stage = (((pipeline as any).stages || []) as any[]).find((candidate) => candidate?.stageId === stageId);
+    if (stage) {
+      const label = stage.label || null;
+      return {
+        eligible: isHubSpotRfpEligibleStageLabel(label),
+        resolvedLabel: label,
+      };
+    }
+  }
+
+  return {
+    eligible: isHubSpotRfpEligibleStageLabel(stageId),
+    resolvedLabel: null,
+  };
 }
 
 function isCrmOpportunityStage(stage: string | null | undefined): boolean {
@@ -271,8 +298,11 @@ export async function checkRfpApprovalSourceEligibility(request: any): Promise<{
   try {
     const fresh = await fetchFullDealFromHubSpot(identity.sourceDealId);
     const stage = fresh.dealstage || fresh.dealStage || null;
-    if (!isHubSpotRfpEligibleStage(stage)) {
-      return { eligible: false, reason: `Source HubSpot deal is no longer RFP/Estimating eligible (current stage: ${stage || 'unknown'})`, exists: true, stage };
+    const pipeline = fresh.pipeline || null;
+    const { eligible, resolvedLabel } = await isHubSpotRfpEligibleStageId(stage, pipeline);
+    if (!eligible) {
+      const stageDisplay = resolvedLabel ? `${resolvedLabel} (${stage})` : `${stage || 'unknown'}`;
+      return { eligible: false, reason: `Source HubSpot deal is no longer RFP/Estimating eligible (current stage: ${stageDisplay})`, exists: true, stage };
     }
     return { eligible: true, exists: true, stage };
   } catch (error: any) {
