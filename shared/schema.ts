@@ -216,7 +216,7 @@ export const syncMappings = pgTable("sync_mappings", {
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
-  uniqueIndex("idx_sync_mappings_source_deal").on(table.sourceSystem, table.sourceDealId),
+  index("idx_sync_mappings_source_deal").on(table.sourceSystem, table.sourceDealId),
   uniqueIndex("idx_sync_mappings_bidboard_project_id").on(table.bidboardProjectId).where(sql`bidboard_project_id IS NOT NULL`),
 ]);
 

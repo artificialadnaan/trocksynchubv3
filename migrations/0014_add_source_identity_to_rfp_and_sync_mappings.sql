@@ -81,19 +81,15 @@ ALTER TABLE sync_mappings
   ALTER COLUMN source_system SET NOT NULL,
   ALTER COLUMN source_deal_id SET NOT NULL;
 
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM sync_mappings
-    GROUP BY source_system, source_deal_id
-    HAVING count(*) > 1
-  ) THEN
-    RAISE EXCEPTION 'Cannot create sync_mappings source uniqueness index: duplicate source_system/source_deal_id rows exist';
-  END IF;
-END $$;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_mappings_source_deal
+-- The unique index on sync_mappings(source_system, source_deal_id) is
+-- intentionally NOT enforced because production has known duplicates
+-- from a March 2026 BidBoard automation loop bug. The duplicates
+-- represent real Procore Bid Board projects that need separate data
+-- hygiene work. The partial unique index on bidboard_project_id below
+-- still protects the more important invariant (no two sync_mappings
+-- rows pointing at the same Procore project).
+-- See backlog item: "Dedupe legacy sync_mappings rows" for cleanup.
+CREATE INDEX IF NOT EXISTS idx_sync_mappings_source_deal
   ON sync_mappings(source_system, source_deal_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_mappings_bidboard_project_id
