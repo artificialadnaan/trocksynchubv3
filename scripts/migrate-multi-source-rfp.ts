@@ -35,7 +35,8 @@ async function main() {
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL must be set");
   }
-  console.log("Running multi-source RFP migrations (0014-0019)...");
+  console.log("Running multi-source RFP migrations (0013a, 0014-0019)...");
+  await runSqlFile("0013a_dedupe_bidboard_project_id.sql");
   await runSqlFile("0014_add_source_identity_to_rfp_and_sync_mappings.sql");
   await runSqlFile("0015_relax_hubspot_deal_id_nullable.sql");
   await runSqlFile("0016_create_rfp_approver_config.sql");
