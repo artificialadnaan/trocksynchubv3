@@ -548,6 +548,31 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                     if (mapping?.bidboardProjectId && !mapping.portfolioProjectId) {
                       await storage.updateSyncMapping(mapping.id, { portfolioProjectId: resourceId });
                       console.log(`[webhook] Stored portfolio project ${resourceId} in sync mapping for bidboard ${mapping.bidboardProjectId}`);
+                      try {
+                        const { buildTrockCrmProjectCreatedPayload, enqueueTrockCrmRelayOutbox } = await import("../trockcrm-relay");
+                        const payload = buildTrockCrmProjectCreatedPayload({
+                          webhookLog: {
+                            id: webhookLog.id,
+                            createdAt: webhookLog.createdAt ?? new Date(),
+                            payload: event,
+                          },
+                          syncMapping: mapping,
+                          procoreProject: {
+                            ...project,
+                            id: resourceId,
+                          },
+                          enrichedAt: new Date(),
+                        });
+                        await enqueueTrockCrmRelayOutbox({
+                          webhookLogId: webhookLog.id,
+                          syncMappingId: mapping.id,
+                          procorePortfolioProjectId: resourceId,
+                          projectNumber,
+                          payload,
+                        });
+                      } catch (relayErr: any) {
+                        console.warn(`[webhook] TrockCRM relay enqueue failed for portfolio project ${resourceId}: ${relayErr.message}`);
+                      }
                     } else if (!mapping) {
                       console.log(`[webhook] No sync mapping found for project number ${projectNumber}`);
                     }

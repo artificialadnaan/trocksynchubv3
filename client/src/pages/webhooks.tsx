@@ -26,6 +26,17 @@ import type { WebhookLog } from "@shared/schema";
 const HUBSPOT_PORTAL_ID = "45644695";
 const PROCORE_COMPANY_ID = "598134325683880";
 
+type TrockCrmRelayOutboxEntry = {
+  id: number;
+  webhookLogId: number | null;
+  status: string;
+  attempts: number;
+  lastError?: string | null;
+  lastResponseStatus?: number | null;
+  sentAt?: string | null;
+  nextRetryAt?: string | null;
+};
+
 /** Build a clickable URL for the webhook's resource (deal, project, etc.) when possible. */
 function getWebhookExternalLink(log: WebhookLog): { url: string; label: string } | null {
   const source = (log.source || "").toLowerCase();
@@ -90,6 +101,15 @@ export default function WebhooksPage() {
     queryKey: [`/api/webhook-logs?${queryString}`],
   });
 
+  const webhookLogIds = data?.logs.map((log) => log.id).join(",") ?? "";
+  const { data: relayData } = useQuery<{ entries: TrockCrmRelayOutboxEntry[] }>({
+    queryKey: [`/api/trockcrm-relay-outbox?webhookLogIds=${webhookLogIds}`],
+    enabled: webhookLogIds.length > 0,
+  });
+  const relayByWebhookLogId = new Map((relayData?.entries ?? [])
+    .filter((entry) => entry.webhookLogId != null)
+    .map((entry) => [entry.webhookLogId!, entry]));
+
   const retryMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await apiRequest("POST", `/api/webhook-logs/${id}/retry`);
@@ -117,6 +137,17 @@ export default function WebhooksPage() {
       companycam: "bg-purple-500/10 text-purple-600 border-purple-500/20",
     };
     return <Badge className={colors[source] || ""}>{source}</Badge>;
+  };
+
+  const relayBadge = (entry?: TrockCrmRelayOutboxEntry) => {
+    if (!entry) return <span className="text-xs text-muted-foreground">-</span>;
+    const variants: Record<string, string> = {
+      sent: "bg-green-500/10 text-green-600 border-green-500/20",
+      pending: "bg-yellow-500/10 text-yellow-600 border-yellow-500/20",
+      failed: "bg-red-500/10 text-red-600 border-red-500/20",
+      abandoned: "bg-zinc-500/10 text-zinc-600 border-zinc-500/20",
+    };
+    return <Badge className={variants[entry.status] || ""}>{entry.status}</Badge>;
   };
 
   return (
@@ -185,6 +216,7 @@ export default function WebhooksPage() {
                       <th className="text-left p-3 font-medium text-muted-foreground">Event</th>
                       <th className="text-left p-3 font-medium text-muted-foreground">Resource</th>
                       <th className="text-left p-3 font-medium text-muted-foreground">Status</th>
+                      <th className="text-left p-3 font-medium text-muted-foreground">TrockCRM Relay</th>
                       <th className="text-right p-3 font-medium text-muted-foreground">Actions</th>
                     </tr>
                   </thead>
@@ -217,6 +249,7 @@ export default function WebhooksPage() {
                           })()}
                         </td>
                         <td className="p-3">{statusBadge(log.status)}</td>
+                        <td className="p-3">{relayBadge(relayByWebhookLogId.get(log.id))}</td>
                         <td className="p-3 text-right">
                           <div className="flex items-center justify-end gap-1">
                             <Button

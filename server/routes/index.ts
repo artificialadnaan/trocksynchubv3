@@ -20,6 +20,7 @@ import { errorHandler } from "../lib/error-middleware";
 import { registerAuthRoutes } from "./auth";
 import { registerDashboardRoutes } from "./dashboard";
 import { registerSyncRoutes } from "./sync";
+import { registerTrockCrmRelayRoutes } from "./trockcrm-relay";
 import { registerDebugRoutes } from "./debug";
 import { registerOAuthRoutes } from "./oauth";
 import { registerWebhookRoutes } from "./webhooks";
@@ -45,6 +46,7 @@ import { startReconciliationScheduler } from "../cron/reconciliationScheduler";
 import { startCleanupScheduler } from "../cron/cleanupScheduler";
 import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
+import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
 
 const PgSession = connectPgSimple(session);
 
@@ -87,6 +89,7 @@ export async function registerRoutes(
   registerAuthRoutes(app, requireAuth);
   registerDashboardRoutes(app, requireAuth);
   registerSyncRoutes(app, requireAuth);
+  registerTrockCrmRelayRoutes(app, requireAuth);
   registerDebugRoutes(app, requireAuth);
   registerOAuthRoutes(app, requireAuth);
   registerWebhookRoutes(app, requireAuth);
@@ -111,6 +114,7 @@ export async function registerRoutes(
   startCleanupScheduler();
   startWebhookRetryScheduler();
   startAlertScheduler();
+  startTrockCrmRelayScheduler();
 
   // Initialize polling systems from saved config
   initPolling().catch((err: any) => {
