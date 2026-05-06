@@ -11,18 +11,20 @@ This runbook covers production rollout for the multi-source RFP approval flow:
 
 Run these on the SyncHub production database in order:
 
-1. `0014_add_source_identity_to_rfp_and_sync_mappings.sql`
+1. `0014_add_trockcrm_relay_outbox.sql`
+   - Creates the TrockCRM relay outbox used by the Procore portfolio relay path.
+2. `0015_add_source_identity_to_rfp_and_sync_mappings.sql`
    - Adds `source_system`, `source_deal_id`, `source_event_id`, `project_number`, and `token_expires_at`.
    - Backfills existing rows as `hubspot`.
-2. `0015_relax_hubspot_deal_id_nullable.sql`
+3. `0016_relax_hubspot_deal_id_nullable.sql`
    - Allows CRM-sourced RFP requests without fake HubSpot IDs.
-3. `0016_create_rfp_approver_config.sql`
+4. `0017_create_rfp_approver_config.sql`
    - Creates seeded approver routing config.
-4. `0017_create_rfp_approval_edits.sql`
+5. `0018_create_rfp_approval_edits.sql`
    - Logs CRM-sourced review-page edits until CRM write-back is active.
-5. `0018_add_pending_project_number_unique.sql`
+6. `0019_add_pending_project_number_unique.sql`
    - Adds `idx_rfp_approval_pending_project_number`, the cross-source pending uniqueness guard.
-6. `0019_create_bidboard_callback_outbox.sql`
+7. `0020_create_bidboard_callback_outbox.sql`
    - Adds durable SyncHub-to-CRM Bid Board-created callback delivery.
 
 ### CRM Migrations
@@ -109,12 +111,13 @@ Only roll back schema after deploy rollback and after confirming no in-flight RF
 
 SyncHub:
 
-- `0019_create_bidboard_callback_outbox.sql`: `DROP TABLE IF EXISTS bidboard_callback_outbox;`
-- `0018_add_pending_project_number_unique.sql`: `DROP INDEX IF EXISTS idx_rfp_approval_pending_project_number;`
-- `0017_create_rfp_approval_edits.sql`: `DROP TABLE IF EXISTS rfp_approval_edits;`
-- `0016_create_rfp_approver_config.sql`: `DROP TABLE IF EXISTS rfp_approver_config;`
-- `0015_relax_hubspot_deal_id_nullable.sql`: only restore `NOT NULL` after proving there are no non-HubSpot rows: `ALTER TABLE rfp_approval_requests ALTER COLUMN hubspot_deal_id SET NOT NULL;`
-- `0014_add_source_identity_to_rfp_and_sync_mappings.sql`: do not drop source identity columns during normal rollback. They are additive and harmless to old code. Dropping them requires first removing unique indexes and verifying no CRM-sourced rows exist.
+- `0020_create_bidboard_callback_outbox.sql`: `DROP TABLE IF EXISTS bidboard_callback_outbox;`
+- `0019_add_pending_project_number_unique.sql`: `DROP INDEX IF EXISTS idx_rfp_approval_pending_project_number;`
+- `0018_create_rfp_approval_edits.sql`: `DROP TABLE IF EXISTS rfp_approval_edits;`
+- `0017_create_rfp_approver_config.sql`: `DROP TABLE IF EXISTS rfp_approver_config;`
+- `0016_relax_hubspot_deal_id_nullable.sql`: only restore `NOT NULL` after proving there are no non-HubSpot rows: `ALTER TABLE rfp_approval_requests ALTER COLUMN hubspot_deal_id SET NOT NULL;`
+- `0015_add_source_identity_to_rfp_and_sync_mappings.sql`: do not drop source identity columns during normal rollback. They are additive and harmless to old code. Dropping them requires first removing unique indexes and verifying no CRM-sourced rows exist.
+- `0014_add_trockcrm_relay_outbox.sql`: `DROP TABLE IF EXISTS trockcrm_relay_outbox;`
 
 CRM:
 

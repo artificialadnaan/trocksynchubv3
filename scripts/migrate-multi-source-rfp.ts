@@ -35,14 +35,14 @@ async function main() {
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL must be set");
   }
-  console.log("Running multi-source RFP migrations (0013a, 0014-0019)...");
+  console.log("Running multi-source RFP migrations (0013a, 0015-0020)...");
   await runSqlFile("0013a_dedupe_bidboard_project_id.sql");
-  await runSqlFile("0014_add_source_identity_to_rfp_and_sync_mappings.sql");
-  await runSqlFile("0015_relax_hubspot_deal_id_nullable.sql");
-  await runSqlFile("0016_create_rfp_approver_config.sql");
-  await runSqlFile("0017_create_rfp_approval_edits.sql");
-  await runSqlFile("0018_add_pending_project_number_unique.sql");
-  await runSqlFile("0019_create_bidboard_callback_outbox.sql");
+  await runSqlFile("0015_add_source_identity_to_rfp_and_sync_mappings.sql");
+  await runSqlFile("0016_relax_hubspot_deal_id_nullable.sql");
+  await runSqlFile("0017_create_rfp_approver_config.sql");
+  await runSqlFile("0018_create_rfp_approval_edits.sql");
+  await runSqlFile("0019_add_pending_project_number_unique.sql");
+  await runSqlFile("0020_create_bidboard_callback_outbox.sql");
   await pool.end();
   console.log("Migration complete.");
   process.exit(0);
