@@ -54,16 +54,17 @@ describe("TrockCRM relay scheduler", () => {
     expect(consoleLog).toHaveBeenCalledWith("[TrockCRMRelay] Scheduler disabled by TROCKCRM_RELAY_ENABLED=false");
   });
 
-  it("does not start when signing secret is missing", async () => {
+  it("starts with a warning when signing secret is missing so pending rows can be marked failed", async () => {
     delete process.env.TROCKCRM_RELAY_ENABLED;
     delete process.env.SYNCHUB_RELAY_SECRET;
+    processBatch.mockResolvedValue({ processed: 1, sent: 0, failed: 1, abandoned: 0 });
 
     const { startTrockCrmRelayScheduler } = await import("../server/cron/trockcrmRelayScheduler.ts");
     startTrockCrmRelayScheduler();
     await vi.advanceTimersByTimeAsync(60_000);
 
-    expect(processBatch).not.toHaveBeenCalled();
-    expect(consoleWarn).toHaveBeenCalledWith("[TrockCRMRelay] SYNCHUB_RELAY_SECRET missing; relay outbox processing disabled");
+    expect(processBatch).toHaveBeenCalledWith({ limit: 25 });
+    expect(consoleWarn).toHaveBeenCalledWith("[TrockCRMRelay] SYNCHUB_RELAY_SECRET missing; relay outbox processing will mark rows failed until configured");
   });
 
   it("processes outbox entries every minute when configured", async () => {

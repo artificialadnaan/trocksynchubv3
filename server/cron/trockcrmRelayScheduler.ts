@@ -11,8 +11,7 @@ export function startTrockCrmRelayScheduler() {
     return;
   }
   if (!process.env.SYNCHUB_RELAY_SECRET?.trim()) {
-    console.warn("[TrockCRMRelay] SYNCHUB_RELAY_SECRET missing; relay outbox processing disabled");
-    return;
+    console.warn("[TrockCRMRelay] SYNCHUB_RELAY_SECRET missing; relay outbox processing will mark rows failed until configured");
   }
 
   relayTimer = setInterval(async () => {

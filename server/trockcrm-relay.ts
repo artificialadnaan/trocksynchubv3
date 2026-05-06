@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { and, asc, eq, inArray, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { fetchWithTimeout } from "./lib/fetch-with-timeout";
 import { trockcrmRelayOutbox, type TrockcrmRelayOutbox } from "@shared/schema";
@@ -43,7 +43,7 @@ export type TrockCrmRelayPayload = {
 
 export type RelayStore = {
   insertOutbox?: (row: Record<string, unknown>) => Promise<{ id: number }>;
-  findReadyOutbox?: (limit: number, now: Date) => Promise<Array<Pick<TrockcrmRelayOutbox, "id" | "payload" | "attempts">>>;
+  claimReadyOutbox?: (limit: number, now: Date, processingStaleBefore: Date) => Promise<Array<Pick<TrockcrmRelayOutbox, "id" | "payload" | "attempts">>>;
   markSent?: (id: number, data: { responseStatus: number; responseBody?: string | null; sentAt: Date }) => Promise<void>;
   markFailed?: (id: number, data: { attempts: number; error: string; responseStatus?: number | null; responseBody?: string | null; nextRetryAt: Date; attemptedAt: Date }) => Promise<void>;
   markAbandoned?: (id: number, data: { attempts?: number; error: string; responseStatus?: number | null; responseBody?: string | null; attemptedAt: Date }) => Promise<void>;
@@ -70,6 +70,14 @@ function relayLog(message: string) {
 function truncateResponseBody(body: string | null | undefined) {
   if (!body) return null;
   return body.length > RESPONSE_BODY_LIMIT ? body.slice(0, RESPONSE_BODY_LIMIT) : body;
+}
+
+function rowsFromDbResult(result: unknown): any[] {
+  if (Array.isArray(result)) return result;
+  if (result && typeof result === "object" && Array.isArray((result as { rows?: unknown[] }).rows)) {
+    return (result as { rows: unknown[] }).rows;
+  }
+  return [];
 }
 
 export function signTrockCrmRelayBody(body: string, secret: string) {
@@ -130,24 +138,41 @@ export function createDbRelayStore(): Required<RelayStore> {
         .returning({ id: trockcrmRelayOutbox.id });
       return result;
     },
-    async findReadyOutbox(limit, now) {
-      return db
-        .select()
-        .from(trockcrmRelayOutbox)
-        .where(
-          or(
-            eq(trockcrmRelayOutbox.status, "pending"),
-            and(
-              eq(trockcrmRelayOutbox.status, "failed"),
-              or(
-                sql`${trockcrmRelayOutbox.nextRetryAt} IS NULL`,
-                lte(trockcrmRelayOutbox.nextRetryAt, now)
-              )
+    async claimReadyOutbox(limit, now, processingStaleBefore) {
+      const result = await db.transaction(async (tx) => tx.execute(sql`
+        WITH claimed AS (
+          SELECT id
+          FROM ${trockcrmRelayOutbox}
+          WHERE (
+            status = 'pending'
+            OR (
+              status = 'failed'
+              AND (next_retry_at IS NULL OR next_retry_at <= ${now})
+            )
+            OR (
+              status = 'processing'
+              AND last_attempt_at <= ${processingStaleBefore}
             )
           )
+          ORDER BY created_at ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT ${limit}
         )
-        .orderBy(asc(trockcrmRelayOutbox.createdAt))
-        .limit(limit);
+        UPDATE ${trockcrmRelayOutbox}
+        SET
+          status = 'processing',
+          attempts = attempts + 1,
+          last_attempt_at = ${now},
+          last_error = NULL,
+          next_retry_at = NULL
+        FROM claimed
+        WHERE ${trockcrmRelayOutbox}.id = claimed.id
+        RETURNING
+          ${trockcrmRelayOutbox}.id,
+          ${trockcrmRelayOutbox}.payload,
+          ${trockcrmRelayOutbox}.attempts
+      `));
+      return rowsFromDbResult(result) as Array<Pick<TrockcrmRelayOutbox, "id" | "payload" | "attempts">>;
     },
     async markSent(id, data) {
       await db.update(trockcrmRelayOutbox).set({
@@ -193,12 +218,6 @@ export async function enqueueTrockCrmRelayOutbox(input: {
   projectNumber: string;
   payload: TrockCrmRelayPayload;
 }): Promise<{ enqueued: true; outboxId: number } | { enqueued: false; reason: "disabled" | "missing_secret" | "insert_failed" }> {
-  if (!relayEnabled()) return { enqueued: false, reason: "disabled" };
-  if (!relaySecret()) {
-    relayLog("[TrockCRMRelay] SYNCHUB_RELAY_SECRET missing; relay disabled");
-    return { enqueued: false, reason: "missing_secret" };
-  }
-
   try {
     const store = input.store ?? createDbRelayStore();
     const row = await store.insertOutbox!({
@@ -227,15 +246,15 @@ export async function processTrockCrmRelayOutboxEntry(input: {
   const secret = relaySecret();
   const store = input.store ?? createDbRelayStore();
   const now = input.now ?? new Date();
-  const nextAttempts = Number(input.row.attempts ?? 0) + 1;
+  const attempts = Math.max(Number(input.row.attempts ?? 0), 1);
   const body = JSON.stringify(input.row.payload);
   const fetchImpl = input.fetchImpl ?? ((url, init) => fetchWithTimeout(String(url), init, 30_000));
 
   if (!secret) {
     await store.markFailed!(input.row.id, {
-      attempts: nextAttempts,
+      attempts,
       error: "SYNCHUB_RELAY_SECRET missing",
-      nextRetryAt: new Date(now.getTime() + calculateTrockCrmRelayBackoff(nextAttempts)),
+      nextRetryAt: new Date(now.getTime() + calculateTrockCrmRelayBackoff(attempts)),
       attemptedAt: now,
     });
     return "failed";
@@ -259,7 +278,7 @@ export async function processTrockCrmRelayOutboxEntry(input: {
     const error = `trockcrm responded ${response.status}`;
     if (response.status >= 400 && response.status < 500 && response.status !== 429) {
       await store.markAbandoned!(input.row.id, {
-        attempts: nextAttempts,
+        attempts,
         error,
         responseStatus: response.status,
         responseBody,
@@ -268,9 +287,9 @@ export async function processTrockCrmRelayOutboxEntry(input: {
       return "abandoned";
     }
 
-    if (nextAttempts >= MAX_ATTEMPTS) {
+    if (attempts >= MAX_ATTEMPTS) {
       await store.markAbandoned!(input.row.id, {
-        attempts: nextAttempts,
+        attempts,
         error,
         responseStatus: response.status,
         responseBody,
@@ -280,24 +299,24 @@ export async function processTrockCrmRelayOutboxEntry(input: {
     }
 
     await store.markFailed!(input.row.id, {
-      attempts: nextAttempts,
+      attempts,
       error,
       responseStatus: response.status,
       responseBody,
-      nextRetryAt: new Date(now.getTime() + calculateTrockCrmRelayBackoff(nextAttempts)),
+      nextRetryAt: new Date(now.getTime() + calculateTrockCrmRelayBackoff(attempts)),
       attemptedAt: now,
     });
     return "failed";
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    if (nextAttempts >= MAX_ATTEMPTS) {
-      await store.markAbandoned!(input.row.id, { attempts: nextAttempts, error, attemptedAt: now });
+    if (attempts >= MAX_ATTEMPTS) {
+      await store.markAbandoned!(input.row.id, { attempts, error, attemptedAt: now });
       return "abandoned";
     }
     await store.markFailed!(input.row.id, {
-      attempts: nextAttempts,
+      attempts,
       error,
-      nextRetryAt: new Date(now.getTime() + calculateTrockCrmRelayBackoff(nextAttempts)),
+      nextRetryAt: new Date(now.getTime() + calculateTrockCrmRelayBackoff(attempts)),
       attemptedAt: now,
     });
     return "failed";
@@ -311,7 +330,9 @@ export async function processTrockCrmRelayOutboxBatch(input: {
 } = {}) {
   if (!relayEnabled()) return { processed: 0, sent: 0, failed: 0, abandoned: 0 };
   const store = input.store ?? createDbRelayStore();
-  const rows = await store.findReadyOutbox!(input.limit ?? 25, new Date());
+  const now = new Date();
+  const processingStaleBefore = new Date(now.getTime() - 5 * 60 * 1000);
+  const rows = await store.claimReadyOutbox!(input.limit ?? 25, now, processingStaleBefore);
   const result = { processed: 0, sent: 0, failed: 0, abandoned: 0 };
   for (const row of rows) {
     const status = await processTrockCrmRelayOutboxEntry({ store, fetchImpl: input.fetchImpl, row });

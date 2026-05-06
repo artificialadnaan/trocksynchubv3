@@ -120,8 +120,8 @@ describe("trockcrm relay outbox", () => {
     }));
   });
 
-  it("does not enqueue when disabled or when the signing secret is missing", async () => {
-    const store = { insertOutbox: vi.fn() };
+  it("still enqueues when disabled or when the signing secret is missing", async () => {
+    const store = { insertOutbox: vi.fn().mockResolvedValueOnce({ id: 13 }).mockResolvedValueOnce({ id: 14 }) };
 
     process.env.TROCKCRM_RELAY_ENABLED = "false";
     await expect(enqueueTrockCrmRelayOutbox({
@@ -131,7 +131,7 @@ describe("trockcrm relay outbox", () => {
       procorePortfolioProjectId: "598134326517540",
       projectNumber: "DFW-1-02326-ad",
       payload: samplePayload(),
-    })).resolves.toEqual({ enqueued: false, reason: "disabled" });
+    })).resolves.toEqual({ enqueued: true, outboxId: 13 });
 
     delete process.env.TROCKCRM_RELAY_ENABLED;
     delete process.env.SYNCHUB_RELAY_SECRET;
@@ -142,9 +142,10 @@ describe("trockcrm relay outbox", () => {
       procorePortfolioProjectId: "598134326517540",
       projectNumber: "DFW-1-02326-ad",
       payload: samplePayload(),
-    })).resolves.toEqual({ enqueued: false, reason: "missing_secret" });
+    })).resolves.toEqual({ enqueued: true, outboxId: 14 });
 
-    expect(store.insertOutbox).not.toHaveBeenCalled();
+    expect(store.insertOutbox).toHaveBeenCalledTimes(2);
+    expect(store.insertOutbox).toHaveBeenCalledWith(expect.objectContaining({ status: "pending" }));
   });
 
   it("returns insert_failed when outbox persistence throws", async () => {
@@ -176,7 +177,7 @@ describe("trockcrm relay outbox", () => {
       row: {
         id: 12,
         payload: samplePayload(),
-        attempts: 0,
+        attempts: 1,
       },
       now: new Date("2026-05-01T12:06:00.000Z"),
     });
@@ -211,7 +212,7 @@ describe("trockcrm relay outbox", () => {
     await processTrockCrmRelayOutboxEntry({
       store,
       fetchImpl: fetchMock,
-      row: { id: 12, payload: samplePayload(), attempts: 0 },
+      row: { id: 12, payload: samplePayload(), attempts: 1 },
       now: new Date("2026-05-01T12:06:00.000Z"),
     });
 
@@ -231,7 +232,7 @@ describe("trockcrm relay outbox", () => {
     await expect(processTrockCrmRelayOutboxEntry({
       store,
       fetchImpl: vi.fn(),
-      row: { id: 12, payload: samplePayload(), attempts: 1 },
+      row: { id: 12, payload: samplePayload(), attempts: 2 },
       now: new Date("2026-05-01T12:06:00.000Z"),
     })).resolves.toBe("failed");
 
@@ -258,7 +259,7 @@ describe("trockcrm relay outbox", () => {
     await processTrockCrmRelayOutboxEntry({
       store,
       fetchImpl: fetchMock,
-      row: { id: 12, payload: samplePayload(), attempts: 0 },
+      row: { id: 12, payload: samplePayload(), attempts: 1 },
       now: new Date("2026-05-01T12:06:00.000Z"),
     });
 
@@ -284,7 +285,7 @@ describe("trockcrm relay outbox", () => {
     await processTrockCrmRelayOutboxEntry({
       store,
       fetchImpl: fetchMock,
-      row: { id: 12, payload: samplePayload(), attempts: 19 },
+      row: { id: 12, payload: samplePayload(), attempts: 20 },
       now: new Date("2026-05-01T12:06:00.000Z"),
     });
 
@@ -305,7 +306,7 @@ describe("trockcrm relay outbox", () => {
     await expect(processTrockCrmRelayOutboxEntry({
       store,
       fetchImpl: fetchMock,
-      row: { id: 12, payload: samplePayload(), attempts: 19 },
+      row: { id: 12, payload: samplePayload(), attempts: 20 },
       now: new Date("2026-05-01T12:06:00.000Z"),
     })).resolves.toBe("abandoned");
 
@@ -327,7 +328,7 @@ describe("trockcrm relay outbox", () => {
     await expect(processTrockCrmRelayOutboxEntry({
       store,
       fetchImpl: fetchMock,
-      row: { id: 12, payload: samplePayload(), attempts: 2 },
+      row: { id: 12, payload: samplePayload(), attempts: 3 },
       now: new Date("2026-05-01T12:06:00.000Z"),
     })).resolves.toBe("failed");
 
@@ -338,10 +339,10 @@ describe("trockcrm relay outbox", () => {
     }));
   });
 
-  it("processes pending and due failed entries but skips future retries", async () => {
-    const due = { id: 1, payload: samplePayload(), attempts: 1 };
+  it("processes atomically claimed entries", async () => {
+    const due = { id: 1, payload: samplePayload(), attempts: 2 };
     const store = {
-      findReadyOutbox: vi.fn().mockResolvedValue([due]),
+      claimReadyOutbox: vi.fn().mockResolvedValue([due]),
       markSent: vi.fn(),
       markFailed: vi.fn(),
       markAbandoned: vi.fn(),
@@ -350,15 +351,58 @@ describe("trockcrm relay outbox", () => {
 
     const result = await processTrockCrmRelayOutboxBatch({ store, fetchImpl: fetchMock, limit: 10 });
 
-    expect(store.findReadyOutbox).toHaveBeenCalledWith(10, expect.any(Date));
+    expect(store.claimReadyOutbox).toHaveBeenCalledWith(10, expect.any(Date), expect.any(Date));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ processed: 1, sent: 1, failed: 0, abandoned: 0 });
+  });
+
+  it("parallel processors do not double-send atomically claimed rows", async () => {
+    const rows = Array.from({ length: 5 }, (_, index) => ({
+      id: index + 1,
+      payload: samplePayload(),
+      attempts: 0,
+      status: "pending",
+    }));
+    const sentIds: number[] = [];
+    const store = {
+      async claimReadyOutbox(limit: number) {
+        const claimed = rows
+          .filter((row) => row.status === "pending")
+          .slice(0, limit);
+        for (const row of claimed) {
+          row.status = "processing";
+          row.attempts += 1;
+        }
+        return claimed.map((row) => ({ id: row.id, payload: row.payload, attempts: row.attempts }));
+      },
+      async markSent(id: number) {
+        rows.find((row) => row.id === id)!.status = "sent";
+        sentIds.push(id);
+      },
+      markFailed: vi.fn(),
+      markAbandoned: vi.fn(),
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue("ok"),
+    });
+
+    const [first, second] = await Promise.all([
+      processTrockCrmRelayOutboxBatch({ store, fetchImpl: fetchMock, limit: 3 }),
+      processTrockCrmRelayOutboxBatch({ store, fetchImpl: fetchMock, limit: 3 }),
+    ]);
+
+    expect(first.processed + second.processed).toBe(5);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(new Set(sentIds).size).toBe(5);
+    expect(rows.every((row) => row.status === "sent")).toBe(true);
   });
 
   it("does not process a batch when relay is disabled", async () => {
     process.env.TROCKCRM_RELAY_ENABLED = "false";
     const store = {
-      findReadyOutbox: vi.fn(),
+      claimReadyOutbox: vi.fn(),
     };
 
     await expect(processTrockCrmRelayOutboxBatch({ store, limit: 10 })).resolves.toEqual({
@@ -367,7 +411,45 @@ describe("trockcrm relay outbox", () => {
       failed: 0,
       abandoned: 0,
     });
-    expect(store.findReadyOutbox).not.toHaveBeenCalled();
+    expect(store.claimReadyOutbox).not.toHaveBeenCalled();
+  });
+
+  it("delivers pending rows that were created while relay was disabled once enabled", async () => {
+    const rows = [{ id: 1, payload: samplePayload(), attempts: 0, status: "pending" }];
+    const store = {
+      async claimReadyOutbox() {
+        const row = rows.find((candidate) => candidate.status === "pending");
+        if (!row) return [];
+        row.status = "processing";
+        row.attempts += 1;
+        return [{ id: row.id, payload: row.payload, attempts: row.attempts }];
+      },
+      async markSent(id: number) {
+        rows.find((row) => row.id === id)!.status = "sent";
+      },
+      markFailed: vi.fn(),
+      markAbandoned: vi.fn(),
+    };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: vi.fn().mockResolvedValue("ok") });
+
+    process.env.TROCKCRM_RELAY_ENABLED = "false";
+    await expect(processTrockCrmRelayOutboxBatch({ store, fetchImpl: fetchMock, limit: 10 })).resolves.toEqual({
+      processed: 0,
+      sent: 0,
+      failed: 0,
+      abandoned: 0,
+    });
+    expect(rows[0].status).toBe("pending");
+
+    delete process.env.TROCKCRM_RELAY_ENABLED;
+    await expect(processTrockCrmRelayOutboxBatch({ store, fetchImpl: fetchMock, limit: 10 })).resolves.toEqual({
+      processed: 1,
+      sent: 1,
+      failed: 0,
+      abandoned: 0,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(rows[0].status).toBe("sent");
   });
 
   it("uses increasing capped backoff delays", () => {
