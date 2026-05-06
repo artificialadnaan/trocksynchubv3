@@ -7,7 +7,9 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM rfp_approval_requests
-    WHERE status = 'pending' AND project_number IS NOT NULL
+    WHERE status = 'pending'
+      AND project_number IS NOT NULL
+      AND project_number != ''
     GROUP BY project_number
     HAVING count(*) > 1
   ) THEN
@@ -17,4 +19,6 @@ END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rfp_approval_pending_project_number
   ON rfp_approval_requests(project_number)
-  WHERE status = 'pending';
+  WHERE status = 'pending'
+    AND project_number IS NOT NULL
+    AND project_number != '';

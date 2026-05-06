@@ -8,19 +8,35 @@
 --
 -- See post-cutover backlog: deal 318186066630 has a stuck pending 
 -- RFP request (id=137) that needs human review.
+-- This migration is idempotent and safe to re-run after the first successful application.
 
 DO $$
+DECLARE
+  row_count INTEGER;
 BEGIN
+  -- Check if row 754 still exists at all (regardless of identity).
+  SELECT COUNT(*) INTO row_count FROM sync_mappings WHERE id = 754;
+
+  IF row_count = 0 THEN
+    -- Row already deleted on a previous run. No-op.
+    RAISE NOTICE 'sync_mappings row id=754 already deleted; 0013a is a no-op.';
+    RETURN;
+  END IF;
+
+  -- Row exists. Verify it matches the stale-row identity before deleting.
   IF NOT EXISTS (
-    SELECT 1 FROM sync_mappings 
+    SELECT 1 FROM sync_mappings
     WHERE id = 754 
       AND hubspot_deal_id = '318186066630'
       AND bidboard_project_id = '562949955676785'
   ) THEN
-    RAISE EXCEPTION 'Expected sync_mappings row id=754 with hubspot_deal_id=318186066630, bidboard_project_id=562949955676785 not found. Aborting dedup.';
+    RAISE EXCEPTION 'sync_mappings row id=754 exists but does not match expected identity (hubspot_deal_id=318186066630, bidboard_project_id=562949955676785). Aborting dedup — production state is not what 0013a expects.';
   END IF;
 END $$;
 
+-- The DELETE itself is naturally idempotent. If row 754 is gone, this 
+-- affects 0 rows. If it's there with the expected identity, this 
+-- removes it.
 DELETE FROM sync_mappings 
 WHERE id = 754 
   AND hubspot_deal_id = '318186066630'

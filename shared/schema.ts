@@ -975,7 +975,7 @@ export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   uniqueIndex("idx_rfp_approval_pending_source_deal").on(table.sourceSystem, table.sourceDealId).where(sql`status = 'pending'`),
-  uniqueIndex("idx_rfp_approval_pending_project_number").on(table.projectNumber).where(sql`status = 'pending'`),
+  uniqueIndex("idx_rfp_approval_pending_project_number").on(table.projectNumber).where(sql`status = 'pending' AND project_number IS NOT NULL AND project_number != ''`),
   index("idx_rfp_approval_project_number").on(table.projectNumber),
 ]);
 export const insertRfpApprovalRequestSchema = createInsertSchema(rfpApprovalRequests).omit({ id: true, createdAt: true });
