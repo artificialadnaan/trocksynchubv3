@@ -6,6 +6,15 @@ const updateRows = vi.hoisted(() => [] as any[]);
 const sendEmailMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "BB-1" })));
 const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false }));
+const hubspotPipelinesMock = vi.hoisted(() => vi.fn(async () => [
+  {
+    hubspotId: "default",
+    stages: [
+      { stageId: "appointmentscheduled", label: "RFP" },
+      { stageId: "qualifiedtobuy", label: "Estimating" },
+    ],
+  },
+]));
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
@@ -19,6 +28,7 @@ vi.mock("../server/storage.ts", () => ({
       auditRows.push(row);
       return { id: auditRows.length, ...row };
     }),
+    getHubspotPipelines: hubspotPipelinesMock,
   },
 }));
 
@@ -40,6 +50,7 @@ vi.mock("../server/hubspot.ts", () => ({
                 project_number: "DFW-2-10001",
                 project_types: "2",
                 dealstage: hubspotFetchMode.stage,
+                pipeline: "default",
               },
               associations: {},
             };
@@ -104,6 +115,16 @@ describe("RFP source eligibility check", () => {
     updateRows.length = 0;
     sendEmailMock.mockClear();
     createBidBoardMock.mockClear();
+    hubspotPipelinesMock.mockClear();
+    hubspotPipelinesMock.mockResolvedValue([
+      {
+        hubspotId: "default",
+        stages: [
+          { stageId: "appointmentscheduled", label: "RFP" },
+          { stageId: "qualifiedtobuy", label: "Estimating" },
+        ],
+      },
+    ]);
     hubspotFetchMode.stage = "RFP";
     hubspotFetchMode.missing = false;
     requestRow.current = makeRequest();
@@ -119,6 +140,49 @@ describe("RFP source eligibility check", () => {
 
     expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
     expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves HubSpot stage IDs to labels before checking RFP eligibility", async () => {
+    hubspotFetchMode.stage = "appointmentscheduled";
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+
+    expect(result).toMatchObject({ eligible: true, exists: true, stage: "appointmentscheduled" });
+    expect(hubspotPipelinesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects HubSpot stage IDs whose resolved labels are not RFP eligible", async () => {
+    hubspotFetchMode.stage = "closedwon";
+    hubspotPipelinesMock.mockResolvedValue([
+      {
+        hubspotId: "default",
+        stages: [{ stageId: "closedwon", label: "Closed Won" }],
+      },
+    ]);
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+
+    expect(result).toMatchObject({
+      eligible: false,
+      exists: true,
+      reason: expect.stringContaining("Closed Won (closedwon)"),
+    });
+  });
+
+  it("falls back to direct stage matching when a HubSpot stage ID is unknown", async () => {
+    hubspotFetchMode.stage = "foo";
+    hubspotPipelinesMock.mockResolvedValue([{ hubspotId: "default", stages: [] }]);
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+
+    expect(result).toMatchObject({
+      eligible: false,
+      exists: true,
+      reason: expect.stringContaining("foo"),
+    });
   });
 
   it("cancels when the HubSpot deal was deleted", async () => {
