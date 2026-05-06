@@ -103,6 +103,15 @@ function responseBodyForResult(result: Awaited<ReturnType<typeof createRfpApprov
     };
   }
 
+  if (result.statusCode === 409) {
+    return {
+      success: false,
+      error: result.error,
+      message: "message" in result ? result.message : result.error,
+      conflict: "conflict" in result ? result.conflict : undefined,
+    };
+  }
+
   return {
     success: false,
     error: "Internal Server Error",

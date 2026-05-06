@@ -33,6 +33,8 @@ const mockStorage = {
   getSyncMapping: vi.fn(),
   getSyncMappingByProcoreProjectId: vi.fn(),
   createSyncMapping: vi.fn(),
+  upsertBidboardSyncState: vi.fn(),
+  createBidboardAutomationLog: vi.fn(),
   updateSyncMapping: vi.fn(),
   searchSyncMappings: vi.fn(),
   transitionToPortfolio: vi.fn(),
@@ -79,6 +81,7 @@ vi.mock("nodemailer", () => ({
 }));
 
 // Stub heavy server deps used transitively
+vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 vi.mock("../server/hubspot.ts", () => ({ hubspotClient: {}, getHubSpotClient: vi.fn(), getAccessToken: vi.fn() }));
 vi.mock("../server/procore.ts", () => ({ getProcoreToken: vi.fn(), procoreRequest: vi.fn() }));
 
@@ -86,7 +89,7 @@ vi.mock("../server/procore.ts", () => ({ getProcoreToken: vi.fn(), procoreReques
 vi.mock("playwright", () => ({ chromium: { launch: vi.fn() } }));
 vi.mock("../server/playwright/browser.ts", () => ({
   ensureLoggedIn: vi.fn().mockResolvedValue({ success: false, error: "Not logged in", page: null }),
-  withBrowserLock: vi.fn(),
+  withBrowserLock: vi.fn(async (_name: string, fn: () => Promise<unknown>) => fn()),
   takeScreenshot: vi.fn(),
 }));
 
@@ -376,6 +379,42 @@ describe("createBidBoardProjectFromDeal — contact_name field mapping", () => {
     const result = await createBidBoardProjectFromDeal("deal-nonexistent");
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/deal-nonexistent/);
+  });
+
+  it("creates from normalized CRM data without reading HubSpot cache", async () => {
+    mockStorage.getHubspotDealByHubspotId.mockResolvedValueOnce(undefined);
+    mockStorage.createSyncMapping.mockResolvedValueOnce({ id: 1 } as any);
+    mockStorage.upsertBidboardSyncState.mockResolvedValueOnce({} as any);
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    const createProject = vi.fn(async () => ({
+      success: true,
+      projectId: "bb-crm-1",
+      projectName: "CRM Deal",
+    } as any));
+
+    const result = await bidboard.createBidBoardProjectFromDeal({
+      sourceSystem: "trock_crm",
+      sourceDealId: "crm-deal-1",
+      bidboardStage: "Estimate in Progress",
+      normalizedDealData: {
+        dealname: "CRM Deal",
+        project_number: "CRM-1",
+        project_types: "4",
+        company_name: "CRM Co",
+        contact_name: "CRM Contact",
+      },
+      options: { syncDocuments: false, createProject },
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockStorage.getHubspotDealByHubspotId).not.toHaveBeenCalled();
+    expect(createProject).toHaveBeenCalledWith(expect.objectContaining({
+      name: "CRM Deal",
+      projectNumber: "CRM-1",
+      projectTypes: "4",
+      clientName: "CRM Co",
+      contactName: "CRM Contact",
+    }));
   });
 
   it("reads contact_name from editedFieldsOverride when present", async () => {

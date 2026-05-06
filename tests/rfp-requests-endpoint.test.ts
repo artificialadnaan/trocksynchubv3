@@ -32,6 +32,9 @@ vi.mock("../server/storage.ts", () => ({
     getRfpApprovalRequestBySourceEventId: vi.fn(async (sourceSystem: string, sourceEventId: string) =>
       rfpRows.find((row) => row.sourceSystem === sourceSystem && row.sourceEventId === sourceEventId)
     ),
+    getRfpApprovalRequestBySourceDealId: vi.fn(async (sourceSystem: string, sourceDealId: string) =>
+      rfpRows.find((row) => row.sourceSystem === sourceSystem && row.sourceDealId === sourceDealId)
+    ),
     getRfpApprovalRequestByProjectNumberAndStatus: vi.fn(async (projectNumber: string, status: string) => {
       if (projectNumber === "RACE-1" && status === "pending" && raceBypassPendingLookups.count > 0) {
         raceBypassPendingLookups.count -= 1;
@@ -48,6 +51,17 @@ vi.mock("../server/storage.ts", () => ({
         const error: any = new Error("duplicate key value violates unique constraint idx_rfp_approval_pending_project_number");
         error.code = "23505";
         error.constraint = "idx_rfp_approval_pending_project_number";
+        throw error;
+      }
+      const duplicateSourceDeal = rfpRows.find((existing) =>
+        existing.status === "pending" &&
+        existing.sourceSystem === row.sourceSystem &&
+        existing.sourceDealId === row.sourceDealId
+      );
+      if (duplicateSourceDeal) {
+        const error: any = new Error("duplicate key value violates unique constraint idx_rfp_approval_pending_source_deal");
+        error.code = "23505";
+        error.constraint = "idx_rfp_approval_pending_source_deal";
         throw error;
       }
       const inserted = makeRow(row);
@@ -318,6 +332,73 @@ describe("POST /api/rfp-requests", () => {
         success: false,
         error: "pending_collision",
         projectNumber: "RACE-1",
+      });
+    });
+  });
+
+  it("converts a pending source_deal unique violation into a 409", async () => {
+    const existing = makeRow({
+      sourceSystem: "trock_crm",
+      sourceDealId: "abc",
+      sourceEventId: "crm-event-existing",
+      projectNumber: "SOURCE-1",
+      status: "pending",
+    });
+    rfpRows.push(existing);
+
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(baseUrl, requestBody({
+        sourceSystem: "trock_crm",
+        sourceDealId: "abc",
+        sourceEventId: "crm-event-second",
+        deal: { ...requestBody().deal, projectNumber: "SOURCE-2" },
+      }));
+
+      expect(response.status).toBe(409);
+      expect(response.body).toMatchObject({
+        success: false,
+        error: "RFP already in flight",
+        message: "Pending RFP already exists for trock_crm deal abc",
+        conflict: {
+          requestId: existing.id,
+          sourceSystem: "trock_crm",
+          sourceDealId: "abc",
+          status: "pending",
+        },
+      });
+      expect(rfpRows).toHaveLength(1);
+      expect(sendEmailMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("converts a pending source_deal unique violation during concurrent inserts into a 409", async () => {
+    await withServer(async (baseUrl) => {
+      const bodyA = requestBody({
+        sourceDealId: "crm-source-race",
+        sourceEventId: "crm-source-race-a",
+        deal: { ...requestBody().deal, projectNumber: "SOURCE-RACE-A" },
+      });
+      const bodyB = requestBody({
+        sourceDealId: "crm-source-race",
+        sourceEventId: "crm-source-race-b",
+        deal: { ...requestBody().deal, projectNumber: "SOURCE-RACE-B" },
+      });
+      const responses = await Promise.all([
+        postRfpRequest(baseUrl, bodyA),
+        postRfpRequest(baseUrl, bodyB),
+      ]);
+
+      expect(responses.map((r) => r.status).sort()).toEqual([201, 409]);
+      expect(rfpRows.filter((row) => row.sourceDealId === "crm-source-race")).toHaveLength(1);
+      expect(sendEmailMock).toHaveBeenCalledTimes(1);
+      expect(responses.find((r) => r.status === 409)?.body).toMatchObject({
+        success: false,
+        error: "RFP already in flight",
+        conflict: {
+          sourceSystem: "trock_crm",
+          sourceDealId: "crm-source-race",
+          status: "pending",
+        },
       });
     });
   });

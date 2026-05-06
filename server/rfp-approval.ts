@@ -59,6 +59,18 @@ export type CreateRfpApprovalRequestResult =
         bidboardProjectId?: string | null;
       };
     }
+  | {
+      success: false;
+      statusCode: 409;
+      error: 'RFP already in flight';
+      message: string;
+      conflict: {
+        requestId: number;
+        sourceSystem: string;
+        sourceDealId: string;
+        status: string;
+      };
+    }
   | { success: false; statusCode?: number; error: string };
 
 type SourceEligibilityResult = { exists: boolean; stage: string | null; checkFailed?: boolean };
@@ -91,9 +103,9 @@ function isCrmOpportunityStage(stage: string | null | undefined): boolean {
   return normalizeStageForEligibility(stage) === 'opportunity';
 }
 
-function sourceIdentityForRequest(request: any): { sourceSystem: string; sourceDealId: string; projectNumber: string } {
+function sourceIdentityForRequest(request: any): { sourceSystem: SourceSystem; sourceDealId: string; projectNumber: string } {
   const dealData = (request.dealData || {}) as Record<string, any>;
-  const sourceSystem = request.sourceSystem || 'hubspot';
+  const sourceSystem = (request.sourceSystem || 'hubspot') as SourceSystem;
   return {
     sourceSystem,
     sourceDealId: sourceSystem === 'hubspot'
@@ -947,6 +959,21 @@ function buildConflictResult(code: 'pending_collision' | 'approved_collision', p
   };
 }
 
+function buildSourceDealPendingConflictResult(sourceSystem: string, sourceDealId: string, request: any): CreateRfpApprovalRequestResult {
+  return {
+    success: false,
+    statusCode: 409,
+    error: 'RFP already in flight',
+    message: `Pending RFP already exists for ${sourceSystem} deal ${sourceDealId}`,
+    conflict: {
+      requestId: request.id,
+      sourceSystem: request.sourceSystem,
+      sourceDealId: request.sourceDealId,
+      status: request.status,
+    },
+  };
+}
+
 export async function createRfpApprovalRequestFromNormalizedInput(
   input: NormalizedRfpRequestInput
 ): Promise<CreateRfpApprovalRequestResult> {
@@ -1002,6 +1029,12 @@ export async function createRfpApprovalRequestFromNormalizedInput(
         const conflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending');
         if (conflict) {
           return buildConflictResult('pending_collision', input.deal.projectNumber, conflict);
+        }
+      }
+      if (isUniqueViolation(error, 'idx_rfp_approval_pending_source_deal')) {
+        const conflict = await storage.getRfpApprovalRequestBySourceDealId(input.sourceSystem, input.sourceDealId);
+        if (conflict && conflict.status === 'pending') {
+          return buildSourceDealPendingConflictResult(input.sourceSystem, input.sourceDealId, conflict);
         }
       }
       throw error;
@@ -1269,24 +1302,30 @@ export async function processRfpApproval(
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
       const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
-      const bbResult = await createBidBoardProjectFromDeal(sourceDealId, bidboardStage, {
-        syncDocuments: true,
-        attachmentsOverride: attachmentsToSync,
-        projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
-        editedFieldsOverride: {
-          // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
-          ...(dealData.description ? { description: String(dealData.description) } : {}),
-          ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
-          ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
-          ...(dealData.address ? { address: String(dealData.address) } : {}),
-          ...(dealData.city ? { city: String(dealData.city) } : {}),
-          ...(dealData.state ? { state: String(dealData.state) } : {}),
-          ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
-          // User-edited fields override the enriched fallbacks
-          ...editedFields,
-          project_types: finalProjectTypeDigit,
+      const bbResult = await createBidBoardProjectFromDeal({
+        sourceSystem: identity.sourceSystem,
+        sourceDealId,
+        bidboardStage,
+        normalizedDealData: identity.sourceSystem === 'trock_crm' ? dealData : undefined,
+        options: {
+          syncDocuments: true,
+          attachmentsOverride: attachmentsToSync,
+          projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
+          editedFieldsOverride: {
+            // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
+            ...(dealData.description ? { description: String(dealData.description) } : {}),
+            ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
+            ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
+            ...(dealData.address ? { address: String(dealData.address) } : {}),
+            ...(dealData.city ? { city: String(dealData.city) } : {}),
+            ...(dealData.state ? { state: String(dealData.state) } : {}),
+            ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
+            // User-edited fields override the enriched fallbacks
+            ...editedFields,
+            project_types: finalProjectTypeDigit,
+          },
+          proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
         },
-        proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
       });
       if (bbResult.success && bbResult.projectId) {
         bidboardProjectId = bbResult.projectId;
