@@ -91,11 +91,73 @@ import {
   manualReviewQueue, type ManualReviewQueue, type InsertManualReviewQueue,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
   rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
+  rfpApprovalEdits, type RfpApprovalEdit, type InsertRfpApprovalEdit,
+  bidboardCallbackOutbox, type BidboardCallbackOutbox, type InsertBidboardCallbackOutbox,
   rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
   rfpApprovals, type RfpApproval, type InsertRfpApproval,
+  rfpApproverConfig, type RfpApproverConfig,
   reportScheduleConfig, type ReportScheduleConfig, type InsertReportScheduleConfig,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
+
+export type SourceSystem = "hubspot" | "trock_crm" | string;
+
+type LegacyCompatibleInsertSyncMapping = Omit<InsertSyncMapping, "sourceSystem" | "sourceDealId"> &
+  Partial<Pick<InsertSyncMapping, "sourceSystem" | "sourceDealId">>;
+
+type LegacyCompatibleInsertRfpApprovalRequest = Omit<InsertRfpApprovalRequest, "sourceSystem" | "sourceDealId"> &
+  Partial<Pick<InsertRfpApprovalRequest, "sourceSystem" | "sourceDealId">>;
+
+function normalizeSyncMappingSource(mapping: LegacyCompatibleInsertSyncMapping): InsertSyncMapping {
+  const sourceSystem = mapping.sourceSystem ?? "hubspot";
+  const sourceDealId =
+    mapping.sourceDealId ??
+    mapping.hubspotDealId ??
+    mapping.bidboardProjectId ??
+    mapping.portfolioProjectId ??
+    mapping.procoreProjectId;
+
+  if (!sourceDealId) {
+    throw new Error("sourceDealId is required when creating a sync mapping");
+  }
+
+  return {
+    ...mapping,
+    sourceSystem,
+    sourceDealId,
+  };
+}
+
+function normalizeRfpApprovalRequestSource(data: LegacyCompatibleInsertRfpApprovalRequest): InsertRfpApprovalRequest {
+  const sourceSystem = data.sourceSystem ?? "hubspot";
+  const sourceDealId = data.sourceDealId ?? data.hubspotDealId;
+
+  if (!sourceDealId) {
+    throw new Error("sourceDealId is required when creating an RFP approval request");
+  }
+
+  return {
+    ...data,
+    sourceSystem,
+    sourceDealId,
+  };
+}
+
+export function isUniqueViolation(error: unknown, indexName: string): boolean {
+  const err = error as {
+    code?: string;
+    constraint?: string;
+    message?: string;
+    detail?: string;
+  };
+
+  if (err?.code !== "23505") return false;
+  return (
+    err.constraint === indexName ||
+    String(err.message || "").includes(indexName) ||
+    String(err.detail || "").includes(indexName)
+  );
+}
 
 /** Classify audit log action as "sync" (meaningful end-to-end sync) or "system" (polling, acks, health, etc.) */
 function inferAuditCategory(action: string): "sync" | "system" {
@@ -142,6 +204,8 @@ export interface IStorage {
   getSyncMappings(): Promise<SyncMapping[]>;
   /** Find mapping by HubSpot deal ID */
   getSyncMappingByHubspotDealId(dealId: string): Promise<SyncMapping | undefined>;
+  /** Find mapping by source system + source deal ID */
+  getSyncMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined>;
   /** Find mapping by Procore project ID (includes BidBoard projects) */
   getSyncMappingByProcoreProjectId(projectId: string): Promise<SyncMapping | undefined>;
   /** Find mapping by BidBoard-specific project ID */
@@ -151,7 +215,7 @@ export interface IStorage {
   /** Find mapping by Procore project number (e.g. DFW-1-06426-ah) */
   getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
   /** Create a new sync mapping linking entities */
-  createSyncMapping(mapping: InsertSyncMapping): Promise<SyncMapping>;
+  createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
   /** Update an existing sync mapping */
   updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined>;
   /** Search mappings by deal name, project name, or project number */
@@ -312,11 +376,23 @@ export interface IStorage {
   getCloseoutSurveys(filters: { limit?: number; offset?: number }): Promise<{ data: CloseoutSurvey[]; total: number }>;
 
   // ==================== RFP APPROVAL REQUESTS ====================
-  createRfpApprovalRequest(data: InsertRfpApprovalRequest): Promise<RfpApprovalRequest>;
+  createRfpApprovalRequest(data: LegacyCompatibleInsertRfpApprovalRequest): Promise<RfpApprovalRequest>;
   getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
   updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
+  createRfpApprovalEdit(data: InsertRfpApprovalEdit): Promise<RfpApprovalEdit>;
+  getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
+  getRfpApproverConfigs(projectType: string, sourceSystem: SourceSystem): Promise<RfpApproverConfig[]>;
+  enqueueBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox>;
+  approveRfpApprovalRequestWithOptionalCallback(
+    id: number,
+    approvalData: Partial<InsertRfpApprovalRequest>,
+    callbackData?: InsertBidboardCallbackOutbox | null,
+  ): Promise<RfpApprovalRequest | undefined>;
 
   // RFP Reporting
   getRfpChangeLog(rfpId: number): Promise<RfpChangeLog[]>;
@@ -348,7 +424,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getSyncMappingByHubspotDealId(dealId: string): Promise<SyncMapping | undefined> {
-    const [mapping] = await db.select().from(syncMappings).where(eq(syncMappings.hubspotDealId, dealId));
+    return this.getSyncMappingBySourceDealId("hubspot", dealId);
+  }
+
+  async getSyncMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined> {
+    const [mapping] = await db.select().from(syncMappings).where(
+      and(
+        eq(syncMappings.sourceSystem, sourceSystem),
+        eq(syncMappings.sourceDealId, sourceDealId)
+      )
+    );
     return mapping;
   }
 
@@ -381,8 +466,8 @@ export class DatabaseStorage implements IStorage {
     return mapping;
   }
 
-  async createSyncMapping(mapping: InsertSyncMapping): Promise<SyncMapping> {
-    const [result] = await db.insert(syncMappings).values(mapping).returning();
+  async createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping> {
+    const [result] = await db.insert(syncMappings).values(normalizeSyncMappingSource(mapping)).returning();
     return result;
   }
 
@@ -1748,8 +1833,8 @@ export class DatabaseStorage implements IStorage {
     return { data, total: countResult?.count || 0 };
   }
 
-  async createRfpApprovalRequest(data: InsertRfpApprovalRequest): Promise<RfpApprovalRequest> {
-    const [result] = await db.insert(rfpApprovalRequests).values(data).returning();
+  async createRfpApprovalRequest(data: LegacyCompatibleInsertRfpApprovalRequest): Promise<RfpApprovalRequest> {
+    const [result] = await db.insert(rfpApprovalRequests).values(normalizeRfpApprovalRequestSource(data)).returning();
     return result;
   }
 
@@ -1759,10 +1844,52 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined> {
+    return this.getRfpApprovalRequestBySourceDealId("hubspot", dealId);
+  }
+
+  async getRfpApprovalRequestBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined> {
     const [result] = await db.select().from(rfpApprovalRequests)
-      .where(and(eq(rfpApprovalRequests.hubspotDealId, dealId), eq(rfpApprovalRequests.status, 'pending')))
+      .where(and(
+        eq(rfpApprovalRequests.sourceSystem, sourceSystem),
+        eq(rfpApprovalRequests.sourceDealId, sourceDealId),
+        eq(rfpApprovalRequests.status, 'pending')
+      ))
       .orderBy(desc(rfpApprovalRequests.createdAt));
     return result;
+  }
+
+  async getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests)
+      .where(and(
+        eq(rfpApprovalRequests.sourceSystem, sourceSystem),
+        eq(rfpApprovalRequests.sourceEventId, sourceEventId)
+      ))
+      .orderBy(desc(rfpApprovalRequests.createdAt));
+    return result;
+  }
+
+  async getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests)
+      .where(and(
+        eq(rfpApprovalRequests.projectNumber, projectNumber),
+        eq(rfpApprovalRequests.status, status)
+      ))
+      .orderBy(desc(rfpApprovalRequests.createdAt));
+    return result;
+  }
+
+  async getRfpApproverConfigs(projectType: string, sourceSystem: SourceSystem): Promise<RfpApproverConfig[]> {
+    const type = String(projectType || '').trim() || '*';
+    return db.select().from(rfpApproverConfig).where(
+      and(
+        eq(rfpApproverConfig.isActive, true),
+        or(
+          and(eq(rfpApproverConfig.projectType, type), eq(rfpApproverConfig.sourceSystem, sourceSystem)),
+          and(eq(rfpApproverConfig.projectType, type), isNull(rfpApproverConfig.sourceSystem)),
+          and(eq(rfpApproverConfig.projectType, '*'), isNull(rfpApproverConfig.sourceSystem))
+        )
+      )
+    );
   }
 
   async updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined> {
@@ -1773,6 +1900,47 @@ export class DatabaseStorage implements IStorage {
   async getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined> {
     const [result] = await db.select().from(rfpApprovalRequests).where(eq(rfpApprovalRequests.id, id));
     return result;
+  }
+
+  async createRfpApprovalEdit(data: InsertRfpApprovalEdit): Promise<RfpApprovalEdit> {
+    const [result] = await db.insert(rfpApprovalEdits).values(data).returning();
+    return result;
+  }
+
+  async getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]> {
+    return db.select().from(rfpApprovalEdits)
+      .where(eq(rfpApprovalEdits.rfpApprovalRequestId, rfpApprovalRequestId))
+      .orderBy(desc(rfpApprovalEdits.editedAt));
+  }
+
+  async enqueueBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox> {
+    const [result] = await db.insert(bidboardCallbackOutbox)
+      .values(data)
+      .onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId })
+      .returning();
+    if (result) return result;
+    const [existing] = await db.select().from(bidboardCallbackOutbox)
+      .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, data.rfpApprovalRequestId));
+    return existing;
+  }
+
+  async approveRfpApprovalRequestWithOptionalCallback(
+    id: number,
+    approvalData: Partial<InsertRfpApprovalRequest>,
+    callbackData?: InsertBidboardCallbackOutbox | null,
+  ): Promise<RfpApprovalRequest | undefined> {
+    return db.transaction(async (tx) => {
+      const [updated] = await tx.update(rfpApprovalRequests)
+        .set(approvalData)
+        .where(eq(rfpApprovalRequests.id, id))
+        .returning();
+      if (callbackData) {
+        await tx.insert(bidboardCallbackOutbox)
+          .values(callbackData)
+          .onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });
+      }
+      return updated;
+    });
   }
 
   async getRfpChangeLog(rfpId: number): Promise<RfpChangeLog[]> {

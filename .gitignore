@@ -16,3 +16,4 @@ sed[A-Z]*
 .playwright-storage/
 data/
 .playwright-mcp/
+logs/

@@ -44,7 +44,7 @@ import { ensureLoggedIn } from "./auth";
 import { BIDBOARD_STAGE_TAB_LABELS, type BidBoardStageTabKind, PROCORE_SELECTORS, getBidBoardUrlNew } from "./selectors";
 import { randomDelay, takeScreenshot, withBrowserLock, withRetry, waitForNavigation } from "./browser";
 import { log } from "../index";
-import { storage } from "../storage";
+import { storage, type SourceSystem } from "../storage";
 
 /** BidBoard project data extracted from web scrape */
 export interface BidBoardProject {
@@ -1871,6 +1871,26 @@ export interface CreateBidBoardProjectFromDealResult extends CreateBidBoardProje
   documentErrors?: string[];
 }
 
+type CreateBidBoardProjectFromDealOptions = {
+  syncDocuments?: boolean;
+  attachmentsOverride?: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }>;
+  /** HubSpot project_number custom field (e.g. ATL-5-06326-af) - takes precedence over deal properties */
+  projectNumberOverride?: string;
+  /** RFP approval edited fields - overrides deal properties when present */
+  editedFieldsOverride?: Record<string, string>;
+  /** proposalId for BidBoard URL */
+  proposalId?: string;
+  createProject?: (projectData: NewBidBoardProjectData) => Promise<CreateBidBoardProjectResult>;
+};
+
+type CreateBidBoardProjectFromDealArgs = {
+  sourceSystem: SourceSystem;
+  sourceDealId: string;
+  normalizedDealData?: Record<string, any>;
+  bidboardStage?: string;
+  options?: CreateBidBoardProjectFromDealOptions;
+};
+
 // Create BidBoard project from HubSpot deal data and sync documents
 /** Look up the first associated contact's name from the deal's associatedContactIds */
 async function getAssociatedContactName(deal: any): Promise<string | null> {
@@ -1892,22 +1912,44 @@ async function getAssociatedContactName(deal: any): Promise<string | null> {
 }
 
 export async function createBidBoardProjectFromDeal(
-  dealId: string,
+  dealIdOrArgs: string | CreateBidBoardProjectFromDealArgs,
   initialStage: string = "Estimate in Progress",
-  options: {
-    syncDocuments?: boolean;
-    attachmentsOverride?: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }>;
-    /** HubSpot project_number custom field (e.g. ATL-5-06326-af) - takes precedence over deal properties */
-    projectNumberOverride?: string;
-    /** RFP approval edited fields - overrides deal properties when present */
-    editedFieldsOverride?: Record<string, string>;
-    /** proposalId for BidBoard URL */
-    proposalId?: string;
-  } = { syncDocuments: true }
+  options: CreateBidBoardProjectFromDealOptions = { syncDocuments: true }
 ): Promise<CreateBidBoardProjectFromDealResult> {
   return withBrowserLock("create-bidboard-project-from-deal", async () => {
-    // Fetch deal data from database
-    const deal = await storage.getHubspotDealByHubspotId(dealId);
+    const args = typeof dealIdOrArgs === "string"
+      ? {
+          sourceSystem: "hubspot" as SourceSystem,
+          sourceDealId: dealIdOrArgs,
+          bidboardStage: initialStage,
+          options,
+        }
+      : dealIdOrArgs;
+    const sourceSystem = args.sourceSystem;
+    const dealId = args.sourceDealId;
+    const effectiveOptions = args.options ?? { syncDocuments: true };
+    const stage = args.bidboardStage ?? initialStage;
+    const normalizedDealData = args.normalizedDealData;
+    const hasNormalizedDealData = Boolean(normalizedDealData);
+    const normalizedAttachments = Array.isArray(normalizedDealData?.attachments)
+      ? normalizedDealData.attachments.map((attachment: any) => ({
+          name: attachment.name || "attachment",
+          url: attachment.url,
+          type: attachment.type || attachment.contentType,
+          size: attachment.size,
+        })).filter((attachment: any) => attachment.url || attachment.localPath)
+      : undefined;
+    const attachmentsForDocumentSync = effectiveOptions.attachmentsOverride
+      ?? (sourceSystem !== "hubspot" ? (normalizedAttachments ?? []) : undefined);
+    const deal = hasNormalizedDealData
+      ? {
+          hubspotId: sourceSystem === "hubspot" ? dealId : null,
+          dealName: normalizedDealData?.dealname || normalizedDealData?.name || `Deal ${dealId}`,
+          associatedCompanyName: normalizedDealData?.company_name || normalizedDealData?.clientName || null,
+          associatedContactIds: [],
+          properties: normalizedDealData || {},
+        }
+      : await storage.getHubspotDealByHubspotId(dealId);
     
     if (!deal) {
       return {
@@ -1918,15 +1960,15 @@ export async function createBidBoardProjectFromDeal(
 
     // Extract properties from deal; RFP editedFields override when present
     const properties = (deal.properties || {}) as Record<string, any>;
-    const ed = options.editedFieldsOverride || {};
+    const ed = effectiveOptions.editedFieldsOverride || {};
     const get = (dealVal: string | undefined, propKey: string) =>
       (ed[propKey] && String(ed[propKey]).trim()) || dealVal || properties[propKey];
 
-    const projectNumber = options.projectNumberOverride ?? ed.project_number ?? properties.project_number ?? undefined;
+    const projectNumber = effectiveOptions.projectNumberOverride ?? ed.project_number ?? properties.project_number ?? undefined;
     const projectData: NewBidBoardProjectData = {
       name: get(deal.dealName ?? undefined, "dealname") || deal.dealName || `Deal ${dealId}`,
       projectNumber: projectNumber ?? undefined,
-      stage: initialStage,
+      stage,
       projectTypes: (ed.project_types ?? properties.project_types) ?? undefined,
       estimator: get(undefined, "estimator"),
       clientName: get(deal.associatedCompanyName ?? undefined, "company_name") || deal.associatedCompanyName || properties.company_name || undefined,
@@ -1940,24 +1982,27 @@ export async function createBidBoardProjectFromDeal(
       country: get(undefined, "country") || properties.country || undefined,
       description: get(undefined, "description") || properties.description || properties.project_description__briefly_describe_the_project_ || properties.project_description || properties.notes || undefined,
       bidDueDate: get(undefined, "bid_due_date") || properties.bid_due_date || properties.due_date || undefined,
-      proposalId: options.proposalId,
+      proposalId: effectiveOptions.proposalId,
     };
 
-    log(`Creating BidBoard project from HubSpot deal: ${deal.dealName} (${dealId})`, "playwright");
+    log(`Creating BidBoard project from ${sourceSystem} deal: ${deal.dealName} (${dealId})`, "playwright");
     log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
     
-    const result: CreateBidBoardProjectFromDealResult = await createBidBoardProject(projectData);
+    const createProject = effectiveOptions.createProject ?? createBidBoardProject;
+    const result: CreateBidBoardProjectFromDealResult = await createProject(projectData);
 
     if (result.success && result.projectId) {
       try {
         await storage.upsertBidboardSyncState({
           projectId: result.projectId,
           projectName: projectData.name,
-          currentStage: initialStage,
+          currentStage: stage,
           metadata: {
             projectNumber: projectData.projectNumber || null,
             seededFromCreation: true,
-            hubspotDealId: dealId,
+            hubspotDealId: sourceSystem === "hubspot" ? dealId : null,
+            sourceSystem,
+            sourceDealId: dealId,
           },
         });
       } catch (stateErr: any) {
@@ -2011,14 +2056,16 @@ export async function createBidBoardProjectFromDeal(
     // Create sync mapping
     try {
       await storage.createSyncMapping({
-        hubspotDealId: dealId,
+        sourceSystem,
+        sourceDealId: dealId,
+        hubspotDealId: sourceSystem === "hubspot" ? dealId : null,
         hubspotDealName: deal.dealName,
         bidboardProjectId: result.projectId,
         bidboardProjectName: projectData.name,
         procoreProjectNumber: projectNumber || null,
         projectPhase: "bidboard",
         lastSyncAt: new Date(),
-        lastSyncStatus: "created_from_hubspot",
+        lastSyncStatus: sourceSystem === "hubspot" ? "created_from_hubspot" : "created_from_trock_crm",
         lastSyncDirection: "hubspot_to_procore",
         metadata: result.proposalId ? { proposalId: result.proposalId } : undefined,
       });
@@ -2028,7 +2075,7 @@ export async function createBidBoardProjectFromDeal(
     }
 
     // Sync documents and photos to BidBoard (with retry)
-    if (options.syncDocuments !== false) {
+    if (effectiveOptions.syncDocuments !== false) {
       const DOC_SYNC_MAX_ATTEMPTS = 3;
       const DOC_SYNC_RETRY_DELAY_MS = 5000;
       let docSyncSuccess = false;
@@ -2037,9 +2084,9 @@ export async function createBidBoardProjectFromDeal(
         try {
           const { syncHubSpotAttachmentsToBidBoard, syncAttachmentsListToBidBoard } = await import("./documents");
           let docResult: { success: boolean; documentsUploaded: number; documentsDownloaded: number; errors: string[] };
-          if (Array.isArray(options.attachmentsOverride)) {
-            log(`Syncing ${options.attachmentsOverride.length} attachments (override) to BidBoard project ${result.projectId} (attempt ${attempt}/${DOC_SYNC_MAX_ATTEMPTS})`, "playwright");
-            docResult = await syncAttachmentsListToBidBoard(result.projectId!, options.attachmentsOverride);
+          if (Array.isArray(attachmentsForDocumentSync)) {
+            log(`Syncing ${attachmentsForDocumentSync.length} attachments (override) to BidBoard project ${result.projectId} (attempt ${attempt}/${DOC_SYNC_MAX_ATTEMPTS})`, "playwright");
+            docResult = await syncAttachmentsListToBidBoard(result.projectId!, attachmentsForDocumentSync);
           } else {
             log(`Syncing documents from HubSpot deal ${dealId} to BidBoard project ${result.projectId} (attempt ${attempt}/${DOC_SYNC_MAX_ATTEMPTS})`, "playwright");
             docResult = await syncHubSpotAttachmentsToBidBoard(result.projectId!, dealId);
@@ -2064,7 +2111,9 @@ export async function createBidBoardProjectFromDeal(
             action: "sync_hubspot_documents",
             status: docResult.success ? "success" : (docResult.documentsUploaded > 0 ? "partial" : "failed"),
             details: {
-              hubspotDealId: dealId,
+              hubspotDealId: sourceSystem === "hubspot" ? dealId : null,
+              sourceSystem,
+              sourceDealId: dealId,
               documentsFound: docResult.documentsDownloaded,
               documentsUploaded: docResult.documentsUploaded,
               attempt,
@@ -2082,7 +2131,7 @@ export async function createBidBoardProjectFromDeal(
             projectName: projectData.name,
             action: "sync_hubspot_documents",
             status: "failed",
-            details: { hubspotDealId: dealId, attempt },
+            details: { hubspotDealId: sourceSystem === "hubspot" ? dealId : null, sourceSystem, sourceDealId: dealId, attempt },
             errorMessage: docErr.message,
           });
         }

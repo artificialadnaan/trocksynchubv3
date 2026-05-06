@@ -33,17 +33,25 @@ describe("RFP approval route", () => {
       getRfpApprovalRequestByToken: vi.fn().mockResolvedValue({
         id: 7,
         status: "pending",
+        sourceSystem: "hubspot",
+        sourceDealId: "321011207920",
         hubspotDealId: "321011207920",
+        tokenExpiresAt: new Date(Date.now() + 60_000),
         dealData: {},
       }),
       updateRfpApprovalRequest: vi.fn(),
       getHubspotDealByHubspotId: vi.fn(),
+      createAuditLog: vi.fn(),
     };
 
     vi.doMock("../server/storage.ts", () => ({ storage }));
     vi.doMock("../server/rfp-approval.ts", () => ({
       processRfpApproval,
       resolveRfpDescription: vi.fn(() => ""),
+      isRfpApprovalRequestExpired: vi.fn(() => false),
+      buildExpiredRfpMessage: vi.fn(() => "expired"),
+      checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
+      cancelIneligibleRfpApproval: vi.fn(),
     }));
 
     const { registerRfpApprovalRoutes } = await import("../server/routes/rfp-approval.ts");

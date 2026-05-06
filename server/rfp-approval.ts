@@ -1,15 +1,308 @@
-import { randomUUID } from 'crypto';
+import crypto, { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import path from 'path';
-import { storage } from './storage';
+import { isUniqueViolation, storage, type SourceSystem } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from './constants';
 import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
 import { log } from './index';
+import { buildBidBoardCreatedCallbackTargetUrl, type BidBoardCreatedCallbackPayload } from './sync/bidboard-callback-worker';
 
 const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
+const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
+const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface NormalizedRfpRequestInput {
+  sourceSystem: 'hubspot' | 'trock_crm';
+  sourceDealId: string;
+  sourceEventId: string;
+  deal: {
+    name: string;
+    projectNumber: string;
+    projectType: string;
+    amount: number | null;
+    estimator: string | null;
+    companyName: string | null;
+    contactName: string | null;
+    clientEmail: string | null;
+    clientPhone: string | null;
+    address: {
+      street: string | null;
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+      country: string | null;
+    } | null;
+    description: string | null;
+    dueDate: string | null;
+    workflowRoute: string | null;
+  };
+  attachments: Array<{ name: string; url: string; contentType: string | null }>;
+}
+
+export type CreateRfpApprovalRequestResult =
+  | { success: true; requestId: number; token: string; status: string; idempotent?: boolean }
+  | {
+      success: false;
+      statusCode: 409;
+      code: 'pending_collision' | 'approved_collision';
+      message: string;
+      projectNumber: string;
+      conflict: {
+        requestId: number;
+        token: string;
+        status: string;
+        sourceSystem: string;
+        sourceDealId: string;
+        bidboardProjectId?: string | null;
+      };
+    }
+  | {
+      success: false;
+      statusCode: 409;
+      error: 'RFP already in flight';
+      message: string;
+      conflict: {
+        requestId: number;
+        sourceSystem: string;
+        sourceDealId: string;
+        status: string;
+      };
+    }
+  | { success: false; statusCode?: number; error: string };
+
+type SourceEligibilityResult = { exists: boolean; stage: string | null; checkFailed?: boolean };
+
+export async function buildSourceDealUrl(sourceSystem: SourceSystem, sourceDealId: string): Promise<string | null> {
+  if (sourceSystem === 'hubspot') {
+    const hubspotConfig = await storage.getAutomationConfig('hubspot_config');
+    const portalId = (hubspotConfig?.value as any)?.portalId?.trim() || DEFAULT_HUBSPOT_PORTAL_ID;
+    return `https://app-na2.hubspot.com/contacts/${portalId}/record/0-3/${sourceDealId}?eschref=%2Fcontacts%2F${portalId}%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp`;
+  }
+
+  if (sourceSystem === 'trock_crm') {
+    const baseUrl = process.env.TROCK_CRM_BASE_URL?.replace(/\/+$/, '');
+    return baseUrl ? `${baseUrl}/deals/${encodeURIComponent(sourceDealId)}` : null;
+  }
+
+  return null;
+}
+
+function normalizeStageForEligibility(stage: string | null | undefined): string {
+  return String(stage || '').trim().toLowerCase().replace(/[–—−]/g, '-');
+}
+
+function isHubSpotRfpEligibleStage(stage: string | null | undefined): boolean {
+  const normalized = normalizeStageForEligibility(stage);
+  return normalized.includes('rfp') || normalized.includes('estimating') || normalized.includes('estimate in progress');
+}
+
+function isCrmOpportunityStage(stage: string | null | undefined): boolean {
+  return normalizeStageForEligibility(stage) === 'opportunity';
+}
+
+function sourceIdentityForRequest(request: any): { sourceSystem: SourceSystem; sourceDealId: string; projectNumber: string } {
+  const dealData = (request.dealData || {}) as Record<string, any>;
+  const sourceSystem = (request.sourceSystem || 'hubspot') as SourceSystem;
+  return {
+    sourceSystem,
+    sourceDealId: sourceSystem === 'hubspot'
+      ? (request.hubspotDealId || request.sourceDealId)
+      : request.sourceDealId,
+    projectNumber: request.projectNumber || dealData.project_number || '',
+  };
+}
+
+function buildRfpAuditDetails(request: any, outcome: string, approverEmail?: string, failureReason?: string) {
+  const identity = sourceIdentityForRequest(request);
+  return {
+    approverEmail: approverEmail || null,
+    sourceSystem: identity.sourceSystem,
+    sourceDealId: identity.sourceDealId,
+    projectNumber: identity.projectNumber,
+    requestId: request.id,
+    tokenId: request.token,
+    outcome,
+    failureReason: failureReason || null,
+  };
+}
+
+async function auditRfpApprovalAttempt(request: any, outcome: string, approverEmail?: string, failureReason?: string): Promise<void> {
+  const identity = sourceIdentityForRequest(request);
+  await storage.createAuditLog({
+    action: 'rfp_approval_attempt',
+    entityType: 'deal',
+    entityId: identity.sourceDealId,
+    source: 'rfp-approval',
+    status: outcome === 'approved' ? 'success' : 'failed',
+    details: buildRfpAuditDetails(request, outcome, approverEmail, failureReason),
+  });
+}
+
+async function auditRfpDeclineAttempt(request: any, outcome: string, declinerEmail?: string, failureReason?: string): Promise<void> {
+  const identity = sourceIdentityForRequest(request);
+  await storage.createAuditLog({
+    action: 'rfp_decline_attempt',
+    entityType: 'deal',
+    entityId: identity.sourceDealId,
+    source: 'rfp-approval',
+    status: outcome === 'declined' ? 'success' : 'failed',
+    details: buildRfpAuditDetails(request, outcome, declinerEmail, failureReason),
+  });
+}
+
+async function buildBidBoardCreatedCallbackData(input: {
+  request: any;
+  sourceDealId: string;
+  bidboardProjectId?: string | null;
+  projectNumber: string;
+}): Promise<any | null> {
+  if ((input.request.sourceSystem || 'hubspot') !== 'trock_crm' || !input.bidboardProjectId) {
+    return null;
+  }
+
+  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
+  if (!targetUrl) {
+    log(`[rfp-approval] TROCK_CRM_BASE_URL not configured; cannot enqueue BidBoard callback for RFP request ${input.request.id}`, 'rfp');
+    return null;
+  }
+
+  const getAutomationConfig = (storage as any).getAutomationConfig;
+  const config =
+    typeof getAutomationConfig === 'function'
+      ? await getAutomationConfig.call(storage, 'procore_config')
+      : null;
+  const procoreCompanyId = String((config?.value as any)?.companyId || process.env.PROCORE_COMPANY_ID || '').trim();
+  if (!procoreCompanyId) {
+    log(`[rfp-approval] Procore company ID not configured; cannot enqueue BidBoard callback for RFP request ${input.request.id}`, 'rfp');
+    return null;
+  }
+
+  const payload: BidBoardCreatedCallbackPayload = {
+    sourceDealId: input.sourceDealId,
+    rfpApprovalRequestId: input.request.id,
+    bidboardProjectId: input.bidboardProjectId,
+    projectNumber: input.projectNumber,
+    procoreCompanyId,
+    createdAt: new Date().toISOString(),
+  };
+
+  return {
+    sourceSystem: 'trock_crm',
+    sourceDealId: input.sourceDealId,
+    rfpApprovalRequestId: input.request.id,
+    payload,
+    targetUrl,
+    status: 'pending',
+    attemptCount: 0,
+    maxAttempts: 5,
+    nextAttemptAt: new Date(),
+  };
+}
+
+export function isRfpApprovalRequestExpired(request: { tokenExpiresAt?: Date | string | null }): boolean {
+  // Legacy rows created before Phase 3 have no tokenExpiresAt and remain valid.
+  return !!request.tokenExpiresAt && new Date() > new Date(request.tokenExpiresAt);
+}
+
+export function buildExpiredRfpMessage(request: { createdAt?: Date | string | null; tokenExpiresAt?: Date | string | null }): string {
+  const sentAt = request.createdAt ? new Date(request.createdAt).toLocaleString('en-US', { timeZone: 'America/Chicago' }) : 'an unknown date';
+  const expiredAt = request.tokenExpiresAt ? new Date(request.tokenExpiresAt).toLocaleString('en-US', { timeZone: 'America/Chicago' }) : 'an unknown date';
+  return `This RFP review link has expired. The deal was sent on ${sentAt} and the link expired on ${expiredAt}. Contact the sender if you still need to review this request.`;
+}
+
+export async function checkCrmDealEligibility(sourceDealId: string): Promise<SourceEligibilityResult> {
+  const baseUrl = process.env.TROCK_CRM_BASE_URL?.replace(/\/+$/, '');
+  const secret = process.env.RFP_REQUEST_SYNC_SECRET;
+  if (!baseUrl || !secret) {
+    log('[rfp-approval] CRM eligibility check not configured; proceeding fail-open', 'rfp');
+    return { exists: true, stage: null, checkFailed: true };
+  }
+
+  const pathPart = '/api/internal/deals/eligibility-check';
+  const rawBody = JSON.stringify({ sourceDealId });
+  const signature = `sha256=${crypto.createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+
+  try {
+    // Phase 5 CRM endpoint: POST /api/internal/deals/eligibility-check.
+    const response = await fetch(`${baseUrl}${pathPart}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-rfp-request-signature': signature,
+      },
+      body: rawBody,
+    });
+    if (response.status === 404) return { exists: false, stage: null };
+    if (response.status >= 500) {
+      log(`[rfp-approval] CRM eligibility check returned ${response.status}; proceeding fail-open`, 'rfp');
+      return { exists: true, stage: null, checkFailed: true };
+    }
+    if (!response.ok) return { exists: false, stage: null };
+    const body = await response.json().catch(() => ({}));
+    return { exists: true, stage: body?.stage ? String(body.stage) : null };
+  } catch (error: any) {
+    log(`[rfp-approval] CRM eligibility check failed (${error?.message || error}); proceeding fail-open`, 'rfp');
+    return { exists: true, stage: null, checkFailed: true };
+  }
+}
+
+export async function checkRfpApprovalSourceEligibility(request: any): Promise<{
+  eligible: boolean;
+  reason?: string;
+  exists?: boolean;
+  stage?: string | null;
+  checkFailed?: boolean;
+}> {
+  const identity = sourceIdentityForRequest(request);
+
+  if (identity.sourceSystem === 'trock_crm') {
+    const crm = await checkCrmDealEligibility(identity.sourceDealId);
+    if (crm.checkFailed) return { eligible: true, exists: crm.exists, stage: crm.stage, checkFailed: true };
+    if (!crm.exists) return { eligible: false, reason: 'Source CRM deal no longer exists', exists: false, stage: crm.stage };
+    if (!isCrmOpportunityStage(crm.stage)) {
+      return { eligible: false, reason: `Source CRM deal is no longer in Opportunity stage (current stage: ${crm.stage || 'unknown'})`, exists: true, stage: crm.stage };
+    }
+    return { eligible: true, exists: true, stage: crm.stage };
+  }
+
+  try {
+    const fresh = await fetchFullDealFromHubSpot(identity.sourceDealId);
+    const stage = fresh.dealstage || fresh.dealStage || null;
+    if (!isHubSpotRfpEligibleStage(stage)) {
+      return { eligible: false, reason: `Source HubSpot deal is no longer RFP/Estimating eligible (current stage: ${stage || 'unknown'})`, exists: true, stage };
+    }
+    return { eligible: true, exists: true, stage };
+  } catch (error: any) {
+    const status = error?.statusCode || error?.status || error?.code;
+    if (status === 404 || String(error?.message || '').includes('404')) {
+      return { eligible: false, reason: 'Source HubSpot deal no longer exists', exists: false, stage: null };
+    }
+    log(`[rfp-approval] HubSpot eligibility check failed (${error?.message || error}); proceeding fail-open`, 'rfp');
+    return { eligible: true, exists: true, stage: null, checkFailed: true };
+  }
+}
+
+export async function cancelIneligibleRfpApproval(request: any, approverEmail: string, reason: string): Promise<{ success: false; error: string; statusCode: 409; message: string }> {
+  const identity = sourceIdentityForRequest(request);
+  const message = `RFP approval cancelled because the source ${identity.sourceSystem} deal ${identity.sourceDealId} is no longer eligible. ${reason}`;
+
+  await storage.updateRfpApprovalRequest(request.id, {
+    status: 'cancelled_source_ineligible',
+  });
+
+  await sendEmail({
+    to: approverEmail,
+    subject: 'RFP approval cancelled — source deal no longer eligible',
+    htmlBody: `<p>${message}</p><p>Project number: ${identity.projectNumber || 'N/A'}</p>`,
+    fromName: 'T-Rock Sync Hub',
+  });
+
+  await auditRfpApprovalAttempt(request, 'cancelled_source_ineligible', approverEmail, reason);
+  return { success: false, error: 'source_ineligible', statusCode: 409, message };
+}
 
 interface RfpStatusStep { name: string; success: boolean; detail: string }
 
@@ -132,14 +425,45 @@ async function uploadFileToHubSpotAndAttachToDeal(
   }
 }
 
-function getRfpReviewRecipients(projectType: string | null | undefined): string[] {
+const RFP_APPROVER_CACHE_TTL_MS = 60_000;
+const rfpApproverCache = new Map<string, { timestamp: number; recipients: string[] }>();
+
+export async function getRfpReviewRecipients(projectType: string | null | undefined, sourceSystem: string | null | undefined = 'hubspot'): Promise<string[]> {
   const type = String(projectType || '').trim();
+  const source = String(sourceSystem || 'hubspot').trim();
+  const cacheKey = `${type || '*'}:${source}`;
+  const cached = rfpApproverCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < RFP_APPROVER_CACHE_TTL_MS) {
+    return cached.recipients;
+  }
+
+  try {
+    // TODO: Build an admin settings UI; for now rfp_approver_config is edited via SQL.
+    const configs = await storage.getRfpApproverConfigs(type, source);
+    const exactSource = configs.find((config) => config.projectType === type && config.sourceSystem === source);
+    const exactProjectType = configs.find((config) => config.projectType === type && config.sourceSystem === null);
+    const defaultConfig = configs.find((config) => config.projectType === '*' && config.sourceSystem === null);
+    const selected = exactSource ?? exactProjectType ?? defaultConfig;
+    if (selected?.approverEmails?.length) {
+      rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: selected.approverEmails });
+      return selected.approverEmails;
+    }
+  } catch (error: any) {
+    console.warn(`[rfp-approval] Failed to load RFP approver config, using hardcoded safety net: ${error?.message || error}`);
+  }
+
+  // Safety net: preserve the original hardcoded routing if DB config is missing or invalid.
+  console.warn(`[rfp-approval] No active RFP approver config for projectType=${type || '*'}, sourceSystem=${source}; using hardcoded safety net`);
+  let fallbackRecipients: string[];
   if (type === '4') {
     // Project type 4: James + Colby
-    return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+    fallbackRecipients = ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+  } else {
+    // All other project types: Sidney + James
+    fallbackRecipients = ['sgibson@trockgc.com', 'jhelms@trockgc.com'];
   }
-  // All other project types: Sidney + James
-  return ['sgibson@trockgc.com', 'jhelms@trockgc.com'];
+  rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: fallbackRecipients });
+  return fallbackRecipients;
 }
 
 const RFP_DEAL_PROPERTIES = [
@@ -411,72 +735,93 @@ function fetchAttachmentsFromProps(props: Record<string, any>): Array<{ name: st
   return list;
 }
 
-export async function createRfpApprovalRequest(
-  hubspotDealId: string
-): Promise<{ success: boolean; token?: string; error?: string }> {
-  try {
-    const existing = await storage.getRfpApprovalRequestByDealId(hubspotDealId);
-    if (existing) {
-      log(`[rfp-approval] Pending approval already exists for deal ${hubspotDealId}, skipping`, 'rfp');
-      return { success: true, token: existing.token };
-    }
+function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { ownerName?: string; ownerEmail?: string }, sourceDealUrl: string | null): Record<string, any> {
+  return {
+    sourceSystem: input.sourceSystem,
+    sourceDealId: input.sourceDealId,
+    sourceDealUrl,
+    hubspotDealId: input.sourceSystem === 'hubspot' ? input.sourceDealId : null,
+    hubspotDealUrl: input.sourceSystem === 'hubspot' ? sourceDealUrl : null,
+    dealname: input.deal.name,
+    amount: input.deal.amount ?? '',
+    project_types: input.deal.projectType,
+    project_number: input.deal.projectNumber,
+    project_location: input.deal.address?.street || '',
+    address: input.deal.address?.street || '',
+    city: input.deal.address?.city || '',
+    state: input.deal.address?.state || '',
+    zip: input.deal.address?.zip || '',
+    country: input.deal.address?.country || '',
+    description: input.deal.description || '',
+    notes: input.deal.description || '',
+    bid_due_date: input.deal.dueDate || '',
+    due_date: input.deal.dueDate || '',
+    workflowRoute: input.deal.workflowRoute || '',
+    estimator: input.deal.estimator || '',
+    company_name: input.deal.companyName || '',
+    client_email: input.deal.clientEmail || '',
+    client_phone: input.deal.clientPhone || '',
+    contact_name: input.deal.contactName || '',
+    ownerName: ownerInfo.ownerName || '',
+    ownerEmail: ownerInfo.ownerEmail || '',
+    attachments: input.attachments.map((attachment) => ({
+      name: attachment.name,
+      url: attachment.url,
+      type: attachment.contentType || undefined,
+    })),
+  };
+}
 
-    const dealData = await fetchFullDealFromHubSpot(hubspotDealId);
-    const token = randomUUID();
+async function sendRfpReviewEmails(params: {
+  requestId: number;
+  token: string;
+  input: NormalizedRfpRequestInput;
+  dealData: Record<string, any>;
+  ownerName: string;
+  sourceDealUrl: string | null;
+}): Promise<string[]> {
+  const template = await storage.getEmailTemplate('rfp_review');
+  if (!template || !template.enabled) {
+    log('[rfp-approval] RFP review email template is disabled', 'rfp');
+    return [];
+  }
 
-    const ownerInfo = await getDealOwnerInfo(hubspotDealId);
+  const appUrl = process.env.APP_URL || 'http://localhost:5000';
+  const reviewUrl = `${appUrl}/rfp-review/${params.token}`;
+  const sourceLabel = params.input.sourceSystem === 'hubspot' ? 'HubSpot' : 'T Rock CRM';
 
-    const hubspotConfig = await storage.getAutomationConfig('hubspot_config');
-    const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
-    const portalId = (hubspotConfig?.value as any)?.portalId?.trim() || DEFAULT_HUBSPOT_PORTAL_ID;
-    const hubspotDealUrl = `https://app-na2.hubspot.com/contacts/${portalId}/record/0-3/${hubspotDealId}?eschref=%2Fcontacts%2F${portalId}%2Fobjects%2F0-3%2Fviews%2Fall%2Flist%3Fquery%3Drfp`;
+  const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-    const appUrl = process.env.APP_URL || 'http://localhost:5000';
-    const reviewUrl = `${appUrl}/rfp-review/${token}`;
+  const attachments = (params.dealData.attachments || []) as Array<{ name: string; url?: string }>;
+  const attachmentListHtml = attachments.length > 0
+    ? attachments.map(a => `<a href="${(a.url || '#').replace(/"/g, '&quot;')}" style="color:#d11921;text-decoration:underline;font-family:Arial,Helvetica,sans-serif;">${esc(a.name || 'Attachment')}</a>`).join('<br>')
+    : '<span style="color:#94a3b8;">None</span>';
 
-    await storage.createRfpApprovalRequest({
-      hubspotDealId,
-      token,
-      status: 'pending',
-      dealData: {
-        ...dealData,
-        ownerName: ownerInfo.ownerName || '',
-        ownerEmail: ownerInfo.ownerEmail || '',
-        hubspotDealUrl,
-      },
-    });
+  const dealName = esc(params.dealData.dealname || 'Unknown Deal');
+  const projectNumber = esc(params.dealData.project_number || 'N/A');
+  const projectType = esc(params.dealData.project_types || 'N/A');
+  const amount = params.dealData.amount ? `$${Number(params.dealData.amount).toLocaleString('en-US')}` : 'N/A';
+  const companyName = esc(params.dealData.company_name || 'N/A');
+  const location = esc([params.dealData.address, params.dealData.city, params.dealData.state, params.dealData.zip].filter(Boolean).join(', ') || 'N/A');
+  const description = esc(resolveRfpDescription(params.dealData) || 'N/A');
+  const estimator = esc(params.dealData.estimator || 'N/A');
+  const ownerName = esc(params.ownerName || 'N/A');
 
-    const template = await storage.getEmailTemplate('rfp_review');
-    if (!template || !template.enabled) {
-      log('[rfp-approval] RFP review email template is disabled', 'rfp');
-      return { success: true, token };
-    }
+  const row = (label: string, value: string, isHtml = false) =>
+    `<tr>
+      <td style="padding:10px 16px;border-bottom:1px solid #e2e8f0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;width:160px;vertical-align:top;">${label}</td>
+      <td style="padding:10px 16px;border-bottom:1px solid #e2e8f0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1e293b;vertical-align:top;">${isHtml ? value : value}</td>
+    </tr>`;
 
-    const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const sourceButtonHtml = params.sourceDealUrl
+    ? `<td style="width:12px;">&nbsp;</td>
+       <td style="border-radius:6px;border:2px solid #e2e8f0;" align="center">
+         <a href="${params.sourceDealUrl.replace(/"/g, '&quot;')}" target="_blank" style="display:inline-block;padding:10px 24px;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:600;color:#64748b;text-decoration:none;border-radius:6px;">View in ${sourceLabel}</a>
+       </td>`
+    : '';
 
-    const attachments = (dealData.attachments || []) as Array<{ name: string; url?: string }>;
-    const attachmentListHtml = attachments.length > 0
-      ? attachments.map(a => `<a href="${(a.url || '#').replace(/"/g, '&quot;')}" style="color:#d11921;text-decoration:underline;font-family:Arial,Helvetica,sans-serif;">${esc(a.name || 'Attachment')}</a>`).join('<br>')
-      : '<span style="color:#94a3b8;">None</span>';
-
-    const dealName = esc(dealData.dealname || 'Unknown Deal');
-    const projectNumber = esc(dealData.project_number || 'N/A');
-    const projectType = esc(dealData.project_types || 'N/A');
-    const amount = dealData.amount ? `$${Number(dealData.amount).toLocaleString('en-US')}` : 'N/A';
-    const companyName = esc(dealData.company_name || 'N/A');
-    const location = esc([dealData.address, dealData.city, dealData.state, dealData.zip].filter(Boolean).join(', ') || 'N/A');
-    const description = esc(resolveRfpDescription(dealData) || 'N/A');
-    const estimator = esc(dealData.estimator || 'N/A');
-    const ownerName = esc(ownerInfo.ownerName || 'N/A');
-
-    const row = (label: string, value: string, isHtml = false) =>
-      `<tr>
-        <td style="padding:10px 16px;border-bottom:1px solid #e2e8f0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;width:160px;vertical-align:top;">${label}</td>
-        <td style="padding:10px 16px;border-bottom:1px solid #e2e8f0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1e293b;vertical-align:top;">${isHtml ? value : value}</td>
-      </tr>`;
-
-    const subject = `Review Required: ${dealData.dealname || 'New RFP'}`;
-    const htmlBody = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+  const subject = `Review Required: ${params.dealData.dealname || 'New RFP'}`;
+  const htmlBody = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
@@ -539,10 +884,7 @@ export async function createRfpApprovalRequest(
                   <a href="${reviewUrl}" target="_blank" style="display:inline-block;padding:12px 32px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:6px;background:#d11921;">Review &amp; Approve</a>
                   <!--[if mso]></center></v:roundrect><![endif]-->
                 </td>
-                <td style="width:12px;">&nbsp;</td>
-                <td style="border-radius:6px;border:2px solid #e2e8f0;" align="center">
-                  <a href="${hubspotDealUrl}" target="_blank" style="display:inline-block;padding:10px 24px;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:600;color:#64748b;text-decoration:none;border-radius:6px;">View in HubSpot</a>
-                </td>
+                ${sourceButtonHtml}
               </tr>
             </table>
           </td>
@@ -559,45 +901,237 @@ export async function createRfpApprovalRequest(
 </body>
 </html>`;
 
-    const rfpRecipients = getRfpReviewRecipients(dealData.project_types);
-    console.log(`[rfp-approval] Project type: ${dealData.project_types || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
-    for (const recipient of rfpRecipients) {
-      try {
-        const result = await sendEmail({
-          to: recipient,
-          subject,
-          htmlBody,
-          fromName: 'T-Rock Sync Hub',
-        });
+  const rfpRecipients = await getRfpReviewRecipients(params.dealData.project_types, params.input.sourceSystem);
+  console.log(`[rfp-approval] Project type: ${params.dealData.project_types || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
+  for (const recipient of rfpRecipients) {
+    try {
+      const result = await sendEmail({
+        to: recipient,
+        subject,
+        htmlBody,
+        fromName: 'T-Rock Sync Hub',
+      });
 
-        await storage.createEmailSendLog({
-          templateKey: 'rfp_review',
-          recipientEmail: recipient,
-          recipientName: null,
-          subject,
-          dedupeKey: `rfp_review:${hubspotDealId}:${recipient}:${token}`,
-          status: result.success ? 'sent' : 'failed',
-          errorMessage: result.error || null,
-          metadata: { hubspotDealId, token },
-          sentAt: new Date(),
-        });
+      const metadata = params.input.sourceSystem === 'hubspot'
+        ? { hubspotDealId: params.input.sourceDealId, token: params.token }
+        : { sourceSystem: params.input.sourceSystem, sourceDealId: params.input.sourceDealId, sourceEventId: params.input.sourceEventId, token: params.token };
 
-        log(`[rfp-approval] Email ${result.success ? 'sent' : 'failed'} to ${recipient} for deal ${hubspotDealId}`, 'rfp');
-      } catch (emailErr: any) {
-        console.error(`[rfp-approval] Failed to send email to ${recipient}:`, emailErr.message);
-      }
+      await storage.createEmailSendLog({
+        templateKey: 'rfp_review',
+        recipientEmail: recipient,
+        recipientName: null,
+        subject,
+        dedupeKey: `rfp_review:${params.input.sourceDealId}:${recipient}:${params.token}`,
+        status: result.success ? 'sent' : 'failed',
+        errorMessage: result.error || null,
+        metadata,
+        sentAt: new Date(),
+      });
+
+      log(`[rfp-approval] Email ${result.success ? 'sent' : 'failed'} to ${recipient} for ${params.input.sourceSystem} deal ${params.input.sourceDealId}`, 'rfp');
+    } catch (emailErr: any) {
+      console.error(`[rfp-approval] Failed to send email to ${recipient}:`, emailErr.message);
     }
+  }
+
+  return rfpRecipients;
+}
+
+function buildConflictResult(code: 'pending_collision' | 'approved_collision', projectNumber: string, request: any): CreateRfpApprovalRequestResult {
+  const message = code === 'pending_collision'
+    ? `RFP already in flight for project_number=${projectNumber} from source=${request.sourceSystem}`
+    : `Bid Board project already created for this project_number`;
+
+  return {
+    success: false,
+    statusCode: 409,
+    code,
+    message,
+    projectNumber,
+    conflict: {
+      requestId: request.id,
+      token: request.token,
+      status: request.status,
+      sourceSystem: request.sourceSystem,
+      sourceDealId: request.sourceDealId,
+      bidboardProjectId: request.bidboardProjectId,
+    },
+  };
+}
+
+function buildSourceDealPendingConflictResult(sourceSystem: string, sourceDealId: string, request: any): CreateRfpApprovalRequestResult {
+  return {
+    success: false,
+    statusCode: 409,
+    error: 'RFP already in flight',
+    message: `Pending RFP already exists for ${sourceSystem} deal ${sourceDealId}`,
+    conflict: {
+      requestId: request.id,
+      sourceSystem: request.sourceSystem,
+      sourceDealId: request.sourceDealId,
+      status: request.status,
+    },
+  };
+}
+
+export async function createRfpApprovalRequestFromNormalizedInput(
+  input: NormalizedRfpRequestInput
+): Promise<CreateRfpApprovalRequestResult> {
+  try {
+    const existingEvent = await storage.getRfpApprovalRequestBySourceEventId(input.sourceSystem, input.sourceEventId);
+    if (existingEvent) {
+      return {
+        success: true,
+        requestId: existingEvent.id,
+        token: existingEvent.token,
+        status: existingEvent.status,
+        idempotent: true,
+      };
+    }
+
+    const pendingConflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending');
+    if (pendingConflict) {
+      return buildConflictResult('pending_collision', input.deal.projectNumber, pendingConflict);
+    }
+
+    const approvedConflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'approved');
+    if (approvedConflict) {
+      return buildConflictResult('approved_collision', input.deal.projectNumber, approvedConflict);
+    }
+
+    const token = randomUUID();
+    const sourceDealUrl = await buildSourceDealUrl(input.sourceSystem, input.sourceDealId);
+    const rawOwnerInfo = input.sourceSystem === 'hubspot'
+      ? await getDealOwnerInfo(input.sourceDealId)
+      : { ownerName: '', ownerEmail: '' };
+    const ownerInfo = {
+      ownerName: rawOwnerInfo.ownerName || '',
+      ownerEmail: rawOwnerInfo.ownerEmail || '',
+    };
+    const dealData = normalizedDealData(input, ownerInfo, sourceDealUrl);
+
+    let created;
+    try {
+      created = await storage.createRfpApprovalRequest({
+        sourceSystem: input.sourceSystem,
+        sourceDealId: input.sourceDealId,
+        sourceEventId: input.sourceEventId,
+        projectNumber: input.deal.projectNumber,
+        // hubspot_deal_id is dual-written only during the HubSpot migration window.
+        hubspotDealId: input.sourceSystem === 'hubspot' ? input.sourceDealId : null,
+        token,
+        tokenExpiresAt: new Date(Date.now() + TOKEN_TTL_MS),
+        status: 'pending',
+        dealData,
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, 'idx_rfp_approval_pending_project_number')) {
+        const conflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending');
+        if (conflict) {
+          return buildConflictResult('pending_collision', input.deal.projectNumber, conflict);
+        }
+      }
+      if (isUniqueViolation(error, 'idx_rfp_approval_pending_source_deal')) {
+        const conflict = await storage.getRfpApprovalRequestBySourceDealId(input.sourceSystem, input.sourceDealId);
+        if (conflict && conflict.status === 'pending') {
+          return buildSourceDealPendingConflictResult(input.sourceSystem, input.sourceDealId, conflict);
+        }
+      }
+      throw error;
+    }
+
+    const rfpRecipients = await sendRfpReviewEmails({
+      requestId: created.id,
+      token,
+      input,
+      dealData,
+      ownerName: ownerInfo.ownerName || '',
+      sourceDealUrl,
+    });
 
     await storage.createAuditLog({
       action: 'rfp_approval_request_created',
       entityType: 'deal',
-      entityId: hubspotDealId,
+      entityId: input.sourceDealId,
       source: 'rfp-approval',
       status: 'success',
-      details: { token, recipients: rfpRecipients, dealName: dealData.dealname },
+      details: {
+        token,
+        recipients: rfpRecipients,
+        dealName: dealData.dealname,
+        sourceSystem: input.sourceSystem,
+        sourceDealId: input.sourceDealId,
+        projectNumber: input.deal.projectNumber,
+      },
     });
 
-    return { success: true, token };
+    return { success: true, requestId: created.id, token, status: created.status };
+  } catch (e: any) {
+    console.error(`[rfp-approval] Error creating normalized approval request for ${input.sourceSystem} deal ${input.sourceDealId}:`, e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+export async function buildNormalizedRfpRequestFromHubSpotDeal(
+  hubspotDealId: string,
+  event?: { eventId?: string | number | null; occurredAt?: number | string | null }
+): Promise<NormalizedRfpRequestInput> {
+  const dealData = await fetchFullDealFromHubSpot(hubspotDealId);
+  const sourceEventId = event?.eventId
+    ? `hubspot:event:${event.eventId}`
+    : `hubspot:dealstage:rfp:${hubspotDealId}:${event?.occurredAt || Date.now()}`;
+
+  return {
+    sourceSystem: 'hubspot',
+    sourceDealId: hubspotDealId,
+    sourceEventId,
+    deal: {
+      name: String(dealData.dealname || ''),
+      projectNumber: String(dealData.project_number || ''),
+      projectType: String(dealData.project_types || ''),
+      amount: dealData.amount === null || dealData.amount === undefined || dealData.amount === '' ? null : Number(dealData.amount),
+      estimator: dealData.estimator || null,
+      companyName: dealData.company_name || null,
+      contactName: dealData.contact_name || null,
+      clientEmail: dealData.client_email || null,
+      clientPhone: dealData.client_phone || null,
+      address: {
+        street: dealData.address || dealData.project_location || null,
+        city: dealData.city || null,
+        state: dealData.state || null,
+        zip: dealData.zip || null,
+        country: dealData.country || null,
+      },
+      description: resolveRfpDescription(dealData) || null,
+      dueDate: dealData.bid_due_date || dealData.due_date || dealData.closedate || null,
+      workflowRoute: dealData.workflowRoute || null,
+    },
+    attachments: ((dealData.attachments || []) as Array<{ name?: string; url?: string; type?: string }>)
+      .filter((attachment) => attachment.url)
+      .map((attachment) => ({
+        name: attachment.name || 'Attachment',
+        url: attachment.url!,
+        contentType: attachment.type || null,
+      })),
+  };
+}
+
+export async function createRfpApprovalRequest(
+  hubspotDealId: string
+): Promise<{ success: boolean; token?: string; error?: string }> {
+  try {
+    const existing = await storage.getRfpApprovalRequestByDealId(hubspotDealId);
+    if (existing) {
+      log(`[rfp-approval] Pending approval already exists for deal ${hubspotDealId}, skipping`, 'rfp');
+      return { success: true, token: existing.token };
+    }
+
+    const input = await buildNormalizedRfpRequestFromHubSpotDeal(hubspotDealId);
+    const result = await createRfpApprovalRequestFromNormalizedInput(input);
+    if (result.success) {
+      return { success: true, token: result.token };
+    }
+    return { success: false, error: 'error' in result ? result.error : result.message };
   } catch (e: any) {
     console.error(`[rfp-approval] Error creating approval request for deal ${hubspotDealId}:`, e.message);
     return { success: false, error: e.message };
@@ -614,14 +1148,32 @@ export async function processRfpApproval(
   editedFields: Record<string, string>,
   approverEmail: string,
   options?: { attachmentsOverride?: RfpApprovalAttachmentOptions['attachmentsOverride']; newFiles?: RfpApprovalAttachmentOptions['newFiles'] }
-): Promise<{ success: boolean; error?: string; bidboardProjectId?: string }> {
+): Promise<{ success: boolean; error?: string; bidboardProjectId?: string; statusCode?: number; message?: string }> {
   try {
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
     if (request.status !== 'pending') return { success: false, error: `Request already ${request.status}` };
+    if (isRfpApprovalRequestExpired(request)) {
+      await auditRfpApprovalAttempt(request, 'expired', approverEmail, 'Token expired');
+      return {
+        success: false,
+        error: 'expired',
+        statusCode: 410,
+        message: buildExpiredRfpMessage(request),
+      };
+    }
 
     const dealData = request.dealData as Record<string, any>;
-    const hubspotDealId = request.hubspotDealId;
+    const identity = sourceIdentityForRequest(request);
+    await auditRfpApprovalAttempt(request, 'attempted', approverEmail);
+
+    const eligibility = await checkRfpApprovalSourceEligibility(request);
+    if (!eligibility.eligible) {
+      return cancelIneligibleRfpApproval(request, approverEmail, eligibility.reason || 'Source deal is no longer eligible');
+    }
+
+    const sourceDealId = identity.sourceDealId;
+    const hubspotDealId = request.sourceSystem === 'hubspot' ? sourceDealId : null;
 
     // Check if project type changed — update project number and HubSpot immediately
     const submittedProjectType = editedFields.project_types;
@@ -637,7 +1189,7 @@ export async function processRfpApproval(
       finalProjectTypeDigit = submittedProjectType;
 
       try {
-        await updateHubSpotDeal(hubspotDealId, {
+        if (hubspotDealId) await updateHubSpotDeal(hubspotDealId, {
           project_number: updatedProjectNumber,
           project_types: submittedProjectType,
         });
@@ -682,39 +1234,45 @@ export async function processRfpApproval(
       }
 
       if (Object.keys(hubspotUpdateProps).length > 0) {
-        const updateResult = await updateHubSpotDeal(hubspotDealId, hubspotUpdateProps);
-        if (!updateResult.success) {
-          console.error(`[rfp-approval] Failed to update HubSpot deal: ${updateResult.message}`);
+        if (hubspotDealId) {
+          const updateResult = await updateHubSpotDeal(hubspotDealId, hubspotUpdateProps);
+          if (!updateResult.success) {
+            console.error(`[rfp-approval] Failed to update HubSpot deal: ${updateResult.message}`);
+          }
+          log(`[rfp-approval] Updated HubSpot deal ${hubspotDealId} with ${Object.keys(hubspotUpdateProps).length} changed fields`, 'rfp');
         }
-        log(`[rfp-approval] Updated HubSpot deal ${hubspotDealId} with ${Object.keys(hubspotUpdateProps).length} changed fields`, 'rfp');
       }
     }
 
     const isService = String(finalProjectTypeDigit) === '4';
     const targetStageName = isService ? 'Service - Estimating' : 'Estimating';
 
-    const resolvedStage = await resolveHubspotStageId(targetStageName);
-    if (resolvedStage) {
-      await updateHubSpotDealStage(hubspotDealId, resolvedStage.stageId);
-      log(`[rfp-approval] Deal ${hubspotDealId} moved to stage "${resolvedStage.stageName}" (type=${finalProjectTypeDigit})`, 'rfp');
-    } else {
-      const altName = isService ? 'Service – Estimating' : 'Estimating';
-      const altStage = await resolveHubspotStageId(altName);
-      if (altStage) {
-        await updateHubSpotDealStage(hubspotDealId, altStage.stageId);
-        log(`[rfp-approval] Deal ${hubspotDealId} moved to stage "${altStage.stageName}" (alt match)`, 'rfp');
+    if (hubspotDealId) {
+      const resolvedStage = await resolveHubspotStageId(targetStageName);
+      if (resolvedStage) {
+        await updateHubSpotDealStage(hubspotDealId, resolvedStage.stageId);
+        log(`[rfp-approval] Deal ${hubspotDealId} moved to stage "${resolvedStage.stageName}" (type=${finalProjectTypeDigit})`, 'rfp');
       } else {
-        console.error(`[rfp-approval] Could not resolve HubSpot stage for "${targetStageName}"`);
+        const altName = isService ? 'Service – Estimating' : 'Estimating';
+        const altStage = await resolveHubspotStageId(altName);
+        if (altStage) {
+          await updateHubSpotDealStage(hubspotDealId, altStage.stageId);
+          log(`[rfp-approval] Deal ${hubspotDealId} moved to stage "${altStage.stageName}" (alt match)`, 'rfp');
+        } else {
+          console.error(`[rfp-approval] Could not resolve HubSpot stage for "${targetStageName}"`);
+        }
       }
     }
 
     // Refresh local deal cache so BidBoard creation picks up any edits
-    try {
-      const { syncSingleHubSpotDeal } = await import('./hubspot');
-      await syncSingleHubSpotDeal(hubspotDealId);
-      log(`[rfp-approval] Local deal cache refreshed for ${hubspotDealId}`, 'rfp');
-    } catch (syncErr: any) {
-      console.error(`[rfp-approval] Failed to refresh deal cache: ${syncErr.message}`);
+    if (hubspotDealId) {
+      try {
+        const { syncSingleHubSpotDeal } = await import('./hubspot');
+        await syncSingleHubSpotDeal(hubspotDealId);
+        log(`[rfp-approval] Local deal cache refreshed for ${hubspotDealId}`, 'rfp');
+      } catch (syncErr: any) {
+        console.error(`[rfp-approval] Failed to refresh deal cache: ${syncErr.message}`);
+      }
     }
 
     const TEMP_DIR = process.env.TEMP_DIR || '.playwright-temp';
@@ -744,47 +1302,55 @@ export async function processRfpApproval(
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
       const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
-      const bbResult = await createBidBoardProjectFromDeal(hubspotDealId, bidboardStage, {
-        syncDocuments: true,
-        attachmentsOverride: attachmentsToSync,
-        projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
-        editedFieldsOverride: {
-          // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
-          ...(dealData.description ? { description: String(dealData.description) } : {}),
-          ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
-          ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
-          ...(dealData.address ? { address: String(dealData.address) } : {}),
-          ...(dealData.city ? { city: String(dealData.city) } : {}),
-          ...(dealData.state ? { state: String(dealData.state) } : {}),
-          ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
-          // User-edited fields override the enriched fallbacks
-          ...editedFields,
-          project_types: finalProjectTypeDigit,
+      const bbResult = await createBidBoardProjectFromDeal({
+        sourceSystem: identity.sourceSystem,
+        sourceDealId,
+        bidboardStage,
+        normalizedDealData: identity.sourceSystem === 'trock_crm' ? dealData : undefined,
+        options: {
+          syncDocuments: true,
+          attachmentsOverride: attachmentsToSync,
+          projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
+          editedFieldsOverride: {
+            // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
+            ...(dealData.description ? { description: String(dealData.description) } : {}),
+            ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
+            ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
+            ...(dealData.address ? { address: String(dealData.address) } : {}),
+            ...(dealData.city ? { city: String(dealData.city) } : {}),
+            ...(dealData.state ? { state: String(dealData.state) } : {}),
+            ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
+            // User-edited fields override the enriched fallbacks
+            ...editedFields,
+            project_types: finalProjectTypeDigit,
+          },
+          proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
         },
-        proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
       });
       if (bbResult.success && bbResult.projectId) {
         bidboardProjectId = bbResult.projectId;
-        log(`[rfp-approval] BidBoard project created: ${bidboardProjectId} for deal ${hubspotDealId}`, 'rfp');
+        log(`[rfp-approval] BidBoard project created: ${bidboardProjectId} for deal ${sourceDealId}`, 'rfp');
 
         // Upload _new attachments to HubSpot and associate with deal (BidBoard upload succeeded)
         const newAttachments = (attachmentsToSync || []).filter((a) => a.localPath);
         for (const att of newAttachments) {
           if (!att.localPath || !att.name) continue;
           try {
-            await uploadFileToHubSpotAndAttachToDeal(att.localPath, att.name, hubspotDealId);
-            log(`[rfp-approval] Uploaded ${att.name} to HubSpot and attached to deal ${hubspotDealId}`, 'rfp');
+            if (hubspotDealId) {
+              await uploadFileToHubSpotAndAttachToDeal(att.localPath, att.name, hubspotDealId);
+              log(`[rfp-approval] Uploaded ${att.name} to HubSpot and attached to deal ${hubspotDealId}`, 'rfp');
+            }
           } catch (hubErr: any) {
             console.error(`[rfp-approval] Failed to upload ${att.name} to HubSpot:`, hubErr.message);
           }
         }
       } else {
         bidboardFailed = true;
-        console.error(`[rfp-approval] HubSpot updated successfully but BidBoard creation failed for deal ${hubspotDealId}: ${bbResult.error}`);
+        console.error(`[rfp-approval] Source updated successfully but BidBoard creation failed for deal ${sourceDealId}: ${bbResult.error}`);
       }
     } catch (bbErr: any) {
       bidboardFailed = true;
-      console.error(`[rfp-approval] BidBoard creation error for deal ${hubspotDealId}:`, bbErr.message);
+      console.error(`[rfp-approval] BidBoard creation error for deal ${sourceDealId}:`, bbErr.message);
     } finally {
       // Temp files are only deleted AFTER createBidBoardProjectFromDeal completes (including document sync).
       // This ensures attachments remain available until they have been uploaded to BidBoard.
@@ -808,13 +1374,13 @@ export async function processRfpApproval(
 
       await sendRfpApprovalStatusEmail({
         dealName: dealData.dealname || 'Unknown Deal',
-        hubspotDealId,
+        hubspotDealId: hubspotDealId || sourceDealId,
         projectNumber: finalProjectNumber,
         approverEmail,
         bidboardProjectId,
         bidboardFailed: true,
         steps: [
-          { name: 'HubSpot Deal Updated', success: true, detail: `Stage: ${targetStageName}, Fields: ${Object.keys(changedFields).length} changed` },
+          { name: 'Source Deal Updated', success: true, detail: `Stage: ${hubspotDealId ? targetStageName : 'unchanged'}, Fields: ${Object.keys(changedFields).length} changed` },
           { name: 'BidBoard Project Created', success: !!bidboardProjectId, detail: bidboardProjectId ? `ID: ${bidboardProjectId} (created but post-creation steps failed)` : 'Failed — project was not created' },
           { name: 'Sync Mapping', success: false, detail: 'Skipped due to BidBoard failure' },
           { name: 'Document Sync', success: false, detail: 'Skipped due to BidBoard failure' },
@@ -837,19 +1403,34 @@ export async function processRfpApproval(
       _new: !!a.localPath,
     }));
 
-    await storage.updateRfpApprovalRequest(request.id, {
+    const approvalData = {
       status: 'approved',
       editedFields: changedFields,
       approvedAttachments: approvedAttachmentsForStorage,
       approvedBy: approverEmail,
       approvedAt: new Date(),
       bidboardProjectId: bidboardProjectId || null,
+    };
+    const callbackData = await buildBidBoardCreatedCallbackData({
+      request,
+      sourceDealId,
+      bidboardProjectId,
+      projectNumber: finalProjectNumber,
     });
+    const approveWithCallback = (storage as any).approveRfpApprovalRequestWithOptionalCallback;
+    if (typeof approveWithCallback === 'function') {
+      await approveWithCallback.call(storage, request.id, approvalData, callbackData);
+    } else {
+      await storage.updateRfpApprovalRequest(request.id, approvalData);
+      if (callbackData && typeof (storage as any).enqueueBidboardCallback === 'function') {
+        await (storage as any).enqueueBidboardCallback(callbackData);
+      }
+    }
 
     await storage.createAuditLog({
       action: 'rfp_approval_approved',
       entityType: 'deal',
-      entityId: hubspotDealId,
+      entityId: sourceDealId,
       source: 'rfp-approval',
       status: 'success',
       details: {
@@ -860,21 +1441,22 @@ export async function processRfpApproval(
         projectType: finalProjectTypeDigit,
         targetStage: targetStageName,
         bidboardProjectId,
+        ...buildRfpAuditDetails(request, 'approved', approverEmail),
       },
     });
 
     // Send detailed status email to admin
     await sendRfpApprovalStatusEmail({
       dealName: dealData.dealname || 'Unknown Deal',
-      hubspotDealId,
+      hubspotDealId: hubspotDealId || sourceDealId,
       projectNumber: finalProjectNumber,
       approverEmail,
       bidboardProjectId,
       bidboardFailed: false,
       steps: [
-        { name: 'HubSpot Deal Updated', success: true, detail: `Stage: ${targetStageName}, Fields: ${Object.keys(changedFields).length} changed` },
+        { name: 'Source Deal Updated', success: true, detail: `Stage: ${hubspotDealId ? targetStageName : 'unchanged'}, Fields: ${Object.keys(changedFields).length} changed` },
         { name: 'BidBoard Project Created', success: !!bidboardProjectId, detail: bidboardProjectId ? `ID: ${bidboardProjectId}` : 'Not created' },
-        { name: 'Sync Mapping', success: !!bidboardProjectId, detail: bidboardProjectId ? `Deal ${hubspotDealId} → BidBoard ${bidboardProjectId}` : 'Skipped' },
+        { name: 'Sync Mapping', success: !!bidboardProjectId, detail: bidboardProjectId ? `Deal ${sourceDealId} → BidBoard ${bidboardProjectId}` : 'Skipped' },
         { name: 'Document Sync', success: true, detail: `${(attachmentsToSync || []).length} attachment(s)` },
       ],
     });
@@ -894,6 +1476,12 @@ export async function processRfpDecline(
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
     if (request.status !== 'pending') return { success: false, error: `Request already ${request.status}` };
+    if (isRfpApprovalRequestExpired(request)) {
+      await auditRfpDeclineAttempt(request, 'expired', declinerEmail, 'Token expired');
+      return { success: false, error: 'expired' };
+    }
+
+    await auditRfpDeclineAttempt(request, 'declined', declinerEmail);
 
     await storage.updateRfpApprovalRequest(request.id, {
       status: 'declined',
@@ -904,13 +1492,14 @@ export async function processRfpDecline(
     await storage.createAuditLog({
       action: 'rfp_approval_declined',
       entityType: 'deal',
-      entityId: request.hubspotDealId,
+      entityId: request.sourceSystem === 'hubspot' ? request.hubspotDealId! : request.sourceDealId,
       source: 'rfp-approval',
       status: 'success',
-      details: { token, declinedBy: declinerEmail },
+      details: { token, declinedBy: declinerEmail, ...buildRfpAuditDetails(request, 'declined', declinerEmail) },
     });
 
-    log(`[rfp-approval] Deal ${request.hubspotDealId} RFP declined by ${declinerEmail}`, 'rfp');
+    const sourceDealId = request.sourceSystem === 'hubspot' ? request.hubspotDealId! : request.sourceDealId;
+    log(`[rfp-approval] Deal ${sourceDealId} RFP declined by ${declinerEmail}`, 'rfp');
     return { success: true };
   } catch (e: any) {
     console.error(`[rfp-approval] Error processing decline for token ${token}:`, e.message);
