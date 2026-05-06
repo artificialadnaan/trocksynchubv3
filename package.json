@@ -12,6 +12,7 @@
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "db:push": "drizzle-kit push --force",
+    "db:inspect-sync-mappings-duplicates": "tsx scripts/inspect-sync-mappings-duplicates.ts",
     "db:migrate-approved-attachments": "tsx scripts/migrate-approved-attachments.ts",
     "db:migrate-audit-log-category": "tsx scripts/migrate-audit-log-category.ts",
     "db:seed-dashboard": "npx tsx scripts/seed-dashboard-data.ts",
