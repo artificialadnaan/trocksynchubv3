@@ -267,6 +267,31 @@ export const insertWebhookLogSchema = createInsertSchema(webhookLogs).omit({
 export type InsertWebhookLog = z.infer<typeof insertWebhookLogSchema>;
 export type WebhookLog = typeof webhookLogs.$inferSelect;
 
+export const trockcrmRelayOutbox = pgTable("trockcrm_relay_outbox", {
+  id: serial("id").primaryKey(),
+  webhookLogId: integer("webhook_log_id").references(() => webhookLogs.id, { onDelete: "set null" }),
+  syncMappingId: integer("sync_mapping_id").references(() => syncMappings.id, { onDelete: "set null" }),
+  procorePortfolioProjectId: text("procore_portfolio_project_id").notNull(),
+  projectNumber: text("project_number").notNull(),
+  payload: jsonb("payload").notNull(),
+  status: text("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  lastError: text("last_error"),
+  lastResponseStatus: integer("last_response_status"),
+  lastResponseBody: text("last_response_body"),
+  createdAt: timestamp("created_at").defaultNow(),
+  sentAt: timestamp("sent_at"),
+  nextRetryAt: timestamp("next_retry_at"),
+});
+
+export const insertTrockcrmRelayOutboxSchema = createInsertSchema(trockcrmRelayOutbox).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTrockcrmRelayOutbox = z.infer<typeof insertTrockcrmRelayOutboxSchema>;
+export type TrockcrmRelayOutbox = typeof trockcrmRelayOutbox.$inferSelect;
+
 /** Audit log category: "sync" = meaningful end-to-end sync; "system" = background events (polling, health, webhook acks) */
 export const auditLogs = pgTable("audit_logs", {
   id: serial("id").primaryKey(),

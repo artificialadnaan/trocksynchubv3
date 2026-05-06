@@ -14,6 +14,8 @@ const mockStorage = {
   upsertProcoreProject: vi.fn(),
   getSyncMappingByProcoreProjectId: vi.fn(),
   getSyncMappingByBidboardProjectId: vi.fn(),
+  getSyncMappingByProcoreProjectNumber: vi.fn(),
+  updateSyncMapping: vi.fn(),
   getSyncMappingByHubspotDealId: vi.fn(),
   getHubspotDealByHubspotId: vi.fn(),
 };
@@ -24,6 +26,29 @@ vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 
 vi.mock("../server/procore-rate-limiter.ts", () => ({
   markProjectWebhookUpdated: vi.fn(),
+}));
+
+vi.mock("../server/trockcrm-relay.ts", () => ({
+  buildTrockCrmProjectCreatedPayload: vi.fn((input: any) => ({
+    eventType: "procore.project.created",
+    source: "synchub",
+    procore: {
+      companyId: String(input.procoreProject.company_id),
+      portfolioProjectId: String(input.procoreProject.id),
+      projectNumber: input.procoreProject.project_number,
+      projectName: input.procoreProject.name,
+    },
+    synchub: {
+      webhookLogId: String(input.webhookLog.id),
+      syncMappingId: String(input.syncMapping.id),
+      bidboardProjectId: input.syncMapping.bidboardProjectId,
+      hubspotDealId: input.syncMapping.hubspotDealId,
+      receivedAt: input.webhookLog.createdAt.toISOString(),
+      enrichedAt: input.enrichedAt.toISOString(),
+    },
+    rawProcoreWebhook: input.webhookLog.payload,
+  })),
+  enqueueTrockCrmRelayOutbox: vi.fn().mockResolvedValue({ enqueued: true, outboxId: 77 }),
 }));
 
 vi.mock("../server/procore.ts", () => ({
@@ -177,6 +202,23 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
       hubspotDealId: "323528245957",
       hubspotDealName: "Canary Deal",
     });
+    mockStorage.getSyncMappingByProcoreProjectNumber.mockResolvedValue({
+      id: 501,
+      procoreProjectId: "598134326000001",
+      procoreProjectNumber: "DFW-1-12126-ad",
+      procoreProjectName: "Canary BidBoard Project",
+      bidboardProjectId: "bb-12126",
+      portfolioProjectId: null,
+      hubspotDealId: "323528245957",
+      hubspotDealName: "Canary Deal",
+    });
+    mockStorage.updateSyncMapping.mockResolvedValue({
+      id: 501,
+      procoreProjectNumber: "DFW-1-12126-ad",
+      bidboardProjectId: "bb-12126",
+      portfolioProjectId: "598134326517540",
+      hubspotDealId: "323528245957",
+    });
     mockStorage.getHubspotDealByHubspotId.mockResolvedValue({ dealName: "Canary Deal" });
 
     vi.mocked(fetchProcoreProjectDetail).mockResolvedValue({
@@ -249,6 +291,40 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
         hubspotUpdateSuppressed: true,
         emailSuppressed: true,
       }),
+    }));
+  });
+
+  it("enqueues the trockcrm relay after a Projects create webhook updates sync mapping with portfolio project id", async () => {
+    vi.useFakeTimers();
+    const { fetchProcoreProjectDetail } = await import("../server/procore.ts");
+    const { enqueueTrockCrmRelayOutbox } = await import("../server/trockcrm-relay.ts");
+    vi.mocked(fetchProcoreProjectDetail).mockResolvedValue({
+      id: "598134326517540",
+      company_id: "598134325683880",
+      project_number: "DFW-1-12126-ad",
+      name: "Canary Portfolio Project",
+    } as any);
+
+    const responsePromise = postProcoreWebhook({
+      id: "evt-project-create",
+      resource_name: "Projects",
+      event_type: "create",
+      reason: "create",
+      resource_id: "598134326517540",
+      company_id: "598134325683880",
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    const response = await responsePromise;
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(response.status).toBe(200);
+    expect(mockStorage.updateSyncMapping).toHaveBeenCalledWith(501, { portfolioProjectId: "598134326517540" });
+    expect(vi.mocked(enqueueTrockCrmRelayOutbox)).toHaveBeenCalledWith(expect.objectContaining({
+      webhookLogId: 101,
+      syncMappingId: 501,
+      procorePortfolioProjectId: "598134326517540",
+      projectNumber: "DFW-1-12126-ad",
     }));
   });
 
