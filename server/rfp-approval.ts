@@ -1361,28 +1361,6 @@ export async function processRfpApproval(
         bidboardProjectId = bbResult.projectId;
         log(`[rfp-approval] BidBoard project created: ${bidboardProjectId} for deal ${sourceDealId}`, 'rfp');
 
-        // Immediate CRM stage advancement for trock_crm-sourced approvals.
-        // Accelerates only the FIRST stage transition (Opportunity -> Estimating/Service Estimating).
-        // The 10-min BidBoard sync remains for all other stage transitions and BidBoard -> CRM field syncs.
-        // Non-fatal: if this fails, the next sync catches up. CRM handles idempotency by rfpApprovalRequestId.
-        if (identity.sourceSystem === 'trock_crm' && sourceDealId && bidboardProjectId) {
-          try {
-            const { fireCrmImmediateAdvance } = await import('./sync/crm-immediate-advance-fire');
-            await fireCrmImmediateAdvance({
-              sourceDealId,
-              rfpApprovalRequestId: request.id,
-              bidboardProjectId,
-              procoreCompanyId: (request as any).procoreCompanyId ?? null,
-            });
-            log(`RFP immediate CRM advance: succeeded sourceDealId=${sourceDealId} bbProject=${bidboardProjectId}`, 'rfp');
-          } catch (err: any) {
-            // NEVER crash approval. The 10-min BidBoard sync is the safety fallback.
-            log(`RFP immediate CRM advance: failed (non-fatal) sourceDealId=${sourceDealId}: ${err?.message || err}`, 'rfp');
-          }
-        } else {
-          log(`RFP immediate CRM advance: skipped sourceSystem=${identity.sourceSystem ?? 'null'} sourceDealId=${sourceDealId ?? 'null'}`, 'rfp');
-        }
-
         // Upload _new attachments to HubSpot and associate with deal (BidBoard upload succeeded)
         const newAttachments = (attachmentsToSync || []).filter((a) => a.localPath);
         for (const att of newAttachments) {
