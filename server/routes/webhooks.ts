@@ -919,6 +919,26 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                     companyId: project.companyId,
                   }) ?? undefined;
                 }
+
+                setImmediate(() => {
+                  import("../trockcrm-relay")
+                    .then(({ enqueueTrockCrmProjectStageChangedRelay }) => enqueueTrockCrmProjectStageChangedRelay({
+                      webhookLog: {
+                        id: webhookLog.id,
+                        createdAt: webhookLog.createdAt ?? new Date(),
+                        payload: event,
+                      },
+                      syncMapping: mapping ?? null,
+                      procoreProject: project,
+                      previousStage: oldStage,
+                      newStage,
+                      detectedAt: new Date(),
+                    }))
+                    .catch((relayErr: unknown) => {
+                      console.warn(`[webhook] TrockCRM stage-change relay enqueue failed for project ${projectId}: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`);
+                    });
+                });
+
                 if (mapping?.hubspotDealId) {
                   // Stage sync enabled by default; set procore_hubspot_stage_sync.enabled = false to disable
                   const stageSyncConfig = await storage.getAutomationConfig("procore_hubspot_stage_sync");

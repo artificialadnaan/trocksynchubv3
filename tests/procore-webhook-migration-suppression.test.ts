@@ -48,6 +48,7 @@ vi.mock("../server/trockcrm-relay.ts", () => ({
     },
     rawProcoreWebhook: input.webhookLog.payload,
   })),
+  enqueueTrockCrmProjectStageChangedRelay: vi.fn().mockResolvedValue({ enqueued: true, outboxId: 88 }),
   enqueueTrockCrmRelayOutbox: vi.fn().mockResolvedValue({ enqueued: true, outboxId: 77 }),
 }));
 
@@ -332,6 +333,7 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
     const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
     const { sendStageChangeEmail } = await import("../server/email-notifications.ts");
     const { processStageNotification } = await import("../server/stage-notifications.ts");
+    const { enqueueTrockCrmProjectStageChangedRelay } = await import("../server/trockcrm-relay.ts");
 
     mockStorage.getAutomationConfig.mockImplementation(async (key: string) => {
       if (key === "procore_webhook_processing") return { key, value: { enabled: true } };
@@ -364,9 +366,67 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
       procoreProjectId: "598134326587649",
       hubspotDealId: "323528245957",
     }));
+    await vi.waitFor(() => {
+      expect(vi.mocked(enqueueTrockCrmProjectStageChangedRelay)).toHaveBeenCalledWith(expect.objectContaining({
+        webhookLog: expect.objectContaining({ id: 101 }),
+        syncMapping: expect.objectContaining({
+          id: 501,
+          bidboardProjectId: "bb-12126",
+          hubspotDealId: "323528245957",
+        }),
+        procoreProject: expect.objectContaining({
+          procoreId: "598134326587649",
+          name: "Canary Project",
+          projectNumber: "DFW-1-12126-ad",
+        }),
+        previousStage: "Bidding",
+        newStage: "Buy Out",
+        detectedAt: expect.any(Date),
+      }));
+    });
     expect(mockStorage.createBidboardAutomationLog).not.toHaveBeenCalledWith(expect.objectContaining({
       action: expect.stringContaining("suppressed"),
     }));
+  });
+
+  it("does not disrupt existing stage-change processing when CRM stage relay enqueue fails", async () => {
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { processStageNotification } = await import("../server/stage-notifications.ts");
+    const { enqueueTrockCrmProjectStageChangedRelay } = await import("../server/trockcrm-relay.ts");
+    vi.mocked(enqueueTrockCrmProjectStageChangedRelay).mockRejectedValueOnce(new Error("relay unavailable"));
+
+    mockStorage.getAutomationConfig.mockImplementation(async (key: string) => {
+      if (key === "procore_webhook_processing") return { key, value: { enabled: true } };
+      if (key === "procore_hubspot_stage_sync") return { key, value: { enabled: true } };
+      if (key === "bidboard_stage_sync") return { key, value: { mode: "live", suppressHubSpotWrites: false, suppressStageNotifications: false } };
+      return undefined;
+    });
+
+    const response = await postProcoreWebhook({
+      id: "evt-live-relay-failure",
+      resource_name: "projects",
+      event_type: "update",
+      resource_id: "598134326587649",
+      project_id: "598134326587649",
+      company_id: "598134325683880",
+    });
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(updateHubSpotDealStage)).toHaveBeenCalledWith("323528245957", "closedwon");
+    expect(vi.mocked(processStageNotification)).toHaveBeenCalledWith(expect.objectContaining({
+      stage: "Buy Out",
+      source: "portfolio",
+      oldStage: "Bidding",
+      procoreProjectId: "598134326587649",
+      hubspotDealId: "323528245957",
+    }));
+    expect(mockStorage.updateWebhookLog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "processed" }),
+    );
+    await vi.waitFor(() => {
+      expect(vi.mocked(enqueueTrockCrmProjectStageChangedRelay)).toHaveBeenCalled();
+    });
   });
 
   it("suppresses HubSpot webhook stage-change emails under Bid Board migration mode", async () => {

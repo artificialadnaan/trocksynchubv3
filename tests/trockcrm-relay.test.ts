@@ -11,8 +11,10 @@ vi.mock("../server/db.ts", () => ({
 }));
 
 const {
+  buildTrockCrmProjectStageChangedPayload,
   buildTrockCrmProjectCreatedPayload,
   calculateTrockCrmRelayBackoff,
+  enqueueTrockCrmProjectStageChangedRelay,
   enqueueTrockCrmRelayOutbox,
   processTrockCrmRelayOutboxEntry,
   processTrockCrmRelayOutboxBatch,
@@ -46,10 +48,53 @@ function samplePayload() {
   };
 }
 
+function sampleStageChangedPayload() {
+  return {
+    eventType: "procore.project.stage_changed",
+    source: "synchub",
+    procore: {
+      companyId: "598134325683880",
+      portfolioProjectId: "598134326517540",
+      projectNumber: "DFW-1-02326-ad",
+      projectName: "Palm Villas",
+      previousStage: "Bidding",
+      currentStage: "Buy Out",
+    },
+    stageChange: {
+      previousStage: "Bidding",
+      newStage: "Buy Out",
+      detectedAt: "2026-05-01T12:05:30.000Z",
+      webhookTimestamp: "2026-05-01T12:04:59.000Z",
+    },
+    synchub: {
+      webhookLogId: "101",
+      syncMappingId: "501",
+      bidboardProjectId: "598134326000001",
+      hubspotDealId: "323528245957",
+      receivedAt: "2026-05-01T12:00:00.000Z",
+      enrichedAt: "2026-05-01T12:05:30.000Z",
+    },
+    rawProcoreWebhook: {
+      id: "evt-stage",
+      reason: "update",
+      resource_type: "Projects",
+      resource_name: "projects",
+      event_type: "update",
+      resource_id: "598134326517540",
+      project_id: "598134326517540",
+      timestamp: "2026-05-01T12:04:59.000Z",
+      company_id: "598134325683880",
+      payload_version: "v4.0",
+    },
+  };
+}
+
 describe("trockcrm relay payload and signing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.SYNCHUB_RELAY_SECRET;
+    delete process.env.TROCKCRM_RELAY_URL;
+    delete process.env.TROCKCRM_STAGE_CHANGE_RELAY_URL;
     delete process.env.TROCKCRM_RELAY_ENABLED;
   });
 
@@ -77,6 +122,73 @@ describe("trockcrm relay payload and signing", () => {
     expect(payload).toEqual(samplePayload());
   });
 
+  it("builds the normalized Procore project stage-changed payload", () => {
+    const payload = buildTrockCrmProjectStageChangedPayload({
+      webhookLog: {
+        id: 101,
+        createdAt: new Date("2026-05-01T12:00:00.000Z"),
+        payload: {
+          id: "evt-stage",
+          reason: "update",
+          resource_type: "Projects",
+          resource_name: "projects",
+          event_type: "update",
+          resource_id: "598134326517540",
+          project_id: "598134326517540",
+          timestamp: "2026-05-01T12:04:59.000Z",
+          company_id: "598134325683880",
+          payload_version: "v4.0",
+        },
+      },
+      syncMapping: {
+        id: 501,
+        bidboardProjectId: "598134326000001",
+        hubspotDealId: "323528245957",
+      },
+      procoreProject: {
+        procoreId: "598134326517540",
+        companyId: "598134325683880",
+        projectNumber: "DFW-1-02326-ad",
+        name: "Palm Villas",
+      },
+      previousStage: "  Bidding ",
+      newStage: " Buy Out  ",
+      detectedAt: new Date("2026-05-01T12:05:30.000Z"),
+    });
+
+    expect(payload).toEqual(sampleStageChangedPayload());
+  });
+
+  it("skips stage-changed enqueue when no configured stage-change relay URL exists", async () => {
+    process.env.TROCKCRM_RELAY_URL = "https://crm.example.test/api/webhooks/synchub/procore-project-created";
+    const store = { insertOutbox: vi.fn() };
+
+    await expect(enqueueTrockCrmProjectStageChangedRelay({
+      store,
+      webhookLog: {
+        id: 101,
+        createdAt: new Date("2026-05-01T12:00:00.000Z"),
+        payload: sampleStageChangedPayload().rawProcoreWebhook,
+      },
+      syncMapping: {
+        id: 501,
+        bidboardProjectId: "598134326000001",
+        hubspotDealId: "323528245957",
+      },
+      procoreProject: {
+        procoreId: "598134326517540",
+        companyId: "598134325683880",
+        projectNumber: "DFW-1-02326-ad",
+        name: "Palm Villas",
+      },
+      previousStage: "Bidding",
+      newStage: "Buy Out",
+      detectedAt: new Date("2026-05-01T12:05:30.000Z"),
+    })).resolves.toEqual({ enqueued: false, reason: "missing_stage_change_relay_url" });
+
+    expect(store.insertOutbox).not.toHaveBeenCalled();
+  });
+
   it("signs bodies as deterministic sha256 HMAC headers", () => {
     const body = JSON.stringify(samplePayload());
     const signature = signTrockCrmRelayBody(body, "shared-secret");
@@ -91,6 +203,8 @@ describe("trockcrm relay outbox", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.SYNCHUB_RELAY_SECRET = "shared-secret";
+    delete process.env.TROCKCRM_RELAY_URL;
+    delete process.env.TROCKCRM_STAGE_CHANGE_RELAY_URL;
     delete process.env.TROCKCRM_RELAY_ENABLED;
   });
 
@@ -220,6 +334,54 @@ describe("trockcrm relay outbox", () => {
     expect(store.markSent).toHaveBeenCalledWith(12, expect.objectContaining({
       responseStatus: 202,
       responseBody: null,
+    }));
+  });
+
+  it("uses the configured stage-change relay URL for stage-changed payloads", async () => {
+    process.env.TROCKCRM_STAGE_CHANGE_RELAY_URL = "https://crm.example.test/procore-stage-changed";
+    const store = {
+      markSent: vi.fn(),
+      markFailed: vi.fn(),
+      markAbandoned: vi.fn(),
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      text: vi.fn().mockResolvedValue("accepted"),
+    });
+
+    await processTrockCrmRelayOutboxEntry({
+      store,
+      fetchImpl: fetchMock,
+      row: { id: 15, payload: sampleStageChangedPayload(), attempts: 1 },
+      now: new Date("2026-05-01T12:06:00.000Z"),
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://crm.example.test/procore-stage-changed", expect.any(Object));
+    expect(store.markSent).toHaveBeenCalledWith(15, expect.objectContaining({ responseStatus: 202 }));
+  });
+
+  it("marks existing stage-changed rows abandoned without fetching when no stage-change relay URL is configured", async () => {
+    process.env.TROCKCRM_RELAY_URL = "https://crm.example.test/api/webhooks/synchub/procore-project-created";
+    delete process.env.TROCKCRM_STAGE_CHANGE_RELAY_URL;
+    const store = {
+      markFailed: vi.fn(),
+      markAbandoned: vi.fn(),
+    };
+    const fetchMock = vi.fn();
+
+    await expect(processTrockCrmRelayOutboxEntry({
+      store,
+      fetchImpl: fetchMock,
+      row: { id: 16, payload: sampleStageChangedPayload(), attempts: 1 },
+      now: new Date("2026-05-01T12:06:00.000Z"),
+    })).resolves.toBe("abandoned");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(store.markFailed).not.toHaveBeenCalled();
+    expect(store.markAbandoned).toHaveBeenCalledWith(16, expect.objectContaining({
+      attempts: 1,
+      error: "TROCKCRM_STAGE_CHANGE_RELAY_URL missing",
     }));
   });
 

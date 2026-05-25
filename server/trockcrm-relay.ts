@@ -41,6 +41,40 @@ export type TrockCrmRelayPayload = {
   };
 };
 
+export type TrockCrmProjectStageChangedRelayPayload = {
+  eventType: "procore.project.stage_changed";
+  source: "synchub";
+  procore: {
+    companyId: string;
+    portfolioProjectId: string;
+    projectNumber: string;
+    projectName: string;
+    previousStage: string;
+    currentStage: string;
+  };
+  stageChange: {
+    previousStage: string;
+    newStage: string;
+    detectedAt: string;
+    webhookTimestamp: string | null;
+  };
+  synchub: {
+    webhookLogId: string;
+    syncMappingId: string | null;
+    bidboardProjectId: string | null;
+    hubspotDealId: string | null;
+    receivedAt: string;
+    enrichedAt: string;
+  };
+  rawProcoreWebhook: {
+    [key: string]: unknown;
+  };
+};
+
+export type TrockCrmRelayOutboxPayload =
+  | TrockCrmRelayPayload
+  | TrockCrmProjectStageChangedRelayPayload;
+
 export type RelayStore = {
   insertOutbox?: (row: Record<string, unknown>) => Promise<{ id: number }>;
   claimReadyOutbox?: (limit: number, now: Date, processingStaleBefore: Date) => Promise<Array<Pick<TrockcrmRelayOutbox, "id" | "payload" | "attempts">>>;
@@ -59,8 +93,24 @@ function relaySecret() {
   return process.env.SYNCHUB_RELAY_SECRET?.trim() || "";
 }
 
+function isStageChangedPayload(payload: unknown): payload is TrockCrmProjectStageChangedRelayPayload {
+  return Boolean(
+    payload &&
+    typeof payload === "object" &&
+    (payload as { eventType?: unknown }).eventType === "procore.project.stage_changed"
+  );
+}
+
 function relayUrl() {
   return process.env.TROCKCRM_RELAY_URL?.trim() || DEFAULT_RELAY_URL;
+}
+
+function stageChangeRelayUrl() {
+  return process.env.TROCKCRM_STAGE_CHANGE_RELAY_URL?.trim() || "";
+}
+
+function resolveRelayUrl(payload: unknown) {
+  return isStageChangedPayload(payload) ? stageChangeRelayUrl() : relayUrl();
 }
 
 function relayLog(message: string) {
@@ -127,6 +177,106 @@ export function buildTrockCrmProjectCreatedPayload(input: {
       resource_id: String(raw.resource_id ?? portfolioProjectId),
     },
   };
+}
+
+function optionalNumericId(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function optionalString(value: unknown): string | null {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function cleanStage(value: string): string {
+  return value.trim();
+}
+
+export function buildTrockCrmProjectStageChangedPayload(input: {
+  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  syncMapping?: { id?: number | string | null; bidboardProjectId?: string | null; hubspotDealId?: string | null } | null;
+  procoreProject: {
+    procoreId?: string | number | null;
+    id?: string | number | null;
+    companyId?: string | number | null;
+    company_id?: string | number | null;
+    projectNumber?: string | null;
+    project_number?: string | null;
+    name?: string | null;
+    displayName?: string | null;
+    display_name?: string | null;
+  };
+  previousStage: string;
+  newStage: string;
+  detectedAt?: Date;
+}): TrockCrmProjectStageChangedRelayPayload {
+  const raw = input.webhookLog.payload ?? {};
+  const detectedAt = input.detectedAt ?? new Date();
+  const previousStage = cleanStage(input.previousStage);
+  const newStage = cleanStage(input.newStage);
+  const portfolioProjectId = String(
+    input.procoreProject.procoreId ??
+    input.procoreProject.id ??
+    raw.project_id ??
+    raw.resource_id ??
+    ""
+  );
+  return {
+    eventType: "procore.project.stage_changed",
+    source: "synchub",
+    procore: {
+      companyId: String(input.procoreProject.companyId ?? input.procoreProject.company_id ?? raw.company_id ?? ""),
+      portfolioProjectId,
+      projectNumber: String(input.procoreProject.projectNumber ?? input.procoreProject.project_number ?? ""),
+      projectName: String(input.procoreProject.name ?? input.procoreProject.displayName ?? input.procoreProject.display_name ?? ""),
+      previousStage,
+      currentStage: newStage,
+    },
+    stageChange: {
+      previousStage,
+      newStage,
+      detectedAt: detectedAt.toISOString(),
+      webhookTimestamp: optionalString(raw.timestamp),
+    },
+    synchub: {
+      webhookLogId: String(input.webhookLog.id),
+      syncMappingId: input.syncMapping?.id == null ? null : String(input.syncMapping.id),
+      bidboardProjectId: input.syncMapping?.bidboardProjectId ?? null,
+      hubspotDealId: input.syncMapping?.hubspotDealId ?? null,
+      receivedAt: new Date(input.webhookLog.createdAt ?? Date.now()).toISOString(),
+      enrichedAt: detectedAt.toISOString(),
+    },
+    rawProcoreWebhook: { ...raw },
+  };
+}
+
+export async function enqueueTrockCrmProjectStageChangedRelay(input: {
+  store?: RelayStore;
+  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  syncMapping?: { id?: number | string | null; bidboardProjectId?: string | null; hubspotDealId?: string | null } | null;
+  procoreProject: Parameters<typeof buildTrockCrmProjectStageChangedPayload>[0]["procoreProject"];
+  previousStage: string;
+  newStage: string;
+  detectedAt?: Date;
+}): Promise<{ enqueued: true; outboxId: number } | { enqueued: false; reason: "missing_stage_change_relay_url" | "insert_failed" }> {
+  try {
+    if (!stageChangeRelayUrl()) return { enqueued: false, reason: "missing_stage_change_relay_url" };
+    const payload = buildTrockCrmProjectStageChangedPayload(input);
+    return await enqueueTrockCrmRelayOutbox({
+      store: input.store,
+      webhookLogId: Number(input.webhookLog.id),
+      syncMappingId: optionalNumericId(input.syncMapping?.id),
+      procorePortfolioProjectId: payload.procore.portfolioProjectId,
+      projectNumber: payload.procore.projectNumber,
+      payload,
+    }) as { enqueued: true; outboxId: number } | { enqueued: false; reason: "insert_failed" };
+  } catch (err) {
+    relayLog(`[TrockCRMRelay] Failed to enqueue project stage-change relay: ${err instanceof Error ? err.message : String(err)}`);
+    return { enqueued: false, reason: "insert_failed" };
+  }
 }
 
 export function createDbRelayStore(): Required<RelayStore> {
@@ -216,7 +366,7 @@ export async function enqueueTrockCrmRelayOutbox(input: {
   syncMappingId: number | null;
   procorePortfolioProjectId: string;
   projectNumber: string;
-  payload: TrockCrmRelayPayload;
+  payload: TrockCrmRelayOutboxPayload;
 }): Promise<{ enqueued: true; outboxId: number } | { enqueued: false; reason: "disabled" | "missing_secret" | "insert_failed" }> {
   try {
     const store = input.store ?? createDbRelayStore();
@@ -249,6 +399,7 @@ export async function processTrockCrmRelayOutboxEntry(input: {
   const attempts = Math.max(Number(input.row.attempts ?? 0), 1);
   const body = JSON.stringify(input.row.payload);
   const fetchImpl = input.fetchImpl ?? ((url, init) => fetchWithTimeout(String(url), init, 30_000));
+  const url = resolveRelayUrl(input.row.payload);
 
   if (!secret) {
     await store.markFailed!(input.row.id, {
@@ -260,8 +411,14 @@ export async function processTrockCrmRelayOutboxEntry(input: {
     return "failed";
   }
 
+  if (!url) {
+    const error = "TROCKCRM_STAGE_CHANGE_RELAY_URL missing";
+    await store.markAbandoned!(input.row.id, { attempts, error, attemptedAt: now });
+    return "abandoned";
+  }
+
   try {
-    const response = await fetchImpl(relayUrl(), {
+    const response = await fetchImpl(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
