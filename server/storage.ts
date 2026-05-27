@@ -393,6 +393,11 @@ export interface IStorage {
     approvalData: Partial<InsertRfpApprovalRequest>,
     callbackData?: InsertBidboardCallbackOutbox | null,
   ): Promise<RfpApprovalRequest | undefined>;
+  declineRfpApprovalRequestWithOptionalCallback(
+    id: number,
+    declineData: Partial<InsertRfpApprovalRequest>,
+    callbackData?: InsertBidboardCallbackOutbox | null,
+  ): Promise<RfpApprovalRequest | undefined>;
 
   // RFP Reporting
   getRfpChangeLog(rfpId: number): Promise<RfpChangeLog[]>;
@@ -1932,6 +1937,25 @@ export class DatabaseStorage implements IStorage {
     return db.transaction(async (tx) => {
       const [updated] = await tx.update(rfpApprovalRequests)
         .set(approvalData)
+        .where(eq(rfpApprovalRequests.id, id))
+        .returning();
+      if (callbackData) {
+        await tx.insert(bidboardCallbackOutbox)
+          .values(callbackData)
+          .onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });
+      }
+      return updated;
+    });
+  }
+
+  async declineRfpApprovalRequestWithOptionalCallback(
+    id: number,
+    declineData: Partial<InsertRfpApprovalRequest>,
+    callbackData?: InsertBidboardCallbackOutbox | null,
+  ): Promise<RfpApprovalRequest | undefined> {
+    return db.transaction(async (tx) => {
+      const [updated] = await tx.update(rfpApprovalRequests)
+        .set(declineData)
         .where(eq(rfpApprovalRequests.id, id))
         .returning();
       if (callbackData) {
