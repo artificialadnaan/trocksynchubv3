@@ -8,7 +8,12 @@ import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from './consta
 import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
 import { log } from './index';
-import { buildBidBoardCreatedCallbackTargetUrl, type BidBoardCreatedCallbackPayload } from './sync/bidboard-callback-worker';
+import {
+  buildBidBoardCreatedCallbackTargetUrl,
+  buildRfpDeclinedCallbackTargetUrl,
+  type BidBoardCreatedCallbackPayload,
+  type RfpDeclinedCallbackPayload,
+} from './sync/bidboard-callback-worker';
 
 const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
 const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
@@ -215,6 +220,44 @@ async function buildBidBoardCreatedCallbackData(input: {
     procoreCompanyId,
     createdAt: new Date().toISOString(),
   };
+
+  return {
+    sourceSystem: 'trock_crm',
+    sourceDealId: input.sourceDealId,
+    rfpApprovalRequestId: input.request.id,
+    payload,
+    targetUrl,
+    status: 'pending',
+    attemptCount: 0,
+    maxAttempts: 5,
+    nextAttemptAt: new Date(),
+  };
+}
+
+function buildRfpDeclinedCallbackData(input: {
+  request: any;
+  sourceDealId: string;
+  declinedAt: Date;
+  denialReason?: string | null;
+}): any | null {
+  if ((input.request.sourceSystem || 'hubspot') !== 'trock_crm') {
+    return null;
+  }
+
+  const targetUrl = buildRfpDeclinedCallbackTargetUrl();
+  if (!targetUrl) {
+    log(`[rfp-approval] TROCK_CRM_BASE_URL not configured; cannot enqueue RFP decline callback for RFP request ${input.request.id}`, 'rfp');
+    return null;
+  }
+
+  const payload: RfpDeclinedCallbackPayload = {
+    sourceDealId: input.sourceDealId,
+    rfpApprovalRequestId: input.request.id,
+    declinedAt: input.declinedAt.toISOString(),
+  };
+  if (input.denialReason?.trim()) {
+    payload.denialReason = input.denialReason.trim();
+  }
 
   return {
     sourceSystem: 'trock_crm',
@@ -1505,6 +1548,7 @@ export async function processRfpDecline(
   try {
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
+    const sourceDealId = request.sourceSystem === 'hubspot' ? request.hubspotDealId! : request.sourceDealId;
     if (request.status !== 'pending') return { success: false, error: `Request already ${request.status}` };
     if (isRfpApprovalRequestExpired(request)) {
       await auditRfpDeclineAttempt(request, 'expired', declinerEmail, 'Token expired');
@@ -1513,11 +1557,26 @@ export async function processRfpDecline(
 
     await auditRfpDeclineAttempt(request, 'declined', declinerEmail);
 
-    await storage.updateRfpApprovalRequest(request.id, {
+    const declinedAt = new Date();
+    const declineData = {
       status: 'declined',
       declinedBy: declinerEmail,
-      declinedAt: new Date(),
+      declinedAt,
+    };
+    const callbackData = buildRfpDeclinedCallbackData({
+      request,
+      sourceDealId,
+      declinedAt,
     });
+    const declineWithCallback = (storage as any).declineRfpApprovalRequestWithOptionalCallback;
+    if (typeof declineWithCallback === 'function') {
+      await declineWithCallback.call(storage, request.id, declineData, callbackData);
+    } else {
+      await storage.updateRfpApprovalRequest(request.id, declineData);
+      if (callbackData && typeof (storage as any).enqueueBidboardCallback === 'function') {
+        await (storage as any).enqueueBidboardCallback(callbackData);
+      }
+    }
 
     await storage.createAuditLog({
       action: 'rfp_approval_declined',
@@ -1528,7 +1587,6 @@ export async function processRfpDecline(
       details: { token, declinedBy: declinerEmail, ...buildRfpAuditDetails(request, 'declined', declinerEmail) },
     });
 
-    const sourceDealId = request.sourceSystem === 'hubspot' ? request.hubspotDealId! : request.sourceDealId;
     log(`[rfp-approval] Deal ${sourceDealId} RFP declined by ${declinerEmail}`, 'rfp');
     return { success: true };
   } catch (e: any) {

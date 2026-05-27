@@ -12,6 +12,13 @@ export interface BidBoardCreatedCallbackPayload {
   createdAt: string;
 }
 
+export interface RfpDeclinedCallbackPayload {
+  sourceDealId: string;
+  rfpApprovalRequestId: number;
+  denialReason?: string;
+  declinedAt: string;
+}
+
 const BACKOFF_INTERVALS = ["30 seconds", "2 minutes", "10 minutes", "30 minutes", "2 hours"] as const;
 let callbackWorkerTimer: ReturnType<typeof setInterval> | null = null;
 let callbackWorkerRunning = false;
@@ -27,6 +34,11 @@ async function getDb() {
 export function buildBidBoardCreatedCallbackTargetUrl(baseUrl = process.env.TROCK_CRM_BASE_URL): string | null {
   const trimmed = baseUrl?.trim().replace(/\/+$/, "");
   return trimmed ? `${trimmed}/api/internal/bid-board-created` : null;
+}
+
+export function buildRfpDeclinedCallbackTargetUrl(baseUrl = process.env.TROCK_CRM_BASE_URL): string | null {
+  const trimmed = baseUrl?.trim().replace(/\/+$/, "");
+  return trimmed ? `${trimmed}/api/internal/rfp-declined` : null;
 }
 
 export async function claimPendingBidBoardCallbacks(limit = 5): Promise<any[]> {
