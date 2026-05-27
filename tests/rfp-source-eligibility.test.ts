@@ -142,6 +142,38 @@ describe("RFP source eligibility check", () => {
     expect(createBidBoardMock).toHaveBeenCalledTimes(1);
   });
 
+  it("uses edited dealname in the post-approval status email", async () => {
+    requestRow.current = makeRequest({
+      dealData: {
+        ...makeRequest().dealData,
+        dealname: "jasonn ranches",
+      },
+    });
+    const { processRfpApproval } = await import("../server/rfp-approval.ts");
+
+    const result = await processRfpApproval("token-1", { dealname: "test" }, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
+
+    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      subject: expect.stringContaining("test"),
+      htmlBody: expect.stringContaining(">test<"),
+    }));
+    expect(sendEmailMock.mock.calls[0][0].subject).not.toContain("jasonn ranches");
+    expect(sendEmailMock.mock.calls[0][0].htmlBody).not.toContain("jasonn ranches");
+  });
+
+  it.each([{}, { dealname: null as any }])("falls back to stored dealname in the post-approval status email when edited dealname is not set", async (editedFields) => {
+    const { processRfpApproval } = await import("../server/rfp-approval.ts");
+
+    const result = await processRfpApproval("token-1", editedFields, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
+
+    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
+    expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
+      subject: expect.stringContaining("Source Deal"),
+      htmlBody: expect.stringContaining(">Source Deal<"),
+    }));
+  });
+
   it("resolves HubSpot stage IDs to labels before checking RFP eligibility", async () => {
     hubspotFetchMode.stage = "appointmentscheduled";
     const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
