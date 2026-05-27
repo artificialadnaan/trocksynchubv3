@@ -1446,7 +1446,7 @@ export async function processRfpApproval(
       });
 
       await sendRfpApprovalStatusEmail({
-        dealName: dealData.dealname || 'Unknown Deal',
+        dealName: (editedFields.dealname && String(editedFields.dealname).trim()) || dealData.dealname || 'Unknown Deal',
         hubspotDealId: hubspotDealId || sourceDealId,
         projectNumber: finalProjectNumber,
         approverEmail,
@@ -1520,7 +1520,7 @@ export async function processRfpApproval(
 
     // Send detailed status email to admin
     await sendRfpApprovalStatusEmail({
-      dealName: dealData.dealname || 'Unknown Deal',
+      dealName: (editedFields.dealname && String(editedFields.dealname).trim()) || dealData.dealname || 'Unknown Deal',
       hubspotDealId: hubspotDealId || sourceDealId,
       projectNumber: finalProjectNumber,
       approverEmail,
