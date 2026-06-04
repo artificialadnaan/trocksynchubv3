@@ -233,6 +233,13 @@ export function registerRfpRequestRoutes(app: Express): void {
     // second app instance loses this race and gets 409; the claim also deletes any stale callback row.
     const claimed = await storage.claimDeclinedRfpForOverride(id);
     if (!claimed) {
+      // Lost the claim race. If the winner is already mid-flight (override_approving), this is an
+      // idempotent duplicate → 202 in-progress, not a conflict. Otherwise the row is no longer
+      // claimable (e.g. concurrently approved/resolved) → 409.
+      const current = await storage.getRfpApprovalRequestById(id);
+      if (current?.status === RFP_OVERRIDE_APPROVING_STATUS) {
+        return res.status(202).json({ success: true, queued: true, message: `RFP request ${id} override approval is already in progress.` });
+      }
       return res.status(409).json({
         success: false,
         error: "Conflict",

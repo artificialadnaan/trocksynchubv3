@@ -156,6 +156,19 @@ describe("processRfpApproval — override (force) path", () => {
     expect(callbackRows).toHaveLength(0);
   });
 
+  it("force aborts (no second create) when the claimed request was already resolved with a project id", async () => {
+    // Between the 202 and processRfpApproval's re-read, the row could be approved manually (gaining a
+    // project id). The force path must not blindly create — it aborts.
+    approvalRequest.current = makeDeclinedRequest({ status: "override_approving", bidboardProjectId: "BB-EXISTING" });
+    const { processRfpApproval } = await import("../server/rfp-approval.ts");
+
+    const result = await processRfpApproval("token-1", {}, "ashaw@trockgc.com", { force: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already resolved/i);
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+  });
+
   it("an unconfirmed Playwright failure ({success:false}) does NOT mark approved and emits a 'failed' callback (held for review)", async () => {
     // {success:false} can mean "could not confirm" AFTER clicking Create, so a project may exist.
     createBidBoardMock.mockResolvedValue({ success: false, error: "bid board unreachable" });

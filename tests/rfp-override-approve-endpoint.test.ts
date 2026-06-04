@@ -20,7 +20,8 @@ vi.mock("../server/storage.ts", () => ({
       const r = requestFixture.current;
       if (!claimState.claimed && r?.status === "declined" && !r?.bidboardProjectId) {
         claimState.claimed = true;
-        return { ...r, status: "override_approving" };
+        requestFixture.current = { ...r, status: "override_approving" }; // the winner's claim mutates the row
+        return requestFixture.current;
       }
       return undefined;
     }),
@@ -188,15 +189,19 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
         postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" }),
         postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" }),
       ]);
-      // Exactly one wins the claim (202); the other loses it (409). Only one Playwright creation runs.
-      expect([a.status, b.status].sort()).toEqual([202, 409]);
+      // Both are idempotently accepted (202): one wins the claim and runs; the loser re-reads the
+      // now-in-flight row and also gets 202. Only one Playwright creation runs.
+      expect(a.status).toBe(202);
+      expect(b.status).toBe(202);
       await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
       release();
     });
   });
 
-  it("a failed claim (lost race / no longer declined) returns 409 without invoking approval", async () => {
-    claimState.claimed = true; // someone else already claimed it
+  it("a lost claim whose row is NOT in-flight (still declined / resolved elsewhere) returns 409", async () => {
+    // Passes the declined pre-guard, but the atomic claim returns undefined and the re-read is not
+    // override_approving (the row was resolved by another path) → 409, not a misleading 202.
+    claimState.claimed = true; // claim returns undefined; requestFixture stays 'declined' on re-read
     await withServer(async (baseUrl) => {
       const res = await postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" });
       expect(res.status).toBe(409);

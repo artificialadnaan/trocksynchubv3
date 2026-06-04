@@ -1302,6 +1302,15 @@ export async function processRfpApproval(
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
     if (request.status !== 'pending' && !force) return { success: false, error: `Request already ${request.status}` };
+    // Force (override) path: the claim guaranteed no project at claim time, but the row could have
+    // been resolved between the 202 response and this re-read (e.g. a reviewer approved it manually).
+    // If it now carries a project id or reached a terminal state, abort rather than double-create.
+    if (force && (request.bidboardProjectId || request.status === 'approved' || request.status === 'cancelled_source_ineligible')) {
+      return {
+        success: false,
+        error: `Override aborted: request ${request.id} was already resolved (status=${request.status}${request.bidboardProjectId ? `, BidBoard ${request.bidboardProjectId}` : ''}).`,
+      };
+    }
     if (!force && isRfpApprovalRequestExpired(request)) {
       await auditRfpApprovalAttempt(request, 'expired', approverEmail, 'Token expired');
       return {
