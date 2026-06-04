@@ -655,7 +655,7 @@ async function advanceSyncStateAfterChange(
   change: StageChange,
   opts: { portfolioTriggerSucceeded: boolean; shouldTriggerPortfolio: boolean }
 ): Promise<void> {
-  const projectId = change.projectNumber || compositeKey(change.projectName, change.customerName);
+  const projectId = getProjectIdFromChange(change);
 
   if (!opts.portfolioTriggerSucceeded && opts.shouldTriggerPortfolio) {
     const prevState = (await storage.getBidboardSyncStates()).find((s) => s.projectId === projectId);
@@ -741,6 +741,7 @@ export async function syncStagesToHubSpot(
       result.success++;
       await advanceSyncStateAfterChange(change, { portfolioTriggerSucceeded, shouldTriggerPortfolio });
       await storage.createBidboardAutomationLog({
+        projectId: getProjectIdFromChange(change),
         projectName: change.projectName,
         action: "bidboard_stage_sync",
         status: "success",
