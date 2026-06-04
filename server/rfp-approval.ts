@@ -213,11 +213,65 @@ async function buildBidBoardCreatedCallbackData(input: {
   }
 
   const payload: BidBoardCreatedCallbackPayload = {
+    status: 'created',
     sourceDealId: input.sourceDealId,
     rfpApprovalRequestId: input.request.id,
     bidboardProjectId: input.bidboardProjectId,
     projectNumber: input.projectNumber,
     procoreCompanyId,
+    createdAt: new Date().toISOString(),
+  };
+
+  return {
+    sourceSystem: 'trock_crm',
+    sourceDealId: input.sourceDealId,
+    rfpApprovalRequestId: input.request.id,
+    payload,
+    targetUrl,
+    status: 'pending',
+    attemptCount: 0,
+    maxAttempts: 5,
+    nextAttemptAt: new Date(),
+  };
+}
+
+/**
+ * Build a 'failed' Bid Board callback for the OVERRIDE-approve path: when the authoritative
+ * Playwright project creation fails, the request is left re-tryable (NOT marked approved) and
+ * the CRM is notified via the same outbox + worker + HMAC, to the same /api/internal/bid-board-created
+ * URL. Unlike the 'created' builder, procoreCompanyId is best-effort (the CRM only needs the
+ * request id + error to surface the failure), so this never returns null for a missing company id.
+ */
+async function buildBidBoardFailedCallbackData(input: {
+  request: any;
+  sourceDealId: string;
+  projectNumber?: string;
+  error?: string;
+}): Promise<any | null> {
+  if ((input.request.sourceSystem || 'hubspot') !== 'trock_crm') {
+    return null;
+  }
+
+  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
+  if (!targetUrl) {
+    log(`[rfp-approval] TROCK_CRM_BASE_URL not configured; cannot enqueue BidBoard failure callback for RFP request ${input.request.id}`, 'rfp');
+    return null;
+  }
+
+  const getAutomationConfig = (storage as any).getAutomationConfig;
+  const config =
+    typeof getAutomationConfig === 'function'
+      ? await getAutomationConfig.call(storage, 'procore_config')
+      : null;
+  const procoreCompanyId = String((config?.value as any)?.companyId || process.env.PROCORE_COMPANY_ID || '').trim() || undefined;
+
+  const payload: BidBoardCreatedCallbackPayload = {
+    status: 'failed',
+    sourceDealId: input.sourceDealId,
+    rfpApprovalRequestId: input.request.id,
+    projectNumber: input.projectNumber,
+    procoreCompanyId,
+    error: input.error || 'BidBoard project creation failed',
     createdAt: new Date().toISOString(),
   };
 
@@ -1220,13 +1274,18 @@ export async function processRfpApproval(
   token: string,
   editedFields: Record<string, string>,
   approverEmail: string,
-  options?: { attachmentsOverride?: RfpApprovalAttachmentOptions['attachmentsOverride']; newFiles?: RfpApprovalAttachmentOptions['newFiles'] }
+  options?: { attachmentsOverride?: RfpApprovalAttachmentOptions['attachmentsOverride']; newFiles?: RfpApprovalAttachmentOptions['newFiles']; force?: boolean }
 ): Promise<{ success: boolean; error?: string; bidboardProjectId?: string; statusCode?: number; message?: string }> {
+  // `force` is the authoritative override-approve path (reviewer re-approves a declined RFP
+  // from the CRM). It relaxes the pending-only and expiry guards — the action is authenticated
+  // server-to-server via HMAC, not via the (possibly stale) email token — but on a Playwright
+  // failure it leaves the request re-tryable instead of marking it approved (see below).
+  const force = options?.force === true;
   try {
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
-    if (request.status !== 'pending') return { success: false, error: `Request already ${request.status}` };
-    if (isRfpApprovalRequestExpired(request)) {
+    if (request.status !== 'pending' && !force) return { success: false, error: `Request already ${request.status}` };
+    if (!force && isRfpApprovalRequestExpired(request)) {
       await auditRfpApprovalAttempt(request, 'expired', approverEmail, 'Token expired');
       return {
         success: false,
@@ -1372,6 +1431,7 @@ export async function processRfpApproval(
 
     let bidboardProjectId: string | undefined;
     let bidboardFailed = false;
+    let bidboardError: string | undefined;
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
       const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
@@ -1419,10 +1479,12 @@ export async function processRfpApproval(
         }
       } else {
         bidboardFailed = true;
+        bidboardError = bbResult.error;
         console.error(`[rfp-approval] Source updated successfully but BidBoard creation failed for deal ${sourceDealId}: ${bbResult.error}`);
       }
     } catch (bbErr: any) {
       bidboardFailed = true;
+      bidboardError = bbErr?.message;
       console.error(`[rfp-approval] BidBoard creation error for deal ${sourceDealId}:`, bbErr.message);
     } finally {
       // Temp files are only deleted AFTER createBidBoardProjectFromDeal completes (including document sync).
@@ -1433,6 +1495,55 @@ export async function processRfpApproval(
       if (tempPaths.length > 0) {
         log(`[rfp-approval] Cleaned up ${tempPaths.length} temporary attachment file(s)`, 'rfp');
       }
+    }
+
+    if (bidboardFailed && force && !bidboardProjectId) {
+      // OVERRIDE path: the authoritative Playwright creation failed and no project was created.
+      // Do NOT mark the request approved — leave it in its current (declined) state so a reviewer
+      // can retry — and notify the CRM with a 'failed' callback through the same outbox + worker.
+      const failureCallbackData = await buildBidBoardFailedCallbackData({
+        request,
+        sourceDealId,
+        projectNumber: finalProjectNumber,
+        error: bidboardError,
+      });
+      const upsertCallback = (storage as any).upsertBidboardCallback;
+      if (failureCallbackData && typeof upsertCallback === 'function') {
+        await upsertCallback.call(storage, failureCallbackData);
+      }
+
+      await storage.createAuditLog({
+        action: 'rfp_override_approval_failed',
+        entityType: 'deal',
+        entityId: sourceDealId,
+        source: 'rfp-approval',
+        status: 'failure',
+        details: {
+          token,
+          approvedBy: approverEmail,
+          error: bidboardError || null,
+          ...buildRfpAuditDetails(request, 'override_failed', approverEmail, bidboardError),
+        },
+      });
+
+      await sendRfpApprovalStatusEmail({
+        dealName: (editedFields.dealname && String(editedFields.dealname).trim()) || dealData.dealname || 'Unknown Deal',
+        hubspotDealId: hubspotDealId || sourceDealId,
+        projectNumber: finalProjectNumber,
+        approverEmail,
+        bidboardProjectId: undefined,
+        bidboardFailed: true,
+        steps: [
+          { name: 'Override Approval', success: false, detail: `BidBoard creation failed; request left re-tryable. ${bidboardError || ''}`.trim() },
+          { name: 'BidBoard Project Created', success: false, detail: 'Failed — project was not created' },
+        ],
+      });
+
+      log(`[rfp-approval] Override-approve BidBoard creation failed for deal ${sourceDealId}; left re-tryable (status preserved): ${bidboardError || 'unknown error'}`, 'rfp');
+      return {
+        success: false,
+        error: bidboardError || 'BidBoard project creation failed during override approval. The request remains re-tryable.',
+      };
     }
 
     if (bidboardFailed) {
@@ -1492,11 +1603,14 @@ export async function processRfpApproval(
     });
     const approveWithCallback = (storage as any).approveRfpApprovalRequestWithOptionalCallback;
     if (typeof approveWithCallback === 'function') {
-      await approveWithCallback.call(storage, request.id, approvalData, callbackData);
+      // On the override path, upsert the callback so a fresh 'created' supersedes any stale
+      // 'failed' callback row left by a prior failed attempt (the outbox is unique per request).
+      await approveWithCallback.call(storage, request.id, approvalData, callbackData, { upsertCallback: force });
     } else {
       await storage.updateRfpApprovalRequest(request.id, approvalData);
-      if (callbackData && typeof (storage as any).enqueueBidboardCallback === 'function') {
-        await (storage as any).enqueueBidboardCallback(callbackData);
+      if (callbackData) {
+        const enqueue = force ? (storage as any).upsertBidboardCallback : (storage as any).enqueueBidboardCallback;
+        if (typeof enqueue === 'function') await enqueue.call(storage, callbackData);
       }
     }
 

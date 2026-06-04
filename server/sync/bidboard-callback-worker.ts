@@ -4,11 +4,16 @@ import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { log } from "../index";
 
 export interface BidBoardCreatedCallbackPayload {
+  // 'created' on a successful Bid Board project creation; 'failed' when the (override)
+  // Playwright creation failed and the request was left re-tryable. Optional for backward
+  // compatibility — an absent status is treated as 'created' by consumers.
+  status?: "created" | "failed";
   sourceDealId: string;
   rfpApprovalRequestId: number;
-  bidboardProjectId: string;
-  projectNumber: string;
-  procoreCompanyId: string;
+  bidboardProjectId?: string; // present on 'created'; absent on 'failed'
+  projectNumber?: string;
+  procoreCompanyId?: string; // best-effort on 'failed'
+  error?: string; // present on 'failed'
   createdAt: string;
 }
 

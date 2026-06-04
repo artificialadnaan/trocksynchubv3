@@ -388,10 +388,12 @@ export interface IStorage {
   getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
   getRfpApproverConfigs(projectType: string, sourceSystem: SourceSystem): Promise<RfpApproverConfig[]>;
   enqueueBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox>;
+  upsertBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox>;
   approveRfpApprovalRequestWithOptionalCallback(
     id: number,
     approvalData: Partial<InsertRfpApprovalRequest>,
     callbackData?: InsertBidboardCallbackOutbox | null,
+    opts?: { upsertCallback?: boolean },
   ): Promise<RfpApprovalRequest | undefined>;
   declineRfpApprovalRequestWithOptionalCallback(
     id: number,
@@ -1929,10 +1931,37 @@ export class DatabaseStorage implements IStorage {
     return existing;
   }
 
+  // Replace any existing outbox row for this RFP request and reset its delivery state to
+  // pending. Used by the override-approve path so a fresh 'created'/'failed' callback supersedes
+  // a stale one from a prior attempt (the outbox is unique per rfp_approval_request_id).
+  async upsertBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox> {
+    const [result] = await db.insert(bidboardCallbackOutbox)
+      .values(data)
+      .onConflictDoUpdate({
+        target: bidboardCallbackOutbox.rfpApprovalRequestId,
+        set: {
+          sourceSystem: data.sourceSystem,
+          sourceDealId: data.sourceDealId,
+          payload: data.payload,
+          targetUrl: data.targetUrl,
+          status: "pending",
+          attemptCount: 0,
+          maxAttempts: data.maxAttempts ?? 5,
+          lastError: null,
+          lastAttemptAt: null,
+          nextAttemptAt: data.nextAttemptAt ?? new Date(),
+          sentAt: null,
+        },
+      })
+      .returning();
+    return result;
+  }
+
   async approveRfpApprovalRequestWithOptionalCallback(
     id: number,
     approvalData: Partial<InsertRfpApprovalRequest>,
     callbackData?: InsertBidboardCallbackOutbox | null,
+    opts?: { upsertCallback?: boolean },
   ): Promise<RfpApprovalRequest | undefined> {
     return db.transaction(async (tx) => {
       const [updated] = await tx.update(rfpApprovalRequests)
@@ -1940,9 +1969,27 @@ export class DatabaseStorage implements IStorage {
         .where(eq(rfpApprovalRequests.id, id))
         .returning();
       if (callbackData) {
-        await tx.insert(bidboardCallbackOutbox)
-          .values(callbackData)
-          .onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });
+        const insert = tx.insert(bidboardCallbackOutbox).values(callbackData);
+        if (opts?.upsertCallback) {
+          await insert.onConflictDoUpdate({
+            target: bidboardCallbackOutbox.rfpApprovalRequestId,
+            set: {
+              sourceSystem: callbackData.sourceSystem,
+              sourceDealId: callbackData.sourceDealId,
+              payload: callbackData.payload,
+              targetUrl: callbackData.targetUrl,
+              status: "pending",
+              attemptCount: 0,
+              maxAttempts: callbackData.maxAttempts ?? 5,
+              lastError: null,
+              lastAttemptAt: null,
+              nextAttemptAt: callbackData.nextAttemptAt ?? new Date(),
+              sentAt: null,
+            },
+          });
+        } else {
+          await insert.onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });
+        }
       }
       return updated;
     });
