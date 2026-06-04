@@ -12,13 +12,6 @@ const overrideApproveBodySchema = z.object({
   approverEmail: z.string().trim().email(),
 });
 
-// Guards against concurrently kicking off two Playwright creations for the same request during
-// the in-flight window (before bidboardProjectId is persisted) — the Playwright create has no dedup.
-// NOTE: this Set is per-process, so it does not protect across multiple app instances or a restart
-// mid-flight. The realistic trigger is a single reviewer clicking approve, so concurrency is ~1; a
-// DB-level claim/advisory lock would be the follow-up if SyncHub is ever scaled to >1 instance.
-const inFlightOverrideTokens = new Set<string>();
-
 export const rfpRequestBodySchema = z.object({
   sourceSystem: z.enum(["hubspot", "trock_crm"]),
   sourceDealId: z.string().trim().min(1),
@@ -227,10 +220,17 @@ export function registerRfpRequestRoutes(app: Express): void {
       return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} already has BidBoard project ${request.bidboardProjectId}; refusing to double-create` });
     }
 
-    if (inFlightOverrideTokens.has(request.token)) {
-      return res.status(202).json({ success: true, queued: true, message: "Override approval already in progress." });
+    // Durable, cross-instance claim: atomically transition declined → override_approving before
+    // queueing the Playwright work (the create has no server-side dedup). A concurrent override or a
+    // second app instance loses this race and gets 409. The claim also deletes any stale callback row.
+    const claimed = await storage.claimDeclinedRfpForOverride(id);
+    if (!claimed) {
+      return res.status(409).json({
+        success: false,
+        error: "Conflict",
+        message: `RFP request ${id} could not be claimed for override (already in progress or no longer declined)`,
+      });
     }
-    inFlightOverrideTokens.add(request.token);
 
     res.status(202).json({
       success: true,
@@ -240,14 +240,19 @@ export function registerRfpRequestRoutes(app: Express): void {
 
     setImmediate(async () => {
       try {
-        const result = await processRfpApproval(request.token, {}, approverEmail, { force: true });
+        const result = await processRfpApproval(claimed.token, {}, approverEmail, { force: true });
         if (!result.success) {
           console.error(`[rfp-requests] Override approval failed for request ${id}: ${result.error || "unknown error"}`);
         }
       } catch (err: any) {
         console.error(`[rfp-requests] Override approval error for request ${id}:`, err?.message || err);
       } finally {
-        inFlightOverrideTokens.delete(request.token);
+        // Release a still-claimed row back to 'declined' (re-tryable). No-op once processRfpApproval
+        // reached a terminal state (approved / cancelled), so it never clobbers the real outcome —
+        // it only rescues a claim left stuck by an unexpected error.
+        await storage.releaseOverrideClaim(id).catch((releaseErr: any) =>
+          console.error(`[rfp-requests] Failed to release override claim for request ${id}:`, releaseErr?.message || releaseErr),
+        );
       }
     });
   }));

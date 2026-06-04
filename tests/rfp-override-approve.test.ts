@@ -14,39 +14,45 @@ const auditRows = vi.hoisted(() => [] as any[]);
 const sendEmailMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "BB-123" })));
 
-// Simulate the unique-per-request outbox: an upsert replaces the existing row for the request.
-const upsertCallbackRow = (row: any) => {
-  const idx = callbackRows.findIndex((r) => r.rfpApprovalRequestId === row.rfpApprovalRequestId);
-  if (idx >= 0) callbackRows[idx] = row;
-  else callbackRows.push(row);
-};
-
 vi.mock("../server/db.ts", () => ({ db: { execute: vi.fn() } }));
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestByToken: vi.fn(async () => approvalRequest.current),
     getRfpApprovalRequestById: vi.fn(async () => approvalRequest.current),
+    // Atomic claim: declined + no project → override_approving, deleting any stale outbox row
+    // (mirrors the real transactional UPDATE...RETURNING + DELETE).
+    claimDeclinedRfpForOverride: vi.fn(async (id: number) => {
+      const r = approvalRequest.current;
+      if (r?.status === "declined" && !r?.bidboardProjectId) {
+        approvalRequest.current = { ...r, status: "override_approving" };
+        const idx = callbackRows.findIndex((row) => row.rfpApprovalRequestId === id);
+        if (idx >= 0) callbackRows.splice(idx, 1);
+        return approvalRequest.current;
+      }
+      return undefined;
+    }),
+    releaseOverrideClaim: vi.fn(async (_id: number) => {
+      if (approvalRequest.current?.status === "override_approving") {
+        approvalRequest.current = { ...approvalRequest.current, status: "declined" };
+      }
+    }),
     updateRfpApprovalRequest: vi.fn(async (_id: number, data: any) => {
       updateRows.push(data);
       approvalRequest.current = { ...approvalRequest.current, ...data };
       return approvalRequest.current;
     }),
-    approveRfpApprovalRequestWithOptionalCallback: vi.fn(async (_id: number, data: any, callback: any, opts?: any) => {
+    approveRfpApprovalRequestWithOptionalCallback: vi.fn(async (_id: number, data: any, callback: any) => {
       updateRows.push(data);
       approvalRequest.current = { ...approvalRequest.current, ...data };
-      if (callback) {
-        if (opts?.upsertCallback) upsertCallbackRow(callback);
-        else if (!callbackRows.some((row) => row.rfpApprovalRequestId === callback.rfpApprovalRequestId)) callbackRows.push(callback);
+      if (callback && !callbackRows.some((row) => row.rfpApprovalRequestId === callback.rfpApprovalRequestId)) {
+        callbackRows.push(callback);
       }
       return approvalRequest.current;
     }),
-    upsertBidboardCallback: vi.fn(async (row: any) => {
-      upsertCallbackRow(row);
-      return { id: callbackRows.length, ...row };
-    }),
+    // onConflictDoNothing semantics: don't insert if a row already exists for the request.
     enqueueBidboardCallback: vi.fn(async (row: any) => {
-      callbackRows.push(row);
+      if (!callbackRows.some((r) => r.rfpApprovalRequestId === row.rfpApprovalRequestId)) callbackRows.push(row);
       return { id: callbackRows.length, ...row };
     }),
     getAutomationConfig: vi.fn(async (key: string) => {
@@ -135,8 +141,11 @@ describe("processRfpApproval — override (force) path", () => {
 
     expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-777" });
     expect(createBidBoardMock).toHaveBeenCalledTimes(1);
-    // Named accountability: the reviewer's real email is recorded as the approver.
+    // Named accountability: the reviewer's real email is recorded as the approver, and the prior
+    // decline is cleared (no approved + rejected decision for the same request).
     expect(approvalRequest.current).toMatchObject({ status: "approved", approvedBy: "ashaw@trockgc.com", bidboardProjectId: "BB-777" });
+    expect(approvalRequest.current.declinedBy).toBeNull();
+    expect(approvalRequest.current.declinedAt).toBeNull();
     expect(callbackRows).toHaveLength(1);
     expect(callbackRows[0].targetUrl).toBe("https://crm.example.com/api/internal/bid-board-created");
     expect(callbackRows[0].payload).toMatchObject({ status: "created", bidboardProjectId: "BB-777", rfpApprovalRequestId: 77, sourceDealId: "crm-deal-1" });
@@ -170,20 +179,35 @@ describe("processRfpApproval — override (force) path", () => {
     expect(callbackRows[0].payload.bidboardProjectId).toBeUndefined();
   });
 
-  it("a retry after a failure supersedes the prior 'failed' callback with a 'created' one", async () => {
-    const { processRfpApproval } = await import("../server/rfp-approval.ts");
+  it("end-to-end via the route: a failed override then a successful retry ends with a single 'created' callback (claim supersedes the stale 'failed')", async () => {
+    // Real route → real processRfpApproval (storage/playwright mocked). The route's atomic claim
+    // deletes the stale 'failed' outbox row at the start of the retry, so the success enqueues a
+    // fresh 'created' — proving the supersede now happens via the claim, not an in-place upsert.
+    const { registerRfpRequestRoutes } = await import("../server/routes/rfp-requests.ts");
+    const app = express();
+    registerRfpRequestRoutes(app);
+    const server = app.listen(0);
+    try {
+      await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+      const port = (server.address() as any).port;
 
-    createBidBoardMock.mockResolvedValueOnce({ success: false, error: "transient" });
-    await processRfpApproval("token-1", {}, "ashaw@trockgc.com", { force: true });
-    expect(callbackRows).toHaveLength(1);
-    expect(callbackRows[0].payload.status).toBe("failed");
+      // Attempt 1 — Playwright fails → 'failed' callback, request released back to 'declined'.
+      createBidBoardMock.mockResolvedValueOnce({ success: false, error: "transient" });
+      await postOverrideViaRoute(port);
+      await vi.waitFor(() => expect(callbackRows).toHaveLength(1));
+      expect(callbackRows[0].payload.status).toBe("failed");
+      await vi.waitFor(() => expect(approvalRequest.current.status).toBe("declined"));
 
-    createBidBoardMock.mockResolvedValueOnce({ success: true, projectId: "BB-999" });
-    await processRfpApproval("token-1", {}, "ashaw@trockgc.com", { force: true });
+      // Attempt 2 — Playwright succeeds → claim deletes the 'failed' row, 'created' enqueued.
+      createBidBoardMock.mockResolvedValueOnce({ success: true, projectId: "BB-999" });
+      await postOverrideViaRoute(port);
+      await vi.waitFor(() => expect(approvalRequest.current.status).toBe("approved"));
 
-    // The unique-per-request outbox row is replaced, not duplicated.
-    expect(callbackRows).toHaveLength(1);
-    expect(callbackRows[0].payload).toMatchObject({ status: "created", bidboardProjectId: "BB-999" });
+      expect(callbackRows).toHaveLength(1);
+      expect(callbackRows[0].payload).toMatchObject({ status: "created", bidboardProjectId: "BB-999" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("end-to-end: a signed override request drives the REAL processRfpApproval and enqueues a 'created' callback", async () => {
@@ -197,31 +221,7 @@ describe("processRfpApproval — override (force) path", () => {
     try {
       await new Promise<void>((resolve) => server.once("listening", () => resolve()));
       const port = (server.address() as any).port;
-      const raw = JSON.stringify({ approverEmail: "ashaw@trockgc.com" });
-      const sig = `sha256=${crypto.createHmac("sha256", process.env.RFP_REQUEST_SYNC_SECRET!).update(raw).digest("hex")}`;
-      // Use the http module (not fetch) — global fetch is stubbed for the eligibility check.
-      const status = await new Promise<number>((resolve, reject) => {
-        const req = http.request(
-          {
-            hostname: "127.0.0.1",
-            port,
-            path: "/api/rfp-requests/77/override-approve",
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              "content-length": Buffer.byteLength(raw),
-              "x-rfp-request-signature": sig,
-            },
-          },
-          (res) => {
-            res.resume();
-            res.on("end", () => resolve(res.statusCode!));
-          },
-        );
-        req.on("error", reject);
-        req.write(raw);
-        req.end();
-      });
+      const status = await postOverrideViaRoute(port);
 
       expect(status).toBe(202);
       await vi.waitFor(() => expect(callbackRows).toHaveLength(1));
@@ -232,3 +232,31 @@ describe("processRfpApproval — override (force) path", () => {
     }
   });
 });
+
+// POST a signed override request via the http module (global fetch is stubbed for the eligibility check).
+function postOverrideViaRoute(port: number): Promise<number> {
+  const raw = JSON.stringify({ approverEmail: "ashaw@trockgc.com" });
+  const sig = `sha256=${crypto.createHmac("sha256", process.env.RFP_REQUEST_SYNC_SECRET!).update(raw).digest("hex")}`;
+  return new Promise<number>((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/api/rfp-requests/77/override-approve",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(raw),
+          "x-rfp-request-signature": sig,
+        },
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode!));
+      },
+    );
+    req.on("error", reject);
+    req.write(raw);
+    req.end();
+  });
+}

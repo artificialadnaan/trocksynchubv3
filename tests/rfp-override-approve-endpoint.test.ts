@@ -6,11 +6,25 @@ import crypto from "crypto";
 // Mirrors the HMAC harness in tests/rfp-requests-endpoint.test.ts; mocks storage + rfp-approval.
 
 const requestFixture = vi.hoisted(() => ({ current: undefined as any }));
+const claimState = vi.hoisted(() => ({ claimed: false }));
 const processRfpApprovalMock = vi.hoisted(() => vi.fn(async () => ({ success: true, bidboardProjectId: "BB-1" })));
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestById: vi.fn(async (_id: number) => requestFixture.current),
+    // Atomic claim: succeeds exactly once for a claimable (declined, no project) request; a concurrent
+    // caller gets undefined → 409 (mirrors the real conditional UPDATE...RETURNING).
+    claimDeclinedRfpForOverride: vi.fn(async (_id: number) => {
+      const r = requestFixture.current;
+      if (!claimState.claimed && r?.status === "declined" && !r?.bidboardProjectId) {
+        claimState.claimed = true;
+        return { ...r, status: "override_approving" };
+      }
+      return undefined;
+    }),
+    releaseOverrideClaim: vi.fn(async (_id: number) => {
+      claimState.claimed = false;
+    }),
   },
 }));
 
@@ -73,6 +87,7 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
     processRfpApprovalMock.mockClear();
     processRfpApprovalMock.mockResolvedValue({ success: true, bidboardProjectId: "BB-1" });
     requestFixture.current = declinedRequest();
+    claimState.claimed = false;
     process.env.RFP_REQUEST_SYNC_SECRET = "test-secret";
   });
 
@@ -154,11 +169,12 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
     });
   });
 
-  it("the in-flight guard prevents a concurrent override from double-invoking approval (no double-create)", async () => {
-    // Hold the background approval open so the in-flight token stays set across both requests.
+  it("the atomic claim rejects a concurrent override with 409 (no double-create)", async () => {
+    // Hold the winner's background approval open so its claim stays held across both requests
+    // (in production the Playwright run takes minutes; the loser must see the claim still held).
     let release!: () => void;
-    const gate = new Promise<{ success: boolean; bidboardProjectId: string }>((resolve) => {
-      release = () => resolve({ success: true, bidboardProjectId: "BB-1" });
+    const gate = new Promise<{ success: boolean }>((resolve) => {
+      release = () => resolve({ success: true });
     });
     processRfpApprovalMock.mockReturnValue(gate as any);
 
@@ -167,11 +183,19 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
         postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" }),
         postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" }),
       ]);
-      expect(a.status).toBe(202);
-      expect(b.status).toBe(202);
-      // Exactly one of the two concurrent requests kicked off the Playwright creation.
+      // Exactly one wins the claim (202); the other loses it (409). Only one Playwright creation runs.
+      expect([a.status, b.status].sort()).toEqual([202, 409]);
       await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
       release();
+    });
+  });
+
+  it("a failed claim (lost race / no longer declined) returns 409 without invoking approval", async () => {
+    claimState.claimed = true; // someone else already claimed it
+    await withServer(async (baseUrl) => {
+      const res = await postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" });
+      expect(res.status).toBe(409);
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
     });
   });
 });

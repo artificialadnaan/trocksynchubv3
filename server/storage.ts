@@ -90,7 +90,7 @@ import {
   bidboardAutomationLogs, type BidboardAutomationLog,
   manualReviewQueue, type ManualReviewQueue, type InsertManualReviewQueue,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
-  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
+  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest, RFP_OVERRIDE_APPROVING_STATUS,
   rfpApprovalEdits, type RfpApprovalEdit, type InsertRfpApprovalEdit,
   bidboardCallbackOutbox, type BidboardCallbackOutbox, type InsertBidboardCallbackOutbox,
   rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
@@ -388,12 +388,12 @@ export interface IStorage {
   getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
   getRfpApproverConfigs(projectType: string, sourceSystem: SourceSystem): Promise<RfpApproverConfig[]>;
   enqueueBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox>;
-  upsertBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox>;
+  claimDeclinedRfpForOverride(id: number): Promise<RfpApprovalRequest | undefined>;
+  releaseOverrideClaim(id: number): Promise<void>;
   approveRfpApprovalRequestWithOptionalCallback(
     id: number,
     approvalData: Partial<InsertRfpApprovalRequest>,
     callbackData?: InsertBidboardCallbackOutbox | null,
-    opts?: { upsertCallback?: boolean },
   ): Promise<RfpApprovalRequest | undefined>;
   declineRfpApprovalRequestWithOptionalCallback(
     id: number,
@@ -1931,37 +1931,45 @@ export class DatabaseStorage implements IStorage {
     return existing;
   }
 
-  // Replace any existing outbox row for this RFP request and reset its delivery state to
-  // pending. Used by the override-approve path so a fresh 'created'/'failed' callback supersedes
-  // a stale one from a prior attempt (the outbox is unique per rfp_approval_request_id).
-  async upsertBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox> {
-    const [result] = await db.insert(bidboardCallbackOutbox)
-      .values(data)
-      .onConflictDoUpdate({
-        target: bidboardCallbackOutbox.rfpApprovalRequestId,
-        set: {
-          sourceSystem: data.sourceSystem,
-          sourceDealId: data.sourceDealId,
-          payload: data.payload,
-          targetUrl: data.targetUrl,
-          status: "pending",
-          attemptCount: 0,
-          maxAttempts: data.maxAttempts ?? 5,
-          lastError: null,
-          lastAttemptAt: null,
-          nextAttemptAt: data.nextAttemptAt ?? new Date(),
-          sentAt: null,
-        },
-      })
-      .returning();
-    return result;
+  // Atomically claim a declined RFP for override-approval: transition declined → override_approving
+  // in a single conditional UPDATE so a concurrent override (or a second app instance) loses the race
+  // and is rejected. Returns the claimed row, or undefined if it was not in a claimable state. In the
+  // same transaction it deletes any stale callback-outbox row for the request, so a fresh
+  // 'created'/'failed' callback is enqueued cleanly and a worker mid-delivering a prior row cannot
+  // mark a replaced row as sent (the old row's id simply no longer exists).
+  async claimDeclinedRfpForOverride(id: number): Promise<RfpApprovalRequest | undefined> {
+    return db.transaction(async (tx) => {
+      const [claimed] = await tx.update(rfpApprovalRequests)
+        .set({ status: RFP_OVERRIDE_APPROVING_STATUS })
+        .where(and(
+          eq(rfpApprovalRequests.id, id),
+          eq(rfpApprovalRequests.status, "declined"),
+          isNull(rfpApprovalRequests.bidboardProjectId),
+        ))
+        .returning();
+      if (!claimed) return undefined;
+      await tx.delete(bidboardCallbackOutbox)
+        .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, id));
+      return claimed;
+    });
+  }
+
+  // Release a stuck override claim back to 'declined' (re-tryable). Conditional on the row still being
+  // in the transitional state, so it never clobbers a terminal 'approved' / 'cancelled_source_ineligible'
+  // outcome that processRfpApproval already wrote.
+  async releaseOverrideClaim(id: number): Promise<void> {
+    await db.update(rfpApprovalRequests)
+      .set({ status: "declined" })
+      .where(and(
+        eq(rfpApprovalRequests.id, id),
+        eq(rfpApprovalRequests.status, RFP_OVERRIDE_APPROVING_STATUS),
+      ));
   }
 
   async approveRfpApprovalRequestWithOptionalCallback(
     id: number,
     approvalData: Partial<InsertRfpApprovalRequest>,
     callbackData?: InsertBidboardCallbackOutbox | null,
-    opts?: { upsertCallback?: boolean },
   ): Promise<RfpApprovalRequest | undefined> {
     return db.transaction(async (tx) => {
       const [updated] = await tx.update(rfpApprovalRequests)
@@ -1969,27 +1977,9 @@ export class DatabaseStorage implements IStorage {
         .where(eq(rfpApprovalRequests.id, id))
         .returning();
       if (callbackData) {
-        const insert = tx.insert(bidboardCallbackOutbox).values(callbackData);
-        if (opts?.upsertCallback) {
-          await insert.onConflictDoUpdate({
-            target: bidboardCallbackOutbox.rfpApprovalRequestId,
-            set: {
-              sourceSystem: callbackData.sourceSystem,
-              sourceDealId: callbackData.sourceDealId,
-              payload: callbackData.payload,
-              targetUrl: callbackData.targetUrl,
-              status: "pending",
-              attemptCount: 0,
-              maxAttempts: callbackData.maxAttempts ?? 5,
-              lastError: null,
-              lastAttemptAt: null,
-              nextAttemptAt: callbackData.nextAttemptAt ?? new Date(),
-              sentAt: null,
-            },
-          });
-        } else {
-          await insert.onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });
-        }
+        await tx.insert(bidboardCallbackOutbox)
+          .values(callbackData)
+          .onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });
       }
       return updated;
     });

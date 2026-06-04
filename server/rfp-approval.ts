@@ -1499,17 +1499,19 @@ export async function processRfpApproval(
 
     if (bidboardFailed && force && !bidboardProjectId) {
       // OVERRIDE path: the authoritative Playwright creation failed and no project was created.
-      // Do NOT mark the request approved — leave it in its current (declined) state so a reviewer
-      // can retry — and notify the CRM with a 'failed' callback through the same outbox + worker.
+      // Do NOT mark the request approved — leave it claimed; the route's finally releases it back to
+      // 'declined' so a reviewer can retry — and notify the CRM with a 'failed' callback through the
+      // same outbox + worker. The route's claim already deleted any stale outbox row for this request,
+      // so a plain enqueue lands cleanly (no in-place row replacement).
       const failureCallbackData = await buildBidBoardFailedCallbackData({
         request,
         sourceDealId,
         projectNumber: finalProjectNumber,
         error: bidboardError,
       });
-      const upsertCallback = (storage as any).upsertBidboardCallback;
-      if (failureCallbackData && typeof upsertCallback === 'function') {
-        await upsertCallback.call(storage, failureCallbackData);
+      const enqueueCallback = (storage as any).enqueueBidboardCallback;
+      if (failureCallbackData && typeof enqueueCallback === 'function') {
+        await enqueueCallback.call(storage, failureCallbackData);
       }
 
       await storage.createAuditLog({
@@ -1594,6 +1596,9 @@ export async function processRfpApproval(
       approvedBy: approverEmail,
       approvedAt: new Date(),
       bidboardProjectId: bidboardProjectId || null,
+      // Override-approve clears the prior decline so reporting can't show both an approved and a
+      // rejected decision for the same request (the route's claim deleted any stale callback row).
+      ...(force ? { declinedBy: null, declinedAt: null } : {}),
     };
     const callbackData = await buildBidBoardCreatedCallbackData({
       request,
@@ -1603,14 +1608,11 @@ export async function processRfpApproval(
     });
     const approveWithCallback = (storage as any).approveRfpApprovalRequestWithOptionalCallback;
     if (typeof approveWithCallback === 'function') {
-      // On the override path, upsert the callback so a fresh 'created' supersedes any stale
-      // 'failed' callback row left by a prior failed attempt (the outbox is unique per request).
-      await approveWithCallback.call(storage, request.id, approvalData, callbackData, { upsertCallback: force });
+      await approveWithCallback.call(storage, request.id, approvalData, callbackData);
     } else {
       await storage.updateRfpApprovalRequest(request.id, approvalData);
-      if (callbackData) {
-        const enqueue = force ? (storage as any).upsertBidboardCallback : (storage as any).enqueueBidboardCallback;
-        if (typeof enqueue === 'function') await enqueue.call(storage, callbackData);
+      if (callbackData && typeof (storage as any).enqueueBidboardCallback === 'function') {
+        await (storage as any).enqueueBidboardCallback(callbackData);
       }
     }
 
