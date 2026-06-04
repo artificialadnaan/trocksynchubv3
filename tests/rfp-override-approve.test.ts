@@ -174,6 +174,20 @@ describe("processRfpApproval — override (force) path", () => {
     expect(callbackRows[0].payload.bidboardProjectId).toBeUndefined();
   });
 
+  it("a THROWN (indeterminate) Playwright error does NOT restore/retry and emits NO callback (a project may exist)", async () => {
+    // createBidBoardProjectFromDeal does post-create work; a throw may arrive AFTER a project was
+    // created, so the state is unknown — leave the request claimed and emit no callback (manual resolution).
+    createBidBoardMock.mockRejectedValue(new Error("playwright crashed mid-create"));
+    const { processRfpApproval } = await import("../server/rfp-approval.ts");
+
+    const result = await processRfpApproval("token-1", {}, "ashaw@trockgc.com", { force: true });
+
+    expect(result.success).toBe(false);
+    expect(callbackRows).toHaveLength(0); // no 'failed' (a project may exist) and no 'created'
+    // No restore-to-declined and no flip-to-approved: the claim is left as-is for manual resolution.
+    expect(updateRows.some((row) => row.status === "approved" || row.status === "declined")).toBe(false);
+  });
+
   it("end-to-end via the route: a failed override then a successful retry ends with a single 'created' callback (claim supersedes the stale 'failed')", async () => {
     // Real route → real processRfpApproval (storage/playwright mocked). The route's atomic claim
     // deletes the stale 'failed' outbox row at the start of the retry, so the success enqueues a

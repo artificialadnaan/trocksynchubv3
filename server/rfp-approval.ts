@@ -1135,6 +1135,14 @@ export async function createRfpApprovalRequestFromNormalizedInput(
       return buildConflictResult('pending_collision', input.deal.projectNumber, overrideConflict);
     }
 
+    // Also guard by source deal: a re-bid carrying a REVISED project number would slip past the
+    // project-number check above, and the DB source-deal uniqueness is partial to status='pending',
+    // so it doesn't cover an in-flight override. Block it explicitly.
+    const overrideSourceConflict = await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS);
+    if (overrideSourceConflict) {
+      return buildSourceDealPendingConflictResult(input.sourceSystem, input.sourceDealId, overrideSourceConflict);
+    }
+
     const token = randomUUID();
     const sourceDealUrl = await buildSourceDealUrl(input.sourceSystem, input.sourceDealId);
     const rawOwnerInfo = input.sourceSystem === 'hubspot'
@@ -1441,6 +1449,10 @@ export async function processRfpApproval(
     let bidboardProjectId: string | undefined;
     let bidboardFailed = false;
     let bidboardError: string | undefined;
+    // True only when Playwright explicitly reported no project ({ success:false }); a CAUGHT exception
+    // leaves this false, because createBidBoardProjectFromDeal does post-create work and a throw may
+    // arrive AFTER a project was already created (indeterminate — must not be retried).
+    let bidboardExplicitNoProject = false;
     try {
       const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
       const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
@@ -1488,11 +1500,12 @@ export async function processRfpApproval(
         }
       } else {
         bidboardFailed = true;
+        bidboardExplicitNoProject = true; // Playwright explicitly reported no project was created.
         bidboardError = bbResult.error;
         console.error(`[rfp-approval] Source updated successfully but BidBoard creation failed for deal ${sourceDealId}: ${bbResult.error}`);
       }
     } catch (bbErr: any) {
-      bidboardFailed = true;
+      bidboardFailed = true; // NOTE: leave bidboardExplicitNoProject false — the throw may have come AFTER a create.
       bidboardError = bbErr?.message;
       console.error(`[rfp-approval] BidBoard creation error for deal ${sourceDealId}:`, bbErr.message);
     } finally {
@@ -1506,16 +1519,24 @@ export async function processRfpApproval(
       }
     }
 
-    if (bidboardFailed && force && !bidboardProjectId) {
-      // OVERRIDE path: the authoritative Playwright creation KNOWN-failed with no project created.
-      // Restore the claim to 'declined' here (this branch is the only place we know for certain no
-      // project exists) so a reviewer can retry — and notify the CRM with a 'failed' callback through
-      // the same outbox + worker. An UNEXPECTED throw (where a project may have been created) instead
-      // falls to the outer catch and leaves the request claimed ('override_approving'), so a retry
-      // cannot create a second project. The route's claim already deleted any stale outbox row, so a
-      // plain enqueue lands cleanly (no in-place row replacement).
-      await storage.updateRfpApprovalRequest(request.id, { status: 'declined' });
+    if (bidboardFailed && force && !bidboardProjectId && !bidboardExplicitNoProject) {
+      // OVERRIDE path, INDETERMINATE: createBidBoardProjectFromDeal threw, and because it does
+      // post-create work, the throw may have arrived AFTER a project was created. We do NOT know the
+      // project state, so leave the request claimed ('override_approving') — a retry could otherwise
+      // create a second project — and emit no callback. Requires manual resolution (check Procore).
+      log(`[rfp-approval] Override-approve errored mid-create for deal ${sourceDealId}; left claimed (override_approving) for manual resolution: ${bidboardError || 'unknown error'}`, 'rfp');
+      return {
+        success: false,
+        error: bidboardError || 'BidBoard project creation errored during override approval; left claimed for manual resolution.',
+      };
+    }
 
+    if (bidboardFailed && force && !bidboardProjectId) {
+      // OVERRIDE path: the authoritative Playwright creation KNOWN-failed with no project created
+      // (explicit { success:false }). Notify the CRM with a 'failed' callback FIRST, then restore the
+      // claim to 'declined' so a reviewer can retry. Ordering matters: enqueuing the 'failed' row
+      // before the request becomes claimable again means a fast retry's claim will find and delete it,
+      // so the retry's 'created' callback can't be suppressed by the unique-per-request outbox.
       const failureCallbackData = await buildBidBoardFailedCallbackData({
         request,
         sourceDealId,
@@ -1526,6 +1547,8 @@ export async function processRfpApproval(
       if (failureCallbackData && typeof enqueueCallback === 'function') {
         await enqueueCallback.call(storage, failureCallbackData);
       }
+
+      await storage.updateRfpApprovalRequest(request.id, { status: 'declined' });
 
       await storage.createAuditLog({
         action: 'rfp_override_approval_failed',

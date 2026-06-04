@@ -380,6 +380,7 @@ export interface IStorage {
   getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestBySourceDealAndStatus(sourceSystem: SourceSystem, sourceDealId: string, status: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
   updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
@@ -1859,6 +1860,17 @@ export class DatabaseStorage implements IStorage {
         eq(rfpApprovalRequests.sourceSystem, sourceSystem),
         eq(rfpApprovalRequests.sourceDealId, sourceDealId),
         eq(rfpApprovalRequests.status, 'pending')
+      ))
+      .orderBy(desc(rfpApprovalRequests.createdAt));
+    return result;
+  }
+
+  async getRfpApprovalRequestBySourceDealAndStatus(sourceSystem: SourceSystem, sourceDealId: string, status: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests)
+      .where(and(
+        eq(rfpApprovalRequests.sourceSystem, sourceSystem),
+        eq(rfpApprovalRequests.sourceDealId, sourceDealId),
+        eq(rfpApprovalRequests.status, status)
       ))
       .orderBy(desc(rfpApprovalRequests.createdAt));
     return result;

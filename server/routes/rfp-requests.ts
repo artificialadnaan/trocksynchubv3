@@ -4,6 +4,7 @@ import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
 import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval, checkRfpApprovalSourceEligibility } from "../rfp-approval";
 import { storage } from "../storage";
+import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 
 const SIGNATURE_HEADER = "x-rfp-request-signature";
 const SECRET_MISSING_MESSAGE = "RFP_REQUEST_SYNC_SECRET not configured — POST /api/rfp-requests will reject all requests with 500";
@@ -212,6 +213,11 @@ export function registerRfpRequestRoutes(app: Express): void {
     // defense-in-depth that also prevents double-creating a Procore project — the create has no dedup.)
     if ((request.sourceSystem || "hubspot") !== "trock_crm") {
       return res.status(409).json({ success: false, error: "Conflict", message: "Override-approve is only supported for trock_crm RFP requests" });
+    }
+    // A duplicate override for a request already mid-flight is idempotently accepted (202 in-progress),
+    // not a conflict — the BidBoard creation is already queued/running.
+    if (request.status === RFP_OVERRIDE_APPROVING_STATUS) {
+      return res.status(202).json({ success: true, queued: true, message: `RFP request ${id} override approval is already in progress.` });
     }
     if (request.status !== "declined") {
       return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} is ${request.status}; override-approve requires a declined request` });

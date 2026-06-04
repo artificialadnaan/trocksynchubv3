@@ -200,6 +200,16 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
     });
   });
 
+  it("returns 202 (in-progress, not 409) for a duplicate override of a request already claimed", async () => {
+    requestFixture.current = declinedRequest({ status: "override_approving" });
+    await withServer(async (baseUrl) => {
+      const res = await postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" });
+      expect(res.status).toBe(202);
+      expect(res.body.message).toMatch(/already in progress/i);
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
   it("returns 409 synchronously when the source deal is no longer eligible (no silent background cancel)", async () => {
     eligibility.current = { eligible: false, reason: "Source CRM deal is no longer in Opportunity stage" };
     await withServer(async (baseUrl) => {
