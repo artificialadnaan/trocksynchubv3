@@ -35,6 +35,9 @@ vi.mock("../server/storage.ts", () => ({
     getRfpApprovalRequestBySourceDealId: vi.fn(async (sourceSystem: string, sourceDealId: string) =>
       rfpRows.find((row) => row.sourceSystem === sourceSystem && row.sourceDealId === sourceDealId)
     ),
+    getRfpApprovalRequestBySourceDealAndStatus: vi.fn(async (sourceSystem: string, sourceDealId: string, status: string) =>
+      rfpRows.find((row) => row.sourceSystem === sourceSystem && row.sourceDealId === sourceDealId && row.status === status)
+    ),
     getRfpApprovalRequestByProjectNumberAndStatus: vi.fn(async (projectNumber: string, status: string) => {
       if (projectNumber === "RACE-1" && status === "pending" && raceBypassPendingLookups.count > 0) {
         raceBypassPendingLookups.count -= 1;

@@ -999,8 +999,11 @@ export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
   bidboardProjectId: text("bidboard_project_id"),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
-  uniqueIndex("idx_rfp_approval_pending_source_deal").on(table.sourceSystem, table.sourceDealId).where(sql`status = 'pending'`),
-  uniqueIndex("idx_rfp_approval_pending_project_number").on(table.projectNumber).where(sql`status = 'pending' AND project_number IS NOT NULL AND project_number != ''`),
+  // Cover the transient 'override_approving' status too (migration 0021): an in-flight override claim
+  // must conflict with a concurrent re-bid 'pending' insert for the same source deal / project number,
+  // closing the duplicate-Procore-project window. See migrations/0021_*.sql.
+  uniqueIndex("idx_rfp_approval_pending_source_deal").on(table.sourceSystem, table.sourceDealId).where(sql`status IN ('pending', 'override_approving')`),
+  uniqueIndex("idx_rfp_approval_pending_project_number").on(table.projectNumber).where(sql`status IN ('pending', 'override_approving') AND project_number IS NOT NULL AND project_number != ''`),
   index("idx_rfp_approval_project_number").on(table.projectNumber),
 ]);
 export const insertRfpApprovalRequestSchema = createInsertSchema(rfpApprovalRequests).omit({ id: true, createdAt: true });
@@ -1008,6 +1011,14 @@ export type InsertRfpApprovalRequest = z.infer<typeof insertRfpApprovalRequestSc
 export type RfpApprovalRequest = typeof rfpApprovalRequests.$inferSelect;
 export const RFP_REQUEST_STATUSES = ['pending', 'approved', 'declined', 'cancelled_source_ineligible'] as const;
 export type RfpRequestStatus = typeof RFP_REQUEST_STATUSES[number];
+
+// Transient status while an override-approve is mid-flight (Playwright running). Atomically claimed
+// from 'declined' so it is NOT 'pending' (the email-approval route + the pending-only approval guard
+// reject it, preventing a second approval) yet IS treated as in-flight by createRfpApprovalRequest's
+// conflict checks (preventing a duplicate re-bid request). Resolves to 'approved' (success) or back
+// to 'declined' (known failure). An override orphaned by a crash stays here — a safe, indeterminate
+// state (a project may exist) that requires manual resolution rather than an unsafe auto-retry.
+export const RFP_OVERRIDE_APPROVING_STATUS = 'override_approving' as const;
 
 export const rfpApprovalEdits = pgTable("rfp_approval_edits", {
   id: serial("id").primaryKey(),

@@ -10,6 +10,7 @@ vi.mock("../server/storage.ts", () => ({
     getRfpApprovalRequestByDealId: vi.fn(async () => undefined),
     getRfpApprovalRequestBySourceEventId: vi.fn(async () => undefined),
     getRfpApprovalRequestByProjectNumberAndStatus: vi.fn(async () => undefined),
+    getRfpApprovalRequestBySourceDealAndStatus: vi.fn(async () => undefined),
     createRfpApprovalRequest: vi.fn(async (row: any) => {
       const inserted = { id: rfpRows.length + 1, createdAt: new Date(), ...row };
       rfpRows.push(inserted);

@@ -90,7 +90,7 @@ import {
   bidboardAutomationLogs, type BidboardAutomationLog,
   manualReviewQueue, type ManualReviewQueue, type InsertManualReviewQueue,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
-  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
+  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest, RFP_OVERRIDE_APPROVING_STATUS,
   rfpApprovalEdits, type RfpApprovalEdit, type InsertRfpApprovalEdit,
   bidboardCallbackOutbox, type BidboardCallbackOutbox, type InsertBidboardCallbackOutbox,
   rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
@@ -380,6 +380,7 @@ export interface IStorage {
   getRfpApprovalRequestByToken(token: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByDealId(dealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
+  getRfpApprovalRequestBySourceDealAndStatus(sourceSystem: SourceSystem, sourceDealId: string, status: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
   updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
@@ -388,6 +389,7 @@ export interface IStorage {
   getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
   getRfpApproverConfigs(projectType: string, sourceSystem: SourceSystem): Promise<RfpApproverConfig[]>;
   enqueueBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox>;
+  claimDeclinedRfpForOverride(id: number): Promise<RfpApprovalRequest | undefined>;
   approveRfpApprovalRequestWithOptionalCallback(
     id: number,
     approvalData: Partial<InsertRfpApprovalRequest>,
@@ -1863,6 +1865,17 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  async getRfpApprovalRequestBySourceDealAndStatus(sourceSystem: SourceSystem, sourceDealId: string, status: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests)
+      .where(and(
+        eq(rfpApprovalRequests.sourceSystem, sourceSystem),
+        eq(rfpApprovalRequests.sourceDealId, sourceDealId),
+        eq(rfpApprovalRequests.status, status)
+      ))
+      .orderBy(desc(rfpApprovalRequests.createdAt));
+    return result;
+  }
+
   async getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined> {
     const [result] = await db.select().from(rfpApprovalRequests)
       .where(and(
@@ -1927,6 +1940,41 @@ export class DatabaseStorage implements IStorage {
     const [existing] = await db.select().from(bidboardCallbackOutbox)
       .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, data.rfpApprovalRequestId));
     return existing;
+  }
+
+  // Atomically claim a declined RFP for override-approval: transition declined → override_approving
+  // in a single conditional UPDATE so a concurrent override (or a second app instance) loses the race
+  // and gets undefined → 409. The transitional status is deliberately NOT 'pending' (so the email
+  // route + pending-only approval guard reject it — no second approval can run) yet IS blocked by
+  // createRfpApprovalRequest's conflict checks (so a re-bid can't insert a duplicate request). In the
+  // same transaction it deletes any stale callback-outbox row for the request, so a fresh
+  // 'created'/'failed' callback is enqueued cleanly and a worker mid-delivering a prior row cannot
+  // mark a replaced row as sent (the old row's id simply no longer exists). On the failure path the
+  // request is restored to 'declined' by processRfpApproval; an orphaned claim (crash) stays
+  // override_approving — a safe, indeterminate state requiring manual resolution.
+  async claimDeclinedRfpForOverride(id: number): Promise<RfpApprovalRequest | undefined> {
+    try {
+      return await db.transaction(async (tx) => {
+        const [claimed] = await tx.update(rfpApprovalRequests)
+          .set({ status: RFP_OVERRIDE_APPROVING_STATUS })
+          .where(and(
+            eq(rfpApprovalRequests.id, id),
+            eq(rfpApprovalRequests.status, "declined"),
+            isNull(rfpApprovalRequests.bidboardProjectId),
+          ))
+          .returning();
+        if (!claimed) return undefined;
+        await tx.delete(bidboardCallbackOutbox)
+          .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, id));
+        return claimed;
+      });
+    } catch (error: any) {
+      // With migration 0021, the pending partial-unique indexes also cover 'override_approving', so
+      // claiming conflicts with a competing pending/override_approving request for the same source
+      // deal / project number — refuse the override rather than create a duplicate.
+      if (error?.code === "23505") return undefined;
+      throw error;
+    }
   }
 
   async approveRfpApprovalRequestWithOptionalCallback(

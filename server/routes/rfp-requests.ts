@@ -2,10 +2,16 @@ import crypto from "crypto";
 import express, { type Express, type Request } from "express";
 import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
-import { createRfpApprovalRequestFromNormalizedInput } from "../rfp-approval";
+import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval, checkRfpApprovalSourceEligibility } from "../rfp-approval";
+import { storage } from "../storage";
+import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 
 const SIGNATURE_HEADER = "x-rfp-request-signature";
 const SECRET_MISSING_MESSAGE = "RFP_REQUEST_SYNC_SECRET not configured — POST /api/rfp-requests will reject all requests with 500";
+
+const overrideApproveBodySchema = z.object({
+  approverEmail: z.string().trim().email(),
+});
 
 export const rfpRequestBodySchema = z.object({
   sourceSystem: z.enum(["hubspot", "trock_crm"]),
@@ -165,5 +171,130 @@ export function registerRfpRequestRoutes(app: Express): void {
     }
 
     return res.status(result.statusCode || 500).json(body);
+  }));
+
+  // Override-approve: when a CRM reviewer (e.g. Adam/Takashi) approves a previously-declined RFP,
+  // fire the REAL authoritative approval — the Playwright Bid Board project creation — so the deal
+  // links Procore and advances to estimating, exactly like a normal approval. HMAC-secured (no
+  // requireAuth), runs in the background (202), and on a Playwright failure leaves the request
+  // re-tryable (it is NOT marked approved) and emits a 'failed' callback to the CRM.
+  app.post("/api/rfp-requests/:id/override-approve", jsonWithRawBody, asyncHandler(async (req, res) => {
+    const signature = verifyRfpRequestSignature(req);
+    if (!signature.ok) {
+      const body = signature.status === 401
+        ? { success: false, error: "Unauthorized", message: signature.message }
+        : { success: false, error: "Internal Server Error", message: signature.message };
+      return res.status(signature.status).json(body);
+    }
+
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: "Bad Request", message: "Invalid RFP request id" });
+    }
+
+    const parsed = overrideApproveBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(422).json({
+        success: false,
+        error: "Unprocessable Entity",
+        message: "approverEmail is required and must be a valid email",
+        issues: parsed.error.issues,
+      });
+    }
+    const approverEmail = parsed.data.approverEmail.trim();
+
+    const request = await storage.getRfpApprovalRequestById(id);
+    if (!request) {
+      return res.status(404).json({ success: false, error: "Not Found", message: `RFP request ${id} not found` });
+    }
+
+    // Guards. Only a declined trock_crm request with no existing BidBoard project may be overridden.
+    // (status='declined' ⇒ bidboardProjectId IS NULL is an invariant; the bidboardProjectId check is
+    // defense-in-depth that also prevents double-creating a Procore project — the create has no dedup.)
+    if ((request.sourceSystem || "hubspot") !== "trock_crm") {
+      return res.status(409).json({ success: false, error: "Conflict", message: "Override-approve is only supported for trock_crm RFP requests" });
+    }
+    // A duplicate override for a request already mid-flight is idempotently accepted (202 in-progress),
+    // not a conflict — the BidBoard creation is already queued/running.
+    if (request.status === RFP_OVERRIDE_APPROVING_STATUS) {
+      return res.status(202).json({ success: true, queued: true, message: `RFP request ${id} override approval is already in progress.` });
+    }
+    if (request.status !== "declined") {
+      return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} is ${request.status}; override-approve requires a declined request` });
+    }
+    if (request.bidboardProjectId) {
+      return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} already has BidBoard project ${request.bidboardProjectId}; refusing to double-create` });
+    }
+    // A re-bid may have created a NEWER request for the same project number that is already approved
+    // (with its own BidBoard project). This stale declined row has no bidboardProjectId of its own, so
+    // overriding it would create a SECOND project for that project number — mirror createRfpApprovalRequest's
+    // approved_collision and refuse.
+    if (request.projectNumber) {
+      const approvedSibling = await storage.getRfpApprovalRequestByProjectNumberAndStatus(request.projectNumber, "approved");
+      if (approvedSibling && approvedSibling.id !== request.id) {
+        return res.status(409).json({
+          success: false,
+          error: "Conflict",
+          message: `Project ${request.projectNumber} already has an approved RFP (request ${approvedSibling.id}); refusing to double-create`,
+        });
+      }
+    }
+
+    // Durable, cross-instance claim FIRST — before the awaited eligibility call — so a re-bid webhook
+    // can't slip in during the check while the row is still 'declined'. Atomically transition declined
+    // → override_approving (NOT 'pending', so the email route can't also approve it; createRfpApproval's
+    // conflict checks DO block it, so a re-bid can't insert a duplicate). A concurrent override or a
+    // second app instance loses this race and gets 409; the claim also deletes any stale callback row.
+    const claimed = await storage.claimDeclinedRfpForOverride(id);
+    if (!claimed) {
+      // Lost the claim race. If the winner is already mid-flight (override_approving), this is an
+      // idempotent duplicate → 202 in-progress, not a conflict. Otherwise the row is no longer
+      // claimable (e.g. concurrently approved/resolved) → 409.
+      const current = await storage.getRfpApprovalRequestById(id);
+      if (current?.status === RFP_OVERRIDE_APPROVING_STATUS) {
+        return res.status(202).json({ success: true, queued: true, message: `RFP request ${id} override approval is already in progress.` });
+      }
+      return res.status(409).json({
+        success: false,
+        error: "Conflict",
+        message: `RFP request ${id} could not be claimed for override (already in progress or no longer declined)`,
+      });
+    }
+
+    // Now check source eligibility (like the email-approval route) so an ineligible deal gets a
+    // terminal 409 rather than a 202 + silent background cancel. Release the claim back to 'declined'
+    // on rejection — this is safe (no Playwright has run yet, so no project can exist). Fail-open on a
+    // CRM lookup error (eligibility.checkFailed).
+    const eligibility = await checkRfpApprovalSourceEligibility(claimed);
+    if (!eligibility.eligible) {
+      await storage.updateRfpApprovalRequest(id, { status: "declined" });
+      return res.status(409).json({
+        success: false,
+        error: "Conflict",
+        message: eligibility.reason || `RFP request ${id} source deal is no longer eligible`,
+      });
+    }
+
+    res.status(202).json({
+      success: true,
+      queued: true,
+      message: "Override approval queued; BidBoard project creation will run in the background.",
+    });
+
+    // No blanket claim-release here: a release that fires after the Playwright job already created a
+    // project (but a later step threw before persisting it) would wrongly re-open the request for a
+    // retry and create a SECOND project. Instead processRfpApproval restores 'declined' only in the
+    // branch where it KNOWS no project was created; an unexpected mid-create error leaves the request
+    // claimed ('override_approving') — a safe, indeterminate state needing manual resolution.
+    setImmediate(async () => {
+      try {
+        const result = await processRfpApproval(claimed.token, {}, approverEmail, { force: true });
+        if (!result.success) {
+          console.error(`[rfp-requests] Override approval failed for request ${id}: ${result.error || "unknown error"}`);
+        }
+      } catch (err: any) {
+        console.error(`[rfp-requests] Override approval error for request ${id}:`, err?.message || err);
+      }
+    });
   }));
 }
