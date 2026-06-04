@@ -398,15 +398,18 @@ async function findSyncMappingForRow(row: BidBoardExcelRow): Promise<{
     }
   }
 
-  // Fallback: Name + Customer Name — search sync_mappings first
+  // Fallback: Name + Customer Name — search sync_mappings first.
+  // Fail closed: this name-only match can't disambiguate two projects that share a name, so only
+  // accept it when EXACTLY ONE mapping matches. Ambiguous (2+) matches fall through to manual
+  // review rather than risk firing portfolio automation against the wrong bidboardProjectId.
   const key = compositeKey(name, customerName);
   if (key && key !== "|||") {
     const all = await storage.getSyncMappings();
-    const match = all.find((m) => {
+    const matches = all.filter((m) => {
       const n = normalizeKey(m.procoreProjectName || m.bidboardProjectName || m.hubspotDealName);
-      const mk = compositeKey(n || (m.hubspotDealName || ""), "");
-      return (n && normalizeKey(name) === n) || mk === key;
+      return Boolean(n && normalizeKey(name) === n);
     });
+    const match = matches.length === 1 ? matches[0] : null;
     if (hasUsableIdentity(match)) {
       return {
         mapping: {
@@ -709,6 +712,21 @@ export async function syncStagesToHubSpot(
     });
     const normalizedStage = resolvedMapping?.normalizedStage ?? normalizeStageLabel(change.newStage);
     if (!resolvedMapping) {
+      // A Bid Board-only change (no HubSpot deal) at a stage with no mapping has no HubSpot write
+      // and no determinable portfolio trigger — advance local state so the edge-triggered diff
+      // doesn't reprocess it every cycle, mirroring the no-identity path in diffBidBoardStages.
+      if (!change.hubspotDealId) {
+        await storage.upsertBidboardSyncState({
+          projectId: getProjectIdFromChange(change),
+          projectName: change.projectName,
+          currentStage: change.newStage,
+        });
+        log(
+          `[sync] Bid Board-only "${change.projectName}" → "${change.newStage}" has no stage mapping — advancing state without a portfolio trigger`,
+          "sync"
+        );
+        continue;
+      }
       result.failed++;
       result.errors.push(
         `No BidBoard stage mapping for "${change.newStage}" (${change.projectName})`
@@ -761,7 +779,7 @@ export async function syncStagesToHubSpot(
     const hubspotDealId = change.hubspotDealId;
 
     const resolved = await resolveHubspotStageId(label);
-    if (!resolved) {
+    if (!resolved && !modeConfig.suppressHubSpotWrites) {
       result.failed++;
       result.errors.push(
         `No HubSpot stage for "${change.newStage}" (${change.projectName})`
@@ -769,6 +787,10 @@ export async function syncStagesToHubSpot(
       log(`Stage sync skip: no mapping for "${change.newStage}"`, "sync");
       continue;
     }
+    // Under the kill-switch we never push to HubSpot, so a missing stage id is non-fatal —
+    // fall back to the resolved Bid Board label for audit logging. (resolved is guaranteed
+    // present on the real-write path below, which is only reached when writes are NOT suppressed.)
+    const hubspotStageName = resolved?.stageName ?? label;
 
     if (options?.dryRun) {
       log(
@@ -846,7 +868,7 @@ export async function syncStagesToHubSpot(
         action: "bidboard_stage_sync:suppressed_hubspot_write",
         change,
         wouldHaveAction: "hubspot_stage_update",
-        targetValue: resolved.stageName,
+        targetValue: hubspotStageName,
         mappingSource,
         modeConfig,
       });
@@ -864,7 +886,7 @@ export async function syncStagesToHubSpot(
           hubspotDealId: change.hubspotDealId,
           previousStage: change.previousStage,
           newStage: change.newStage,
-          hubspotStage: resolved.stageName,
+          hubspotStage: hubspotStageName,
           totalSales: change.totalSales,
           mode: modeConfig.mode,
           suppressed: true,
@@ -909,7 +931,7 @@ export async function syncStagesToHubSpot(
 
     const updateResult = await updateHubSpotDealStage(
       change.hubspotDealId,
-      resolved.stageId
+      resolved!.stageId
     );
 
     if (updateResult.success) {
@@ -963,7 +985,7 @@ export async function syncStagesToHubSpot(
         });
       }
       log(
-        `Stage synced: ${change.projectName} → ${change.newStage} (HubSpot: ${resolved.stageName})`,
+        `Stage synced: ${change.projectName} → ${change.newStage} (HubSpot: ${hubspotStageName})`,
         "sync"
       );
 
@@ -975,7 +997,7 @@ export async function syncStagesToHubSpot(
           hubspotDealId: change.hubspotDealId,
           previousStage: change.previousStage,
           newStage: change.newStage,
-          hubspotStage: resolved.stageName,
+          hubspotStage: hubspotStageName,
           totalSales: change.totalSales,
           ...(modeConfig.canaryRunId ? { canaryRunId: modeConfig.canaryRunId } : {}),
         },

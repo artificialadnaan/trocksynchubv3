@@ -28,6 +28,10 @@ export const BIDBOARD_TO_HUBSPOT_STAGE: Record<string, string> = {
   "Estimate Sent to Client": "Proposal Sent",
   "Service - Sent to Production": "Service – Won",
   "Sent to Production": "Closed Won",
+  // Current live Bid Board label (renamed from "Sent to Production"). Needed so the hardcoded
+  // fallback can resolve "Won" — and fire its portfolio trigger — even when the DB seed lacks
+  // the "Won" stage_mappings row. Mirrors isFallbackPortfolioTrigger("Won").
+  "Won": "Closed Won",
   "Service - Lost": "Service – Lost",
   "Production Lost": "Closed Lost",
 };
