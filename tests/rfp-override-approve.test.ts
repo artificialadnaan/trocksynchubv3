@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import express from "express";
+import crypto from "crypto";
+import http from "http";
 
 // CORE behavior of the override-approve path: processRfpApproval(token, {}, email, { force: true }).
 // Mirrors tests/bidboard-callback-outbox.test.ts (real processRfpApproval + full mocks), adding
@@ -181,5 +184,51 @@ describe("processRfpApproval — override (force) path", () => {
     // The unique-per-request outbox row is replaced, not duplicated.
     expect(callbackRows).toHaveLength(1);
     expect(callbackRows[0].payload).toMatchObject({ status: "created", bidboardProjectId: "BB-999" });
+  });
+
+  it("end-to-end: a signed override request drives the REAL processRfpApproval and enqueues a 'created' callback", async () => {
+    // Wire the real HTTP route to the real processRfpApproval (only storage/playwright are mocked),
+    // proving the route → core → 'created' callback path the endpoint test (which stubs the core) cannot.
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "BB-INT" });
+    const { registerRfpRequestRoutes } = await import("../server/routes/rfp-requests.ts");
+    const app = express();
+    registerRfpRequestRoutes(app);
+    const server = app.listen(0);
+    try {
+      await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+      const port = (server.address() as any).port;
+      const raw = JSON.stringify({ approverEmail: "ashaw@trockgc.com" });
+      const sig = `sha256=${crypto.createHmac("sha256", process.env.RFP_REQUEST_SYNC_SECRET!).update(raw).digest("hex")}`;
+      // Use the http module (not fetch) — global fetch is stubbed for the eligibility check.
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port,
+            path: "/api/rfp-requests/77/override-approve",
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(raw),
+              "x-rfp-request-signature": sig,
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode!));
+          },
+        );
+        req.on("error", reject);
+        req.write(raw);
+        req.end();
+      });
+
+      expect(status).toBe(202);
+      await vi.waitFor(() => expect(callbackRows).toHaveLength(1));
+      expect(callbackRows[0].payload).toMatchObject({ status: "created", bidboardProjectId: "BB-INT" });
+      expect(approvalRequest.current).toMatchObject({ status: "approved", approvedBy: "ashaw@trockgc.com" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

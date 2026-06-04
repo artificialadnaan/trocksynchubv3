@@ -136,11 +136,42 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
     });
   });
 
-  it("returns 422 when approverEmail is missing", async () => {
+  it("returns 422 when approverEmail is missing or not a valid email", async () => {
     await withServer(async (baseUrl) => {
-      const res = await postOverride(baseUrl, 77, {});
-      expect(res.status).toBe(422);
+      const missing = await postOverride(baseUrl, 77, {});
+      const notEmail = await postOverride(baseUrl, 77, { approverEmail: "not-an-email" });
+      expect(missing.status).toBe(422);
+      expect(notEmail.status).toBe(422);
       expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 400 for a non-numeric :id", async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postOverride(baseUrl, "abc", { approverEmail: "ashaw@trockgc.com" });
+      expect(res.status).toBe(400);
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("the in-flight guard prevents a concurrent override from double-invoking approval (no double-create)", async () => {
+    // Hold the background approval open so the in-flight token stays set across both requests.
+    let release!: () => void;
+    const gate = new Promise<{ success: boolean; bidboardProjectId: string }>((resolve) => {
+      release = () => resolve({ success: true, bidboardProjectId: "BB-1" });
+    });
+    processRfpApprovalMock.mockReturnValue(gate as any);
+
+    await withServer(async (baseUrl) => {
+      const [a, b] = await Promise.all([
+        postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" }),
+        postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" }),
+      ]);
+      expect(a.status).toBe(202);
+      expect(b.status).toBe(202);
+      // Exactly one of the two concurrent requests kicked off the Playwright creation.
+      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
+      release();
     });
   });
 });

@@ -14,6 +14,9 @@ const overrideApproveBodySchema = z.object({
 
 // Guards against concurrently kicking off two Playwright creations for the same request during
 // the in-flight window (before bidboardProjectId is persisted) — the Playwright create has no dedup.
+// NOTE: this Set is per-process, so it does not protect across multiple app instances or a restart
+// mid-flight. The realistic trigger is a single reviewer clicking approve, so concurrency is ~1; a
+// DB-level claim/advisory lock would be the follow-up if SyncHub is ever scaled to >1 instance.
 const inFlightOverrideTokens = new Set<string>();
 
 export const rfpRequestBodySchema = z.object({
