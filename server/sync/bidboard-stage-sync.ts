@@ -850,11 +850,11 @@ export async function syncStagesToHubSpot(
         mappingSource,
         modeConfig,
       });
-      await storage.upsertBidboardSyncState({
-        projectId,
-        projectName: change.projectName,
-        currentStage: change.newStage,
-      });
+      // Honor cross-cycle retry: if the portfolio trigger threw (Playwright failure), keep the
+      // previous stage so the edge-triggered diff re-fires next cycle — matching the no-HubSpot
+      // and normal-write paths. (In migration mode the trigger is suppressed, so this advances
+      // normally.)
+      await advanceSyncStateAfterChange(change, { portfolioTriggerSucceeded, shouldTriggerPortfolio });
       await storage.createBidboardAutomationLog({
         projectId,
         projectName: change.projectName,

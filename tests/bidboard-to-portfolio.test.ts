@@ -2351,4 +2351,66 @@ describe("Portfolio trigger decoupled from HubSpot (post-HubSpot)", () => {
       expect.objectContaining({ projectId: "TP-TERM", currentStage: "Won" })
     );
   });
+
+  // Codex P2: under the kill-switch, a legacy-HubSpot trigger-stage change whose Playwright
+  // trigger THROWS must keep its previous stage so the edge-triggered diff re-fires it next
+  // cycle — same cross-cycle retry the no-HubSpot and normal-write paths already do.
+  it("kill-switch: a legacy-HubSpot Won change whose trigger throws keeps the previous stage for retry (does not advance under suppression)", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "live",
+            suppressHubSpotWrites: true,
+            suppressStageNotifications: true,
+            logSuppressedActions: true,
+            cycleId: "cycle-ks-retry",
+          },
+        } as any;
+      }
+      if (key === "bidboard_portfolio_trigger") return { key, value: { enabled: true, allowlist: [] } } as any;
+      if (key === "bidboard_stage_mapping") return { key, value: { allowHardcodedFallback: true } } as any;
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([WON_TRIGGER_MAPPING as any]);
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([]); // no prior attempts
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockRejectedValue(new Error("playwright boom"));
+
+    const change = {
+      projectName: "Legacy Won Project",
+      projectNumber: "TP-KS-RETRY",
+      customerName: "Legacy Customer",
+      previousStage: "Estimate Sent to Client",
+      newStage: "Won",
+      hubspotDealId: "hs-ks-1",
+      bidboardProjectId: "bb-ks",
+      totalSales: 50000,
+      synchubRecordId: "ks",
+    };
+
+    await syncStagesToHubSpot([change as any]);
+
+    // Keep previous stage + track the attempt so the next cycle re-detects and re-fires.
+    expect(vi.mocked(storage.upsertBidboardSyncState)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "TP-KS-RETRY",
+        currentStage: "Estimate Sent to Client",
+        metadata: expect.objectContaining({ portfolioTriggerAttempts: 1 }),
+      })
+    );
+    // Must NOT advance to "Won" — that would lose the retry under the edge-triggered diff.
+    expect(vi.mocked(storage.upsertBidboardSyncState)).not.toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "TP-KS-RETRY", currentStage: "Won" })
+    );
+  });
 });
