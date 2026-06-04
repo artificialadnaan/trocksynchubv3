@@ -34,7 +34,11 @@ export interface StageChange {
   newStage: string;
   totalSales: number;
   synchubRecordId: string;
-  hubspotDealId: string;
+  // Post-HubSpot: a change is actionable when it carries EITHER a HubSpot deal (legacy) OR a
+  // Bid Board project id (trock_crm-sourced deals, which have no HubSpot deal). The portfolio
+  // trigger fires off whichever identity is present.
+  hubspotDealId?: string;
+  bidboardProjectId?: string;
 }
 
 export interface BidBoardStageSyncModeConfig {
@@ -345,13 +349,25 @@ export function parseActiveProjectsSheet(filePath: string): BidBoardExcelRow[] {
   return rows.filter((r) => r.Name && r.Status);
 }
 
-/** Minimal mapping shape needed for stage sync (hubspotDealId required) */
-type MappingForSync = { hubspotDealId: string };
+/**
+ * Minimal mapping identity needed for stage sync. Post-HubSpot a mapping is "usable" when it
+ * carries EITHER a HubSpot deal (legacy) OR a Bid Board project id (trock_crm-sourced deals,
+ * which have no HubSpot deal). The portfolio trigger only needs the Bid Board project id.
+ */
+type MappingForSync = { hubspotDealId?: string; bidboardProjectId?: string };
+
+/** A mapping is actionable for stage sync when it has a HubSpot deal OR a Bid Board project id. */
+function hasUsableIdentity(mapping: { hubspotDealId?: string | null; bidboardProjectId?: string | null } | null | undefined): boolean {
+  return Boolean(mapping && (mapping.hubspotDealId || mapping.bidboardProjectId));
+}
 
 /**
  * Find SyncHub mapping for a Bid Board project from Excel row.
  * 1. By Project # (when non-empty)
  * 2. By Name + Customer Name composite
+ *
+ * Returns the row's identity (HubSpot deal id and/or Bid Board project id). HubSpot is
+ * decommissioned, so a mapping with only a Bid Board project id is still a valid match.
  */
 async function findSyncMappingForRow(row: BidBoardExcelRow): Promise<{
   mapping: MappingForSync;
@@ -363,17 +379,20 @@ async function findSyncMappingForRow(row: BidBoardExcelRow): Promise<{
 
   if (projectNumber) {
     const mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
-    if (mapping?.hubspotDealId) {
+    if (hasUsableIdentity(mapping)) {
       return {
-        mapping: { hubspotDealId: mapping.hubspotDealId },
-        synchubRecordId: String(mapping.id),
+        mapping: {
+          hubspotDealId: mapping!.hubspotDealId ?? undefined,
+          bidboardProjectId: mapping!.bidboardProjectId ?? undefined,
+        },
+        synchubRecordId: String(mapping!.id),
       };
     }
     const deal = await storage.getHubspotDealByProjectNumber(projectNumber);
     if (deal?.hubspotId) {
       const m = await storage.getSyncMappingByHubspotDealId(deal.hubspotId);
       return {
-        mapping: { hubspotDealId: deal.hubspotId },
+        mapping: { hubspotDealId: deal.hubspotId, bidboardProjectId: m?.bidboardProjectId ?? undefined },
         synchubRecordId: m ? String(m.id) : `deal:${deal.hubspotId}`,
       };
     }
@@ -388,8 +407,14 @@ async function findSyncMappingForRow(row: BidBoardExcelRow): Promise<{
       const mk = compositeKey(n || (m.hubspotDealName || ""), "");
       return (n && normalizeKey(name) === n) || mk === key;
     });
-    if (match?.hubspotDealId) {
-      return { mapping: { hubspotDealId: match.hubspotDealId }, synchubRecordId: String(match.id) };
+    if (hasUsableIdentity(match)) {
+      return {
+        mapping: {
+          hubspotDealId: match!.hubspotDealId ?? undefined,
+          bidboardProjectId: match!.bidboardProjectId ?? undefined,
+        },
+        synchubRecordId: String(match!.id),
+      };
     }
   }
 
@@ -406,7 +431,7 @@ async function findSyncMappingForRow(row: BidBoardExcelRow): Promise<{
   if (dealMatch?.hubspotId) {
     const m = await storage.getSyncMappingByHubspotDealId(dealMatch.hubspotId);
     return {
-      mapping: { hubspotDealId: dealMatch.hubspotId },
+      mapping: { hubspotDealId: dealMatch.hubspotId, bidboardProjectId: m?.bidboardProjectId ?? undefined },
       synchubRecordId: m ? String(m.id) : `deal:${dealMatch.hubspotId}`,
     };
   }
@@ -471,8 +496,13 @@ export async function diffBidBoardStages(
 
     const match = await findSyncMappingForRow(row);
     const hubspotDealId = match?.mapping?.hubspotDealId;
+    const bidboardProjectId = match?.mapping?.bidboardProjectId;
+    // A change is actionable when we can reach the project — via a HubSpot deal (legacy) OR a
+    // Bid Board project id (trock_crm deals, post-HubSpot). Manual review is reserved for deals
+    // with NO resolvable Procore/Bid Board identity at all.
+    const hasResolvableIdentity = Boolean(hubspotDealId || bidboardProjectId);
 
-    if (!hubspotDealId) {
+    if (!hasResolvableIdentity) {
       const projectName = row.Name?.toString()?.trim() || "";
       const projectNumber = row["Project #"]?.toString()?.trim() || null;
       const customerName = row["Customer Name"]?.toString()?.trim() || "";
@@ -487,7 +517,7 @@ export async function diffBidBoardStages(
 
       if (resolvedMapping?.triggerPortfolio) {
         log(
-          `[sync] No HubSpot deal for "${projectName}" at Portfolio trigger stage "${newStatus}" — queueing manual review instead of auto-creating Portfolio`,
+          `[sync] No resolvable Bid Board identity for "${projectName}" at Portfolio trigger stage "${newStatus}" — queueing manual review instead of auto-creating Portfolio`,
           "sync"
         );
 
@@ -534,7 +564,7 @@ export async function diffBidBoardStages(
       continue;
     }
 
-    // HubSpot deal found — proceed as before (add to changes for HubSpot sync)
+    // Resolvable identity found (HubSpot deal and/or Bid Board project id) — queue for sync.
     const totalSales = parseFloat(String(row["Total Sales"] || 0)) || 0;
     changes.push({
       projectName: row.Name?.toString()?.trim() || "",
@@ -543,12 +573,118 @@ export async function diffBidBoardStages(
       previousStage: previousStage || "(new)",
       newStage: newStatus,
       totalSales,
-      synchubRecordId: match.synchubRecordId,
+      synchubRecordId: match!.synchubRecordId,
       hubspotDealId,
+      bidboardProjectId,
     });
   }
 
   return changes;
+}
+
+/**
+ * Fire the Procore portfolio automation for a change at a trigger stage, honoring the global
+ * enable flag, the allowlist, and migration-mode suppression. Returns whether the trigger
+ * succeeded — false only when it was attempted and threw, which drives cross-cycle retry.
+ */
+async function firePortfolioTriggerForChange(
+  change: StageChange,
+  opts: {
+    mappingSource: StageMappingSource;
+    modeConfig: ResolvedBidBoardStageSyncModeConfig;
+    result: StageSyncResult;
+  }
+): Promise<boolean> {
+  const portfolioConfig = await getPortfolioTriggerConfig(opts.modeConfig);
+  const allowlistMatch = isPortfolioTriggerAllowlisted(change, portfolioConfig.allowlist);
+  const shouldFirePortfolio = portfolioConfig.enabled || allowlistMatch;
+
+  if (shouldFirePortfolio) {
+    if (allowlistMatch && !portfolioConfig.enabled) {
+      await logPortfolioTriggerAllowlistMatch({
+        change,
+        targetValue: change.newStage,
+        mappingSource: opts.mappingSource,
+        modeConfig: opts.modeConfig,
+        portfolioConfig,
+      });
+    }
+
+    try {
+      await triggerPortfolioAutomationFromStageChange(
+        change.projectName,
+        change.projectNumber,
+        change.customerName,
+        change.hubspotDealId
+      );
+    } catch (err) {
+      log(
+        `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
+        "sync"
+      );
+      return false;
+    }
+  } else if (opts.modeConfig.suppressPortfolioTriggers) {
+    opts.result.suppressed++;
+    await logSuppressedAction({
+      action: "bidboard_stage_sync:suppressed_portfolio_trigger",
+      change,
+      wouldHaveAction: "portfolio_create_phase1",
+      targetValue: change.newStage,
+      mappingSource: opts.mappingSource,
+      modeConfig: opts.modeConfig,
+    });
+  } else {
+    await logPortfolioTriggerDisabledSkip({
+      change,
+      targetValue: change.newStage,
+      mappingSource: opts.mappingSource,
+      modeConfig: opts.modeConfig,
+      portfolioConfig,
+    });
+  }
+  return true;
+}
+
+/**
+ * Advance bidboard_sync_state after processing a change. When the portfolio trigger was
+ * attempted and failed, keep the previous stage (so it re-triggers next cycle) up to
+ * MAX_CROSS_CYCLE_RETRIES, then give up and advance. Otherwise advance to the new stage.
+ */
+async function advanceSyncStateAfterChange(
+  change: StageChange,
+  opts: { portfolioTriggerSucceeded: boolean; shouldTriggerPortfolio: boolean }
+): Promise<void> {
+  const projectId = change.projectNumber || compositeKey(change.projectName, change.customerName);
+
+  if (!opts.portfolioTriggerSucceeded && opts.shouldTriggerPortfolio) {
+    const prevState = (await storage.getBidboardSyncStates()).find((s) => s.projectId === projectId);
+    const attempts = ((prevState?.metadata as any)?.portfolioTriggerAttempts ?? 0) + 1;
+    const MAX_CROSS_CYCLE_RETRIES = 3;
+    if (attempts >= MAX_CROSS_CYCLE_RETRIES) {
+      log(`[sync] Portfolio automation failed ${attempts} cycles for ${change.projectName} — giving up, updating sync state`, "sync");
+      await storage.upsertBidboardSyncState({
+        projectId,
+        projectName: change.projectName,
+        currentStage: change.newStage,
+        metadata: { portfolioTriggerAttempts: attempts, gaveUp: true },
+      });
+    } else {
+      log(`[sync] Portfolio automation failed for ${change.projectName} (attempt ${attempts}/${MAX_CROSS_CYCLE_RETRIES}) — will retry next cycle`, "sync");
+      await storage.upsertBidboardSyncState({
+        projectId,
+        projectName: change.projectName,
+        currentStage: change.previousStage || undefined,
+        metadata: { portfolioTriggerAttempts: attempts },
+      });
+    }
+  } else {
+    await storage.upsertBidboardSyncState({
+      projectId,
+      projectName: change.projectName,
+      currentStage: change.newStage,
+    });
+  }
 }
 
 /**
@@ -584,6 +720,45 @@ export async function syncStagesToHubSpot(
     const mappingSource = resolvedMapping.mappingSource;
     const shouldTriggerPortfolio = resolvedMapping.triggerPortfolio;
 
+    // ── Post-HubSpot path: no HubSpot deal to write to ──────────────────────────
+    // trock_crm-sourced deals carry only a Bid Board project id. Fire the portfolio
+    // automation off Bid Board identity and skip every HubSpot write/guard. (HubSpot was
+    // decommissioned; resolving/pushing a HubSpot stage here would only 404.)
+    if (!change.hubspotDealId) {
+      if (options?.dryRun) {
+        log(
+          `[DRY RUN] Would fire portfolio for ${change.projectName} at ${change.newStage} (no HubSpot deal)`,
+          "sync"
+        );
+        result.success++;
+        continue;
+      }
+
+      const portfolioTriggerSucceeded = shouldTriggerPortfolio
+        ? await firePortfolioTriggerForChange(change, { mappingSource, modeConfig, result })
+        : true;
+
+      result.success++;
+      await advanceSyncStateAfterChange(change, { portfolioTriggerSucceeded, shouldTriggerPortfolio });
+      await storage.createBidboardAutomationLog({
+        projectName: change.projectName,
+        action: "bidboard_stage_sync",
+        status: "success",
+        details: {
+          bidboardProjectId: change.bidboardProjectId ?? null,
+          previousStage: change.previousStage,
+          newStage: change.newStage,
+          portfolioTriggered: shouldTriggerPortfolio,
+          source: "bidboard_no_hubspot",
+          ...(modeConfig.canaryRunId ? { canaryRunId: modeConfig.canaryRunId } : {}),
+        },
+      });
+      continue;
+    }
+
+    // Past this point the change carries a HubSpot deal (the no-HubSpot path returned above).
+    const hubspotDealId = change.hubspotDealId;
+
     const resolved = await resolveHubspotStageId(label);
     if (!resolved) {
       result.failed++;
@@ -604,62 +779,16 @@ export async function syncStagesToHubSpot(
     }
 
     // Trigger portfolio automation BEFORE terminal guard — production stages always fire regardless of HubSpot block.
-    // TODO(ticket-9/stage-rename-cleanup): remove legacy Sent to Production trigger preservation
-    // from resolveBidBoardHubSpotStage once Procore rename is complete and bidboard_sync_state is backfilled.
-    let portfolioTriggerSucceeded = true;
-    if (shouldTriggerPortfolio) {
-      const portfolioConfig = await getPortfolioTriggerConfig(modeConfig);
-      const allowlistMatch = isPortfolioTriggerAllowlisted(change, portfolioConfig.allowlist);
-      const shouldFirePortfolio = portfolioConfig.enabled || allowlistMatch;
+    const portfolioTriggerSucceeded = shouldTriggerPortfolio
+      ? await firePortfolioTriggerForChange(change, { mappingSource, modeConfig, result })
+      : true;
 
-      if (shouldFirePortfolio) {
-        if (allowlistMatch && !portfolioConfig.enabled) {
-          await logPortfolioTriggerAllowlistMatch({
-            change,
-            targetValue: change.newStage,
-            mappingSource,
-            modeConfig,
-            portfolioConfig,
-          });
-        }
-
-        try {
-          await triggerPortfolioAutomationFromStageChange(
-            change.projectName,
-            change.projectNumber,
-            change.customerName,
-            change.hubspotDealId
-          );
-        } catch (err) {
-          portfolioTriggerSucceeded = false;
-          log(
-            `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
-            "sync"
-          );
-        }
-      } else if (modeConfig.suppressPortfolioTriggers) {
-        result.suppressed++;
-        await logSuppressedAction({
-          action: "bidboard_stage_sync:suppressed_portfolio_trigger",
-          change,
-          wouldHaveAction: "portfolio_create_phase1",
-          targetValue: change.newStage,
-          mappingSource,
-          modeConfig,
-        });
-      } else {
-        await logPortfolioTriggerDisabledSkip({
-          change,
-          targetValue: change.newStage,
-          mappingSource,
-          modeConfig,
-          portfolioConfig,
-        });
-      }
-    }
-
-    // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.)
-    const terminalStage = await getTerminalStageGuard(change.hubspotDealId, label);
+    // Guard: don't overwrite terminal stages (Closed Won, Closed Lost, etc.).
+    // Skip when HubSpot writes are suppressed (kill-switch / decommissioned) — the guard reads
+    // the live HubSpot deal, which only 404s, and we are not writing anyway.
+    const terminalStage = modeConfig.suppressHubSpotWrites
+      ? null
+      : await getTerminalStageGuard(hubspotDealId, label);
     if (terminalStage) {
       log(
         `BLOCKED: Deal ${change.hubspotDealId} is "${terminalStage}" — refusing to overwrite with "${label}" from Bid Board stage "${change.newStage}" (${change.projectName})`,
@@ -705,7 +834,10 @@ export async function syncStagesToHubSpot(
       continue;
     }
 
-    if (migrationMode && modeConfig.suppressHubSpotWrites) {
+    // HubSpot-write kill-switch: honored in ALL modes (not just migration). When set, advance
+    // local state and fire portfolio (already done above) but never push to the decommissioned
+    // HubSpot API, which only 404s.
+    if (modeConfig.suppressHubSpotWrites) {
       result.success++;
       result.suppressed++;
       const projectId = getProjectIdFromChange(change);

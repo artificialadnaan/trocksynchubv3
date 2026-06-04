@@ -918,7 +918,11 @@ describe("Portfolio automation trigger", () => {
     );
   });
 
-  it('does NOT trigger portfolio automation for "Won" when triggerPortfolio is false', async () => {
+  // Regression insurance (post-HubSpot): "Won" is the live Bid Board label. Even if the
+  // DB stage_mappings row for "Won" drifts to triggerPortfolio=false (e.g. a future rename
+  // re-seed), the hardcoded fallback must keep "Won" firing portfolio — this is the exact
+  // class of bug this whole effort started as.
+  it('STILL triggers portfolio automation for "Won" even when the DB triggerPortfolio flag is false (hardcoded fallback safety net)', async () => {
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
     const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
@@ -940,10 +944,11 @@ describe("Portfolio automation trigger", () => {
     vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
     vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
     vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
 
     await syncStagesToHubSpot([makeProductionChange("Won")]);
 
-    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).not.toHaveBeenCalled();
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT trigger portfolio automation when no BidBoard mapping exists", async () => {
@@ -1940,5 +1945,249 @@ describe("DB-driven BidBoard stage mapping", () => {
 
     expect(result).toBeNull();
     expect(vi.mocked(storage.createBidboardAutomationLog)).not.toHaveBeenCalled();
+  });
+
+  // Regression insurance (post-HubSpot): the live Bid Board label is "Won". Even when the
+  // DB stage_mappings row for "Won" carries triggerPortfolio=false, the hardcoded fallback
+  // must still treat it as a portfolio trigger so a future re-seed can't silently disable it.
+  it('treats "Won" as a portfolio trigger via hardcoded fallback even when the DB row has triggerPortfolio false', async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { resolveBidBoardHubSpotStage } = await import("../server/sync/stage-mapping.ts");
+
+    vi.mocked(storage.getStageMappings).mockResolvedValue([
+      {
+        procoreStageLabel: "Won",
+        hubspotStageLabel: "Closed Won",
+        direction: "bidboard_to_hubspot",
+        isActive: true,
+        triggerPortfolio: false,
+      } as any,
+    ]);
+
+    const result = await resolveBidBoardHubSpotStage("Won", {
+      projectName: "Won Fallback Project",
+      projectNumber: "TRK-WON-FB",
+      previousStage: "Estimate Sent to Client",
+      cycleId: "cycle-won-fallback",
+    });
+
+    expect(result?.stageLabel).toBe("Closed Won");
+    expect(result?.mappingSource).toBe("stage_mappings");
+    expect(result?.triggerPortfolio).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Post-HubSpot: portfolio trigger decoupled from hubspotDealId
+// ───────────────────────────────────────────────────────────────────────────
+// HubSpot was operationally decommissioned. New Bid Board deals are source_system
+// 'trock_crm' with hubspot_deal_id = NULL but a bidboard_project_id. The portfolio
+// trigger must fire off Bid Board identity, NOT a HubSpot deal. manual_review_queue
+// is reserved for deals with NO resolvable Procore/Bid Board identity at all.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("Portfolio trigger decoupled from HubSpot (post-HubSpot)", () => {
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    const { storage } = await import("../server/storage.ts");
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: true, allowlist: [] } } as any;
+      }
+      return undefined;
+    });
+  });
+
+  const WON_TRIGGER_MAPPING = {
+    procoreStageLabel: "Won",
+    hubspotStageLabel: "Closed Won",
+    direction: "bidboard_to_hubspot",
+    isActive: true,
+    triggerPortfolio: true,
+  };
+
+  it("diffBidBoardStages emits a change (not manual review) for a null-HubSpot trock_crm deal at Won when the mapping has a bidboard_project_id", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([
+      { projectId: "TRK-WON-1", currentStage: "Estimate Sent to Client", projectName: "CRM Won Project", metadata: {} } as any,
+    ]);
+    // trock_crm mapping: no HubSpot deal, but a Bid Board project id is present
+    vi.mocked(storage.getSyncMappingByProcoreProjectNumber).mockResolvedValue({
+      id: 900,
+      sourceSystem: "trock_crm",
+      sourceDealId: "crm-1",
+      hubspotDealId: null,
+      bidboardProjectId: "bb-900",
+      procoreProjectNumber: "TRK-WON-1",
+    } as any);
+    vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
+    vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([WON_TRIGGER_MAPPING as any]);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const xlsxPath = writeTempXlsx([
+      { Name: "CRM Won Project", Status: "Won", "Project #": "TRK-WON-1", "Total Sales": 12345, "Customer Name": "CRM Customer" },
+    ]);
+
+    const changes = await diffBidBoardStages(xlsxPath);
+
+    expect(changes).toHaveLength(1);
+    expect(changes[0].newStage).toBe("Won");
+    expect(changes[0].bidboardProjectId).toBe("bb-900");
+    expect(changes[0].hubspotDealId).toBeFalsy();
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).not.toHaveBeenCalled();
+
+    fs.unlinkSync(xlsxPath);
+  });
+
+  it("diffBidBoardStages still queues manual review for a Won deal with NO resolvable identity (no HubSpot deal AND no bidboard_project_id)", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([
+      { projectId: "TRK-NOID", currentStage: "Estimate Sent to Client", projectName: "No Identity Project", metadata: {} } as any,
+    ]);
+    // A mapping exists but has neither a HubSpot deal nor a Bid Board project id → unusable
+    vi.mocked(storage.getSyncMappingByProcoreProjectNumber).mockResolvedValue({
+      id: 901,
+      sourceSystem: "trock_crm",
+      sourceDealId: "crm-2",
+      hubspotDealId: null,
+      bidboardProjectId: null,
+      procoreProjectNumber: "TRK-NOID",
+    } as any);
+    vi.mocked(storage.getHubspotDealByProjectNumber).mockResolvedValue(undefined);
+    vi.mocked(storage.getSyncMappings).mockResolvedValue([]);
+    vi.mocked(storage.getHubspotDeals).mockResolvedValue({ data: [], total: 0 });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([WON_TRIGGER_MAPPING as any]);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+
+    const xlsxPath = writeTempXlsx([
+      { Name: "No Identity Project", Status: "Won", "Project #": "TRK-NOID", "Total Sales": 9999, "Customer Name": "Nobody" },
+    ]);
+
+    const changes = await diffBidBoardStages(xlsxPath);
+
+    expect(changes).toHaveLength(0);
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledWith(
+      expect.objectContaining({ projectNumber: "TRK-NOID", currentStage: "Won" })
+    );
+
+    fs.unlinkSync(xlsxPath);
+  });
+
+  it("syncStagesToHubSpot fires the portfolio trigger for a no-HubSpot Won change and skips ALL HubSpot writes/guards", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getStageMappings).mockResolvedValue([WON_TRIGGER_MAPPING as any]);
+    // Even if these were callable, the no-HubSpot path must not touch them.
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
+
+    const change = {
+      projectName: "CRM Won Project",
+      projectNumber: "TRK-WON-1",
+      customerName: "CRM Customer",
+      previousStage: "Estimate Sent to Client",
+      newStage: "Won",
+      bidboardProjectId: "bb-900",
+      totalSales: 12345,
+      synchubRecordId: "900",
+    };
+
+    const result = await syncStagesToHubSpot([change as any]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(getTerminalStageGuard)).not.toHaveBeenCalled();
+    expect(result.success).toBe(1);
+    expect(result.failed).toBe(0);
+    // sync state still advances so we don't reprocess every cycle
+    expect(vi.mocked(storage.upsertBidboardSyncState)).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "TRK-WON-1", currentStage: "Won" })
+    );
+  });
+
+  it("HubSpot kill-switch: with suppressHubSpotWrites in LIVE mode, skips HubSpot writes/guard but still fires the portfolio trigger for a Won change WITH a hubspotDealId", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage, updateHubSpotDeal } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) => {
+      if (key === "bidboard_stage_sync") {
+        return {
+          key,
+          value: {
+            mode: "live",
+            suppressHubSpotWrites: true,
+            suppressPortfolioTriggers: false,
+            suppressStageNotifications: true,
+            logSuppressedActions: true,
+            cycleId: "cycle-killswitch",
+          },
+        } as any;
+      }
+      if (key === "bidboard_portfolio_trigger") {
+        return { key, value: { enabled: true, allowlist: [] } } as any;
+      }
+      if (key === "bidboard_stage_mapping") {
+        return { key, value: { allowHardcodedFallback: true } } as any;
+      }
+      return undefined;
+    });
+    vi.mocked(storage.getStageMappings).mockResolvedValue([WON_TRIGGER_MAPPING as any]);
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue(undefined as any);
+
+    const change = {
+      projectName: "Legacy Won Project",
+      projectNumber: "TP-LEGACY",
+      customerName: "Legacy Customer",
+      previousStage: "Estimate Sent to Client",
+      newStage: "Won",
+      hubspotDealId: "hs-legacy-1",
+      bidboardProjectId: "bb-legacy",
+      totalSales: 50000,
+      synchubRecordId: "legacy",
+    };
+
+    const result = await syncStagesToHubSpot([change as any]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(updateHubSpotDealStage)).not.toHaveBeenCalled();
+    expect(vi.mocked(updateHubSpotDeal)).not.toHaveBeenCalled();
+    expect(vi.mocked(getTerminalStageGuard)).not.toHaveBeenCalled();
+    expect(result.success).toBe(1);
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "bidboard_stage_sync:suppressed_hubspot_write" })
+    );
   });
 });

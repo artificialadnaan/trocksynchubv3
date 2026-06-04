@@ -77,7 +77,15 @@ function prefersServiceHubSpotLabel(stageLabel: string): boolean {
 }
 
 function isFallbackPortfolioTrigger(normalizedStage: string): boolean {
-  return normalizedStage === "Sent to Production" || normalizedStage === "Service - Sent to Production";
+  // "Won" is the current live Bid Board label (Procore renamed "Sent to Production" /
+  // "Service - Sent to Production" → "Won"). Keep all three in the hardcoded safety net so a
+  // future stage re-seed that drops triggerPortfolio on the DB row can't silently disable the
+  // portfolio automation — the exact regression this fix originated from.
+  return (
+    normalizedStage === "Won" ||
+    normalizedStage === "Sent to Production" ||
+    normalizedStage === "Service - Sent to Production"
+  );
 }
 
 async function logMappingFallback(
