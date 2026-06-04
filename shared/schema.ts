@@ -1009,11 +1009,6 @@ export type RfpApprovalRequest = typeof rfpApprovalRequests.$inferSelect;
 export const RFP_REQUEST_STATUSES = ['pending', 'approved', 'declined', 'cancelled_source_ineligible'] as const;
 export type RfpRequestStatus = typeof RFP_REQUEST_STATUSES[number];
 
-// Transient status while an override-approve is mid-flight (Playwright running). It is atomically
-// claimed from 'declined' so a concurrent override (or a second app instance) loses the race, then
-// resolves to 'approved' (success) or back to 'declined' (failure / stuck-claim release).
-export const RFP_OVERRIDE_APPROVING_STATUS = 'override_approving' as const;
-
 export const rfpApprovalEdits = pgTable("rfp_approval_edits", {
   id: serial("id").primaryKey(),
   rfpApprovalRequestId: integer("rfp_approval_request_id")

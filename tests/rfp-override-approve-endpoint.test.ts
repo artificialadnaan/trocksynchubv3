@@ -18,7 +18,7 @@ vi.mock("../server/storage.ts", () => ({
       const r = requestFixture.current;
       if (!claimState.claimed && r?.status === "declined" && !r?.bidboardProjectId) {
         claimState.claimed = true;
-        return { ...r, status: "override_approving" };
+        return { ...r, status: "pending" };
       }
       return undefined;
     }),

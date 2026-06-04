@@ -220,9 +220,12 @@ export function registerRfpRequestRoutes(app: Express): void {
       return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} already has BidBoard project ${request.bidboardProjectId}; refusing to double-create` });
     }
 
-    // Durable, cross-instance claim: atomically transition declined → override_approving before
-    // queueing the Playwright work (the create has no server-side dedup). A concurrent override or a
-    // second app instance loses this race and gets 409. The claim also deletes any stale callback row.
+    // Durable, cross-instance claim: atomically transition declined → pending before queueing the
+    // Playwright work (the create has no server-side dedup). Claiming into 'pending' re-enters the
+    // existing pending dup-protections, so a repeated CRM webhook for the same deal/project during the
+    // run can't insert a second approvable request. A concurrent override or a second app instance
+    // loses this race and gets 409; the claim also deletes any stale callback row. An override left
+    // mid-flight by a crash simply stays 'pending' (recoverable via the original approval email).
     const claimed = await storage.claimDeclinedRfpForOverride(id);
     if (!claimed) {
       return res.status(409).json({

@@ -90,7 +90,7 @@ import {
   bidboardAutomationLogs, type BidboardAutomationLog,
   manualReviewQueue, type ManualReviewQueue, type InsertManualReviewQueue,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
-  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest, RFP_OVERRIDE_APPROVING_STATUS,
+  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest,
   rfpApprovalEdits, type RfpApprovalEdit, type InsertRfpApprovalEdit,
   bidboardCallbackOutbox, type BidboardCallbackOutbox, type InsertBidboardCallbackOutbox,
   rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
@@ -1931,38 +1931,51 @@ export class DatabaseStorage implements IStorage {
     return existing;
   }
 
-  // Atomically claim a declined RFP for override-approval: transition declined → override_approving
-  // in a single conditional UPDATE so a concurrent override (or a second app instance) loses the race
-  // and is rejected. Returns the claimed row, or undefined if it was not in a claimable state. In the
-  // same transaction it deletes any stale callback-outbox row for the request, so a fresh
+  // Atomically claim a declined RFP for override-approval by transitioning declined → pending in a
+  // single conditional UPDATE. Claiming back into 'pending' deliberately re-enters the existing
+  // in-flight protections — the pending partial-unique indexes and createRfpApprovalRequest's
+  // pending/approved conflict checks — so a repeated CRM webhook for the same source deal / project
+  // number during the minutes-long Playwright run cannot insert a second approvable request. A
+  // concurrent override (or a second app instance) loses this race and gets undefined → 409, and a
+  // pre-existing pending row for the same deal/project surfaces as a unique violation → undefined.
+  // In the same transaction it deletes any stale callback-outbox row for the request, so a fresh
   // 'created'/'failed' callback is enqueued cleanly and a worker mid-delivering a prior row cannot
   // mark a replaced row as sent (the old row's id simply no longer exists).
   async claimDeclinedRfpForOverride(id: number): Promise<RfpApprovalRequest | undefined> {
-    return db.transaction(async (tx) => {
-      const [claimed] = await tx.update(rfpApprovalRequests)
-        .set({ status: RFP_OVERRIDE_APPROVING_STATUS })
-        .where(and(
-          eq(rfpApprovalRequests.id, id),
-          eq(rfpApprovalRequests.status, "declined"),
-          isNull(rfpApprovalRequests.bidboardProjectId),
-        ))
-        .returning();
-      if (!claimed) return undefined;
-      await tx.delete(bidboardCallbackOutbox)
-        .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, id));
-      return claimed;
-    });
+    try {
+      return await db.transaction(async (tx) => {
+        const [claimed] = await tx.update(rfpApprovalRequests)
+          .set({ status: "pending" })
+          .where(and(
+            eq(rfpApprovalRequests.id, id),
+            eq(rfpApprovalRequests.status, "declined"),
+            isNull(rfpApprovalRequests.bidboardProjectId),
+          ))
+          .returning();
+        if (!claimed) return undefined;
+        await tx.delete(bidboardCallbackOutbox)
+          .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, id));
+        return claimed;
+      });
+    } catch (error: any) {
+      // A pending partial-unique violation means another approvable (pending) request already exists
+      // for this source deal / project number — refuse the override rather than create a duplicate.
+      if (error?.code === "23505") return undefined;
+      throw error;
+    }
   }
 
-  // Release a stuck override claim back to 'declined' (re-tryable). Conditional on the row still being
-  // in the transitional state, so it never clobbers a terminal 'approved' / 'cancelled_source_ineligible'
-  // outcome that processRfpApproval already wrote.
+  // Release a still-claimed override (left 'pending' by the claim) back to 'declined' so the override
+  // route can retry it. Conditional on the row still being 'pending', so it never clobbers a terminal
+  // 'approved' / 'cancelled_source_ineligible' outcome that processRfpApproval already wrote. (A claim
+  // orphaned by a process crash simply stays 'pending' — a recoverable state whose original approval
+  // email still works — rather than getting stuck in a bespoke status.)
   async releaseOverrideClaim(id: number): Promise<void> {
     await db.update(rfpApprovalRequests)
       .set({ status: "declined" })
       .where(and(
         eq(rfpApprovalRequests.id, id),
-        eq(rfpApprovalRequests.status, RFP_OVERRIDE_APPROVING_STATUS),
+        eq(rfpApprovalRequests.status, "pending"),
       ));
   }
 

@@ -1550,6 +1550,11 @@ export async function processRfpApproval(
 
     if (bidboardFailed) {
       // HubSpot was already updated (stage, fields). Mark as approved.
+      // NOTE: reaching here implies bidboardProjectId is unset — createBidBoardProject only sets
+      // projectId together with success=true, so a Playwright failure never carries a project id
+      // (the `bidboardProjectId ? …` arms below are defensive). The force path with no project id
+      // returned above; the genuine partial case (project created, post-steps failed) is success=true
+      // and is handled by the success path below, which clears the decline and enqueues 'created'.
       await storage.updateRfpApprovalRequest(request.id, {
         status: 'approved',
         editedFields: changedFields,
