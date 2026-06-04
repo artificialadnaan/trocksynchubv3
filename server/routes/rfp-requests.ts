@@ -2,7 +2,7 @@ import crypto from "crypto";
 import express, { type Express, type Request } from "express";
 import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
-import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval } from "../rfp-approval";
+import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval, checkRfpApprovalSourceEligibility } from "../rfp-approval";
 import { storage } from "../storage";
 
 const SIGNATURE_HEADER = "x-rfp-request-signature";
@@ -220,12 +220,24 @@ export function registerRfpRequestRoutes(app: Express): void {
       return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} already has BidBoard project ${request.bidboardProjectId}; refusing to double-create` });
     }
 
-    // Durable, cross-instance claim: atomically transition declined → pending before queueing the
-    // Playwright work (the create has no server-side dedup). Claiming into 'pending' re-enters the
-    // existing pending dup-protections, so a repeated CRM webhook for the same deal/project during the
-    // run can't insert a second approvable request. A concurrent override or a second app instance
-    // loses this race and gets 409; the claim also deletes any stale callback row. An override left
-    // mid-flight by a crash simply stays 'pending' (recoverable via the original approval email).
+    // Check source eligibility synchronously (like the email-approval route) so an ineligible deal
+    // gets a terminal 409 the CRM can act on — rather than a 202 followed by a silent background
+    // cancellation with no callback. Fail-open on a CRM lookup error (eligibility.checkFailed).
+    const eligibility = await checkRfpApprovalSourceEligibility(request);
+    if (!eligibility.eligible) {
+      return res.status(409).json({
+        success: false,
+        error: "Conflict",
+        message: eligibility.reason || `RFP request ${id} source deal is no longer eligible`,
+      });
+    }
+
+    // Durable, cross-instance claim: atomically transition declined → override_approving before
+    // queueing the Playwright work (the create has no server-side dedup). The transitional status is
+    // NOT 'pending', so the email-approval route can't also approve it; it IS blocked by
+    // createRfpApprovalRequest's conflict checks, so a re-bid can't insert a duplicate request. A
+    // concurrent override or a second app instance loses this race and gets 409; the claim also
+    // deletes any stale callback row.
     const claimed = await storage.claimDeclinedRfpForOverride(id);
     if (!claimed) {
       return res.status(409).json({
@@ -241,6 +253,11 @@ export function registerRfpRequestRoutes(app: Express): void {
       message: "Override approval queued; BidBoard project creation will run in the background.",
     });
 
+    // No blanket claim-release here: a release that fires after the Playwright job already created a
+    // project (but a later step threw before persisting it) would wrongly re-open the request for a
+    // retry and create a SECOND project. Instead processRfpApproval restores 'declined' only in the
+    // branch where it KNOWS no project was created; an unexpected mid-create error leaves the request
+    // claimed ('override_approving') — a safe, indeterminate state needing manual resolution.
     setImmediate(async () => {
       try {
         const result = await processRfpApproval(claimed.token, {}, approverEmail, { force: true });
@@ -249,13 +266,6 @@ export function registerRfpRequestRoutes(app: Express): void {
         }
       } catch (err: any) {
         console.error(`[rfp-requests] Override approval error for request ${id}:`, err?.message || err);
-      } finally {
-        // Release a still-claimed row back to 'declined' (re-tryable). No-op once processRfpApproval
-        // reached a terminal state (approved / cancelled), so it never clobbers the real outcome —
-        // it only rescues a claim left stuck by an unexpected error.
-        await storage.releaseOverrideClaim(id).catch((releaseErr: any) =>
-          console.error(`[rfp-requests] Failed to release override claim for request ${id}:`, releaseErr?.message || releaseErr),
-        );
       }
     });
   }));

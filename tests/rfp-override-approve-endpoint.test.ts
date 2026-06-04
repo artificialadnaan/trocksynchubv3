@@ -7,23 +7,22 @@ import crypto from "crypto";
 
 const requestFixture = vi.hoisted(() => ({ current: undefined as any }));
 const claimState = vi.hoisted(() => ({ claimed: false }));
+const eligibility = vi.hoisted(() => ({ current: { eligible: true } as any }));
 const processRfpApprovalMock = vi.hoisted(() => vi.fn(async () => ({ success: true, bidboardProjectId: "BB-1" })));
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestById: vi.fn(async (_id: number) => requestFixture.current),
-    // Atomic claim: succeeds exactly once for a claimable (declined, no project) request; a concurrent
-    // caller gets undefined → 409 (mirrors the real conditional UPDATE...RETURNING).
+    // Atomic claim: succeeds exactly once for a claimable (declined, no project) request → status
+    // override_approving; a concurrent caller gets undefined → 409 (mirrors the real conditional
+    // UPDATE...RETURNING).
     claimDeclinedRfpForOverride: vi.fn(async (_id: number) => {
       const r = requestFixture.current;
       if (!claimState.claimed && r?.status === "declined" && !r?.bidboardProjectId) {
         claimState.claimed = true;
-        return { ...r, status: "pending" };
+        return { ...r, status: "override_approving" };
       }
       return undefined;
-    }),
-    releaseOverrideClaim: vi.fn(async (_id: number) => {
-      claimState.claimed = false;
     }),
   },
 }));
@@ -31,6 +30,7 @@ vi.mock("../server/storage.ts", () => ({
 vi.mock("../server/rfp-approval.ts", () => ({
   processRfpApproval: processRfpApprovalMock,
   createRfpApprovalRequestFromNormalizedInput: vi.fn(),
+  checkRfpApprovalSourceEligibility: vi.fn(async () => eligibility.current),
 }));
 
 function sign(raw: string, secret: string): string {
@@ -88,6 +88,7 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
     processRfpApprovalMock.mockResolvedValue({ success: true, bidboardProjectId: "BB-1" });
     requestFixture.current = declinedRequest();
     claimState.claimed = false;
+    eligibility.current = { eligible: true };
     process.env.RFP_REQUEST_SYNC_SECRET = "test-secret";
   });
 
@@ -195,6 +196,16 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
     await withServer(async (baseUrl) => {
       const res = await postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" });
       expect(res.status).toBe(409);
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 409 synchronously when the source deal is no longer eligible (no silent background cancel)", async () => {
+    eligibility.current = { eligible: false, reason: "Source CRM deal is no longer in Opportunity stage" };
+    await withServer(async (baseUrl) => {
+      const res = await postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" });
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain("Opportunity");
       expect(processRfpApprovalMock).not.toHaveBeenCalled();
     });
   });

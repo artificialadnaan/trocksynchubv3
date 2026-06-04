@@ -20,22 +20,17 @@ vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestByToken: vi.fn(async () => approvalRequest.current),
     getRfpApprovalRequestById: vi.fn(async () => approvalRequest.current),
-    // Atomic claim: declined + no project → pending (re-enters the existing pending dup-protections),
-    // deleting any stale outbox row (mirrors the real transactional UPDATE...RETURNING + DELETE).
+    // Atomic claim: declined + no project → override_approving (NOT 'pending', so the email route
+    // can't approve it), deleting any stale outbox row (mirrors the real UPDATE...RETURNING + DELETE).
     claimDeclinedRfpForOverride: vi.fn(async (id: number) => {
       const r = approvalRequest.current;
       if (r?.status === "declined" && !r?.bidboardProjectId) {
-        approvalRequest.current = { ...r, status: "pending" };
+        approvalRequest.current = { ...r, status: "override_approving" };
         const idx = callbackRows.findIndex((row) => row.rfpApprovalRequestId === id);
         if (idx >= 0) callbackRows.splice(idx, 1);
         return approvalRequest.current;
       }
       return undefined;
-    }),
-    releaseOverrideClaim: vi.fn(async (_id: number) => {
-      if (approvalRequest.current?.status === "pending") {
-        approvalRequest.current = { ...approvalRequest.current, status: "declined" };
-      }
     }),
     updateRfpApprovalRequest: vi.fn(async (_id: number, data: any) => {
       updateRows.push(data);

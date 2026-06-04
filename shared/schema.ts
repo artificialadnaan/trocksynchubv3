@@ -1009,6 +1009,14 @@ export type RfpApprovalRequest = typeof rfpApprovalRequests.$inferSelect;
 export const RFP_REQUEST_STATUSES = ['pending', 'approved', 'declined', 'cancelled_source_ineligible'] as const;
 export type RfpRequestStatus = typeof RFP_REQUEST_STATUSES[number];
 
+// Transient status while an override-approve is mid-flight (Playwright running). Atomically claimed
+// from 'declined' so it is NOT 'pending' (the email-approval route + the pending-only approval guard
+// reject it, preventing a second approval) yet IS treated as in-flight by createRfpApprovalRequest's
+// conflict checks (preventing a duplicate re-bid request). Resolves to 'approved' (success) or back
+// to 'declined' (known failure). An override orphaned by a crash stays here — a safe, indeterminate
+// state (a project may exist) that requires manual resolution rather than an unsafe auto-retry.
+export const RFP_OVERRIDE_APPROVING_STATUS = 'override_approving' as const;
+
 export const rfpApprovalEdits = pgTable("rfp_approval_edits", {
   id: serial("id").primaryKey(),
   rfpApprovalRequestId: integer("rfp_approval_request_id")

@@ -14,6 +14,7 @@ import {
   type BidBoardCreatedCallbackPayload,
   type RfpDeclinedCallbackPayload,
 } from './sync/bidboard-callback-worker';
+import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
 
 const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
 const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
@@ -1126,6 +1127,14 @@ export async function createRfpApprovalRequestFromNormalizedInput(
       return buildConflictResult('approved_collision', input.deal.projectNumber, approvedConflict);
     }
 
+    // An override-approve is mid-flight for this project number (claimed declined → override_approving
+    // and creating a BidBoard project right now). Treat it as in-flight so a re-bid webhook can't
+    // insert a second approvable request that would create a duplicate project.
+    const overrideConflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, RFP_OVERRIDE_APPROVING_STATUS);
+    if (overrideConflict) {
+      return buildConflictResult('pending_collision', input.deal.projectNumber, overrideConflict);
+    }
+
     const token = randomUUID();
     const sourceDealUrl = await buildSourceDealUrl(input.sourceSystem, input.sourceDealId);
     const rawOwnerInfo = input.sourceSystem === 'hubspot'
@@ -1498,11 +1507,15 @@ export async function processRfpApproval(
     }
 
     if (bidboardFailed && force && !bidboardProjectId) {
-      // OVERRIDE path: the authoritative Playwright creation failed and no project was created.
-      // Do NOT mark the request approved — leave it claimed; the route's finally releases it back to
-      // 'declined' so a reviewer can retry — and notify the CRM with a 'failed' callback through the
-      // same outbox + worker. The route's claim already deleted any stale outbox row for this request,
-      // so a plain enqueue lands cleanly (no in-place row replacement).
+      // OVERRIDE path: the authoritative Playwright creation KNOWN-failed with no project created.
+      // Restore the claim to 'declined' here (this branch is the only place we know for certain no
+      // project exists) so a reviewer can retry — and notify the CRM with a 'failed' callback through
+      // the same outbox + worker. An UNEXPECTED throw (where a project may have been created) instead
+      // falls to the outer catch and leaves the request claimed ('override_approving'), so a retry
+      // cannot create a second project. The route's claim already deleted any stale outbox row, so a
+      // plain enqueue lands cleanly (no in-place row replacement).
+      await storage.updateRfpApprovalRequest(request.id, { status: 'declined' });
+
       const failureCallbackData = await buildBidBoardFailedCallbackData({
         request,
         sourceDealId,
@@ -1519,7 +1532,7 @@ export async function processRfpApproval(
         entityType: 'deal',
         entityId: sourceDealId,
         source: 'rfp-approval',
-        status: 'failure',
+        status: 'failed',
         details: {
           token,
           approvedBy: approverEmail,
