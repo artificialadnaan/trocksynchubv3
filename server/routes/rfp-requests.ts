@@ -225,6 +225,20 @@ export function registerRfpRequestRoutes(app: Express): void {
     if (request.bidboardProjectId) {
       return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} already has BidBoard project ${request.bidboardProjectId}; refusing to double-create` });
     }
+    // A re-bid may have created a NEWER request for the same project number that is already approved
+    // (with its own BidBoard project). This stale declined row has no bidboardProjectId of its own, so
+    // overriding it would create a SECOND project for that project number — mirror createRfpApprovalRequest's
+    // approved_collision and refuse.
+    if (request.projectNumber) {
+      const approvedSibling = await storage.getRfpApprovalRequestByProjectNumberAndStatus(request.projectNumber, "approved");
+      if (approvedSibling && approvedSibling.id !== request.id) {
+        return res.status(409).json({
+          success: false,
+          error: "Conflict",
+          message: `Project ${request.projectNumber} already has an approved RFP (request ${approvedSibling.id}); refusing to double-create`,
+        });
+      }
+    }
 
     // Durable, cross-instance claim FIRST — before the awaited eligibility call — so a re-bid webhook
     // can't slip in during the check while the row is still 'declined'. Atomically transition declined

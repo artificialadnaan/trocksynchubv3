@@ -8,11 +8,15 @@ import crypto from "crypto";
 const requestFixture = vi.hoisted(() => ({ current: undefined as any }));
 const claimState = vi.hoisted(() => ({ claimed: false }));
 const eligibility = vi.hoisted(() => ({ current: { eligible: true } as any }));
+const approvedSibling = vi.hoisted(() => ({ current: undefined as any }));
 const processRfpApprovalMock = vi.hoisted(() => vi.fn(async () => ({ success: true, bidboardProjectId: "BB-1" })));
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestById: vi.fn(async (_id: number) => requestFixture.current),
+    getRfpApprovalRequestByProjectNumberAndStatus: vi.fn(async (_pn: string, status: string) =>
+      status === "approved" ? approvedSibling.current : undefined,
+    ),
     // Atomic claim: succeeds exactly once for a claimable (declined, no project) request → status
     // override_approving; a concurrent caller gets undefined → 409 (mirrors the real conditional
     // UPDATE...RETURNING).
@@ -81,6 +85,7 @@ function declinedRequest(overrides: Partial<any> = {}) {
     token: "tok-77",
     status: "declined",
     sourceSystem: "trock_crm",
+    projectNumber: "PN-77",
     bidboardProjectId: null,
     ...overrides,
   };
@@ -94,6 +99,7 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
     requestFixture.current = declinedRequest();
     claimState.claimed = false;
     eligibility.current = { eligible: true };
+    approvedSibling.current = undefined;
     process.env.RFP_REQUEST_SYNC_SECRET = "test-secret";
   });
 
@@ -215,6 +221,16 @@ describe("POST /api/rfp-requests/:id/override-approve", () => {
       const res = await postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" });
       expect(res.status).toBe(202);
       expect(res.body.message).toMatch(/already in progress/i);
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("returns 409 when the project number already has an approved RFP (re-bid double-create guard)", async () => {
+    approvedSibling.current = { id: 99, projectNumber: "PN-77", status: "approved" };
+    await withServer(async (baseUrl) => {
+      const res = await postOverride(baseUrl, 77, { approverEmail: "ashaw@trockgc.com" });
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/already has an approved RFP/i);
       expect(processRfpApprovalMock).not.toHaveBeenCalled();
     });
   });

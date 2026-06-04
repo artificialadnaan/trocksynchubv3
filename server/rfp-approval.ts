@@ -1170,14 +1170,19 @@ export async function createRfpApprovalRequestFromNormalizedInput(
       });
     } catch (error) {
       if (isUniqueViolation(error, 'idx_rfp_approval_pending_project_number')) {
-        const conflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending');
+        // Since migration 0021 these indexes also cover 'override_approving', so a race-insert can
+        // conflict with an in-flight override row — re-query both statuses so it surfaces as a
+        // clean conflict, not a thrown 500.
+        const conflict = (await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending'))
+          ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, RFP_OVERRIDE_APPROVING_STATUS));
         if (conflict) {
           return buildConflictResult('pending_collision', input.deal.projectNumber, conflict);
         }
       }
       if (isUniqueViolation(error, 'idx_rfp_approval_pending_source_deal')) {
-        const conflict = await storage.getRfpApprovalRequestBySourceDealId(input.sourceSystem, input.sourceDealId);
-        if (conflict && conflict.status === 'pending') {
+        const conflict = (await storage.getRfpApprovalRequestBySourceDealId(input.sourceSystem, input.sourceDealId))
+          ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS));
+        if (conflict && (conflict.status === 'pending' || conflict.status === RFP_OVERRIDE_APPROVING_STATUS)) {
           return buildSourceDealPendingConflictResult(input.sourceSystem, input.sourceDealId, conflict);
         }
       }

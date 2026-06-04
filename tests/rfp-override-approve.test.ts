@@ -20,6 +20,7 @@ vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestByToken: vi.fn(async () => approvalRequest.current),
     getRfpApprovalRequestById: vi.fn(async () => approvalRequest.current),
+    getRfpApprovalRequestByProjectNumberAndStatus: vi.fn(async () => undefined),
     // Atomic claim: declined + no project → override_approving (NOT 'pending', so the email route
     // can't approve it), deleting any stale outbox row (mirrors the real UPDATE...RETURNING + DELETE).
     claimDeclinedRfpForOverride: vi.fn(async (id: number) => {
