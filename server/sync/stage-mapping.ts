@@ -28,6 +28,10 @@ export const BIDBOARD_TO_HUBSPOT_STAGE: Record<string, string> = {
   "Estimate Sent to Client": "Proposal Sent",
   "Service - Sent to Production": "Service – Won",
   "Sent to Production": "Closed Won",
+  // Current live Bid Board label (renamed from "Sent to Production"). Needed so the hardcoded
+  // fallback can resolve "Won" — and fire its portfolio trigger — even when the DB seed lacks
+  // the "Won" stage_mappings row. Mirrors isFallbackPortfolioTrigger("Won").
+  "Won": "Closed Won",
   "Service - Lost": "Service – Lost",
   "Production Lost": "Closed Lost",
 };
@@ -77,7 +81,15 @@ function prefersServiceHubSpotLabel(stageLabel: string): boolean {
 }
 
 function isFallbackPortfolioTrigger(normalizedStage: string): boolean {
-  return normalizedStage === "Sent to Production" || normalizedStage === "Service - Sent to Production";
+  // "Won" is the current live Bid Board label (Procore renamed "Sent to Production" /
+  // "Service - Sent to Production" → "Won"). Keep all three in the hardcoded safety net so a
+  // future stage re-seed that drops triggerPortfolio on the DB row can't silently disable the
+  // portfolio automation — the exact regression this fix originated from.
+  return (
+    normalizedStage === "Won" ||
+    normalizedStage === "Sent to Production" ||
+    normalizedStage === "Service - Sent to Production"
+  );
 }
 
 async function logMappingFallback(

@@ -339,9 +339,16 @@ describe("BIDBOARD_TO_HUBSPOT_STAGE map — coverage of all entries", () => {
     expect(BIDBOARD_TO_HUBSPOT_STAGE["Service - Lost"]).toBe("Service \u2013 Lost");
   });
 
-  it("contains exactly 8 entries (no silent additions)", async () => {
+  it("maps the live 'Won' label → 'Closed Won' (renamed from 'Sent to Production')", async () => {
     const { BIDBOARD_TO_HUBSPOT_STAGE } = await import("../server/sync/stage-mapping.ts");
-    expect(Object.keys(BIDBOARD_TO_HUBSPOT_STAGE).length).toBe(8);
+    expect(BIDBOARD_TO_HUBSPOT_STAGE["Won"]).toBe("Closed Won");
+  });
+
+  it("contains exactly 9 entries (no silent additions)", async () => {
+    const { BIDBOARD_TO_HUBSPOT_STAGE } = await import("../server/sync/stage-mapping.ts");
+    // 9 = original 8 + the live "Won" label added so the hardcoded fallback resolves it
+    // even when the DB seed lacks the "Won" stage_mappings row.
+    expect(Object.keys(BIDBOARD_TO_HUBSPOT_STAGE).length).toBe(9);
   });
 });
 
