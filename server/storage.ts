@@ -1953,20 +1953,28 @@ export class DatabaseStorage implements IStorage {
   // request is restored to 'declined' by processRfpApproval; an orphaned claim (crash) stays
   // override_approving — a safe, indeterminate state requiring manual resolution.
   async claimDeclinedRfpForOverride(id: number): Promise<RfpApprovalRequest | undefined> {
-    return db.transaction(async (tx) => {
-      const [claimed] = await tx.update(rfpApprovalRequests)
-        .set({ status: RFP_OVERRIDE_APPROVING_STATUS })
-        .where(and(
-          eq(rfpApprovalRequests.id, id),
-          eq(rfpApprovalRequests.status, "declined"),
-          isNull(rfpApprovalRequests.bidboardProjectId),
-        ))
-        .returning();
-      if (!claimed) return undefined;
-      await tx.delete(bidboardCallbackOutbox)
-        .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, id));
-      return claimed;
-    });
+    try {
+      return await db.transaction(async (tx) => {
+        const [claimed] = await tx.update(rfpApprovalRequests)
+          .set({ status: RFP_OVERRIDE_APPROVING_STATUS })
+          .where(and(
+            eq(rfpApprovalRequests.id, id),
+            eq(rfpApprovalRequests.status, "declined"),
+            isNull(rfpApprovalRequests.bidboardProjectId),
+          ))
+          .returning();
+        if (!claimed) return undefined;
+        await tx.delete(bidboardCallbackOutbox)
+          .where(eq(bidboardCallbackOutbox.rfpApprovalRequestId, id));
+        return claimed;
+      });
+    } catch (error: any) {
+      // With migration 0021, the pending partial-unique indexes also cover 'override_approving', so
+      // claiming conflicts with a competing pending/override_approving request for the same source
+      // deal / project number — refuse the override rather than create a duplicate.
+      if (error?.code === "23505") return undefined;
+      throw error;
+    }
   }
 
   async approveRfpApprovalRequestWithOptionalCallback(
