@@ -226,30 +226,31 @@ export function registerRfpRequestRoutes(app: Express): void {
       return res.status(409).json({ success: false, error: "Conflict", message: `RFP request ${id} already has BidBoard project ${request.bidboardProjectId}; refusing to double-create` });
     }
 
-    // Check source eligibility synchronously (like the email-approval route) so an ineligible deal
-    // gets a terminal 409 the CRM can act on — rather than a 202 followed by a silent background
-    // cancellation with no callback. Fail-open on a CRM lookup error (eligibility.checkFailed).
-    const eligibility = await checkRfpApprovalSourceEligibility(request);
-    if (!eligibility.eligible) {
-      return res.status(409).json({
-        success: false,
-        error: "Conflict",
-        message: eligibility.reason || `RFP request ${id} source deal is no longer eligible`,
-      });
-    }
-
-    // Durable, cross-instance claim: atomically transition declined → override_approving before
-    // queueing the Playwright work (the create has no server-side dedup). The transitional status is
-    // NOT 'pending', so the email-approval route can't also approve it; it IS blocked by
-    // createRfpApprovalRequest's conflict checks, so a re-bid can't insert a duplicate request. A
-    // concurrent override or a second app instance loses this race and gets 409; the claim also
-    // deletes any stale callback row.
+    // Durable, cross-instance claim FIRST — before the awaited eligibility call — so a re-bid webhook
+    // can't slip in during the check while the row is still 'declined'. Atomically transition declined
+    // → override_approving (NOT 'pending', so the email route can't also approve it; createRfpApproval's
+    // conflict checks DO block it, so a re-bid can't insert a duplicate). A concurrent override or a
+    // second app instance loses this race and gets 409; the claim also deletes any stale callback row.
     const claimed = await storage.claimDeclinedRfpForOverride(id);
     if (!claimed) {
       return res.status(409).json({
         success: false,
         error: "Conflict",
         message: `RFP request ${id} could not be claimed for override (already in progress or no longer declined)`,
+      });
+    }
+
+    // Now check source eligibility (like the email-approval route) so an ineligible deal gets a
+    // terminal 409 rather than a 202 + silent background cancel. Release the claim back to 'declined'
+    // on rejection — this is safe (no Playwright has run yet, so no project can exist). Fail-open on a
+    // CRM lookup error (eligibility.checkFailed).
+    const eligibility = await checkRfpApprovalSourceEligibility(claimed);
+    if (!eligibility.eligible) {
+      await storage.updateRfpApprovalRequest(id, { status: "declined" });
+      return res.status(409).json({
+        success: false,
+        error: "Conflict",
+        message: eligibility.reason || `RFP request ${id} source deal is no longer eligible`,
       });
     }
 

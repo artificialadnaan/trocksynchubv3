@@ -156,17 +156,17 @@ describe("processRfpApproval — override (force) path", () => {
     expect(callbackRows).toHaveLength(0);
   });
 
-  it("a Playwright failure in the override path does NOT mark approved and enqueues a 'failed' callback (re-tryable)", async () => {
+  it("an unconfirmed Playwright failure ({success:false}) does NOT mark approved and emits a 'failed' callback (held for review)", async () => {
+    // {success:false} can mean "could not confirm" AFTER clicking Create, so a project may exist.
     createBidBoardMock.mockResolvedValue({ success: false, error: "bid board unreachable" });
     const { processRfpApproval } = await import("../server/rfp-approval.ts");
 
     const result = await processRfpApproval("token-1", {}, "ashaw@trockgc.com", { force: true });
 
     expect(result.success).toBe(false);
-    // CRITICAL: must NOT be marked approved — left re-tryable.
-    expect(approvalRequest.current.status).toBe("declined");
-    expect(updateRows.some((row) => row.status === "approved")).toBe(false);
-    // A 'failed' callback is emitted to the same CRM URL.
+    // Must NOT be marked approved, and must NOT be auto-restored to a retryable state (held claimed).
+    expect(updateRows.some((row) => row.status === "approved" || row.status === "declined")).toBe(false);
+    // A 'failed' callback is emitted to the same CRM URL so the CRM can verify in Procore.
     expect(callbackRows).toHaveLength(1);
     expect(callbackRows[0].targetUrl).toBe("https://crm.example.com/api/internal/bid-board-created");
     expect(callbackRows[0].payload).toMatchObject({ status: "failed", rfpApprovalRequestId: 77, sourceDealId: "crm-deal-1" });
@@ -174,24 +174,22 @@ describe("processRfpApproval — override (force) path", () => {
     expect(callbackRows[0].payload.bidboardProjectId).toBeUndefined();
   });
 
-  it("a THROWN (indeterminate) Playwright error does NOT restore/retry and emits NO callback (a project may exist)", async () => {
-    // createBidBoardProjectFromDeal does post-create work; a throw may arrive AFTER a project was
-    // created, so the state is unknown — leave the request claimed and emit no callback (manual resolution).
+  it("a THROWN Playwright error is handled identically (no approve, no auto-restore, 'failed' callback)", async () => {
+    // A throw may also arrive AFTER a project was created — same indeterminate state as {success:false}.
     createBidBoardMock.mockRejectedValue(new Error("playwright crashed mid-create"));
     const { processRfpApproval } = await import("../server/rfp-approval.ts");
 
     const result = await processRfpApproval("token-1", {}, "ashaw@trockgc.com", { force: true });
 
     expect(result.success).toBe(false);
-    expect(callbackRows).toHaveLength(0); // no 'failed' (a project may exist) and no 'created'
-    // No restore-to-declined and no flip-to-approved: the claim is left as-is for manual resolution.
     expect(updateRows.some((row) => row.status === "approved" || row.status === "declined")).toBe(false);
+    expect(callbackRows).toHaveLength(1);
+    expect(callbackRows[0].payload).toMatchObject({ status: "failed", rfpApprovalRequestId: 77 });
   });
 
-  it("end-to-end via the route: a failed override then a successful retry ends with a single 'created' callback (claim supersedes the stale 'failed')", async () => {
-    // Real route → real processRfpApproval (storage/playwright mocked). The route's atomic claim
-    // deletes the stale 'failed' outbox row at the start of the retry, so the success enqueues a
-    // fresh 'created' — proving the supersede now happens via the claim, not an in-place upsert.
+  it("end-to-end via the route: a failed override is HELD (claimed) and a retry is accepted as in-progress without re-running Playwright", async () => {
+    // A failure can't be proven project-free, so it is NOT auto-retried: the request stays claimed
+    // (override_approving) and a subsequent override returns 202 'in progress' without a second create.
     const { registerRfpRequestRoutes } = await import("../server/routes/rfp-requests.ts");
     const app = express();
     registerRfpRequestRoutes(app);
@@ -200,20 +198,19 @@ describe("processRfpApproval — override (force) path", () => {
       await new Promise<void>((resolve) => server.once("listening", () => resolve()));
       const port = (server.address() as any).port;
 
-      // Attempt 1 — Playwright fails → 'failed' callback, request released back to 'declined'.
+      // Attempt 1 — Playwright fails → 'failed' callback; request held in override_approving.
       createBidBoardMock.mockResolvedValueOnce({ success: false, error: "transient" });
       await postOverrideViaRoute(port);
       await vi.waitFor(() => expect(callbackRows).toHaveLength(1));
       expect(callbackRows[0].payload.status).toBe("failed");
-      await vi.waitFor(() => expect(approvalRequest.current.status).toBe("declined"));
+      await vi.waitFor(() => expect(approvalRequest.current.status).toBe("override_approving"));
 
-      // Attempt 2 — Playwright succeeds → claim deletes the 'failed' row, 'created' enqueued.
-      createBidBoardMock.mockResolvedValueOnce({ success: true, projectId: "BB-999" });
-      await postOverrideViaRoute(port);
-      await vi.waitFor(() => expect(approvalRequest.current.status).toBe("approved"));
-
-      expect(callbackRows).toHaveLength(1);
-      expect(callbackRows[0].payload).toMatchObject({ status: "created", bidboardProjectId: "BB-999" });
+      // Attempt 2 — the request is still claimed, so the route returns 202 and never re-runs Playwright.
+      expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+      const status = await postOverrideViaRoute(port);
+      expect(status).toBe(202);
+      await new Promise((r) => setImmediate(r));
+      expect(createBidBoardMock).toHaveBeenCalledTimes(1); // no second create
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

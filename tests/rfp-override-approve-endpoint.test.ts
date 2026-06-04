@@ -24,6 +24,10 @@ vi.mock("../server/storage.ts", () => ({
       }
       return undefined;
     }),
+    updateRfpApprovalRequest: vi.fn(async (_id: number, data: any) => {
+      requestFixture.current = { ...requestFixture.current, ...data };
+      return requestFixture.current;
+    }),
   },
 }));
 
