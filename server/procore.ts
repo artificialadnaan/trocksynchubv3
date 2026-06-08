@@ -962,6 +962,80 @@ export async function updateProcoreProject(
   return response.json();
 }
 
+export type ProcoreProjectLink = { id: number; title: string; url: string };
+
+/**
+ * Lists the project's "Links" (the Project Home Links tile). Confirmed via live probe:
+ * the resource is the flat `/rest/v1.0/links?project_id=...`, NOT project-nested, schema { id, title, url }.
+ */
+export async function listProcoreProjectLinks(projectId: string): Promise<ProcoreProjectLink[]> {
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  const response = await fetchWithTimeout(
+    `${baseUrl}/rest/v1.0/links?project_id=${projectId}&company_id=${companyId}`,
+    {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/json',
+        'Procore-Company-Id': companyId,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to list project links: ${response.status} ${errText}`);
+  }
+
+  const data = await response.json();
+  return Array.isArray(data) ? data : [];
+}
+
+/**
+ * Creates a Link (title + url) on a Procore project's Home Links tile. Idempotent: if a Link with
+ * the same title already exists it is left untouched (avoids duplicates on relay retries).
+ * Confirmed via live probe: POST `/rest/v1.0/links?project_id=...` body `{ link: { title, url } }`.
+ */
+export async function createProcoreProjectLink(
+  projectId: string,
+  link: { title: string; url: string }
+): Promise<{ created: boolean; link: ProcoreProjectLink | null }> {
+  const existing = await listProcoreProjectLinks(projectId);
+  const duplicate = existing.find((entry) => entry.title === link.title);
+  if (duplicate) {
+    return { created: false, link: duplicate };
+  }
+
+  const accessToken = await getAccessToken();
+  const config = await getProcoreConfig();
+  const baseUrl = getBaseUrl(config.environment);
+  const companyId = config.companyId;
+
+  const response = await fetchWithTimeout(
+    `${baseUrl}/rest/v1.0/links?project_id=${projectId}&company_id=${companyId}`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Procore-Company-Id': companyId,
+      },
+      body: JSON.stringify({ link: { title: link.title, url: link.url } }),
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to create project link: ${response.status} ${errText}`);
+  }
+
+  return { created: true, link: await response.json() };
+}
+
 export async function updateProcoreBid(
   projectId: string,
   bidPackageId: string,

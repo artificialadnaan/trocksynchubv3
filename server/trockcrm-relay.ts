@@ -101,6 +101,61 @@ function isStageChangedPayload(payload: unknown): payload is TrockCrmProjectStag
   );
 }
 
+function isProjectCreatedPayload(payload: unknown): payload is TrockCrmRelayPayload {
+  return Boolean(
+    payload &&
+    typeof payload === "object" &&
+    (payload as { eventType?: unknown }).eventType === "procore.project.created"
+  );
+}
+
+// Title for the public photos Link seeded into the Procore project. Distinct from the existing
+// login-required "CompanyCam" Link so the two sit side by side.
+const PROCORE_PHOTO_LINK_TITLE = "Job-Site Photos";
+
+export type SeedProcoreLink = (projectId: string, url: string) => Promise<void>;
+
+function extractPhotoViewerUrl(responseBody: string | null | undefined): string | null {
+  if (!responseBody) return null;
+  try {
+    const parsed = JSON.parse(responseBody);
+    const url = parsed?.photoViewerUrl;
+    return typeof url === "string" && url.trim() ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+// Default Procore-Link writer: lazily imported so the relay module's test graph never pulls in the
+// Procore client (DB/token) unless a real seed actually fires in production.
+const defaultSeedProcorePhotoLink: SeedProcoreLink = async (projectId, url) => {
+  const { createProcoreProjectLink } = await import("./procore.ts");
+  await createProcoreProjectLink(projectId, { title: PROCORE_PHOTO_LINK_TITLE, url });
+};
+
+/**
+ * Best-effort: after a successful project-created relay, seed the public photo-viewer URL (returned
+ * by trockcrm in the relay response) as a Procore project Link. Only fires for project-created
+ * payloads that carry a photoViewerUrl. Never throws — a Procore failure must not unmark the relay.
+ */
+async function maybeSeedProcorePhotoLink(
+  payload: unknown,
+  responseBody: string | null | undefined,
+  seedImpl: SeedProcoreLink = defaultSeedProcorePhotoLink
+): Promise<void> {
+  if (!isProjectCreatedPayload(payload)) return;
+  const url = extractPhotoViewerUrl(responseBody);
+  if (!url) return;
+  const projectId = payload.procore?.portfolioProjectId;
+  if (!projectId) return;
+  try {
+    await seedImpl(String(projectId), url);
+    relayLog(`[TrockCRMRelay] Seeded Procore photo Link for project ${projectId}`);
+  } catch (err) {
+    relayLog(`[TrockCRMRelay] Failed to seed Procore photo Link for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function relayUrl() {
   return process.env.TROCKCRM_RELAY_URL?.trim() || DEFAULT_RELAY_URL;
 }
@@ -390,6 +445,7 @@ export async function enqueueTrockCrmRelayOutbox(input: {
 export async function processTrockCrmRelayOutboxEntry(input: {
   store?: RelayStore;
   fetchImpl?: typeof fetch;
+  seedProcoreLink?: SeedProcoreLink;
   row: Pick<TrockcrmRelayOutbox, "id" | "payload" | "attempts">;
   now?: Date;
 }): Promise<ProcessResult> {
@@ -429,6 +485,7 @@ export async function processTrockCrmRelayOutboxEntry(input: {
     const responseBody = truncateResponseBody(await response.text().catch(() => ""));
     if (response.ok) {
       await store.markSent!(input.row.id, { responseStatus: response.status, responseBody, sentAt: now });
+      await maybeSeedProcorePhotoLink(input.row.payload, responseBody, input.seedProcoreLink);
       return "sent";
     }
 
@@ -483,6 +540,7 @@ export async function processTrockCrmRelayOutboxEntry(input: {
 export async function processTrockCrmRelayOutboxBatch(input: {
   store?: RelayStore;
   fetchImpl?: typeof fetch;
+  seedProcoreLink?: SeedProcoreLink;
   limit?: number;
 } = {}) {
   if (!relayEnabled()) return { processed: 0, sent: 0, failed: 0, abandoned: 0 };
@@ -492,7 +550,7 @@ export async function processTrockCrmRelayOutboxBatch(input: {
   const rows = await store.claimReadyOutbox!(input.limit ?? 25, now, processingStaleBefore);
   const result = { processed: 0, sent: 0, failed: 0, abandoned: 0 };
   for (const row of rows) {
-    const status = await processTrockCrmRelayOutboxEntry({ store, fetchImpl: input.fetchImpl, row });
+    const status = await processTrockCrmRelayOutboxEntry({ store, fetchImpl: input.fetchImpl, seedProcoreLink: input.seedProcoreLink, row });
     result.processed += 1;
     result[status] += 1;
   }

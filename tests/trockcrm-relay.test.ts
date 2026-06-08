@@ -614,6 +614,91 @@ describe("trockcrm relay outbox", () => {
     expect(rows[0].status).toBe("sent");
   });
 
+  it("seeds a Procore photo Link when a project-created relay response returns a photoViewerUrl", async () => {
+    const store = { markSent: vi.fn(), markFailed: vi.fn(), markAbandoned: vi.fn() };
+    const seedProcoreLink = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ status: "linked", photoViewerUrl: "https://frontend.test/p/abc123" })),
+    });
+
+    await expect(processTrockCrmRelayOutboxEntry({
+      store,
+      fetchImpl: fetchMock,
+      seedProcoreLink,
+      row: { id: 12, payload: samplePayload(), attempts: 1 },
+      now: new Date("2026-05-01T12:06:00.000Z"),
+    })).resolves.toBe("sent");
+
+    expect(store.markSent).toHaveBeenCalledWith(12, expect.objectContaining({ responseStatus: 200 }));
+    expect(seedProcoreLink).toHaveBeenCalledWith("598134326517540", "https://frontend.test/p/abc123");
+  });
+
+  it("does not seed a Procore Link when the relay response has no photoViewerUrl", async () => {
+    const store = { markSent: vi.fn(), markFailed: vi.fn(), markAbandoned: vi.fn() };
+    const seedProcoreLink = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ status: "already_linked" })),
+    });
+
+    await processTrockCrmRelayOutboxEntry({
+      store,
+      fetchImpl: fetchMock,
+      seedProcoreLink,
+      row: { id: 12, payload: samplePayload(), attempts: 1 },
+      now: new Date("2026-05-01T12:06:00.000Z"),
+    });
+
+    expect(store.markSent).toHaveBeenCalled();
+    expect(seedProcoreLink).not.toHaveBeenCalled();
+  });
+
+  it("does not seed a Procore Link for stage-changed payloads even when a url is present", async () => {
+    process.env.TROCKCRM_STAGE_CHANGE_RELAY_URL = "https://crm.example.test/procore-stage-changed";
+    const store = { markSent: vi.fn(), markFailed: vi.fn(), markAbandoned: vi.fn() };
+    const seedProcoreLink = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ photoViewerUrl: "https://frontend.test/p/abc123" })),
+    });
+
+    await processTrockCrmRelayOutboxEntry({
+      store,
+      fetchImpl: fetchMock,
+      seedProcoreLink,
+      row: { id: 15, payload: sampleStageChangedPayload(), attempts: 1 },
+      now: new Date("2026-05-01T12:06:00.000Z"),
+    });
+
+    expect(store.markSent).toHaveBeenCalled();
+    expect(seedProcoreLink).not.toHaveBeenCalled();
+  });
+
+  it("still marks the relay sent when seeding the Procore Link throws", async () => {
+    const store = { markSent: vi.fn(), markFailed: vi.fn(), markAbandoned: vi.fn() };
+    const seedProcoreLink = vi.fn().mockRejectedValue(new Error("procore 500"));
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ status: "linked", photoViewerUrl: "https://frontend.test/p/abc123" })),
+    });
+
+    await expect(processTrockCrmRelayOutboxEntry({
+      store,
+      fetchImpl: fetchMock,
+      seedProcoreLink,
+      row: { id: 12, payload: samplePayload(), attempts: 1 },
+      now: new Date("2026-05-01T12:06:00.000Z"),
+    })).resolves.toBe("sent");
+
+    expect(store.markSent).toHaveBeenCalled();
+    expect(store.markFailed).not.toHaveBeenCalled();
+  });
+
   it("uses increasing capped backoff delays", () => {
     expect(calculateTrockCrmRelayBackoff(1)).toBe(30_000);
     expect(calculateTrockCrmRelayBackoff(2)).toBe(120_000);
