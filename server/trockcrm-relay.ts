@@ -482,10 +482,12 @@ export async function processTrockCrmRelayOutboxEntry(input: {
       },
       body,
     });
-    const responseBody = truncateResponseBody(await response.text().catch(() => ""));
+    const rawResponseText = await response.text().catch(() => "");
+    const responseBody = truncateResponseBody(rawResponseText);
     if (response.ok) {
       await store.markSent!(input.row.id, { responseStatus: response.status, responseBody, sentAt: now });
-      await maybeSeedProcorePhotoLink(input.row.payload, responseBody, input.seedProcoreLink);
+      // Parse the FULL (untruncated) body — photoViewerUrl could fall past the stored 4 KB cap.
+      await maybeSeedProcorePhotoLink(input.row.payload, rawResponseText, input.seedProcoreLink);
       return "sent";
     }
 

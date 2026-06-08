@@ -974,6 +974,8 @@ export async function listProcoreProjectLinks(projectId: string): Promise<Procor
   const baseUrl = getBaseUrl(config.environment);
   const companyId = config.companyId;
 
+  await acquireRateLimitToken(); // Unified token bucket — all Procore calls share the same budget
+  await applyBackpressure("procore");
   const response = await fetchWithTimeout(
     `${baseUrl}/rest/v1.0/links?project_id=${projectId}&company_id=${companyId}`,
     {
@@ -984,6 +986,7 @@ export async function listProcoreProjectLinks(projectId: string): Promise<Procor
       },
     }
   );
+  updateRateLimits("procore", response.headers);
 
   if (!response.ok) {
     const errText = await response.text();
@@ -1014,6 +1017,8 @@ export async function createProcoreProjectLink(
   const baseUrl = getBaseUrl(config.environment);
   const companyId = config.companyId;
 
+  await acquireRateLimitToken(); // Unified token bucket — all Procore calls share the same budget
+  await applyBackpressure("procore");
   const response = await fetchWithTimeout(
     `${baseUrl}/rest/v1.0/links?project_id=${projectId}&company_id=${companyId}`,
     {
@@ -1027,6 +1032,7 @@ export async function createProcoreProjectLink(
       body: JSON.stringify({ link: { title: link.title, url: link.url } }),
     }
   );
+  updateRateLimits("procore", response.headers);
 
   if (!response.ok) {
     const errText = await response.text();
