@@ -176,6 +176,27 @@ export async function runPhase1WithRetry(
         }
       }
 
+      // PRIMARY path: emit the CRM public-photo-link relay when the direct Phase-2 chain succeeds.
+      // (The webhook fallback path emits it from runPhase2WithRetry.) Idempotent (outbox-guarded) and
+      // wrapped so a relay failure can never affect the Phase-1/direct-chain result.
+      if (directChainSucceeded && result.portfolioProjectId) {
+        try {
+          const { enqueueProjectCreatedRelayForPortfolioProject } = await import("./trockcrm-relay");
+          const relay = await enqueueProjectCreatedRelayForPortfolioProject({
+            portfolioProjectId: result.portfolioProjectId,
+          });
+          log(
+            `[portfolio-runner] Photo-link relay (direct chain) for portfolio ${result.portfolioProjectId}: ${relay.enqueued ? "enqueued" : `skipped (${relay.reason})`}`,
+            "playwright"
+          );
+        } catch (relayErr: unknown) {
+          log(
+            `[portfolio-runner] Photo-link relay enqueue (direct chain) failed for portfolio ${result.portfolioProjectId}: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`,
+            "playwright"
+          );
+        }
+      }
+
       await sendPortfolioAutomationEmail(result, attempts, {
         projectName: context.projectName,
         projectNumber: context.projectNumber,
@@ -294,7 +315,6 @@ export async function runPhase2WithRetry(
         const { enqueueProjectCreatedRelayForPortfolioProject } = await import("./trockcrm-relay");
         const relay = await enqueueProjectCreatedRelayForPortfolioProject({
           portfolioProjectId,
-          bidboardProjectId,
           webhookLog: context?.webhookLog ?? null,
         });
         log(
