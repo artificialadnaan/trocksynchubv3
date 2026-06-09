@@ -33,16 +33,22 @@ vi.mock("../server/db", () => ({ db: {}, pool: {} }));
 
 import { enqueueProjectCreatedRelayForPortfolioProject } from "../server/trockcrm-relay";
 
-type Mapping = { id: number; bidboardProjectId: string | null; hubspotDealId: string | null };
+type Mapping = { id: number; procoreProjectNumber?: string | null; bidboardProjectId: string | null; hubspotDealId: string | null };
 
-function makeDeps(opts?: { mapping?: Partial<Mapping> | null; projectNumber?: string | null; alreadyRelayed?: boolean }) {
+function makeDeps(opts?: {
+  mapping?: Partial<Mapping> | null;
+  allMappings?: Mapping[];
+  projectNumber?: string | null;
+  alreadyRelayed?: boolean;
+}) {
   const mapping: Mapping | null =
     opts?.mapping === null
       ? null
-      : { id: 7, bidboardProjectId: "bb-1", hubspotDealId: "hs-1", ...opts?.mapping };
+      : { id: 7, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: "bb-1", hubspotDealId: "hs-1", ...opts?.mapping };
   const insertOutbox = vi.fn(async (_row: Record<string, unknown>) => ({ id: 123 }));
   const hasProjectCreatedRelay = vi.fn(async () => Boolean(opts?.alreadyRelayed));
   const getSyncMappingByProcoreProjectNumber = vi.fn(async () => mapping);
+  const getSyncMappings = vi.fn(async () => opts?.allMappings ?? (mapping ? [mapping] : []));
   const fetchProcoreProjectDetail = vi.fn(async () => ({
     project_number: opts?.projectNumber === undefined ? "DFW-4-15526-ac" : opts.projectNumber,
     name: "Rayside Residences",
@@ -53,9 +59,10 @@ function makeDeps(opts?: { mapping?: Partial<Mapping> | null; projectNumber?: st
     insertOutbox,
     hasProjectCreatedRelay,
     getSyncMappingByProcoreProjectNumber,
+    getSyncMappings,
     fetchProcoreProjectDetail,
     deps: {
-      storage: { getSyncMappingByProcoreProjectNumber },
+      storage: { getSyncMappingByProcoreProjectNumber, getSyncMappings },
       fetchProcoreProjectDetail,
       store: { insertOutbox, hasProjectCreatedRelay },
     },
@@ -99,6 +106,26 @@ describe("photo-link relay on Phase-2 completion", () => {
     expect(t.fetchProcoreProjectDetail).toHaveBeenCalledWith("598134326634550");
     expect(t.getSyncMappingByProcoreProjectNumber).toHaveBeenCalledWith("DFW-4-15526-ac");
     expect(t.insertOutbox).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefers a bid-board mapping among duplicate project numbers (skips a portfolio-only/legacy duplicate)", async () => {
+    // getSyncMappingByProcoreProjectNumber returns an arbitrary first row with NO bid-board link,
+    // but another row for the same project_number does carry it — the relay must still fire.
+    const t = makeDeps({
+      mapping: { id: 9, bidboardProjectId: null },
+      allMappings: [
+        { id: 9, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: null, hubspotDealId: null },
+        { id: 7, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: "bb-1", hubspotDealId: "hs-1" },
+      ],
+    });
+
+    const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
+
+    expect(result.enqueued).toBe(true);
+    expect(t.getSyncMappings).toHaveBeenCalled();
+    const row: any = t.insertOutbox.mock.calls[0][0];
+    expect(row.syncMappingId).toBe(7); // the bid-board-linked row, not the null-bidboard duplicate
+    expect(row.payload.synchub.bidboardProjectId).toBe("bb-1");
   });
 
   it("is idempotent (once-guard via outbox): skips when a procore.project.created relay already exists", async () => {

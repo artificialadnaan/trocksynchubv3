@@ -405,6 +405,7 @@ export async function enqueueTrockCrmRelayOutbox(input: {
 
 type Phase2RelayStorage = {
   getSyncMappingByProcoreProjectNumber: (n: string) => Promise<any>;
+  getSyncMappings: () => Promise<any[]>;
 };
 
 /**
@@ -455,7 +456,14 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
   if (!projectNumber) return { enqueued: false, reason: "no_project_number" };
 
   // Resolve the mapping by project_number — authoritative for THIS portfolio project (see note above).
-  const mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
+  let mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
+  // Among duplicate rows sharing this project_number, prefer one that actually carries the bid-board
+  // link — getSyncMappingByProcoreProjectNumber can return an arbitrary portfolio-only/legacy
+  // duplicate with bidboardProjectId null (matches the fallback in triggerPortfolioAutomationFromStageChange).
+  if (!mapping?.bidboardProjectId) {
+    const all = await storage.getSyncMappings();
+    mapping = all.find((m: any) => m.procoreProjectNumber === projectNumber && m.bidboardProjectId) ?? mapping;
+  }
   if (!mapping?.bidboardProjectId) return { enqueued: false, reason: "no_bidboard_mapping" };
 
   // Once-guard keyed on the outbox (the real "relay emitted" signal), not mapping.portfolioProjectId.

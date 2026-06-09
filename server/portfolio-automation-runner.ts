@@ -294,23 +294,12 @@ export async function runPhase2WithRetry(
         `[portfolio-runner] Phase 2 succeeded on attempt ${attempt}`,
         "playwright"
       );
-      await sendPortfolioAutomationEmail(result, attempts, {
-        projectName: context?.projectName,
-        bidboardProjectId: bidboardProjectId ?? result.bidboardProjectId,
-        portfolioProjectId,
-        triggerSource: context?.triggerSource ?? "webhook",
-        phase: phase2Input?.bidboardProjectUrl || phase2Input?.proposalPdfPath
-          ? "phase2+3"
-          : "phase2",
-        firstAttemptStart,
-        lastAttemptEnd: result.completedAt,
-      });
-
-      // Reliably emit the CRM public-photo-link relay on Phase-2 success. The projects.create
-      // webhook only enqueues this in its no-pending-job fallback branch, which the normal
-      // automation flow never hits (it claims the pending job and runs Phase-2 here instead) — so
-      // without this, the photo link is silently skipped for every automation-portfolio'd project.
-      // Wrapped so a relay failure can never affect the Phase-2 result. Idempotent (once-guarded).
+      // Emit the CRM public-photo-link relay BEFORE the notification email. The projects.create
+      // webhook only enqueues this in its no-pending-job fallback branch, which the normal automation
+      // flow never hits (it claims the pending job and runs Phase-2 here instead) — so without this,
+      // the photo link is silently skipped for every automation-portfolio'd project. Ordered before
+      // (and isolated from) the email so a notification failure can't drop the relay. Wrapped so a
+      // relay failure can never affect the Phase-2 result. Idempotent (outbox once-guard).
       try {
         const { enqueueProjectCreatedRelayForPortfolioProject } = await import("./trockcrm-relay");
         const relay = await enqueueProjectCreatedRelayForPortfolioProject({
@@ -327,6 +316,18 @@ export async function runPhase2WithRetry(
           "playwright"
         );
       }
+
+      await sendPortfolioAutomationEmail(result, attempts, {
+        projectName: context?.projectName,
+        bidboardProjectId: bidboardProjectId ?? result.bidboardProjectId,
+        portfolioProjectId,
+        triggerSource: context?.triggerSource ?? "webhook",
+        phase: phase2Input?.bidboardProjectUrl || phase2Input?.proposalPdfPath
+          ? "phase2+3"
+          : "phase2",
+        firstAttemptStart,
+        lastAttemptEnd: result.completedAt,
+      });
       return result;
     }
 
