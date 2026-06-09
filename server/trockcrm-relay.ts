@@ -362,7 +362,7 @@ export function createDbRelayStore(): Required<RelayStore> {
 
 export async function enqueueTrockCrmRelayOutbox(input: {
   store?: RelayStore;
-  webhookLogId: number;
+  webhookLogId: number | null;
   syncMappingId: number | null;
   procorePortfolioProjectId: string;
   projectNumber: string;
@@ -385,6 +385,92 @@ export async function enqueueTrockCrmRelayOutbox(input: {
     relayLog(`[TrockCRMRelay] Failed to enqueue relay: ${err instanceof Error ? err.message : String(err)}`);
     return { enqueued: false, reason: "insert_failed" };
   }
+}
+
+type Phase2RelayStorage = {
+  getSyncMappingByBidboardProjectId: (id: string) => Promise<any>;
+  getSyncMappingByProcoreProjectNumber: (n: string) => Promise<any>;
+  updateSyncMapping: (id: number, data: Record<string, unknown>) => Promise<any>;
+};
+
+/**
+ * Enqueue the `procore.project.created` relay for a portfolio project on Phase-2 completion.
+ *
+ * WHY THIS EXISTS: the `projects.create` webhook handler only enqueues this relay in its
+ * "no pending Phase-2 job" *fallback* branch. The normal automation flow registers a pending
+ * Phase-2 job (right after Phase-1) BEFORE the create-webhook arrives, so the webhook claims that
+ * job and runs Phase-2 down the `if (pending)` branch — never reaching the relay enqueue. Result:
+ * the CRM public photo link was silently skipped for every automation-portfolio'd project. Calling
+ * this from `runPhase2WithRetry`'s success path makes the relay fire reliably for every project,
+ * independent of the pending-job branch / queue timing.
+ *
+ * Idempotent: skips when no bid-board sync-mapping resolves, when the mapping already has a
+ * `portfolioProjectId` (relay already emitted — the once-guard), or when the Procore project has no
+ * `project_number` (the CRM resolves the deal by project number). On enqueue it stamps
+ * `portfolioProjectId` so the webhook fallback and any re-runs no-op. The CRM consumer is
+ * independently idempotent as a backstop, so a rare double-enqueue is harmless.
+ */
+export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
+  portfolioProjectId: string;
+  bidboardProjectId?: string | null;
+  webhookLog?: { id: number | string; createdAt?: Date | string | null; payload?: any } | null;
+  deps?: {
+    storage?: Phase2RelayStorage;
+    fetchProcoreProjectDetail?: (id: string) => Promise<any>;
+    store?: RelayStore;
+  };
+}): Promise<{ enqueued: boolean; reason?: string; outboxId?: number }> {
+  const portfolioProjectId = String(input.portfolioProjectId ?? "");
+  if (!portfolioProjectId) return { enqueued: false, reason: "missing_portfolio_project_id" };
+
+  const storage: Phase2RelayStorage = input.deps?.storage ?? (await import("./storage")).storage;
+  const fetchDetail = input.deps?.fetchProcoreProjectDetail ?? (await import("./procore")).fetchProcoreProjectDetail;
+
+  // The CRM resolves the deal by project_number, so Procore project detail is required.
+  let project: any = null;
+  try {
+    project = await fetchDetail(portfolioProjectId);
+  } catch (err) {
+    relayLog(`[TrockCRMRelay] Phase 2 relay: could not fetch Procore project ${portfolioProjectId}: ${err instanceof Error ? err.message : String(err)}`);
+    return { enqueued: false, reason: "project_detail_failed" };
+  }
+  const projectNumber = optionalString(project?.project_number);
+  if (!projectNumber) return { enqueued: false, reason: "no_project_number" };
+
+  // Resolve the bid-board sync-mapping (by bid-board id first, then by project number).
+  let mapping: any = null;
+  if (input.bidboardProjectId) {
+    mapping = await storage.getSyncMappingByBidboardProjectId(String(input.bidboardProjectId));
+  }
+  if (!mapping) {
+    mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
+  }
+  if (!mapping?.bidboardProjectId) return { enqueued: false, reason: "no_bidboard_mapping" };
+  if (mapping.portfolioProjectId) return { enqueued: false, reason: "already_relayed" }; // once-guard
+
+  // Stamp portfolioProjectId so the webhook fallback / any re-run no-ops (mirrors the webhook else-branch).
+  await storage.updateSyncMapping(mapping.id, { portfolioProjectId });
+
+  const payload = buildTrockCrmProjectCreatedPayload({
+    webhookLog: input.webhookLog ?? {
+      id: 0,
+      createdAt: new Date(),
+      payload: { resource_id: portfolioProjectId, reason: "phase2_complete", resource_type: "Projects" },
+    },
+    syncMapping: mapping,
+    procoreProject: { ...project, id: portfolioProjectId },
+    enrichedAt: new Date(),
+  });
+
+  const res = await enqueueTrockCrmRelayOutbox({
+    store: input.deps?.store,
+    webhookLogId: optionalNumericId(input.webhookLog?.id),
+    syncMappingId: optionalNumericId(mapping.id),
+    procorePortfolioProjectId: portfolioProjectId,
+    projectNumber,
+    payload,
+  });
+  return res.enqueued ? { enqueued: true, outboxId: res.outboxId } : { enqueued: false, reason: res.reason };
 }
 
 export async function processTrockCrmRelayOutboxEntry(input: {

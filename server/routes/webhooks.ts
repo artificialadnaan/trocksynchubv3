@@ -507,7 +507,15 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                     portfolioProjectId,
                     pending.bidboardProjectId,
                     phase2Input,
-                    { triggerSource: 'webhook' }
+                    {
+                      triggerSource: 'webhook',
+                      // Pass the originating webhook so the Phase-2-success photo-link relay carries
+                      // real trace metadata. The relay is enqueued inside runPhase2WithRetry (not in
+                      // this branch), so it now fires for this if-pending path that previously skipped it.
+                      webhookLog: webhookLog
+                        ? { id: webhookLog.id, createdAt: webhookLog.createdAt, payload: webhookPayload }
+                        : null,
+                    }
                   );
                   if (result.success) {
                     await markPhase2Complete(jobId);
@@ -694,7 +702,15 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                     portfolioProjectId,
                     pending.bidboardProjectId,
                     phase2Input,
-                    { triggerSource: 'webhook' }
+                    {
+                      triggerSource: 'webhook',
+                      // Pass the originating webhook so the Phase-2-success photo-link relay carries
+                      // real trace metadata. The relay is enqueued inside runPhase2WithRetry (not in
+                      // this branch), so it now fires for this if-pending path that previously skipped it.
+                      webhookLog: webhookLog
+                        ? { id: webhookLog.id, createdAt: webhookLog.createdAt, payload: webhookPayload }
+                        : null,
+                    }
                   );
                   if (result.success) {
                     await markPhase2Complete(jobId);
