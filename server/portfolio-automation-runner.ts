@@ -176,6 +176,27 @@ export async function runPhase1WithRetry(
         }
       }
 
+      // PRIMARY path: emit the CRM public-photo-link relay when the direct Phase-2 chain succeeds.
+      // (The webhook fallback path emits it from runPhase2WithRetry.) Idempotent (outbox-guarded) and
+      // wrapped so a relay failure can never affect the Phase-1/direct-chain result.
+      if (directChainSucceeded && result.portfolioProjectId) {
+        try {
+          const { enqueueProjectCreatedRelayForPortfolioProject } = await import("./trockcrm-relay");
+          const relay = await enqueueProjectCreatedRelayForPortfolioProject({
+            portfolioProjectId: result.portfolioProjectId,
+          });
+          log(
+            `[portfolio-runner] Photo-link relay (direct chain) for portfolio ${result.portfolioProjectId}: ${relay.enqueued ? "enqueued" : `skipped (${relay.reason})`}`,
+            "playwright"
+          );
+        } catch (relayErr: unknown) {
+          log(
+            `[portfolio-runner] Photo-link relay enqueue (direct chain) failed for portfolio ${result.portfolioProjectId}: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`,
+            "playwright"
+          );
+        }
+      }
+
       await sendPortfolioAutomationEmail(result, attempts, {
         projectName: context.projectName,
         projectNumber: context.projectNumber,
@@ -235,6 +256,7 @@ export async function runPhase2WithRetry(
   context?: {
     projectName?: string;
     triggerSource: "webhook" | "manual" | "orphan_failsafe";
+    webhookLog?: { id: number | string; createdAt?: Date | string | null; payload?: any } | null;
   }
 ): Promise<PortfolioAutomationResult> {
   const attempts: Array<{
@@ -272,6 +294,29 @@ export async function runPhase2WithRetry(
         `[portfolio-runner] Phase 2 succeeded on attempt ${attempt}`,
         "playwright"
       );
+      // Emit the CRM public-photo-link relay BEFORE the notification email. The projects.create
+      // webhook only enqueues this in its no-pending-job fallback branch, which the normal automation
+      // flow never hits (it claims the pending job and runs Phase-2 here instead) — so without this,
+      // the photo link is silently skipped for every automation-portfolio'd project. Ordered before
+      // (and isolated from) the email so a notification failure can't drop the relay. Wrapped so a
+      // relay failure can never affect the Phase-2 result. Idempotent (outbox once-guard).
+      try {
+        const { enqueueProjectCreatedRelayForPortfolioProject } = await import("./trockcrm-relay");
+        const relay = await enqueueProjectCreatedRelayForPortfolioProject({
+          portfolioProjectId,
+          webhookLog: context?.webhookLog ?? null,
+        });
+        log(
+          `[portfolio-runner] Photo-link relay for portfolio ${portfolioProjectId}: ${relay.enqueued ? "enqueued" : `skipped (${relay.reason})`}`,
+          "playwright"
+        );
+      } catch (relayErr: unknown) {
+        log(
+          `[portfolio-runner] Photo-link relay enqueue failed for portfolio ${portfolioProjectId}: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`,
+          "playwright"
+        );
+      }
+
       await sendPortfolioAutomationEmail(result, attempts, {
         projectName: context?.projectName,
         bidboardProjectId: bidboardProjectId ?? result.bidboardProjectId,
