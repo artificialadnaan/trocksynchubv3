@@ -77,7 +77,10 @@ export type TrockCrmRelayOutboxPayload =
 
 export type RelayStore = {
   insertOutbox?: (row: Record<string, unknown>) => Promise<{ id: number }>;
-  hasProjectCreatedRelay?: (procorePortfolioProjectId: string) => Promise<boolean>;
+  insertProjectCreatedRelayIfAbsent?: (
+    row: Record<string, unknown>,
+    procorePortfolioProjectId: string,
+  ) => Promise<{ inserted: boolean; id?: number }>;
   claimReadyOutbox?: (limit: number, now: Date, processingStaleBefore: Date) => Promise<Array<Pick<TrockcrmRelayOutbox, "id" | "payload" | "attempts">>>;
   markSent?: (id: number, data: { responseStatus: number; responseBody?: string | null; sentAt: Date }) => Promise<void>;
   markFailed?: (id: number, data: { attempts: number; error: string; responseStatus?: number | null; responseBody?: string | null; nextRetryAt: Date; attemptedAt: Date }) => Promise<void>;
@@ -289,20 +292,30 @@ export function createDbRelayStore(): Required<RelayStore> {
         .returning({ id: trockcrmRelayOutbox.id });
       return result;
     },
-    // Has a `procore.project.created` relay EVER been enqueued for this portfolio project (any
-    // status — rows persist after send via markSent)? This is the authoritative "relay emitted"
-    // idempotency signal, independent of syncMappings.portfolioProjectId (which runPhase2 sets
-    // mid-automation, so it can't be trusted as proof the relay was sent).
-    async hasProjectCreatedRelay(procorePortfolioProjectId) {
-      const rows = await db
-        .select({ id: trockcrmRelayOutbox.id })
-        .from(trockcrmRelayOutbox)
-        .where(and(
-          eq(trockcrmRelayOutbox.procorePortfolioProjectId, procorePortfolioProjectId),
-          sql`${trockcrmRelayOutbox.payload}->>'eventType' = 'procore.project.created'`,
-        ))
-        .limit(1);
-      return rows.length > 0;
+    // Atomic once-guard: insert a `procore.project.created` outbox row for this portfolio project
+    // ONLY if none exists yet. The outbox is the authoritative "relay emitted" signal (rows persist
+    // after send via markSent), independent of syncMappings.portfolioProjectId (which runPhase2 sets
+    // mid-automation). A per-project transaction advisory lock serializes concurrent emitters (e.g.
+    // the direct-chain path racing the webhook/orphan fallback) so the check+insert can't both pass —
+    // no migration / unique constraint required.
+    async insertProjectCreatedRelayIfAbsent(row, procorePortfolioProjectId) {
+      return db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"trockcrm_relay_pc_" + procorePortfolioProjectId}))`);
+        const existing = await tx
+          .select({ id: trockcrmRelayOutbox.id })
+          .from(trockcrmRelayOutbox)
+          .where(and(
+            eq(trockcrmRelayOutbox.procorePortfolioProjectId, procorePortfolioProjectId),
+            sql`${trockcrmRelayOutbox.payload}->>'eventType' = 'procore.project.created'`,
+          ))
+          .limit(1);
+        if (existing.length > 0) return { inserted: false };
+        const [result] = await tx
+          .insert(trockcrmRelayOutbox)
+          .values(row as any)
+          .returning({ id: trockcrmRelayOutbox.id });
+        return { inserted: true, id: result.id };
+      });
     },
     async claimReadyOutbox(limit, now, processingStaleBefore) {
       const result = await db.transaction(async (tx) => tx.execute(sql`
@@ -465,11 +478,6 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
   }
   if (!mapping?.bidboardProjectId) return { enqueued: false, reason: "no_bidboard_mapping" };
 
-  // Once-guard keyed on the outbox (the real "relay emitted" signal), not mapping.portfolioProjectId.
-  if (store.hasProjectCreatedRelay && (await store.hasProjectCreatedRelay(portfolioProjectId))) {
-    return { enqueued: false, reason: "already_relayed" };
-  }
-
   const payload = buildTrockCrmProjectCreatedPayload({
     webhookLog: input.webhookLog ?? {
       id: 0,
@@ -481,15 +489,28 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
     enrichedAt: new Date(),
   });
 
-  const res = await enqueueTrockCrmRelayOutbox({
-    store,
-    webhookLogId: optionalNumericId(input.webhookLog?.id),
-    syncMappingId: optionalNumericId(mapping.id),
-    procorePortfolioProjectId: portfolioProjectId,
-    projectNumber,
-    payload,
-  });
-  return res.enqueued ? { enqueued: true, outboxId: res.outboxId } : { enqueued: false, reason: res.reason };
+  // Atomic insert-if-absent (outbox once-guard, advisory-lock serialized) — see store impl. This
+  // both enforces idempotency and inserts in one transaction, so concurrent emitters can't double-enqueue.
+  try {
+    const res = await store.insertProjectCreatedRelayIfAbsent!(
+      {
+        webhookLogId: optionalNumericId(input.webhookLog?.id),
+        syncMappingId: optionalNumericId(mapping.id),
+        procorePortfolioProjectId: portfolioProjectId,
+        projectNumber,
+        payload,
+        status: "pending",
+        attempts: 0,
+        nextRetryAt: null,
+      },
+      portfolioProjectId,
+    );
+    if (!res.inserted) return { enqueued: false, reason: "already_relayed" };
+    return { enqueued: true, outboxId: res.id };
+  } catch (err) {
+    relayLog(`[TrockCRMRelay] Phase 2 relay: failed to enqueue for ${portfolioProjectId}: ${err instanceof Error ? err.message : String(err)}`);
+    return { enqueued: false, reason: "insert_failed" };
+  }
 }
 
 export async function processTrockCrmRelayOutboxEntry(input: {

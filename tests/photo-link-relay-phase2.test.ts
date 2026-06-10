@@ -16,8 +16,9 @@
  *  - resolves the mapping by **project_number** (from the actual portfolio project), NOT a passed
  *    bid-board id — the webhook claims the oldest pending job globally, which may be a different
  *    project, so a bid-board lookup could attach the relay to the wrong deal;
- *  - the once-guard is **outbox existence** (`hasProjectCreatedRelay`), NOT mapping.portfolioProjectId
- *    (which runPhase2 sets mid-automation and would falsely report already-relayed);
+ *  - the once-guard is an **atomic insert-if-absent** on the outbox (advisory-locked per project),
+ *    NOT mapping.portfolioProjectId (which runPhase2 sets mid-automation and would falsely report
+ *    already-relayed) — and atomic so concurrent emitters can't both insert;
  *  - no mapping mutation (so a transient insert failure can't permanently lose the relay).
  *
  * Helper is exercised directly with injected deps (no DB / Procore / Playwright).
@@ -48,8 +49,12 @@ function makeDeps(opts?: {
   // Targeted bid-board lookup: defaults to the primary row when it already carries the link.
   const bidboardMapping: Mapping | null =
     opts?.bidboardMapping !== undefined ? opts.bidboardMapping : (mapping?.bidboardProjectId ? mapping : null);
-  const insertOutbox = vi.fn(async (_row: Record<string, unknown>) => ({ id: 123 }));
-  const hasProjectCreatedRelay = vi.fn(async () => Boolean(opts?.alreadyRelayed));
+  // Atomic insert-if-absent (the outbox once-guard): returns {inserted:false} when a relay already
+  // exists for the project. The real impl serializes concurrent emitters with a per-project advisory
+  // lock; the helper just delegates to this single call (no separate read-before-write).
+  const insertProjectCreatedRelayIfAbsent = vi.fn(async (_row: Record<string, unknown>, _pid: string) =>
+    opts?.alreadyRelayed ? { inserted: false as const } : { inserted: true as const, id: 123 },
+  );
   const getSyncMappingByProcoreProjectNumber = vi.fn(async () => mapping);
   const getBidboardMappingByProcoreProjectNumber = vi.fn(async () => bidboardMapping ?? undefined);
   const fetchProcoreProjectDetail = vi.fn(async () => ({
@@ -59,15 +64,14 @@ function makeDeps(opts?: {
   }));
   return {
     mapping,
-    insertOutbox,
-    hasProjectCreatedRelay,
+    insertProjectCreatedRelayIfAbsent,
     getSyncMappingByProcoreProjectNumber,
     getBidboardMappingByProcoreProjectNumber,
     fetchProcoreProjectDetail,
     deps: {
       storage: { getSyncMappingByProcoreProjectNumber, getBidboardMappingByProcoreProjectNumber },
       fetchProcoreProjectDetail,
-      store: { insertOutbox, hasProjectCreatedRelay },
+      store: { insertProjectCreatedRelayIfAbsent },
     },
   };
 }
@@ -85,9 +89,9 @@ describe("photo-link relay on Phase-2 completion", () => {
     });
 
     expect(result.enqueued).toBe(true);
-    expect(t.insertOutbox).toHaveBeenCalledTimes(1);
+    expect(t.insertProjectCreatedRelayIfAbsent).toHaveBeenCalledTimes(1);
 
-    const row: any = t.insertOutbox.mock.calls[0][0];
+    const row: any = t.insertProjectCreatedRelayIfAbsent.mock.calls[0][0];
     expect(row.payload.eventType).toBe("procore.project.created");
     expect(row.procorePortfolioProjectId).toBe("598134326634550");
     expect(row.webhookLogId).toBe(42);
@@ -108,7 +112,7 @@ describe("photo-link relay on Phase-2 completion", () => {
     // The project's own project_number is the lookup key — never a (possibly mismatched) bid-board id.
     expect(t.fetchProcoreProjectDetail).toHaveBeenCalledWith("598134326634550");
     expect(t.getSyncMappingByProcoreProjectNumber).toHaveBeenCalledWith("DFW-4-15526-ac");
-    expect(t.insertOutbox).toHaveBeenCalledTimes(1);
+    expect(t.insertProjectCreatedRelayIfAbsent).toHaveBeenCalledTimes(1);
   });
 
   it("prefers a bid-board mapping among duplicate project numbers (skips a portfolio-only/legacy duplicate)", async () => {
@@ -123,19 +127,20 @@ describe("photo-link relay on Phase-2 completion", () => {
 
     expect(result.enqueued).toBe(true);
     expect(t.getBidboardMappingByProcoreProjectNumber).toHaveBeenCalledWith("DFW-4-15526-ac");
-    const row: any = t.insertOutbox.mock.calls[0][0];
+    const row: any = t.insertProjectCreatedRelayIfAbsent.mock.calls[0][0];
     expect(row.syncMappingId).toBe(7); // the bid-board-linked row, not the null-bidboard duplicate
     expect(row.payload.synchub.bidboardProjectId).toBe("bb-1");
   });
 
-  it("is idempotent (once-guard via outbox): skips when a procore.project.created relay already exists", async () => {
+  it("is idempotent (atomic once-guard): insert-if-absent reports an existing relay and we skip", async () => {
     const t = makeDeps({ alreadyRelayed: true });
 
     const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
 
     expect(result).toEqual({ enqueued: false, reason: "already_relayed" });
-    expect(t.hasProjectCreatedRelay).toHaveBeenCalledWith("598134326634550");
-    expect(t.insertOutbox).not.toHaveBeenCalled();
+    // The guard + insert is ONE atomic store call keyed on the portfolio project id (advisory-locked
+    // in the real impl), so concurrent emitters can't both insert.
+    expect(t.insertProjectCreatedRelayIfAbsent).toHaveBeenCalledWith(expect.any(Object), "598134326634550");
   });
 
   it("works without an originating webhook (direct-chain / manual Phase-2) — webhookLogId is null", async () => {
@@ -144,7 +149,7 @@ describe("photo-link relay on Phase-2 completion", () => {
     const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
 
     expect(result.enqueued).toBe(true);
-    const row: any = t.insertOutbox.mock.calls[0][0];
+    const row: any = t.insertProjectCreatedRelayIfAbsent.mock.calls[0][0];
     expect(row.webhookLogId).toBeNull();
     expect(row.payload.eventType).toBe("procore.project.created");
   });
@@ -155,7 +160,7 @@ describe("photo-link relay on Phase-2 completion", () => {
     const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
 
     expect(result).toEqual({ enqueued: false, reason: "no_project_number" });
-    expect(t.insertOutbox).not.toHaveBeenCalled();
+    expect(t.insertProjectCreatedRelayIfAbsent).not.toHaveBeenCalled();
   });
 
   it("skips when no bid-board sync-mapping resolves (e.g. a manual non-bid-board project)", async () => {
@@ -164,6 +169,6 @@ describe("photo-link relay on Phase-2 completion", () => {
     const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
 
     expect(result).toEqual({ enqueued: false, reason: "no_bidboard_mapping" });
-    expect(t.insertOutbox).not.toHaveBeenCalled();
+    expect(t.insertProjectCreatedRelayIfAbsent).not.toHaveBeenCalled();
   });
 });

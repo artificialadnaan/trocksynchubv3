@@ -261,7 +261,11 @@ export async function handleProcoreProjectWebhook(
                 portfolioProjectId,
                 undefined,
                 undefined,
-                { triggerSource: "webhook" }
+                {
+                  triggerSource: "webhook",
+                  // Preserve the originating webhook's trace data in the photo-link relay payload.
+                  webhookLog: { id: webhookId, payload },
+                }
               );
               log(
                 `[webhook] Auto Phase 2 completed: ${result.success ? "success" : "failed"}`,
