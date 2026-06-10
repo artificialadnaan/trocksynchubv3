@@ -176,11 +176,14 @@ export async function runPhase1WithRetry(
         }
       }
 
-      // PRIMARY path: emit the CRM public-photo-link relay once the portfolio project EXISTS — gated
-      // on portfolioProjectId, NOT on directChainSucceeded (which folds in Phase 3, so a Phase-3-only
-      // failure would otherwise drop the photo link even though the project was created). Idempotent
-      // (outbox-guarded) and wrapped so a relay failure can never affect the Phase-1/direct-chain result.
-      if (result.portfolioProjectId) {
+      // PRIMARY path: emit the CRM public-photo-link relay only when the direct chain SUCCEEDED — i.e.
+      // Phase 2 actually created/identity-validated the portfolio project. Gating merely on
+      // result.portfolioProjectId would also fire after a Phase-2 failure (e.g. an id recovered from the
+      // legacy procoreProjectId fallback, or an identity-validation failure) and could link the wrong
+      // project. A Phase-3-only failure is NOT dropped: directChainSucceeded is false, so the pending
+      // Phase-2 job is left unclaimed and the webhook fallback re-runs Phase 2 and emits the relay from
+      // runPhase2WithRetry. Idempotent (outbox-guarded); wrapped so a relay failure can't affect the result.
+      if (directChainSucceeded && result.portfolioProjectId) {
         try {
           const { enqueueProjectCreatedRelayForPortfolioProject } = await import("./trockcrm-relay");
           const relay = await enqueueProjectCreatedRelayForPortfolioProject({
@@ -268,28 +271,36 @@ export async function runPhase2WithRetry(
   const firstAttemptStart = new Date();
   let lastResult: PortfolioAutomationResult | null = null;
 
-  // Emit the CRM public-photo-link relay up front, gated only on the portfolio project EXISTING
-  // (it always does here — runPhase2WithRetry is invoked for an already-created portfolio project).
-  // Decoupled from Phase 2/3 success so a later Phase-3 failure can't drop the link, and from the
-  // notification email. Idempotent (outbox once-guard) and wrapped so it can never affect Phase 2.
-  if (portfolioProjectId) {
+  // Emit the CRM public-photo-link relay for this (already-created) portfolio project. Decoupled from
+  // Phase 2/3 success so a Phase-3 failure can't drop the link, and from the notification email.
+  // Idempotent (outbox once-guard) and wrapped so it can never affect Phase 2. We try it UP FRONT (so a
+  // later total failure can't drop it) and again AFTER a Phase-2 success — the latter is the fallback
+  // for the case where the mapping isn't stamped yet and enrichment was momentarily unavailable, so the
+  // up-front attempt skipped for missing metadata. Once enqueued (or confirmed already-relayed) we stop.
+  let relaySettled = false;
+  const emitPhotoLinkRelay = async (phase: string): Promise<void> => {
+    if (relaySettled || !portfolioProjectId) return;
     try {
       const { enqueueProjectCreatedRelayForPortfolioProject } = await import("./trockcrm-relay");
       const relay = await enqueueProjectCreatedRelayForPortfolioProject({
         portfolioProjectId,
         webhookLog: context?.webhookLog ?? null,
       });
+      // Settle on success or a terminal skip; leave unsettled on a transient metadata/insert miss so a
+      // later Phase-2 success retries (by then runPhase2 has stamped the mapping's portfolioProjectId).
+      if (relay.enqueued || relay.reason === "already_relayed") relaySettled = true;
       log(
-        `[portfolio-runner] Photo-link relay for portfolio ${portfolioProjectId}: ${relay.enqueued ? "enqueued" : `skipped (${relay.reason})`}`,
+        `[portfolio-runner] Photo-link relay (${phase}) for portfolio ${portfolioProjectId}: ${relay.enqueued ? "enqueued" : `skipped (${relay.reason})`}`,
         "playwright"
       );
     } catch (relayErr: unknown) {
       log(
-        `[portfolio-runner] Photo-link relay enqueue failed for portfolio ${portfolioProjectId}: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`,
+        `[portfolio-runner] Photo-link relay (${phase}) enqueue failed for portfolio ${portfolioProjectId}: ${relayErr instanceof Error ? relayErr.message : String(relayErr)}`,
         "playwright"
       );
     }
-  }
+  };
+  await emitPhotoLinkRelay("upfront");
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     log(
@@ -318,7 +329,10 @@ export async function runPhase2WithRetry(
         `[portfolio-runner] Phase 2 succeeded on attempt ${attempt}`,
         "playwright"
       );
-      // (Photo-link relay is emitted up front, before the retry loop — see top of this function.)
+      // Fallback emit: re-attempt the relay now that Phase 2 has stamped the mapping's
+      // portfolioProjectId — covers the case where the up-front attempt skipped for missing metadata.
+      // No-op if it already enqueued. Ordered before (and isolated from) the email.
+      await emitPhotoLinkRelay("post-phase2");
       await sendPortfolioAutomationEmail(result, attempts, {
         projectName: context?.projectName,
         bidboardProjectId: bidboardProjectId ?? result.bidboardProjectId,
