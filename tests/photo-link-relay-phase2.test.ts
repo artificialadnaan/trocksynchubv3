@@ -172,6 +172,7 @@ describe("photo-link relay on Phase-2 completion", () => {
     expect(result.enqueued).toBe(true);
     const row: any = t.insertProjectCreatedRelayIfAbsent.mock.calls[0][0];
     expect(row.webhookLogId).toBeNull();
+    expect(row.payload.synchub.webhookLogId).toBeNull(); // synthetic default must be null, not "0"
     expect(row.payload.eventType).toBe("procore.project.created");
   });
 

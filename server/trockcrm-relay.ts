@@ -489,7 +489,9 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
 
   const payload = buildTrockCrmProjectCreatedPayload({
     webhookLog: input.webhookLog ?? {
-      id: 0,
+      // id: null so payload.synchub.webhookLogId is null — consistent with the outbox FK, which is null
+      // when there's no originating webhook_logs row (NOT a synthetic "0" that implies row id 0).
+      id: null,
       createdAt: new Date(),
       payload: { resource_id: portfolioProjectId, reason: "phase2_complete", resource_type: "Projects" },
     },
