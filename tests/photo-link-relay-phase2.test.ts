@@ -175,6 +175,24 @@ describe("photo-link relay on Phase-2 completion", () => {
     expect(row.payload.eventType).toBe("procore.project.created");
   });
 
+  it("a project-events webhook with no persisted webhook_logs row writes a null FK (no FK violation) but keeps the trace", async () => {
+    const t = makeDeps();
+
+    // The /project-events callers pass { id: null, payload } — there's no webhook_logs row, so the
+    // outbox FK must be null (a numeric Procore event id here would violate the FK and drop the relay).
+    const result = await enqueueProjectCreatedRelayForPortfolioProject({
+      portfolioProjectId: "598134326634550",
+      webhookLog: { id: null, payload: { id: "procore-evt-777", reason: "create", resource_id: "598134326634550" } },
+      deps: t.deps,
+    });
+
+    expect(result.enqueued).toBe(true);
+    const row: any = t.insertProjectCreatedRelayIfAbsent.mock.calls[0][0];
+    expect(row.webhookLogId).toBeNull(); // null FK — no reference to a non-existent webhook_logs row
+    // Procore event id is still preserved for trace via rawProcoreWebhook.
+    expect(row.payload.rawProcoreWebhook.id).toBe("procore-evt-777");
+  });
+
   it("skips safely when neither the mapping nor enrichment yields a project_number", async () => {
     const t = makeDeps({ projectNumber: null, mapping: { procoreProjectNumber: null } });
 

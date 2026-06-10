@@ -143,7 +143,7 @@ export function calculateTrockCrmRelayBackoff(attempts: number) {
 }
 
 export function buildTrockCrmProjectCreatedPayload(input: {
-  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  webhookLog: { id: number | string | null; createdAt?: Date | string | null; payload?: any };
   syncMapping: { id: number | string; bidboardProjectId?: string | null; hubspotDealId?: string | null };
   procoreProject: {
     id?: string | number | null;
@@ -167,7 +167,7 @@ export function buildTrockCrmProjectCreatedPayload(input: {
       projectName: String(input.procoreProject.name ?? input.procoreProject.display_name ?? ""),
     },
     synchub: {
-      webhookLogId: String(input.webhookLog.id),
+      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : "",
       syncMappingId: String(input.syncMapping.id),
       bidboardProjectId: input.syncMapping.bidboardProjectId ?? null,
       hubspotDealId: input.syncMapping.hubspotDealId ?? null,
@@ -200,7 +200,7 @@ function cleanStage(value: string): string {
 }
 
 export function buildTrockCrmProjectStageChangedPayload(input: {
-  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  webhookLog: { id: number | string | null; createdAt?: Date | string | null; payload?: any };
   syncMapping?: { id?: number | string | null; bidboardProjectId?: string | null; hubspotDealId?: string | null } | null;
   procoreProject: {
     procoreId?: string | number | null;
@@ -246,7 +246,7 @@ export function buildTrockCrmProjectStageChangedPayload(input: {
       webhookTimestamp: optionalString(raw.timestamp),
     },
     synchub: {
-      webhookLogId: String(input.webhookLog.id),
+      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : "",
       syncMappingId: input.syncMapping?.id == null ? null : String(input.syncMapping.id),
       bidboardProjectId: input.syncMapping?.bidboardProjectId ?? null,
       hubspotDealId: input.syncMapping?.hubspotDealId ?? null,
@@ -259,7 +259,7 @@ export function buildTrockCrmProjectStageChangedPayload(input: {
 
 export async function enqueueTrockCrmProjectStageChangedRelay(input: {
   store?: RelayStore;
-  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  webhookLog: { id: number | string | null; createdAt?: Date | string | null; payload?: any };
   syncMapping?: { id?: number | string | null; bidboardProjectId?: string | null; hubspotDealId?: string | null } | null;
   procoreProject: Parameters<typeof buildTrockCrmProjectStageChangedPayload>[0]["procoreProject"];
   previousStage: string;
@@ -447,7 +447,7 @@ type Phase2RelayStorage = {
  */
 export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
   portfolioProjectId: string;
-  webhookLog?: { id: number | string; createdAt?: Date | string | null; payload?: any } | null;
+  webhookLog?: { id: number | string | null; createdAt?: Date | string | null; payload?: any } | null;
   deps?: {
     storage?: Phase2RelayStorage;
     fetchProcoreProjectDetail?: (id: string) => Promise<any>;

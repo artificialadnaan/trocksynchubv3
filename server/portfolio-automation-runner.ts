@@ -260,7 +260,7 @@ export async function runPhase2WithRetry(
   context?: {
     projectName?: string;
     triggerSource: "webhook" | "manual" | "orphan_failsafe";
-    webhookLog?: { id: number | string; createdAt?: Date | string | null; payload?: any } | null;
+    webhookLog?: { id: number | string | null; createdAt?: Date | string | null; payload?: any } | null;
   }
 ): Promise<PortfolioAutomationResult> {
   const attempts: Array<{
@@ -324,15 +324,18 @@ export async function runPhase2WithRetry(
       timestamp: new Date(),
     });
 
+    // Fallback emit after EACH Phase-2 attempt (regardless of result.success, which folds in Phase 3):
+    // once Phase 2 has stamped the mapping's portfolioProjectId, this catches the case where the
+    // up-front attempt skipped for missing metadata — even if Phase 3 then fails. No-op once enqueued.
+    // Safe here: portfolioProjectId is the real webhook-created project (the helper still requires a
+    // bid-board mapping), so this never relays a non-portfolio project.
+    await emitPhotoLinkRelay("post-phase2");
+
     if (result.success) {
       log(
         `[portfolio-runner] Phase 2 succeeded on attempt ${attempt}`,
         "playwright"
       );
-      // Fallback emit: re-attempt the relay now that Phase 2 has stamped the mapping's
-      // portfolioProjectId — covers the case where the up-front attempt skipped for missing metadata.
-      // No-op if it already enqueued. Ordered before (and isolated from) the email.
-      await emitPhotoLinkRelay("post-phase2");
       await sendPortfolioAutomationEmail(result, attempts, {
         projectName: context?.projectName,
         bidboardProjectId: bidboardProjectId ?? result.bidboardProjectId,
