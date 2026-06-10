@@ -45,7 +45,7 @@
  * @module storage
  */
 
-import { eq, desc, and, gte, lte, sql, ilike, or, isNull } from "drizzle-orm";
+import { eq, desc, and, gte, lte, sql, ilike, or, isNull, isNotNull } from "drizzle-orm";
 
 /** Escape LIKE/ILIKE wildcards so user input is treated literally */
 function escapeLike(input: string): string {
@@ -214,6 +214,7 @@ export interface IStorage {
   getSyncMappingByPortfolioProjectId(portfolioProjectId: string): Promise<SyncMapping | undefined>;
   /** Find mapping by Procore project number (e.g. DFW-1-06426-ah) */
   getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
+  getBidboardMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
   /** Create a new sync mapping linking entities */
   createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
   /** Update an existing sync mapping */
@@ -469,6 +470,20 @@ export class DatabaseStorage implements IStorage {
     if (!projectNumber?.trim()) return undefined;
     const [mapping] = await db.select().from(syncMappings).where(
       eq(syncMappings.procoreProjectNumber, projectNumber.trim())
+    );
+    return mapping;
+  }
+
+  // The bid-board-linked row for a project number, when duplicate rows share it (a portfolio-only
+  // /legacy duplicate may otherwise be returned first). Targeted query — not paginated — so it stays
+  // correct regardless of dataset size.
+  async getBidboardMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined> {
+    if (!projectNumber?.trim()) return undefined;
+    const [mapping] = await db.select().from(syncMappings).where(
+      and(
+        eq(syncMappings.procoreProjectNumber, projectNumber.trim()),
+        isNotNull(syncMappings.bidboardProjectId),
+      )
     );
     return mapping;
   }

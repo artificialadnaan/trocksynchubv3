@@ -37,7 +37,7 @@ type Mapping = { id: number; procoreProjectNumber?: string | null; bidboardProje
 
 function makeDeps(opts?: {
   mapping?: Partial<Mapping> | null;
-  allMappings?: Mapping[];
+  bidboardMapping?: Mapping | null;
   projectNumber?: string | null;
   alreadyRelayed?: boolean;
 }) {
@@ -45,10 +45,13 @@ function makeDeps(opts?: {
     opts?.mapping === null
       ? null
       : { id: 7, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: "bb-1", hubspotDealId: "hs-1", ...opts?.mapping };
+  // Targeted bid-board lookup: defaults to the primary row when it already carries the link.
+  const bidboardMapping: Mapping | null =
+    opts?.bidboardMapping !== undefined ? opts.bidboardMapping : (mapping?.bidboardProjectId ? mapping : null);
   const insertOutbox = vi.fn(async (_row: Record<string, unknown>) => ({ id: 123 }));
   const hasProjectCreatedRelay = vi.fn(async () => Boolean(opts?.alreadyRelayed));
   const getSyncMappingByProcoreProjectNumber = vi.fn(async () => mapping);
-  const getSyncMappings = vi.fn(async () => opts?.allMappings ?? (mapping ? [mapping] : []));
+  const getBidboardMappingByProcoreProjectNumber = vi.fn(async () => bidboardMapping ?? undefined);
   const fetchProcoreProjectDetail = vi.fn(async () => ({
     project_number: opts?.projectNumber === undefined ? "DFW-4-15526-ac" : opts.projectNumber,
     name: "Rayside Residences",
@@ -59,10 +62,10 @@ function makeDeps(opts?: {
     insertOutbox,
     hasProjectCreatedRelay,
     getSyncMappingByProcoreProjectNumber,
-    getSyncMappings,
+    getBidboardMappingByProcoreProjectNumber,
     fetchProcoreProjectDetail,
     deps: {
-      storage: { getSyncMappingByProcoreProjectNumber, getSyncMappings },
+      storage: { getSyncMappingByProcoreProjectNumber, getBidboardMappingByProcoreProjectNumber },
       fetchProcoreProjectDetail,
       store: { insertOutbox, hasProjectCreatedRelay },
     },
@@ -109,20 +112,17 @@ describe("photo-link relay on Phase-2 completion", () => {
   });
 
   it("prefers a bid-board mapping among duplicate project numbers (skips a portfolio-only/legacy duplicate)", async () => {
-    // getSyncMappingByProcoreProjectNumber returns an arbitrary first row with NO bid-board link,
-    // but another row for the same project_number does carry it — the relay must still fire.
+    // getSyncMappingByProcoreProjectNumber returns an arbitrary first row with NO bid-board link;
+    // the targeted bid-board lookup finds the row that does carry it — the relay must still fire.
     const t = makeDeps({
       mapping: { id: 9, bidboardProjectId: null },
-      allMappings: [
-        { id: 9, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: null, hubspotDealId: null },
-        { id: 7, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: "bb-1", hubspotDealId: "hs-1" },
-      ],
+      bidboardMapping: { id: 7, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: "bb-1", hubspotDealId: "hs-1" },
     });
 
     const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
 
     expect(result.enqueued).toBe(true);
-    expect(t.getSyncMappings).toHaveBeenCalled();
+    expect(t.getBidboardMappingByProcoreProjectNumber).toHaveBeenCalledWith("DFW-4-15526-ac");
     const row: any = t.insertOutbox.mock.calls[0][0];
     expect(row.syncMappingId).toBe(7); // the bid-board-linked row, not the null-bidboard duplicate
     expect(row.payload.synchub.bidboardProjectId).toBe("bb-1");

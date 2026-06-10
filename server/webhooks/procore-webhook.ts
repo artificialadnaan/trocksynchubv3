@@ -174,7 +174,11 @@ export async function handleProcoreProjectWebhook(
               portfolioProjectId,
               pending.bidboardProjectId,
               phase2Input,
-              { triggerSource: "webhook" }
+              {
+                triggerSource: "webhook",
+                // Preserve the originating webhook's trace data in the photo-link relay payload.
+                webhookLog: { id: webhookId, payload },
+              }
             );
 
             if (result.success) {

@@ -405,7 +405,7 @@ export async function enqueueTrockCrmRelayOutbox(input: {
 
 type Phase2RelayStorage = {
   getSyncMappingByProcoreProjectNumber: (n: string) => Promise<any>;
-  getSyncMappings: () => Promise<any[]>;
+  getBidboardMappingByProcoreProjectNumber: (n: string) => Promise<any>;
 };
 
 /**
@@ -457,12 +457,11 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
 
   // Resolve the mapping by project_number — authoritative for THIS portfolio project (see note above).
   let mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
-  // Among duplicate rows sharing this project_number, prefer one that actually carries the bid-board
-  // link — getSyncMappingByProcoreProjectNumber can return an arbitrary portfolio-only/legacy
-  // duplicate with bidboardProjectId null (matches the fallback in triggerPortfolioAutomationFromStageChange).
+  // Among duplicate rows sharing this project_number, prefer the bid-board-linked one —
+  // getSyncMappingByProcoreProjectNumber can return an arbitrary portfolio-only/legacy duplicate with
+  // bidboardProjectId null. Use a targeted (unbounded) query so this stays correct regardless of dataset size.
   if (!mapping?.bidboardProjectId) {
-    const all = await storage.getSyncMappings();
-    mapping = all.find((m: any) => m.procoreProjectNumber === projectNumber && m.bidboardProjectId) ?? mapping;
+    mapping = (await storage.getBidboardMappingByProcoreProjectNumber(projectNumber)) ?? mapping;
   }
   if (!mapping?.bidboardProjectId) return { enqueued: false, reason: "no_bidboard_mapping" };
 
