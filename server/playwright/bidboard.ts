@@ -892,7 +892,14 @@ function escapeRegExp(value: string): string {
 }
 
 function exactTabLabelRegex(label: string): RegExp {
-  return new RegExp(`^\\s*${escapeRegExp(label).replace(/\\ /g, "\\s+")}\\s*$`, "i");
+  // Procore appends a live item count to stage tabs, e.g. "Estimate in Progress (9)".
+  // Tolerate an optional trailing "(N)" count, while keeping start/end anchoring so a
+  // shorter label can't match a longer tab (e.g. "Estimating" must not match
+  // "Service Estimating").
+  return new RegExp(
+    `^\\s*${escapeRegExp(label).replace(/\\ /g, "\\s+")}\\s*(?:\\(\\s*[\\d,]+\\s*\\))?\\s*$`,
+    "i"
+  );
 }
 
 export async function clickBidBoardStageTab(page: Page, kind: BidBoardStageTabKind): Promise<string | null> {
