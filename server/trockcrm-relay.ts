@@ -417,6 +417,7 @@ export async function enqueueTrockCrmRelayOutbox(input: {
 }
 
 type Phase2RelayStorage = {
+  getSyncMappingByPortfolioProjectId: (id: string) => Promise<any>;
   getSyncMappingByProcoreProjectNumber: (n: string) => Promise<any>;
   getBidboardMappingByProcoreProjectNumber: (n: string) => Promise<any>;
 };
@@ -433,13 +434,16 @@ type Phase2RelayStorage = {
  * every Phase-2 success makes the relay fire reliably, independent of branch / queue timing.
  *
  * Idempotency & correctness:
- *  - Resolve the mapping by **project_number** (derived from the actual portfolioProjectId), NOT by a
- *    passed bid-board id: the webhook claims the OLDEST pending job, which may belong to a different
- *    project, so a bid-board-id lookup could attach the relay to the wrong deal.
- *  - The once-guard is **outbox existence** (a prior `procore.project.created` row for this project),
- *    NOT syncMappings.portfolioProjectId — runPhase2 sets that field mid-automation, so it is not
- *    proof the relay was emitted. No mapping mutation here (avoids losing the relay on a transient
- *    insert failure). The CRM consumer is independently idempotent as a backstop.
+ *  - Resolve the mapping by **the actual portfolio project** (by portfolioProjectId, then by
+ *    project_number), NOT by a passed bid-board id: the webhook claims the OLDEST pending job, which
+ *    may belong to a different project, so a bid-board-id lookup could attach the relay to the wrong deal.
+ *  - **Durable to enrichment failure:** project_number is taken from the sync-mapping when available,
+ *    so a transient Procore detail fetch (rate-limit / 5xx / details-not-ready) does NOT drop the
+ *    relay — enrichment only enriches name/company. The relay is only skipped when neither the mapping
+ *    nor enrichment yields a project_number.
+ *  - The once-guard is an **atomic insert-if-absent** (advisory-locked per project) on the outbox, the
+ *    real "relay emitted" signal — NOT syncMappings.portfolioProjectId (runPhase2 sets that mid-
+ *    automation). No mapping mutation. The CRM consumer is independently idempotent as a backstop.
  */
 export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
   portfolioProjectId: string;
@@ -457,24 +461,29 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
   const fetchDetail = input.deps?.fetchProcoreProjectDetail ?? (await import("./procore")).fetchProcoreProjectDetail;
   const store = input.deps?.store ?? createDbRelayStore();
 
-  // The CRM resolves the deal by project_number, so Procore project detail is required.
+  // Resolve the mapping by the actual portfolio project FIRST (runPhase2 stamps portfolioProjectId on
+  // the mapping), so the critical path does not depend on the flaky Procore enrichment below.
+  let mapping = await storage.getSyncMappingByPortfolioProjectId(portfolioProjectId);
+
+  // Enrichment is BEST-EFFORT: it provides project name/company for the payload, and a project_number
+  // fallback if the mapping lookup didn't yield one. A transient failure must NOT drop the relay.
   let project: any = null;
   try {
     project = await fetchDetail(portfolioProjectId);
   } catch (err) {
-    relayLog(`[TrockCRMRelay] Phase 2 relay: could not fetch Procore project ${portfolioProjectId}: ${err instanceof Error ? err.message : String(err)}`);
-    return { enqueued: false, reason: "project_detail_failed" };
+    relayLog(`[TrockCRMRelay] Phase 2 relay: Procore detail enrichment failed for ${portfolioProjectId} (continuing best-effort): ${err instanceof Error ? err.message : String(err)}`);
   }
-  const projectNumber = optionalString(project?.project_number);
+
+  const projectNumber = optionalString(mapping?.procoreProjectNumber) ?? optionalString(project?.project_number);
   if (!projectNumber) return { enqueued: false, reason: "no_project_number" };
 
-  // Resolve the mapping by project_number — authoritative for THIS portfolio project (see note above).
-  let mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
-  // Among duplicate rows sharing this project_number, prefer the bid-board-linked one —
-  // getSyncMappingByProcoreProjectNumber can return an arbitrary portfolio-only/legacy duplicate with
-  // bidboardProjectId null. Use a targeted (unbounded) query so this stays correct regardless of dataset size.
+  // If portfolioProjectId wasn't stamped yet, fall back to resolving by project_number — preferring
+  // the bid-board-linked row among duplicates (targeted unbounded query, not a paginated scan).
   if (!mapping?.bidboardProjectId) {
-    mapping = (await storage.getBidboardMappingByProcoreProjectNumber(projectNumber)) ?? mapping;
+    mapping = (await storage.getSyncMappingByProcoreProjectNumber(projectNumber)) ?? mapping;
+    if (!mapping?.bidboardProjectId) {
+      mapping = (await storage.getBidboardMappingByProcoreProjectNumber(projectNumber)) ?? mapping;
+    }
   }
   if (!mapping?.bidboardProjectId) return { enqueued: false, reason: "no_bidboard_mapping" };
 
@@ -485,7 +494,9 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
       payload: { resource_id: portfolioProjectId, reason: "phase2_complete", resource_type: "Projects" },
     },
     syncMapping: mapping,
-    procoreProject: { ...project, id: portfolioProjectId },
+    // project may be null if enrichment failed; pin project_number (from the mapping) so the CRM can
+    // still resolve the deal. name/company default to "" in the builder when absent.
+    procoreProject: { ...(project ?? {}), id: portfolioProjectId, project_number: projectNumber },
     enrichedAt: new Date(),
   });
 

@@ -38,14 +38,18 @@ type Mapping = { id: number; procoreProjectNumber?: string | null; bidboardProje
 
 function makeDeps(opts?: {
   mapping?: Partial<Mapping> | null;
+  byPortfolioMapping?: Mapping | null;
   bidboardMapping?: Mapping | null;
   projectNumber?: string | null;
   alreadyRelayed?: boolean;
+  enrichmentFails?: boolean;
 }) {
   const mapping: Mapping | null =
     opts?.mapping === null
       ? null
       : { id: 7, procoreProjectNumber: "DFW-4-15526-ac", bidboardProjectId: "bb-1", hubspotDealId: "hs-1", ...opts?.mapping };
+  // Resolved by portfolioProjectId (runPhase2 stamps it). Defaults to the primary mapping.
+  const byPortfolioMapping: Mapping | null = opts?.byPortfolioMapping !== undefined ? opts.byPortfolioMapping : mapping;
   // Targeted bid-board lookup: defaults to the primary row when it already carries the link.
   const bidboardMapping: Mapping | null =
     opts?.bidboardMapping !== undefined ? opts.bidboardMapping : (mapping?.bidboardProjectId ? mapping : null);
@@ -55,21 +59,26 @@ function makeDeps(opts?: {
   const insertProjectCreatedRelayIfAbsent = vi.fn(async (_row: Record<string, unknown>, _pid: string) =>
     opts?.alreadyRelayed ? { inserted: false as const } : { inserted: true as const, id: 123 },
   );
+  const getSyncMappingByPortfolioProjectId = vi.fn(async () => byPortfolioMapping ?? undefined);
   const getSyncMappingByProcoreProjectNumber = vi.fn(async () => mapping);
   const getBidboardMappingByProcoreProjectNumber = vi.fn(async () => bidboardMapping ?? undefined);
-  const fetchProcoreProjectDetail = vi.fn(async () => ({
-    project_number: opts?.projectNumber === undefined ? "DFW-4-15526-ac" : opts.projectNumber,
-    name: "Rayside Residences",
-    company_id: "co-1",
-  }));
+  const fetchProcoreProjectDetail = vi.fn(async () => {
+    if (opts?.enrichmentFails) throw new Error("procore rate limited");
+    return {
+      project_number: opts?.projectNumber === undefined ? "DFW-4-15526-ac" : opts.projectNumber,
+      name: "Rayside Residences",
+      company_id: "co-1",
+    };
+  });
   return {
     mapping,
     insertProjectCreatedRelayIfAbsent,
+    getSyncMappingByPortfolioProjectId,
     getSyncMappingByProcoreProjectNumber,
     getBidboardMappingByProcoreProjectNumber,
     fetchProcoreProjectDetail,
     deps: {
-      storage: { getSyncMappingByProcoreProjectNumber, getBidboardMappingByProcoreProjectNumber },
+      storage: { getSyncMappingByPortfolioProjectId, getSyncMappingByProcoreProjectNumber, getBidboardMappingByProcoreProjectNumber },
       fetchProcoreProjectDetail,
       store: { insertProjectCreatedRelayIfAbsent },
     },
@@ -104,15 +113,27 @@ describe("photo-link relay on Phase-2 completion", () => {
     expect(row.payload.synchub.bidboardProjectId).toBe("bb-1");
   });
 
-  it("resolves the mapping by project_number (not a bid-board id) — prevents attaching to the wrong deal", async () => {
+  it("resolves the mapping by the actual portfolio project (portfolioProjectId) — wrong-deal-safe", async () => {
     const t = makeDeps();
 
     await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
 
-    // The project's own project_number is the lookup key — never a (possibly mismatched) bid-board id.
-    expect(t.fetchProcoreProjectDetail).toHaveBeenCalledWith("598134326634550");
-    expect(t.getSyncMappingByProcoreProjectNumber).toHaveBeenCalledWith("DFW-4-15526-ac");
+    // Resolves by the actual project, never a (possibly mismatched) bid-board id. With portfolioProjectId
+    // stamped, the project_number-based fallback isn't even needed.
+    expect(t.getSyncMappingByPortfolioProjectId).toHaveBeenCalledWith("598134326634550");
+    expect(t.getSyncMappingByProcoreProjectNumber).not.toHaveBeenCalled();
     expect(t.insertProjectCreatedRelayIfAbsent).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays durable when Procore detail enrichment fails — uses the mapping's project_number and still enqueues", async () => {
+    const t = makeDeps({ enrichmentFails: true });
+
+    const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
+
+    expect(result.enqueued).toBe(true);
+    const row: any = t.insertProjectCreatedRelayIfAbsent.mock.calls[0][0];
+    expect(row.projectNumber).toBe("DFW-4-15526-ac"); // sourced from the sync-mapping, not the failed Procore call
+    expect(row.payload.procore.projectNumber).toBe("DFW-4-15526-ac");
   });
 
   it("prefers a bid-board mapping among duplicate project numbers (skips a portfolio-only/legacy duplicate)", async () => {
@@ -154,8 +175,8 @@ describe("photo-link relay on Phase-2 completion", () => {
     expect(row.payload.eventType).toBe("procore.project.created");
   });
 
-  it("skips safely when the Procore project has no project_number (CRM resolves by project number)", async () => {
-    const t = makeDeps({ projectNumber: null });
+  it("skips safely when neither the mapping nor enrichment yields a project_number", async () => {
+    const t = makeDeps({ projectNumber: null, mapping: { procoreProjectNumber: null } });
 
     const result = await enqueueProjectCreatedRelayForPortfolioProject({ portfolioProjectId: "598134326634550", deps: t.deps });
 
