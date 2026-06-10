@@ -26,7 +26,7 @@ export type TrockCrmRelayPayload = {
     projectName: string;
   };
   synchub: {
-    webhookLogId: string;
+    webhookLogId: string | null;
     syncMappingId: string;
     bidboardProjectId: string | null;
     hubspotDealId: string | null;
@@ -59,7 +59,7 @@ export type TrockCrmProjectStageChangedRelayPayload = {
     webhookTimestamp: string | null;
   };
   synchub: {
-    webhookLogId: string;
+    webhookLogId: string | null;
     syncMappingId: string | null;
     bidboardProjectId: string | null;
     hubspotDealId: string | null;
@@ -167,7 +167,7 @@ export function buildTrockCrmProjectCreatedPayload(input: {
       projectName: String(input.procoreProject.name ?? input.procoreProject.display_name ?? ""),
     },
     synchub: {
-      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : "",
+      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : null,
       syncMappingId: String(input.syncMapping.id),
       bidboardProjectId: input.syncMapping.bidboardProjectId ?? null,
       hubspotDealId: input.syncMapping.hubspotDealId ?? null,
@@ -246,7 +246,7 @@ export function buildTrockCrmProjectStageChangedPayload(input: {
       webhookTimestamp: optionalString(raw.timestamp),
     },
     synchub: {
-      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : "",
+      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : null,
       syncMappingId: input.syncMapping?.id == null ? null : String(input.syncMapping.id),
       bidboardProjectId: input.syncMapping?.bidboardProjectId ?? null,
       hubspotDealId: input.syncMapping?.hubspotDealId ?? null,

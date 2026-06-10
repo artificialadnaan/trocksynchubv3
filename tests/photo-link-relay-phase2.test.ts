@@ -189,6 +189,7 @@ describe("photo-link relay on Phase-2 completion", () => {
     expect(result.enqueued).toBe(true);
     const row: any = t.insertProjectCreatedRelayIfAbsent.mock.calls[0][0];
     expect(row.webhookLogId).toBeNull(); // null FK — no reference to a non-existent webhook_logs row
+    expect(row.payload.synchub.webhookLogId).toBeNull(); // semantically null in the CRM payload, not ""
     // Procore event id is still preserved for trace via rawProcoreWebhook.
     expect(row.payload.rawProcoreWebhook.id).toBe("procore-evt-777");
   });
