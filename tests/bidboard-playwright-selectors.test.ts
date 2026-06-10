@@ -134,4 +134,34 @@ describe("BidBoard Playwright transition selectors", () => {
     expect(page.clicks).toEqual([label]);
     expect(log).toHaveBeenCalledWith(`BidBoard stage tab matched: "${label}"`, "playwright");
   });
+
+  it("matches the estimating tab when Procore appends a live count suffix", async () => {
+    const { clickBidBoardStageTab } = await import("../server/playwright/bidboard.ts");
+    const page = makeTabPage(["Estimate in Progress (9)"]);
+
+    const matched = await clickBidBoardStageTab(page as any, "estimating");
+
+    expect(matched).toBe("Estimate in Progress");
+    expect(page.clicks).toEqual(["Estimate in Progress (9)"]);
+  });
+
+  it("matches the service estimating tab with a count suffix", async () => {
+    const { clickBidBoardStageTab } = await import("../server/playwright/bidboard.ts");
+    const page = makeTabPage(["Service - Estimating (12)"]);
+
+    const matched = await clickBidBoardStageTab(page as any, "serviceEstimating");
+
+    expect(matched).toBe("Service - Estimating");
+    expect(page.clicks).toEqual(["Service - Estimating (12)"]);
+  });
+
+  it("does not let the estimating label match the service estimating tab (anchoring preserved)", async () => {
+    const { clickBidBoardStageTab } = await import("../server/playwright/bidboard.ts");
+    const page = makeTabPage(["Service Estimating (5)"]);
+
+    const matched = await clickBidBoardStageTab(page as any, "estimating");
+
+    expect(matched).toBeNull();
+    expect(page.clicks).toEqual([]);
+  });
 });
