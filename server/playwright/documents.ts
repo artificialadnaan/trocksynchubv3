@@ -48,6 +48,7 @@ import { ensureLoggedIn } from "./auth";
 import { PROCORE_SELECTORS, PROCORE_URLS } from "./selectors";
 import { randomDelay, takeScreenshot } from "./browser";
 import { navigateToProject } from "./bidboard";
+import { waitForAttachModalToClose } from "./attach-verify";
 import { navigateToPortfolioProject } from "./portfolio";
 import { log } from "../index";
 import { storage } from "../storage";
@@ -530,25 +531,21 @@ export async function uploadDocumentToBidBoard(
         });
         log(`Clicked Attach for ${filePaths.length} file(s)`, "playwright");
 
-        // Wait for modal to close — the Attach Files dialog disappears after successful attach
-        await page.waitForFunction(
-          () => {
-            // Check that no "Attach Files" modal header is visible
-            const headers = document.querySelectorAll('div, h2, h3');
-            for (const h of headers) {
-              if (h.textContent?.trim() === 'Attach Files' && (h as HTMLElement).offsetParent !== null) return false;
-            }
-            return true;
-          },
-          undefined,
-          { timeout: 60000 }
-        ).catch(() => {
-          log("Attach Files modal did not close within timeout", "playwright");
-        });
+        // Verify the attach actually committed. Procore closes the "Attach Files" modal only on a
+        // successful attach, so a modal that never closes means the files did NOT land. Fail loudly
+        // here (caught below → success=false → the doc-sync retry re-attempts) instead of swallowing
+        // the timeout and reporting success regardless.
+        const modalClosed = await waitForAttachModalToClose(page, 60000);
+        if (!modalClosed) {
+          await takeScreenshot(page, "upload-attach-unconfirmed");
+          throw new Error(
+            `Attach not confirmed for ${filePaths.length} file(s) in BidBoard project ${projectId}: the "Attach Files" modal never closed`
+          );
+        }
         await randomDelay(3000, 5000);
 
         success = true;
-        log(`Successfully uploaded ${filePaths.length} file(s) to BidBoard project ${projectId}`, "playwright");
+        log(`Successfully uploaded and confirmed ${filePaths.length} file(s) to BidBoard project ${projectId}`, "playwright");
         await takeScreenshot(page, "upload-complete");
       } catch (err: any) {
         log(`Failed to upload files: ${err.message}`, "playwright");

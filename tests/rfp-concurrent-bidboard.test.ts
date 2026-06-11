@@ -6,6 +6,8 @@ vi.mock("../server/storage.ts", () => ({
   storage: {
     getHubspotDealByHubspotId: vi.fn(),
     getHubspotContactByHubspotId: vi.fn(),
+    getSyncMappingBySourceDealId: vi.fn(),
+    getBidboardMappingByProcoreProjectNumber: vi.fn(),
     createSyncMapping: vi.fn(),
     createBidboardAutomationLog: vi.fn(),
     upsertBidboardSyncState: vi.fn(),

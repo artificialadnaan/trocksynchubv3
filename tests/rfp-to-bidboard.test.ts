@@ -32,6 +32,8 @@ const mockStorage = {
   getSyncMappings: vi.fn(),
   getSyncMapping: vi.fn(),
   getSyncMappingByProcoreProjectId: vi.fn(),
+  getSyncMappingBySourceDealId: vi.fn(),
+  getBidboardMappingByProcoreProjectNumber: vi.fn(),
   createSyncMapping: vi.fn(),
   upsertBidboardSyncState: vi.fn(),
   createBidboardAutomationLog: vi.fn(),

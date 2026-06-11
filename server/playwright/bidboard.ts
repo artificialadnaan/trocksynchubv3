@@ -1876,6 +1876,8 @@ export async function createBidBoardProject(
 export interface CreateBidBoardProjectFromDealResult extends CreateBidBoardProjectResult {
   documentsUploaded?: number;
   documentErrors?: string[];
+  /** True when an existing BidBoard project was adopted (idempotency guard) rather than newly created. */
+  adopted?: boolean;
 }
 
 type CreateBidBoardProjectFromDealOptions = {
@@ -1995,6 +1997,39 @@ export async function createBidBoardProjectFromDeal(
     log(`Creating BidBoard project from ${sourceSystem} deal: ${deal.dealName} (${dealId})`, "playwright");
     log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
     
+    // Idempotency guard: one deal → one BidBoard project. A prior approve, a retry, or a concurrent
+    // override-approve may have already created the project. The global browser lock serializes creates,
+    // so by the time we hold it, any earlier create's sync mapping is already committed. If a BidBoard
+    // project already exists for this deal (or its project number), adopt it instead of creating a
+    // duplicate — this is what prevents the two-projects-for-one-deal bug (e.g. …849463 vs …849472) and
+    // makes re-runs no-ops that return the existing project.
+    const hasBidId = (
+      m: { bidboardProjectId?: string | null } | undefined | null,
+    ): m is { bidboardProjectId: string; bidboardProjectName?: string | null } =>
+      Boolean(m?.bidboardProjectId && m.bidboardProjectId.trim().length > 0);
+    const dealMapping = await storage.getSyncMappingBySourceDealId(sourceSystem, dealId);
+    const numberMapping =
+      !hasBidId(dealMapping) && projectNumber
+        ? await storage.getBidboardMappingByProcoreProjectNumber(projectNumber)
+        : undefined;
+    const existingMapping = hasBidId(dealMapping)
+      ? dealMapping
+      : hasBidId(numberMapping)
+        ? numberMapping
+        : undefined;
+    if (existingMapping) {
+      log(
+        `BidBoard project already exists for ${sourceSystem} deal ${dealId} (${existingMapping.bidboardProjectId}) — adopting it instead of creating a duplicate`,
+        "playwright",
+      );
+      return {
+        success: true,
+        projectId: existingMapping.bidboardProjectId,
+        projectName: existingMapping.bidboardProjectName ?? projectData.name,
+        adopted: true,
+      };
+    }
+
     const createProject = effectiveOptions.createProject ?? createBidBoardProject;
     const result: CreateBidBoardProjectFromDealResult = await createProject(projectData);
 
