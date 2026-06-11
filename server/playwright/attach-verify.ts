@@ -7,9 +7,10 @@ import { Page } from "playwright";
  * upload fails or stalls, the modal stays open (often showing an error). So a modal that never closes
  * is the strongest available signal that the attach did NOT land.
  *
- * Returns true iff the modal closed within `timeoutMs`. On timeout it returns false so the caller can
- * fail loudly and retry, instead of swallowing the timeout into a hardcoded success (the bug where
- * "Attach Files modal did not close" was followed by "Successfully uploaded N file(s)" anyway).
+ * Returns true iff the modal closed within `timeoutMs`. Returns false on ANY wait failure — timeout,
+ * page crash, navigation, etc. — so the caller can fail loudly and retry instead of swallowing the
+ * failure into a hardcoded success (the bug where "Attach Files modal did not close" was followed by
+ * "Successfully uploaded N file(s)" anyway).
  */
 export async function waitForAttachModalToClose(page: Page, timeoutMs = 60000): Promise<boolean> {
   try {
@@ -29,6 +30,7 @@ export async function waitForAttachModalToClose(page: Page, timeoutMs = 60000): 
     );
     return true;
   } catch {
+    // Treat any wait failure (timeout, page crash, navigation) as "modal not closed" → attach unconfirmed.
     return false;
   }
 }
