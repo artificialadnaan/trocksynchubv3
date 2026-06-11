@@ -125,6 +125,8 @@ export interface BidBoardScrapedData {
 
 export interface PortfolioAutomationResult {
   success: boolean;
+  /** Phase-2-only success (project created + identity validated), captured before Phase 3 folds into `success`. */
+  phase2Succeeded?: boolean;
   bidboardProjectId: string;
   bidboardProjectName?: string;
   portfolioProjectId?: string;
@@ -2648,6 +2650,10 @@ export async function runPhase2(
     result.success = result.steps.every(
       (s) => s.status === "success" || s.status === "skipped"
     );
+    // Capture Phase-2-only success NOW — before the non-critical audit log (which can throw) and before
+    // Phase 3 folds into result.success — so neither an audit-log error nor a later Phase-3 failure can
+    // cause the photo-link relay to be skipped for a genuinely successful Phase 2.
+    result.phase2Succeeded = result.success;
     result.completedAt = new Date();
 
     await storage.createAuditLog({

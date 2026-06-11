@@ -26,7 +26,7 @@ export type TrockCrmRelayPayload = {
     projectName: string;
   };
   synchub: {
-    webhookLogId: string;
+    webhookLogId: string | null;
     syncMappingId: string;
     bidboardProjectId: string | null;
     hubspotDealId: string | null;
@@ -59,7 +59,7 @@ export type TrockCrmProjectStageChangedRelayPayload = {
     webhookTimestamp: string | null;
   };
   synchub: {
-    webhookLogId: string;
+    webhookLogId: string | null;
     syncMappingId: string | null;
     bidboardProjectId: string | null;
     hubspotDealId: string | null;
@@ -77,7 +77,10 @@ export type TrockCrmRelayOutboxPayload =
 
 export type RelayStore = {
   insertOutbox?: (row: Record<string, unknown>) => Promise<{ id: number }>;
-  hasProjectCreatedRelay?: (procorePortfolioProjectId: string) => Promise<boolean>;
+  insertProjectCreatedRelayIfAbsent?: (
+    row: Record<string, unknown>,
+    procorePortfolioProjectId: string,
+  ) => Promise<{ inserted: boolean; id?: number }>;
   claimReadyOutbox?: (limit: number, now: Date, processingStaleBefore: Date) => Promise<Array<Pick<TrockcrmRelayOutbox, "id" | "payload" | "attempts">>>;
   markSent?: (id: number, data: { responseStatus: number; responseBody?: string | null; sentAt: Date }) => Promise<void>;
   markFailed?: (id: number, data: { attempts: number; error: string; responseStatus?: number | null; responseBody?: string | null; nextRetryAt: Date; attemptedAt: Date }) => Promise<void>;
@@ -140,7 +143,7 @@ export function calculateTrockCrmRelayBackoff(attempts: number) {
 }
 
 export function buildTrockCrmProjectCreatedPayload(input: {
-  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  webhookLog: { id: number | string | null; createdAt?: Date | string | null; payload?: any };
   syncMapping: { id: number | string; bidboardProjectId?: string | null; hubspotDealId?: string | null };
   procoreProject: {
     id?: string | number | null;
@@ -164,7 +167,7 @@ export function buildTrockCrmProjectCreatedPayload(input: {
       projectName: String(input.procoreProject.name ?? input.procoreProject.display_name ?? ""),
     },
     synchub: {
-      webhookLogId: String(input.webhookLog.id),
+      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : null,
       syncMappingId: String(input.syncMapping.id),
       bidboardProjectId: input.syncMapping.bidboardProjectId ?? null,
       hubspotDealId: input.syncMapping.hubspotDealId ?? null,
@@ -197,7 +200,7 @@ function cleanStage(value: string): string {
 }
 
 export function buildTrockCrmProjectStageChangedPayload(input: {
-  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  webhookLog: { id: number | string | null; createdAt?: Date | string | null; payload?: any };
   syncMapping?: { id?: number | string | null; bidboardProjectId?: string | null; hubspotDealId?: string | null } | null;
   procoreProject: {
     procoreId?: string | number | null;
@@ -243,7 +246,7 @@ export function buildTrockCrmProjectStageChangedPayload(input: {
       webhookTimestamp: optionalString(raw.timestamp),
     },
     synchub: {
-      webhookLogId: String(input.webhookLog.id),
+      webhookLogId: input.webhookLog.id != null ? String(input.webhookLog.id) : null,
       syncMappingId: input.syncMapping?.id == null ? null : String(input.syncMapping.id),
       bidboardProjectId: input.syncMapping?.bidboardProjectId ?? null,
       hubspotDealId: input.syncMapping?.hubspotDealId ?? null,
@@ -256,7 +259,7 @@ export function buildTrockCrmProjectStageChangedPayload(input: {
 
 export async function enqueueTrockCrmProjectStageChangedRelay(input: {
   store?: RelayStore;
-  webhookLog: { id: number | string; createdAt?: Date | string | null; payload?: any };
+  webhookLog: { id: number | string | null; createdAt?: Date | string | null; payload?: any };
   syncMapping?: { id?: number | string | null; bidboardProjectId?: string | null; hubspotDealId?: string | null } | null;
   procoreProject: Parameters<typeof buildTrockCrmProjectStageChangedPayload>[0]["procoreProject"];
   previousStage: string;
@@ -268,7 +271,9 @@ export async function enqueueTrockCrmProjectStageChangedRelay(input: {
     const payload = buildTrockCrmProjectStageChangedPayload(input);
     return await enqueueTrockCrmRelayOutbox({
       store: input.store,
-      webhookLogId: Number(input.webhookLog.id),
+      // optionalNumericId (not Number) so a null/non-numeric id becomes a null FK instead of 0 (which
+      // would violate the webhook_logs FK and drop the stage relay for any no-persisted-webhook caller).
+      webhookLogId: optionalNumericId(input.webhookLog.id),
       syncMappingId: optionalNumericId(input.syncMapping?.id),
       procorePortfolioProjectId: payload.procore.portfolioProjectId,
       projectNumber: payload.procore.projectNumber,
@@ -289,20 +294,30 @@ export function createDbRelayStore(): Required<RelayStore> {
         .returning({ id: trockcrmRelayOutbox.id });
       return result;
     },
-    // Has a `procore.project.created` relay EVER been enqueued for this portfolio project (any
-    // status — rows persist after send via markSent)? This is the authoritative "relay emitted"
-    // idempotency signal, independent of syncMappings.portfolioProjectId (which runPhase2 sets
-    // mid-automation, so it can't be trusted as proof the relay was sent).
-    async hasProjectCreatedRelay(procorePortfolioProjectId) {
-      const rows = await db
-        .select({ id: trockcrmRelayOutbox.id })
-        .from(trockcrmRelayOutbox)
-        .where(and(
-          eq(trockcrmRelayOutbox.procorePortfolioProjectId, procorePortfolioProjectId),
-          sql`${trockcrmRelayOutbox.payload}->>'eventType' = 'procore.project.created'`,
-        ))
-        .limit(1);
-      return rows.length > 0;
+    // Atomic once-guard: insert a `procore.project.created` outbox row for this portfolio project
+    // ONLY if none exists yet. The outbox is the authoritative "relay emitted" signal (rows persist
+    // after send via markSent), independent of syncMappings.portfolioProjectId (which runPhase2 sets
+    // mid-automation). A per-project transaction advisory lock serializes concurrent emitters (e.g.
+    // the direct-chain path racing the webhook/orphan fallback) so the check+insert can't both pass —
+    // no migration / unique constraint required.
+    async insertProjectCreatedRelayIfAbsent(row, procorePortfolioProjectId) {
+      return db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"trockcrm_relay_pc_" + procorePortfolioProjectId}))`);
+        const existing = await tx
+          .select({ id: trockcrmRelayOutbox.id })
+          .from(trockcrmRelayOutbox)
+          .where(and(
+            eq(trockcrmRelayOutbox.procorePortfolioProjectId, procorePortfolioProjectId),
+            sql`${trockcrmRelayOutbox.payload}->>'eventType' = 'procore.project.created'`,
+          ))
+          .limit(1);
+        if (existing.length > 0) return { inserted: false };
+        const [result] = await tx
+          .insert(trockcrmRelayOutbox)
+          .values(row as any)
+          .returning({ id: trockcrmRelayOutbox.id });
+        return { inserted: true, id: result.id };
+      });
     },
     async claimReadyOutbox(limit, now, processingStaleBefore) {
       const result = await db.transaction(async (tx) => tx.execute(sql`
@@ -404,8 +419,9 @@ export async function enqueueTrockCrmRelayOutbox(input: {
 }
 
 type Phase2RelayStorage = {
+  getSyncMappingByPortfolioProjectId: (id: string) => Promise<any>;
   getSyncMappingByProcoreProjectNumber: (n: string) => Promise<any>;
-  getSyncMappings: () => Promise<any[]>;
+  getBidboardMappingByProcoreProjectNumber: (n: string) => Promise<any>;
 };
 
 /**
@@ -420,17 +436,20 @@ type Phase2RelayStorage = {
  * every Phase-2 success makes the relay fire reliably, independent of branch / queue timing.
  *
  * Idempotency & correctness:
- *  - Resolve the mapping by **project_number** (derived from the actual portfolioProjectId), NOT by a
- *    passed bid-board id: the webhook claims the OLDEST pending job, which may belong to a different
- *    project, so a bid-board-id lookup could attach the relay to the wrong deal.
- *  - The once-guard is **outbox existence** (a prior `procore.project.created` row for this project),
- *    NOT syncMappings.portfolioProjectId — runPhase2 sets that field mid-automation, so it is not
- *    proof the relay was emitted. No mapping mutation here (avoids losing the relay on a transient
- *    insert failure). The CRM consumer is independently idempotent as a backstop.
+ *  - Resolve the mapping by **the actual portfolio project** (by portfolioProjectId, then by
+ *    project_number), NOT by a passed bid-board id: the webhook claims the OLDEST pending job, which
+ *    may belong to a different project, so a bid-board-id lookup could attach the relay to the wrong deal.
+ *  - **Durable to enrichment failure:** project_number is taken from the sync-mapping when available,
+ *    so a transient Procore detail fetch (rate-limit / 5xx / details-not-ready) does NOT drop the
+ *    relay — enrichment only enriches name/company. The relay is only skipped when neither the mapping
+ *    nor enrichment yields a project_number.
+ *  - The once-guard is an **atomic insert-if-absent** (advisory-locked per project) on the outbox, the
+ *    real "relay emitted" signal — NOT syncMappings.portfolioProjectId (runPhase2 sets that mid-
+ *    automation). No mapping mutation. The CRM consumer is independently idempotent as a backstop.
  */
 export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
   portfolioProjectId: string;
-  webhookLog?: { id: number | string; createdAt?: Date | string | null; payload?: any } | null;
+  webhookLog?: { id: number | string | null; createdAt?: Date | string | null; payload?: any } | null;
   deps?: {
     storage?: Phase2RelayStorage;
     fetchProcoreProjectDetail?: (id: string) => Promise<any>;
@@ -444,53 +463,69 @@ export async function enqueueProjectCreatedRelayForPortfolioProject(input: {
   const fetchDetail = input.deps?.fetchProcoreProjectDetail ?? (await import("./procore")).fetchProcoreProjectDetail;
   const store = input.deps?.store ?? createDbRelayStore();
 
-  // The CRM resolves the deal by project_number, so Procore project detail is required.
+  // Resolve the mapping by the actual portfolio project FIRST (runPhase2 stamps portfolioProjectId on
+  // the mapping), so the critical path does not depend on the flaky Procore enrichment below.
+  let mapping = await storage.getSyncMappingByPortfolioProjectId(portfolioProjectId);
+
+  // Enrichment is BEST-EFFORT: it provides project name/company for the payload, and a project_number
+  // fallback if the mapping lookup didn't yield one. A transient failure must NOT drop the relay.
   let project: any = null;
   try {
     project = await fetchDetail(portfolioProjectId);
   } catch (err) {
-    relayLog(`[TrockCRMRelay] Phase 2 relay: could not fetch Procore project ${portfolioProjectId}: ${err instanceof Error ? err.message : String(err)}`);
-    return { enqueued: false, reason: "project_detail_failed" };
+    relayLog(`[TrockCRMRelay] Phase 2 relay: Procore detail enrichment failed for ${portfolioProjectId} (continuing best-effort): ${err instanceof Error ? err.message : String(err)}`);
   }
-  const projectNumber = optionalString(project?.project_number);
+
+  const projectNumber = optionalString(mapping?.procoreProjectNumber) ?? optionalString(project?.project_number);
   if (!projectNumber) return { enqueued: false, reason: "no_project_number" };
 
-  // Resolve the mapping by project_number — authoritative for THIS portfolio project (see note above).
-  let mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
-  // Among duplicate rows sharing this project_number, prefer one that actually carries the bid-board
-  // link — getSyncMappingByProcoreProjectNumber can return an arbitrary portfolio-only/legacy
-  // duplicate with bidboardProjectId null (matches the fallback in triggerPortfolioAutomationFromStageChange).
+  // If portfolioProjectId wasn't stamped yet, fall back to resolving by project_number — preferring
+  // the bid-board-linked row among duplicates (targeted unbounded query, not a paginated scan).
   if (!mapping?.bidboardProjectId) {
-    const all = await storage.getSyncMappings();
-    mapping = all.find((m: any) => m.procoreProjectNumber === projectNumber && m.bidboardProjectId) ?? mapping;
+    mapping = (await storage.getSyncMappingByProcoreProjectNumber(projectNumber)) ?? mapping;
+    if (!mapping?.bidboardProjectId) {
+      mapping = (await storage.getBidboardMappingByProcoreProjectNumber(projectNumber)) ?? mapping;
+    }
   }
   if (!mapping?.bidboardProjectId) return { enqueued: false, reason: "no_bidboard_mapping" };
 
-  // Once-guard keyed on the outbox (the real "relay emitted" signal), not mapping.portfolioProjectId.
-  if (store.hasProjectCreatedRelay && (await store.hasProjectCreatedRelay(portfolioProjectId))) {
-    return { enqueued: false, reason: "already_relayed" };
-  }
-
   const payload = buildTrockCrmProjectCreatedPayload({
     webhookLog: input.webhookLog ?? {
-      id: 0,
+      // id: null so payload.synchub.webhookLogId is null — consistent with the outbox FK, which is null
+      // when there's no originating webhook_logs row (NOT a synthetic "0" that implies row id 0).
+      id: null,
       createdAt: new Date(),
       payload: { resource_id: portfolioProjectId, reason: "phase2_complete", resource_type: "Projects" },
     },
     syncMapping: mapping,
-    procoreProject: { ...project, id: portfolioProjectId },
+    // project may be null if enrichment failed; pin project_number (from the mapping) so the CRM can
+    // still resolve the deal. name/company default to "" in the builder when absent.
+    procoreProject: { ...(project ?? {}), id: portfolioProjectId, project_number: projectNumber },
     enrichedAt: new Date(),
   });
 
-  const res = await enqueueTrockCrmRelayOutbox({
-    store,
-    webhookLogId: optionalNumericId(input.webhookLog?.id),
-    syncMappingId: optionalNumericId(mapping.id),
-    procorePortfolioProjectId: portfolioProjectId,
-    projectNumber,
-    payload,
-  });
-  return res.enqueued ? { enqueued: true, outboxId: res.outboxId } : { enqueued: false, reason: res.reason };
+  // Atomic insert-if-absent (outbox once-guard, advisory-lock serialized) — see store impl. This
+  // both enforces idempotency and inserts in one transaction, so concurrent emitters can't double-enqueue.
+  try {
+    const res = await store.insertProjectCreatedRelayIfAbsent!(
+      {
+        webhookLogId: optionalNumericId(input.webhookLog?.id),
+        syncMappingId: optionalNumericId(mapping.id),
+        procorePortfolioProjectId: portfolioProjectId,
+        projectNumber,
+        payload,
+        status: "pending",
+        attempts: 0,
+        nextRetryAt: null,
+      },
+      portfolioProjectId,
+    );
+    if (!res.inserted) return { enqueued: false, reason: "already_relayed" };
+    return { enqueued: true, outboxId: res.id };
+  } catch (err) {
+    relayLog(`[TrockCRMRelay] Phase 2 relay: failed to enqueue for ${portfolioProjectId}: ${err instanceof Error ? err.message : String(err)}`);
+    return { enqueued: false, reason: "insert_failed" };
+  }
 }
 
 export async function processTrockCrmRelayOutboxEntry(input: {

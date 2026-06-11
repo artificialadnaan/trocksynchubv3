@@ -174,7 +174,14 @@ export async function handleProcoreProjectWebhook(
               portfolioProjectId,
               pending.bidboardProjectId,
               phase2Input,
-              { triggerSource: "webhook" }
+              {
+                triggerSource: "webhook",
+                // No webhook_logs row is persisted in this handler, so pass id: null (the FK
+                // trockcrm_relay_outbox.webhook_log_id must reference a real row or be null — a numeric
+                // Procore event id would violate the FK and drop the relay). The Procore event id is
+                // still preserved for trace via the payload (rawProcoreWebhook).
+                webhookLog: { id: null, payload },
+              }
             );
 
             if (result.success) {
@@ -257,7 +264,14 @@ export async function handleProcoreProjectWebhook(
                 portfolioProjectId,
                 undefined,
                 undefined,
-                { triggerSource: "webhook" }
+                {
+                  triggerSource: "webhook",
+                  // No webhook_logs row is persisted in this handler, so pass id: null (the FK
+                  // trockcrm_relay_outbox.webhook_log_id must reference a real row or be null — a numeric
+                  // Procore event id would violate the FK and drop the relay). The Procore event id is
+                  // still preserved for trace via the payload (rawProcoreWebhook).
+                  webhookLog: { id: null, payload },
+                }
               );
               log(
                 `[webhook] Auto Phase 2 completed: ${result.success ? "success" : "failed"}`,
