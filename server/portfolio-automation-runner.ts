@@ -280,6 +280,10 @@ export async function runPhase2WithRetry(
   // after the relay is enqueued (or confirmed already-relayed), while a transient metadata/insert miss
   // stays unsettled so a subsequent Phase-2-success attempt retries.
   let relaySettled = false;
+  // Once Phase 2 has succeeded in ANY attempt, the portfolio project is validated — keep retrying the
+  // relay on later attempts too (even if a subsequent attempt's Phase 2 fails), so a transient enqueue
+  // miss isn't permanently lost.
+  let phase2EverSucceeded = false;
   const emitPhotoLinkRelay = async (phase: string): Promise<void> => {
     if (relaySettled || !portfolioProjectId) return;
     try {
@@ -325,11 +329,13 @@ export async function runPhase2WithRetry(
       timestamp: new Date(),
     });
 
-    // Emit the relay after a PHASE-2 success (project created + identity-validated), regardless of a
-    // Phase-3 failure — by now runPhase2 has stamped the mapping's portfolioProjectId. We do NOT emit
-    // on a Phase-2 failure (would relay a wrong/half-set-up project and set the once-guard, suppressing
-    // the correct enqueue). Runs each attempt so a transient metadata miss retries; no-op once enqueued.
-    if (result.phase2Succeeded === true) {
+    // Emit the relay once Phase 2 has succeeded (project created + identity-validated), regardless of a
+    // Phase-3 failure — by now runPhase2 has stamped the mapping's portfolioProjectId. We never emit
+    // before Phase 2 has EVER succeeded (would relay a wrong/half-set-up project and set the once-guard,
+    // suppressing the correct enqueue). We DO keep retrying on later attempts even if their Phase 2 fails
+    // (phase2EverSucceeded), so a transient enqueue miss isn't lost; no-op once enqueued.
+    if (result.phase2Succeeded === true) phase2EverSucceeded = true;
+    if (phase2EverSucceeded) {
       await emitPhotoLinkRelay("after-phase2");
     }
 
