@@ -483,6 +483,9 @@ export class DatabaseStorage implements IStorage {
       and(
         eq(syncMappings.procoreProjectNumber, projectNumber.trim()),
         isNotNull(syncMappings.bidboardProjectId),
+        // Exclude blank/whitespace-only bid-board ids — IS NOT NULL alone matches '' rows, which the
+        // helper's `!mapping.bidboardProjectId` check would then reject as no_bidboard_mapping.
+        sql`length(trim(${syncMappings.bidboardProjectId})) > 0`,
       )
     );
     return mapping;

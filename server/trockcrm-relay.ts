@@ -271,7 +271,9 @@ export async function enqueueTrockCrmProjectStageChangedRelay(input: {
     const payload = buildTrockCrmProjectStageChangedPayload(input);
     return await enqueueTrockCrmRelayOutbox({
       store: input.store,
-      webhookLogId: Number(input.webhookLog.id),
+      // optionalNumericId (not Number) so a null/non-numeric id becomes a null FK instead of 0 (which
+      // would violate the webhook_logs FK and drop the stage relay for any no-persisted-webhook caller).
+      webhookLogId: optionalNumericId(input.webhookLog.id),
       syncMappingId: optionalNumericId(input.syncMapping?.id),
       procorePortfolioProjectId: payload.procore.portfolioProjectId,
       projectNumber: payload.procore.projectNumber,

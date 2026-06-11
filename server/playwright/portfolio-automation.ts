@@ -125,6 +125,8 @@ export interface BidBoardScrapedData {
 
 export interface PortfolioAutomationResult {
   success: boolean;
+  /** Phase-2-only success (project created + identity validated), captured before Phase 3 folds into `success`. */
+  phase2Succeeded?: boolean;
   bidboardProjectId: string;
   bidboardProjectName?: string;
   portfolioProjectId?: string;
@@ -2663,6 +2665,11 @@ export async function runPhase2(
     });
 
     logAutomationSummary(result);
+
+    // Capture Phase-2-only success (project created + identity-validated) BEFORE Phase 3 folds into
+    // result.success below — callers gate the photo-link relay on this so it fires on Phase-2 success
+    // regardless of a later Phase-3 failure, but never for a failed Phase 2.
+    result.phase2Succeeded = result.success;
 
     // Phase 3: always run after Phase 2 succeeds — construct missing inputs if needed
     if (result.success) {
