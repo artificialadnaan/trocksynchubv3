@@ -2650,6 +2650,10 @@ export async function runPhase2(
     result.success = result.steps.every(
       (s) => s.status === "success" || s.status === "skipped"
     );
+    // Capture Phase-2-only success NOW — before the non-critical audit log (which can throw) and before
+    // Phase 3 folds into result.success — so neither an audit-log error nor a later Phase-3 failure can
+    // cause the photo-link relay to be skipped for a genuinely successful Phase 2.
+    result.phase2Succeeded = result.success;
     result.completedAt = new Date();
 
     await storage.createAuditLog({
@@ -2665,11 +2669,6 @@ export async function runPhase2(
     });
 
     logAutomationSummary(result);
-
-    // Capture Phase-2-only success (project created + identity-validated) BEFORE Phase 3 folds into
-    // result.success below — callers gate the photo-link relay on this so it fires on Phase-2 success
-    // regardless of a later Phase-3 failure, but never for a failed Phase 2.
-    result.phase2Succeeded = result.success;
 
     // Phase 3: always run after Phase 2 succeeds — construct missing inputs if needed
     if (result.success) {
