@@ -121,6 +121,10 @@ describe("safeHttpUrl", () => {
     expect(safeHttpUrl(null)).toBeNull();
     expect(safeHttpUrl(undefined)).toBeNull();
   });
+  it("trims surrounding whitespace from a valid URL", () => {
+    expect(safeHttpUrl("  https://app-na2.hubspot.com/x  ")).toBe("https://app-na2.hubspot.com/x");
+    expect(safeHttpUrl("\n\thttps://example.com\n")).toBe("https://example.com");
+  });
 });
 
 describe("formatRfpDateTime", () => {
