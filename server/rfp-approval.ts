@@ -30,6 +30,9 @@ export interface NormalizedRfpRequestInput {
     projectType: string;
     amount: number | null;
     estimator: string | null;
+    /** Deal owner / rep — the "Requested by" person (CRM-sourced; HubSpot resolves its own). */
+    ownerName?: string | null;
+    ownerEmail?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -933,7 +936,9 @@ async function sendRfpReviewEmails(params: {
   const location = esc([params.dealData.address, params.dealData.city, params.dealData.state, params.dealData.zip].filter(Boolean).join(', ') || 'N/A');
   const description = esc(resolveRfpDescription(params.dealData) || 'N/A');
   const estimator = esc(params.dealData.estimator || 'N/A');
-  const ownerName = esc(params.ownerName || 'N/A');
+  // Fall back to the owner email when only an email was resolved (e.g. the CRM's hubspot_owner_email
+  // fallback supplies an email but no name) so "Deal Owner" shows the requester instead of N/A.
+  const ownerName = esc(params.ownerName || params.dealData.ownerEmail || 'N/A');
 
   const row = (label: string, value: string, isHtml = false) =>
     `<tr>
@@ -1145,9 +1150,12 @@ export async function createRfpApprovalRequestFromNormalizedInput(
 
     const token = randomUUID();
     const sourceDealUrl = await buildSourceDealUrl(input.sourceSystem, input.sourceDealId);
+    // HubSpot resolves the owner via its own API; trock_crm sends the resolved owner (assigned_rep
+    // → name/email, with fallbacks) in the request payload. Previously the trock_crm branch was an
+    // empty stub, which left "Requested by" blank on every CRM-sourced RFP.
     const rawOwnerInfo = input.sourceSystem === 'hubspot'
       ? await getDealOwnerInfo(input.sourceDealId)
-      : { ownerName: '', ownerEmail: '' };
+      : { ownerName: input.deal.ownerName ?? '', ownerEmail: input.deal.ownerEmail ?? '' };
     const ownerInfo = {
       ownerName: rawOwnerInfo.ownerName || '',
       ownerEmail: rawOwnerInfo.ownerEmail || '',
