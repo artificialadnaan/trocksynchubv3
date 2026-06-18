@@ -18,6 +18,14 @@ import { sendEmail } from "./email-service";
 import { DEFAULT_PROCORE_COMPANY_ID, PROJECT_TYPES, parseProjectTypeFromNumber } from "./constants";
 import type { Request, Response } from "express";
 
+/** Return the value only if it is an absolute http(s) URL, else null — so we never emit a
+ *  relative/unsafe href into an email, regardless of where the value originated. */
+export function safeHttpUrl(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  return /^https?:\/\//i.test(s) ? s : null;
+}
+
 /** Resolve a human-readable project-type label (e.g. "Service", "Interior Renovation"). */
 export function resolveProjectTypeLabel(
   dealData: Record<string, unknown>,
@@ -199,11 +207,9 @@ export async function getRfpReportList(
     const requestedBy = String(dealData.ownerName || dealData.ownerEmail || "—");
     const amount = resolveRfpAmount(dealData, editedFields);
     const bidBoardUrl = buildBidBoardUrl(rfp.bidboardProjectId);
-    const crmUrlRaw = dealData.sourceDealUrl ?? dealData.hubspotDealUrl;
     // Only emit an absolute http(s) link so a malformed/relative stored value never
     // produces a broken button in recipients' inboxes.
-    const crmUrl =
-      crmUrlRaw && /^https?:\/\//i.test(String(crmUrlRaw)) ? String(crmUrlRaw) : null;
+    const crmUrl = safeHttpUrl(dealData.sourceDealUrl ?? dealData.hubspotDealUrl);
     const approvedBy = rfp.approvedBy ? String(rfp.approvedBy) : null;
     const declinedBy = rfp.declinedBy ? String(rfp.declinedBy) : null;
     const mapping = mappingByDeal.get(rfp.hubspotDealId);
@@ -606,9 +612,13 @@ export async function buildRfpReportEmailHtml(options: {
         : "";
       const numberLine = [escapeHtml(r.projectNumber), typeBadge].filter(Boolean).join("&nbsp;&nbsp;");
 
+      // Re-validate at the render boundary: this function is exported, so don't assume the
+      // caller already filtered the URLs to absolute http(s).
+      const bidBoardHref = safeHttpUrl(r.bidBoardUrl);
+      const crmHref = safeHttpUrl(r.crmUrl);
       const buttons: string[] = [];
-      if (r.bidBoardUrl) buttons.push(linkButton(r.bidBoardUrl, "Bid Board →", "#1e2024"));
-      if (r.crmUrl) buttons.push(linkButton(r.crmUrl, "CRM →", "#d11921"));
+      if (bidBoardHref) buttons.push(linkButton(bidBoardHref, "Bid Board →", "#1e2024"));
+      if (crmHref) buttons.push(linkButton(crmHref, "CRM →", "#d11921"));
       const buttonRow = buttons.length > 0
         ? `<tr><td style="padding: 14px 18px 16px 18px;">${buttons.join("")}</td></tr>`
         : "";

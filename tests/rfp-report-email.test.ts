@@ -13,6 +13,7 @@ import {
   formatRfpAmount,
   formatRfpDateTime,
   resolveProjectTypeLabel,
+  safeHttpUrl,
   buildRfpReportEmailHtml,
   type RfpReportRow,
 } from "../server/rfp-reports";
@@ -104,6 +105,21 @@ describe("buildBidBoardUrl", () => {
     expect(buildBidBoardUrl(null)).toBeNull();
     expect(buildBidBoardUrl("")).toBeNull();
     expect(buildBidBoardUrl(undefined)).toBeNull();
+  });
+});
+
+describe("safeHttpUrl", () => {
+  it("passes absolute http(s) URLs", () => {
+    expect(safeHttpUrl("https://app-na2.hubspot.com/x")).toBe("https://app-na2.hubspot.com/x");
+    expect(safeHttpUrl("http://example.com")).toBe("http://example.com");
+  });
+  it("rejects relative, scheme-relative, and unsafe schemes", () => {
+    expect(safeHttpUrl("/deals/123")).toBeNull();
+    expect(safeHttpUrl("//evil.com")).toBeNull();
+    expect(safeHttpUrl("javascript:alert(1)")).toBeNull();
+    expect(safeHttpUrl("")).toBeNull();
+    expect(safeHttpUrl(null)).toBeNull();
+    expect(safeHttpUrl(undefined)).toBeNull();
   });
 });
 
@@ -200,6 +216,8 @@ describe("buildRfpReportEmailHtml — R3 edge cases", () => {
     });
     const html = await renderEmail([pendingRow], 1);
     expect(html).not.toContain("/projects/9988/tools/estimating");
+    expect(html).not.toContain("/tools/bid-board/project/9988/details"); // canonical path also absent
+    expect(html).not.toContain("Bid Board →"); // the button itself is not rendered
     expect(html).toContain("Awaiting approval");
     expect(html).toContain('href="https://app-na2.hubspot.com/contacts/123/record/0-3/555"'); // CRM still present
   });
@@ -238,7 +256,10 @@ describe("buildRfpReportEmailHtml — R3 edge cases", () => {
   it("renders an em dash when an RFP has neither amount nor links", async () => {
     const bare = makeRow({ amount: null, bidBoardUrl: null, crmUrl: null });
     const html = await renderEmail([bare]);
-    expect(html).toContain("—");
+    expect(html).toContain(">—</td>"); // the amount cell specifically, not just any em dash
+    expect(html).not.toContain("$NaN");
+    expect(html).not.toContain("Bid Board →");
+    expect(html).not.toContain("CRM →");
   });
 
   it("shows an empty-state message when there are no RFPs", async () => {
