@@ -120,6 +120,13 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     expect(db.store.get("dallas").state).toBe("failing");
   });
 
+  it("sends the ops alert with bypassGlobalCc so it goes only to the configured recipient", async () => {
+    const db = fakeDb();
+    await run(db, { ok: false, attempts: 3, status: 500, error: "x" }, NOW);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toMatchObject({ to: "ops@trock.test", bypassGlobalCc: true });
+  });
+
   it("does NOT email again for a sustained outage within the window (no storm)", async () => {
     const db = fakeDb();
     await run(db, { ok: false, attempts: 3, status: 500, error: "x" }, NOW); // first alert

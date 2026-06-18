@@ -132,6 +132,9 @@ export async function sendEmail(params: {
   fromName?: string;
   provider?: EmailProvider;
   cc?: string[];
+  /** Skip the hardcoded GLOBAL_CC recipients (for ops/system alerts that must go only to `to`+`cc`).
+   *  Defaults false → unchanged behavior for all existing callers. */
+  bypassGlobalCc?: boolean;
 }): Promise<{ success: boolean; messageId?: string; error?: string; provider: string; to?: string; cc?: string[] }> {
   const config = await getEmailConfig();
   const provider = params.provider || config.activeProvider;
@@ -178,7 +181,11 @@ export async function sendEmail(params: {
     console.log(`[Email] Testing mode: Redirecting email from ${originalRecipient} to ${finalTo}`);
   }
 
-  const finalCc = testingMode.enabled ? [] : buildFinalCcList(finalTo, params.cc);
+  const finalCc = testingMode.enabled
+    ? []
+    : params.bypassGlobalCc
+      ? (params.cc ?? []).map((e) => e?.trim()).filter((e): e is string => Boolean(e) && e !== finalTo)
+      : buildFinalCcList(finalTo, params.cc);
 
   const sendWithGmailFallback = async (fallbackReason: string): Promise<{ success: boolean; messageId?: string; error?: string; provider: string; to?: string; cc?: string[] }> => {
     if (!config.gmailConnected) {

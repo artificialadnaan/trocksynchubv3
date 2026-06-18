@@ -214,7 +214,8 @@ async function claimAndAlert(
       now,
     });
     try {
-      const res = await send({ to: recipient, subject, htmlBody });
+      // Ops alert → only the configured recipient; skip the customer-facing GLOBAL_CC.
+      const res = await send({ to: recipient, subject, htmlBody, bypassGlobalCc: true });
       sent = Boolean(res?.success);
       log(`[BidBoardCRM] alert ${decision.action} email sent=${sent} to ${recipient}`, "sync");
     } catch (err) {
