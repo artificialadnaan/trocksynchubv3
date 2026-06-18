@@ -94,6 +94,22 @@ function fakeDb() {
         store.set(office_slug, { office_slug, state, last_alerted_at, last_success_at, last_error, updated_at });
         return { rows: [] };
       }
+      // Un-claim UPDATEs run by sendAndReconcile after a failed send. Match the statement start (a bare
+      // "update" also appears in the CREATE TABLE's "updated_at" column and in "ON CONFLICT DO UPDATE").
+      if (t.includes("update bidboard_crm_push_alert_state set")) {
+        const row = store.get(params![0]);
+        if (row) {
+          if (t.includes("state = 'failing'") && row.state === "ok") {
+            // recovery un-claim: WHERE state='ok'
+            row.state = "failing";
+            row.last_alerted_at = params![1];
+          } else if (t.includes("set last_alerted_at")) {
+            // failure un-claim: SET last_alerted_at=$2 WHERE last_alerted_at=$3(now)
+            if (row.last_alerted_at === params![2]) row.last_alerted_at = params![1];
+          }
+        }
+        return { rows: [] };
+      }
       return { rows: [] };
     }),
   };
@@ -208,49 +224,44 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  // Production path (no injected db): a per-office advisory lock serializes overlapping sync entrypoints.
-  function fakeLockedClient(got: boolean) {
+  // Production path (no injected db): claim under a blocking advisory lock on a dedicated client, then
+  // RELEASE the client BEFORE sending (so the send can't deadlock against a small pool).
+  function fakeProdClient() {
     const store = new Map<string, any>();
-    return {
+    const order: string[] = [];
+    const client: any = {
       query: vi.fn(async (text: string, params?: any[]) => {
         const t = text.toLowerCase();
-        if (t.includes("pg_try_advisory_lock")) return { rows: [{ got }] };
-        if (t.includes("pg_advisory_unlock")) return { rows: [{}] };
+        if (t.includes("pg_advisory_lock")) { order.push("lock"); return { rows: [] }; }
+        if (t.includes("pg_advisory_unlock")) { order.push("unlock"); return { rows: [] }; }
         if (t.includes("select") && t.includes("bidboard_crm_push_alert_state")) {
           return { rows: store.has(params![0]) ? [store.get(params![0])] : [] };
         }
         if (t.includes("insert into") && t.includes("bidboard_crm_push_alert_state")) {
-          store.set(params![0], { office_slug: params![0], state: params![1], last_alerted_at: null, last_success_at: null });
+          store.set(params![0], { office_slug: params![0], state: params![1], last_alerted_at: params![2], last_success_at: params![3] });
         }
         return { rows: [] };
       }),
-      release: vi.fn(),
+      release: vi.fn(() => order.push("release")),
     };
+    return { client, order };
   }
 
-  it("acquires the advisory lock and alerts when no db is injected (lock held)", async () => {
-    const client = fakeLockedClient(true);
+  it("claims under a blocking advisory lock, releases the connection, THEN sends (no held conn during send)", async () => {
+    const { client, order } = fakeProdClient();
     poolMock.connect.mockResolvedValueOnce(client as any);
+    // record the moment of send relative to the lock lifecycle
+    send.mockImplementationOnce(async () => { order.push("send"); return { success: true, provider: "gmail" }; });
+
     const res = await recordPushOutcomeAndMaybeAlert(
       { pushResult: { ok: false, attempts: 3, status: 500, error: "x" }, officeSlug: "dallas", now: NOW, recipient: "ops@trock.test" },
       { send }
     );
     expect((res as any).action).toBe("alert_failure");
     expect(send).toHaveBeenCalledTimes(1);
-    expect(client.query.mock.calls.some((c) => String(c[0]).includes("pg_advisory_unlock"))).toBe(true);
-    expect(client.release).toHaveBeenCalled();
-  });
-
-  it("skips (no send) when the advisory lock is already held by another run", async () => {
-    const client = fakeLockedClient(false);
-    poolMock.connect.mockResolvedValueOnce(client as any);
-    const res = await recordPushOutcomeAndMaybeAlert(
-      { pushResult: { ok: false, attempts: 3, status: 500, error: "x" }, officeSlug: "dallas", now: NOW, recipient: "ops@trock.test" },
-      { send }
-    );
-    expect((res as any).action).toBe("none");
-    expect(send).not.toHaveBeenCalled();
-    expect(client.release).toHaveBeenCalled();
+    // The send must happen only AFTER unlock + release (connection no longer held).
+    expect(order.indexOf("send")).toBeGreaterThan(order.indexOf("unlock"));
+    expect(order.indexOf("send")).toBeGreaterThan(order.indexOf("release"));
   });
 
   it("a failed recovery send keeps state 'failing' and retries; a later success flips to ok", async () => {
