@@ -15,7 +15,47 @@ import {
   syncMappings,
 } from "@shared/schema";
 import { sendEmail } from "./email-service";
+import { DEFAULT_PROCORE_COMPANY_ID, PROJECT_TYPES, parseProjectTypeFromNumber } from "./constants";
 import type { Request, Response } from "express";
+
+/** Resolve a human-readable project-type label (e.g. "Service", "Interior Renovation"). */
+export function resolveProjectTypeLabel(
+  dealData: Record<string, unknown>,
+  projectNumber?: string | null
+): string | null {
+  const raw = String(dealData?.project_types ?? "").trim();
+  // Stored as a 1–9 dropdown code → map to its label.
+  if (/^[1-9]$/.test(raw)) return PROJECT_TYPES[raw] ?? null;
+  // Already a readable label.
+  if (raw) return raw;
+  // Fall back to the digit encoded in the project number (e.g. DFW-4-… → Service).
+  const digit = projectNumber ? parseProjectTypeFromNumber(projectNumber) : null;
+  return digit ? PROJECT_TYPES[digit] ?? null : null;
+}
+
+/** Build a Procore Bid Board deep link from a bidboard project id (null until the project exists). */
+export function buildBidBoardUrl(bidboardProjectId: string | null | undefined): string | null {
+  const id = String(bidboardProjectId ?? "").trim();
+  if (!id) return null;
+  return `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${encodeURIComponent(id)}/tools/estimating`;
+}
+
+/** Resolve the actionable RFP amount: a reviewer's edited value wins over the original deal amount. */
+export function resolveRfpAmount(
+  dealData: Record<string, unknown>,
+  editedFields: Record<string, unknown> | null | undefined
+): number | null {
+  const raw = editedFields?.amount ?? dealData?.amount;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Format a number as USD for display (e.g. 1234.5 -> "$1,235"). Returns "—" when null. */
+export function formatRfpAmount(amount: number | null): string {
+  if (amount === null) return "—";
+  return `$${Math.round(amount).toLocaleString("en-US")}`;
+}
 
 export interface RfpReportFilters {
   dateFrom?: string;
@@ -32,11 +72,25 @@ export interface RfpReportRow {
   hubspotDealId: string;
   projectName: string;
   projectNumber: string;
+  /** Human-readable project type (e.g. "Interior Renovation", "Service"); null when unknown. */
+  projectType: string | null;
   recipient: string;
   dateSent: string;
   bidboardStage: string;
   approvalStatus: string;
   changeCount: number;
+  /** Actionable RFP amount (reviewer-edited value wins over original); null when absent. */
+  amount: number | null;
+  /** Person the RFP belongs to — the deal owner (name preferred, falls back to email). */
+  requestedBy: string;
+  /** Approver email, or null when the RFP is still pending. */
+  approvedBy: string | null;
+  /** Decliner email when the RFP was rejected; null otherwise. */
+  declinedBy: string | null;
+  /** Procore Bid Board deep link; null until a Bid Board project exists (post-approval). */
+  bidBoardUrl: string | null;
+  /** Source CRM/HubSpot deep link to the deal; null when unavailable. */
+  crmUrl: string | null;
 }
 
 /** Get paginated RFP list with filters */
@@ -113,7 +167,9 @@ export async function getRfpReportList(
 
   const changeMap = new Map(changeCounts.map((c) => [c.rfpId, c.count]));
 
-  const dealIds = [...new Set(rfps.map((r) => r.hubspotDealId))].filter(Boolean);
+  const dealIds = [...new Set(rfps.map((r) => r.hubspotDealId))].filter(
+    (id): id is string => Boolean(id)
+  );
   const mappings =
     dealIds.length > 0
       ? await db
@@ -126,9 +182,19 @@ export async function getRfpReportList(
 
   let data: RfpReportRow[] = rfps.map((rfp) => {
     const dealData = (rfp.dealData as Record<string, unknown>) || {};
+    const editedFields = (rfp.editedFields as Record<string, unknown> | null) || null;
     const projectName = String(dealData.dealname || dealData.project_name || "—");
     const projectNumber = String(dealData.project_number || "—");
+    const projectType = resolveProjectTypeLabel(dealData, projectNumber);
     const recipient = String(dealData.ownerEmail || dealData.ownerName || "—");
+    // "Requested by" = the deal owner (name preferred); distinct from the approver.
+    const requestedBy = String(dealData.ownerName || dealData.ownerEmail || "—");
+    const amount = resolveRfpAmount(dealData, editedFields);
+    const bidBoardUrl = buildBidBoardUrl(rfp.bidboardProjectId);
+    const crmUrlRaw = dealData.sourceDealUrl ?? dealData.hubspotDealUrl;
+    const crmUrl = crmUrlRaw ? String(crmUrlRaw) : null;
+    const approvedBy = rfp.approvedBy ? String(rfp.approvedBy) : null;
+    const declinedBy = rfp.declinedBy ? String(rfp.declinedBy) : null;
     const mapping = mappingByDeal.get(rfp.hubspotDealId);
 
     let bidboardStage = "—";
@@ -143,14 +209,21 @@ export async function getRfpReportList(
 
     return {
       id: rfp.id,
-      hubspotDealId: rfp.hubspotDealId,
+      hubspotDealId: rfp.hubspotDealId ?? "",
       projectName,
       projectNumber,
+      projectType,
       recipient,
       dateSent: rfp.createdAt ? new Date(rfp.createdAt).toISOString() : "",
       bidboardStage,
       approvalStatus,
       changeCount,
+      amount,
+      requestedBy,
+      approvedBy,
+      declinedBy,
+      bidBoardUrl,
+      crmUrl,
     };
   });
 
@@ -421,6 +494,26 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/** Format an ISO timestamp into a Central-Time date and time pair for the email. */
+export function formatRfpDateTime(iso: string): { date: string; time: string } {
+  if (!iso) return { date: "—", time: "" };
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { date: "—", time: "" };
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(d);
+  const time = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(d);
+  return { date, time: `${time} CT` };
+}
+
 /** Build HTML email body for scheduled RFP report */
 export async function buildRfpReportEmailHtml(options: {
   periodLabel: string;
@@ -438,7 +531,6 @@ export async function buildRfpReportEmailHtml(options: {
     changes,
     approvalSummary,
     includeRfpLog,
-    includeChangeHistory,
     includeApprovalSummary,
     dashboardUrl,
   } = options;
@@ -448,99 +540,100 @@ export async function buildRfpReportEmailHtml(options: {
 
   let sections: string[] = [];
 
+  // Stat chips use inline-block so they sit side-by-side on desktop and wrap
+  // cleanly on mobile instead of overflowing a fixed 3-column table.
+  const statChip = (text: string, bg: string, color: string, accent = false) =>
+    `<span style="display: inline-block; margin: 0 8px 8px 0; padding: 10px 16px; background: ${bg}; color: ${color}; border-radius: 6px; font-weight: 600; font-size: 13px;${accent ? " border-left: 3px solid #d11921;" : ""}">${text}</span>`;
+
   sections.push(`
-    <tr><td style="padding: 20px 32px;">
-      <table cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td style="padding: 10px 16px; background: #1e2024; color: #fff; border-radius: 6px; text-align: center; font-weight: 600; font-size: 13px; border-left: 3px solid #d11921;">
-            ${totalRfps} RFPs Sent
-          </td>
-          <td width="12"></td>
-          <td style="padding: 10px 16px; background: #1e2024; color: #fff; border-radius: 6px; text-align: center; font-weight: 600; font-size: 13px; border-left: 3px solid #d11921;">
-            ${totalChanges} Changes
-          </td>
-          <td width="12"></td>
-          <td style="padding: 10px 16px; background: #fef3c7; color: #92400e; border-radius: 6px; text-align: center; font-weight: 600; font-size: 13px;">
-            ${approvalSummary.pending} Pending
-          </td>
-        </tr>
-      </table>
+    <tr><td class="mobile-pad" style="padding: 20px 32px 12px 32px;">
+      ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}
     </td></tr>`);
 
-  if (includeRfpLog && rfps.length > 0) {
-    const rows = rfps
-      .slice(0, 30)
-      .map(
-        (r) => `
-        <tr>
-          <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;">${escapeHtml(r.projectName)}</td>
-          <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;">${escapeHtml(r.projectNumber)}</td>
-          <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;">${escapeHtml(r.recipient)}</td>
-          <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;">${r.dateSent ? new Date(r.dateSent).toLocaleDateString() : ""}</td>
-          <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;"><span style="padding: 2px 8px; border-radius: 999px; font-size: 11px; ${r.approvalStatus === "approved" ? "background: #dcfce7; color: #166534;" : r.approvalStatus === "rejected" ? "background: #fee2e2; color: #991b1b;" : "background: #fef3c7; color: #92400e;"}">${escapeHtml(r.approvalStatus)}</span></td>
-        </tr>`
-      )
-      .join("");
-    sections.push(`
-    <tr><td style="padding: 20px 32px;">
-      <h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">RFP Send Log — ${periodLabel}</h3>
-      <table cellpadding="0" cellspacing="0" width="100%" style="border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden;">
-        <thead>
-          <tr style="background: #1e2024;">
-            <th style="padding: 10px 12px; text-align: left; font-size: 10px; color: #fff; text-transform: uppercase; letter-spacing: 0.04em; border-top: 2px solid #d11921;">Project Name</th>
-            <th style="padding: 10px 12px; text-align: left; font-size: 10px; color: #fff; text-transform: uppercase; letter-spacing: 0.04em; border-top: 2px solid #d11921;">Project #</th>
-            <th style="padding: 10px 12px; text-align: left; font-size: 10px; color: #fff; text-transform: uppercase; letter-spacing: 0.04em; border-top: 2px solid #d11921;">Recipient</th>
-            <th style="padding: 10px 12px; text-align: left; font-size: 10px; color: #fff; text-transform: uppercase; letter-spacing: 0.04em; border-top: 2px solid #d11921;">Date</th>
-            <th style="padding: 10px 12px; text-align: left; font-size: 10px; color: #fff; text-transform: uppercase; letter-spacing: 0.04em; border-top: 2px solid #d11921;">Status</th>
+  if (includeRfpLog) {
+    // Status-aware approver value: approver email, rejection, or pending.
+    const approverValue = (r: RfpReportRow): string => {
+      if (r.approvedBy) {
+        return `<span style="color: #166534; font-weight: 600; word-break: break-word;">${escapeHtml(r.approvedBy)}</span>`;
+      }
+      if (r.approvalStatus === "rejected") {
+        const who = r.declinedBy
+          ? ` <span style="color: #475569; word-break: break-word;">${escapeHtml(r.declinedBy)}</span>`
+          : "";
+        return `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #fee2e2; color: #991b1b;">Rejected</span>${who}`;
+      }
+      return `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #fef3c7; color: #92400e;">Awaiting approval</span>`;
+    };
+
+    // One label/value row inside a card.
+    const metaRow = (label: string, valueHtml: string) => `
+              <tr>
+                <td style="padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; width: 110px; vertical-align: top;">${label}</td>
+                <td style="padding: 4px 0; font-size: 14px; color: #1e293b; vertical-align: top;">${valueHtml}</td>
+              </tr>`;
+
+    // Tappable link buttons — each rendered only when its URL exists (absolute URLs).
+    const linkButton = (href: string, label: string, bg: string) =>
+      `<a href="${escapeHtml(href)}" target="_blank" style="display: inline-block; margin: 0 8px 0 0; padding: 11px 20px; background: ${bg}; color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; border-radius: 6px; white-space: nowrap;">${label}</a>`;
+
+    const card = (r: RfpReportRow): string => {
+      const { date, time } = formatRfpDateTime(r.dateSent);
+      const typeBadge = r.projectType
+        ? `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 11px; font-weight: 600; white-space: nowrap;">${escapeHtml(r.projectType)}</span>`
+        : "";
+      const numberLine = [escapeHtml(r.projectNumber), typeBadge].filter(Boolean).join("&nbsp;&nbsp;");
+
+      const buttons: string[] = [];
+      if (r.bidBoardUrl) buttons.push(linkButton(r.bidBoardUrl, "Bid Board →", "#1e2024"));
+      if (r.crmUrl) buttons.push(linkButton(r.crmUrl, "CRM →", "#d11921"));
+      const buttonRow = buttons.length > 0
+        ? `<tr><td style="padding: 14px 18px 16px 18px;">${buttons.join("")}</td></tr>`
+        : "";
+
+      return `
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 12px; background: #ffffff;">
+          <tr>
+            <td style="padding: 16px 18px 0 18px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3;">${escapeHtml(r.projectName)}</td>
+                  <td align="right" style="font-size: 16px; font-weight: 700; color: #111214; white-space: nowrap; padding-left: 10px; vertical-align: top;">${escapeHtml(formatRfpAmount(r.amount))}</td>
+                </tr>
+              </table>
+              <div style="margin-top: 5px; font-size: 12px; color: #6b7280;">${numberLine}</div>
+            </td>
           </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-      ${rfps.length > 30 ? `<p style="margin: 10px 0 0 0; font-size: 11px; color: #6b7280;">Showing 30 of ${rfps.length} RFPs. <a href="${dashboardUrl}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}
-    </td></tr>`);
-  }
+          <tr>
+            <td style="padding: 12px 18px 4px 18px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                ${metaRow("Requested by", `<span style="word-break: break-word;">${escapeHtml(r.requestedBy)}</span>`)}
+                ${metaRow("Approved by", approverValue(r))}
+                ${metaRow("Sent", `${escapeHtml(date)} · <span style="color: #6b7280;">${escapeHtml(time)}</span>`)}
+              </table>
+            </td>
+          </tr>
+          ${buttonRow}
+        </table>`;
+    };
 
-  if (includeChangeHistory && changes.length > 0) {
-    const changeBlocks = changes
-      .slice(0, 10)
-      .map(
-        (c) => `
-        <div style="margin-bottom: 12px; padding: 12px; background: #f9fafb; border-radius: 6px; border-left: 3px solid #d11921;">
-          <strong>${escapeHtml(c.projectName)}</strong> (${escapeHtml(c.projectNumber)})
-          ${c.items
-            .slice(0, 5)
-            .map(
-              (i) => `
-          <div style="font-size: 12px; margin-top: 6px; color: #475569;">
-            <span style="color: #64748b;">${escapeHtml(i.field)}</span>:
-            <del style="color: #dc2626;">${escapeHtml(String(i.oldVal || "").slice(0, 50))}</del> → <ins style="color: #16a34a;">${escapeHtml(String(i.newVal || "").slice(0, 50))}</ins>
-            <span style="color: #94a3b8;">— ${escapeHtml(i.changedBy || "system")}</span>
-          </div>`
-            )
-            .join("")}
-        </div>`
-      )
-      .join("");
+    const body =
+      rfps.length > 0
+        ? `${rfps.slice(0, 30).map(card).join("")}
+      ${rfps.length > 30 ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${rfps.length} RFPs. <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}`
+        : `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No RFPs in this period.</p>`;
+
     sections.push(`
-    <tr><td style="padding: 20px 32px;">
-      <h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Change Highlights</h3>
-      ${changeBlocks}
+    <tr><td class="mobile-pad" style="padding: 20px 32px;">
+      <h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">RFP Activity — ${escapeHtml(periodLabel)}</h3>
+      ${body}
     </td></tr>`);
   }
 
   if (includeApprovalSummary) {
     sections.push(`
-    <tr><td style="padding: 20px 32px;">
-      <h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Approval Summary</h3>
-      <table cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-          <td style="padding: 8px 16px; background: #fef3c7; color: #92400e; border-radius: 6px; font-weight: 600;">${approvalSummary.pending} Pending</td>
-          <td width="12"></td>
-          <td style="padding: 8px 16px; background: #dcfce7; color: #166534; border-radius: 6px; font-weight: 600;">${approvalSummary.approved} Approved</td>
-          <td width="12"></td>
-          <td style="padding: 8px 16px; background: #fee2e2; color: #991b1b; border-radius: 6px; font-weight: 600;">${approvalSummary.rejected} Rejected</td>
-        </tr>
-      </table>
+    <tr><td class="mobile-pad" style="padding: 20px 32px;">
+      <h3 style="margin: 0 0 10px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Approval Summary</h3>
+      ${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}${statChip(`${approvalSummary.approved} Approved`, "#dcfce7", "#166534")}${statChip(`${approvalSummary.rejected} Rejected`, "#fee2e2", "#991b1b")}
     </td></tr>`);
   }
 
@@ -550,16 +643,24 @@ export async function buildRfpReportEmailHtml(options: {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
   <title>RFP Report — T-Rock Construction</title>
+  <style>
+    /* Mobile tightening — supported by Gmail/Apple Mail; ignored safely elsewhere. */
+    @media only screen and (max-width: 480px) {
+      .email-card { width: 100% !important; }
+      .mobile-pad { padding-left: 16px !important; padding-right: 16px !important; }
+    }
+  </style>
 </head>
 <body style="margin: 0; padding: 0; background: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;">
   <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background: #f3f4f6;">
     <tr>
-      <td style="padding: 32px 20px;">
-        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="margin: 0 auto; max-width: 600px; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); overflow: hidden;">
+      <td style="padding: 24px 12px;">
+        <table role="presentation" class="email-card" cellspacing="0" cellpadding="0" border="0" width="600" style="margin: 0 auto; max-width: 600px; width: 100%; background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); overflow: hidden;">
           <!-- Header -->
           <tr>
-            <td style="background: #1e2024; padding: 20px 32px;">
+            <td class="mobile-pad" style="background: #1e2024; padding: 20px 32px;">
               <span style="color: #fff; font-size: 13px; font-weight: 700; letter-spacing: 0.03em;">T-ROCK CONSTRUCTION</span>
               <div style="color: #9ca3af; font-size: 11px; margin-top: 2px;">Sync Hub</div>
             </td>
@@ -570,7 +671,7 @@ export async function buildRfpReportEmailHtml(options: {
           </tr>
           <!-- Title -->
           <tr>
-            <td style="padding: 28px 32px 20px 32px;">
+            <td class="mobile-pad" style="padding: 28px 32px 20px 32px;">
               <h1 style="margin: 0 0 6px 0; font-size: 20px; font-weight: 700; color: #111214; letter-spacing: -0.02em;">RFP Report</h1>
               <p style="margin: 0 0 4px 0; font-size: 13px; color: #6b7280;">${escapeHtml(periodLabel)}</p>
               <p style="margin: 0; font-size: 11px; color: #9ca3af;">${new Date().toLocaleString()}</p>
@@ -579,7 +680,7 @@ export async function buildRfpReportEmailHtml(options: {
           ${sections.join("")}
           <!-- Footer -->
           <tr>
-            <td style="padding: 20px 32px; border-top: 1px solid #d11921; font-size: 11px; color: #9ca3af;">
+            <td class="mobile-pad" style="padding: 20px 32px; border-top: 1px solid #d11921; font-size: 11px; color: #9ca3af;">
               T-Rock Construction &nbsp;|&nbsp; <a href="${dashboardUrl}" style="color: #d11921; text-decoration: none;">Open Dashboard</a>
             </td>
           </tr>
