@@ -101,10 +101,13 @@ export interface Querier {
  * (Codex). TIMESTAMPTZ because the debounce compares instants across runs/processes.
  */
 export async function ensurePushAlertStateTable(db: Querier = pool): Promise<void> {
+  // No CHECK constraint: kept byte-aligned with the drizzle definition (shared/schema.ts) so
+  // drizzle-kit push --force doesn't see drift — matches the bidboard_stage_sync_runs convention.
+  // State values are constrained by the PushAlertState type + the writers (only 'ok'/'failing').
   await db.query(`
     CREATE TABLE IF NOT EXISTS bidboard_crm_push_alert_state (
       office_slug TEXT PRIMARY KEY,
-      state TEXT NOT NULL DEFAULT 'ok' CHECK (state IN ('ok', 'failing')),
+      state TEXT NOT NULL DEFAULT 'ok',
       last_alerted_at TIMESTAMPTZ,
       last_success_at TIMESTAMPTZ,
       last_error TEXT,
@@ -243,6 +246,26 @@ async function sendAndReconcile(
   send: typeof sendEmail
 ): Promise<void> {
   if (decision.action === "none") return;
+
+  // Re-verify our claim is still current. Phase 1 released the advisory lock before this send, so an
+  // overlapping run with a DIFFERENT outcome could have rewritten the row in between (e.g. a failed
+  // push flips state back to 'failing' after we claimed 'alert_recovered'). updated_at is our claim
+  // token — set to `now` when we claimed; if it has changed, that run now owns the state, so skip this
+  // now-stale send rather than emit a RECOVERED/FAILED email that contradicts the current state (Codex).
+  try {
+    const cur = await db.query(
+      `SELECT updated_at FROM bidboard_crm_push_alert_state WHERE office_slug = $1`,
+      [args.officeSlug]
+    );
+    const curUpdated = cur.rows[0]?.updated_at ? new Date(cur.rows[0].updated_at).getTime() : null;
+    if (curUpdated !== now.getTime()) {
+      log(`[BidBoardCRM] alert claim for ${args.officeSlug} superseded by a concurrent run — skipping send`, "sync");
+      return;
+    }
+  } catch (err) {
+    log(`[BidBoardCRM] alert claim recheck errored: ${err instanceof Error ? err.message : String(err)}`, "sync");
+    return; // can't confirm the claim is current → don't risk a stale send
+  }
 
   const { subject, htmlBody } = renderPushAlertEmail({
     kind: decision.action === "alert_recovered" ? "recovered" : "failure",
