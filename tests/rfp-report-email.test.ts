@@ -34,7 +34,7 @@ function makeRow(overrides: Partial<RfpReportRow> = {}): RfpReportRow {
     approvedBy: "churlling@trockgc.com",
     declinedBy: null,
     bidBoardUrl:
-      "https://us02.procore.com/webclients/host/companies/598134325683880/projects/9988/tools/estimating",
+      "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/9988/details",
     crmUrl: "https://app-na2.hubspot.com/contacts/123/record/0-3/555",
     ...overrides,
   };
@@ -71,8 +71,12 @@ describe("resolveRfpAmount", () => {
 
   it("returns null when the amount is missing or empty", () => {
     expect(resolveRfpAmount({ amount: "" }, null)).toBeNull();
+    expect(resolveRfpAmount({ amount: "   " }, null)).toBeNull(); // whitespace must not become $0
     expect(resolveRfpAmount({}, null)).toBeNull();
     expect(resolveRfpAmount({ amount: "not-a-number" }, null)).toBeNull();
+  });
+  it("treats a genuine zero as $0, not missing", () => {
+    expect(resolveRfpAmount({ amount: 0 }, null)).toBe(0);
   });
 });
 
@@ -86,10 +90,15 @@ describe("formatRfpAmount", () => {
 });
 
 describe("buildBidBoardUrl", () => {
-  it("builds a Procore estimating deep link from a project id", () => {
+  it("builds a canonical Bid Board deep link (bid-board namespace, not portfolio-project)", () => {
     expect(buildBidBoardUrl("9988")).toBe(
-      "https://us02.procore.com/webclients/host/companies/598134325683880/projects/9988/tools/estimating"
+      "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/9988/details"
     );
+  });
+  it("uses the Bid Board path, never the /projects/{id}/tools/estimating portfolio path", () => {
+    const url = buildBidBoardUrl("9988")!;
+    expect(url).toContain("/tools/bid-board/project/");
+    expect(url).not.toContain("/tools/estimating");
   });
   it("returns null when there is no project id (pre-approval)", () => {
     expect(buildBidBoardUrl(null)).toBeNull();
@@ -126,6 +135,11 @@ describe("resolveProjectTypeLabel", () => {
     expect(resolveProjectTypeLabel({}, "HOU-x-000")).toBeNull();
     expect(resolveProjectTypeLabel({})).toBeNull();
   });
+  it("never renders a raw out-of-range numeric code as a label", () => {
+    expect(resolveProjectTypeLabel({ project_types: "0" })).toBeNull();
+    expect(resolveProjectTypeLabel({ project_types: "10" })).toBeNull();
+    expect(resolveProjectTypeLabel({ project_types: "99" })).toBeNull();
+  });
 });
 
 describe("buildRfpReportEmailHtml — R1 field mapping & no raw leak", () => {
@@ -147,12 +161,18 @@ describe("buildRfpReportEmailHtml — R1 field mapping & no raw leak", () => {
     }
   });
 
-  it("shows requester and approver as distinct people", async () => {
+  it("renders requester and approver under their correct labels (not crossed)", async () => {
     const html = await renderEmail([makeRow()]);
-    expect(html).toContain("Jane Owner"); // requested by (deal owner)
-    expect(html).toContain("churlling@trockgc.com"); // approved by
-    // they are not the same value
-    expect("Jane Owner").not.toBe("churlling@trockgc.com");
+    // Assert document order: Requested by → Jane Owner → Approved by → approver email.
+    // This fails if requestedBy/approvedBy are swapped into each other's slots.
+    const iReqLabel = html.indexOf("Requested by");
+    const iOwner = html.indexOf("Jane Owner");
+    const iAppLabel = html.indexOf("Approved by");
+    const iApprover = html.indexOf("churlling@trockgc.com");
+    expect(iReqLabel).toBeGreaterThanOrEqual(0);
+    expect(iOwner).toBeGreaterThan(iReqLabel);
+    expect(iAppLabel).toBeGreaterThan(iOwner);
+    expect(iApprover).toBeGreaterThan(iAppLabel);
   });
 
   it("renders the amount, project name and number", async () => {
@@ -164,7 +184,7 @@ describe("buildRfpReportEmailHtml — R1 field mapping & no raw leak", () => {
 
   it("renders both deep-link buttons as absolute URLs", async () => {
     const html = await renderEmail([makeRow()]);
-    expect(html).toContain('href="https://us02.procore.com/webclients/host/companies/598134325683880/projects/9988/tools/estimating"');
+    expect(html).toContain('href="https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/9988/details"');
     expect(html).toContain('href="https://app-na2.hubspot.com/contacts/123/record/0-3/555"');
     expect(html).toContain("Bid Board");
     expect(html).toContain("CRM");
@@ -193,6 +213,26 @@ describe("buildRfpReportEmailHtml — R3 edge cases", () => {
     const html = await renderEmail([rejected]);
     expect(html).toContain("Rejected");
     expect(html).toContain("boss@trockgc.com");
+  });
+
+  it("does not mislabel a cancelled RFP as 'Awaiting approval'", async () => {
+    const cancelled = makeRow({
+      approvalStatus: "cancelled_source_ineligible",
+      approvedBy: null,
+      declinedBy: null,
+      bidBoardUrl: null,
+    });
+    const html = await renderEmail([cancelled]);
+    expect(html).not.toContain("Awaiting approval");
+    expect(html).toContain("Cancelled Source Ineligible");
+  });
+
+  it("omits the CRM button when the stored URL is not absolute http(s)", async () => {
+    // crmUrl is validated in getRfpReportList; here we simulate a row that already failed the
+    // guard (crmUrl null) to confirm the card renders no CRM button.
+    const noCrm = makeRow({ crmUrl: null });
+    const html = await renderEmail([noCrm]);
+    expect(html).not.toContain(">CRM →<");
   });
 
   it("renders an em dash when an RFP has neither amount nor links", async () => {

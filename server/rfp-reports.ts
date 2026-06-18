@@ -26,18 +26,25 @@ export function resolveProjectTypeLabel(
   const raw = String(dealData?.project_types ?? "").trim();
   // Stored as a 1–9 dropdown code → map to its label.
   if (/^[1-9]$/.test(raw)) return PROJECT_TYPES[raw] ?? null;
-  // Already a readable label.
-  if (raw) return raw;
+  // A non-numeric value is already a readable label (e.g. "Roofing"); a numeric value
+  // outside 1–9 is an unknown code — never show a raw code as a badge.
+  if (raw && !/^\d+$/.test(raw)) return raw;
   // Fall back to the digit encoded in the project number (e.g. DFW-4-… → Service).
   const digit = projectNumber ? parseProjectTypeFromNumber(projectNumber) : null;
   return digit ? PROJECT_TYPES[digit] ?? null : null;
 }
 
-/** Build a Procore Bid Board deep link from a bidboard project id (null until the project exists). */
+/**
+ * Build a Procore Bid Board deep link from a bidboard project id (null until the project exists).
+ * Uses the canonical Bid Board namespace (`/tools/bid-board/project/{id}/details`) — the same
+ * shape used everywhere else in the app (stage-notifications, portfolio-automation, routes/portfolio).
+ * NOTE: bidboardProjectId is a Bid Board id, NOT a Procore portfolio-project id — do not use the
+ * `/projects/{id}/tools/estimating` form, which is a different id namespace.
+ */
 export function buildBidBoardUrl(bidboardProjectId: string | null | undefined): string | null {
   const id = String(bidboardProjectId ?? "").trim();
   if (!id) return null;
-  return `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/projects/${encodeURIComponent(id)}/tools/estimating`;
+  return `https://us02.procore.com/webclients/host/companies/${DEFAULT_PROCORE_COMPANY_ID}/tools/bid-board/project/${encodeURIComponent(id)}/details`;
 }
 
 /** Resolve the actionable RFP amount: a reviewer's edited value wins over the original deal amount. */
@@ -46,7 +53,8 @@ export function resolveRfpAmount(
   editedFields: Record<string, unknown> | null | undefined
 ): number | null {
   const raw = editedFields?.amount ?? dealData?.amount;
-  if (raw === null || raw === undefined || raw === "") return null;
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "string" && raw.trim() === "") return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 }
@@ -192,7 +200,10 @@ export async function getRfpReportList(
     const amount = resolveRfpAmount(dealData, editedFields);
     const bidBoardUrl = buildBidBoardUrl(rfp.bidboardProjectId);
     const crmUrlRaw = dealData.sourceDealUrl ?? dealData.hubspotDealUrl;
-    const crmUrl = crmUrlRaw ? String(crmUrlRaw) : null;
+    // Only emit an absolute http(s) link so a malformed/relative stored value never
+    // produces a broken button in recipients' inboxes.
+    const crmUrl =
+      crmUrlRaw && /^https?:\/\//i.test(String(crmUrlRaw)) ? String(crmUrlRaw) : null;
     const approvedBy = rfp.approvedBy ? String(rfp.approvedBy) : null;
     const declinedBy = rfp.declinedBy ? String(rfp.declinedBy) : null;
     const mapping = mappingByDeal.get(rfp.hubspotDealId);
@@ -551,18 +562,30 @@ export async function buildRfpReportEmailHtml(options: {
     </td></tr>`);
 
   if (includeRfpLog) {
-    // Status-aware approver value: approver email, rejection, or pending.
+    // Status-aware approver value: approver email, rejection, cancellation, or pending.
+    const pill = (text: string, bg: string, color: string, after = "") =>
+      `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: ${bg}; color: ${color};">${text}</span>${after}`;
     const approverValue = (r: RfpReportRow): string => {
       if (r.approvedBy) {
         return `<span style="color: #166534; font-weight: 600; word-break: break-word;">${escapeHtml(r.approvedBy)}</span>`;
       }
-      if (r.approvalStatus === "rejected") {
+      // "declined" is the raw status that getRfpReportList normalizes to "rejected"; accept both
+      // here so the email helper is correct even if a caller passes the un-normalized value.
+      if (r.approvalStatus === "rejected" || r.approvalStatus === "declined") {
         const who = r.declinedBy
           ? ` <span style="color: #475569; word-break: break-word;">${escapeHtml(r.declinedBy)}</span>`
           : "";
-        return `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #fee2e2; color: #991b1b;">Rejected</span>${who}`;
+        return pill("Rejected", "#fee2e2", "#991b1b", who);
       }
-      return `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #fef3c7; color: #92400e;">Awaiting approval</span>`;
+      if (r.approvalStatus === "pending") {
+        return pill("Awaiting approval", "#fef3c7", "#92400e");
+      }
+      // Any other terminal/non-pending status (e.g. cancelled_source_ineligible) — show it
+      // neutrally rather than implying action is still pending.
+      const label = r.approvalStatus
+        ? r.approvalStatus.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+        : "—";
+      return pill(escapeHtml(label), "#e5e7eb", "#374151");
     };
 
     // One label/value row inside a card.
@@ -596,7 +619,7 @@ export async function buildRfpReportEmailHtml(options: {
             <td style="padding: 16px 18px 0 18px;">
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
                 <tr>
-                  <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3;">${escapeHtml(r.projectName)}</td>
+                  <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3; word-break: break-word;">${escapeHtml(r.projectName)}</td>
                   <td align="right" style="font-size: 16px; font-weight: 700; color: #111214; white-space: nowrap; padding-left: 10px; vertical-align: top;">${escapeHtml(formatRfpAmount(r.amount))}</td>
                 </tr>
               </table>
@@ -681,7 +704,7 @@ export async function buildRfpReportEmailHtml(options: {
           <!-- Footer -->
           <tr>
             <td class="mobile-pad" style="padding: 20px 32px; border-top: 1px solid #d11921; font-size: 11px; color: #9ca3af;">
-              T-Rock Construction &nbsp;|&nbsp; <a href="${dashboardUrl}" style="color: #d11921; text-decoration: none;">Open Dashboard</a>
+              T-Rock Construction &nbsp;|&nbsp; <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">Open Dashboard</a>
             </td>
           </tr>
         </table>
