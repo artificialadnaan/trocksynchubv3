@@ -15,10 +15,13 @@ export async function ensureBidboardCrmPushAlertStateTable(): Promise<void> {
       CREATE TABLE IF NOT EXISTS bidboard_crm_push_alert_state (
         office_slug TEXT PRIMARY KEY,
         state TEXT NOT NULL DEFAULT 'ok',
-        last_alerted_at TIMESTAMP,
-        last_success_at TIMESTAMP,
+        -- timestamptz (not the repo's usual TIMESTAMP) because the debounce compares INSTANTS across
+        -- separate cron/cycle runs and processes; a tz-naive column round-trips shifted by the server's
+        -- TZ offset and would skew the re-alert window on any non-UTC host.
+        last_alerted_at TIMESTAMPTZ,
+        last_success_at TIMESTAMPTZ,
         last_error TEXT,
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
     console.log("[migrate] bidboard_crm_push_alert_state table ensured");

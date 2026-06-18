@@ -150,8 +150,12 @@ function realertMinutesFromEnv(): number {
   return Number.isFinite(n) && n > 0 ? n : 60;
 }
 
-function recipientFromEnv(): string {
-  return (process.env.BIDBOARD_CRM_ALERT_RECIPIENT ?? "adnaan.iqbal@gmail.com").trim() || "adnaan.iqbal@gmail.com";
+/** Recipient is env-driven with NO hardcoded fallback: unset/empty → null → the alert is a no-op.
+ *  This matches the CRM heartbeat's "ships inert until configured" posture so a deploy never emails a
+ *  surprise address. Set BIDBOARD_CRM_ALERT_RECIPIENT to activate. */
+function recipientFromEnv(): string | null {
+  const v = (process.env.BIDBOARD_CRM_ALERT_RECIPIENT ?? "").trim();
+  return v || null;
 }
 
 /**
@@ -173,11 +177,17 @@ export async function recordPushOutcomeAndMaybeAlert(
   try {
     if (args.pushResult.skipped) return { skipped: true };
 
+    const recipient = args.recipient ?? recipientFromEnv();
+    // Inert until configured (parity with the CRM heartbeat): no recipient → no send, no state write.
+    if (!recipient) {
+      log("[BidBoardCRM] BIDBOARD_CRM_ALERT_RECIPIENT is empty — push alert is a no-op", "sync");
+      return { action: "none" };
+    }
+
     const db = deps.db ?? pool;
     const send = deps.send ?? sendEmail;
     const now = args.now ?? new Date();
     const realertMinutes = args.realertMinutes ?? realertMinutesFromEnv();
-    const recipient = args.recipient ?? recipientFromEnv();
 
     const prior = await readPushAlertState(args.officeSlug, db);
     const decision = decidePushAlert({
@@ -188,9 +198,33 @@ export async function recordPushOutcomeAndMaybeAlert(
       realertMinutes,
     });
 
+    // Send FIRST so the throttle anchor can be gated on a successful send: a failed first send must
+    // re-alert next cycle, not stay quiet for a whole window. A thrown/false send is swallowed.
+    let sent = false;
+    if (decision.action !== "none") {
+      const { subject, htmlBody } = renderPushAlertEmail({
+        kind: decision.action === "alert_recovered" ? "recovered" : "failure",
+        office: args.officeSlug,
+        attempts: args.pushResult.attempts,
+        status: args.pushResult.status,
+        error: args.pushResult.error,
+        sourceFilename: args.sourceFilename,
+        now,
+      });
+      try {
+        const res = await send({ to: recipient, subject, htmlBody });
+        sent = Boolean(res?.success);
+        log(`[BidBoardCRM] alert ${decision.action} email sent=${sent} to ${recipient}`, "sync");
+      } catch (err) {
+        log(`[BidBoardCRM] alert email send FAILED: ${err instanceof Error ? err.message : String(err)}`, "sync");
+      }
+    }
+
     const lastAlertedAt =
       decision.action === "alert_failure"
-        ? now
+        ? sent
+          ? now
+          : (prior?.last_alerted_at ?? null)
         : decision.action === "alert_recovered"
           ? null
           : (prior?.last_alerted_at ?? null);
@@ -206,24 +240,6 @@ export async function recordPushOutcomeAndMaybeAlert(
       },
       db
     );
-
-    if (decision.action !== "none") {
-      const { subject, htmlBody } = renderPushAlertEmail({
-        kind: decision.action === "alert_recovered" ? "recovered" : "failure",
-        office: args.officeSlug,
-        attempts: args.pushResult.attempts,
-        status: args.pushResult.status,
-        error: args.pushResult.error,
-        sourceFilename: args.sourceFilename,
-        now,
-      });
-      try {
-        const res = await send({ to: recipient, subject, htmlBody });
-        log(`[BidBoardCRM] alert ${decision.action} email sent=${res?.success} to ${recipient}`, "sync");
-      } catch (err) {
-        log(`[BidBoardCRM] alert email send FAILED: ${err instanceof Error ? err.message : String(err)}`, "sync");
-      }
-    }
 
     return { action: decision.action };
   } catch (err) {

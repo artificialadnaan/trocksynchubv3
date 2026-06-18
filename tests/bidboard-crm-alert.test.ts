@@ -154,6 +154,33 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     expect((res as any).skipped).toBe(true);
   });
 
+  it("a failed send does NOT advance the throttle; the next cycle re-alerts (parity w/ heartbeat)", async () => {
+    const db = fakeDb();
+    send.mockResolvedValueOnce({ success: false, provider: "gmail" }); // first send fails
+    await run(db, { ok: false, attempts: 3, error: "x" }, NOW);
+    expect(db.store.get("dallas").last_alerted_at).toBeNull(); // throttle not advanced
+
+    const retry = await run(db, { ok: false, attempts: 3, error: "x" }, new Date(NOW.getTime() + 19 * MIN));
+    expect((retry as any).action).toBe("alert_failure"); // re-alerts next cycle, inside the window
+  });
+
+  it("is a full no-op when no recipient is configured (inert until BIDBOARD_CRM_ALERT_RECIPIENT set)", async () => {
+    const db = fakeDb();
+    const prev = process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    try {
+      const res = await recordPushOutcomeAndMaybeAlert(
+        { pushResult: { ok: false, attempts: 3, error: "x" }, officeSlug: "dallas", now: NOW },
+        { db, send }
+      );
+      expect(send).not.toHaveBeenCalled();
+      expect(db.store.size).toBe(0); // no state written
+      expect((res as any).action).toBe("none");
+    } finally {
+      if (prev !== undefined) process.env.BIDBOARD_CRM_ALERT_RECIPIENT = prev;
+    }
+  });
+
   it("an email-send failure does NOT throw (sync must continue) and state is still recorded", async () => {
     const db = fakeDb();
     send.mockRejectedValueOnce(new Error("gmail down"));
