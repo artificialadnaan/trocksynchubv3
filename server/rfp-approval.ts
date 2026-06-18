@@ -30,6 +30,9 @@ export interface NormalizedRfpRequestInput {
     projectType: string;
     amount: number | null;
     estimator: string | null;
+    /** Deal owner / rep — the "Requested by" person (CRM-sourced; HubSpot resolves its own). */
+    ownerName?: string | null;
+    ownerEmail?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -1145,9 +1148,12 @@ export async function createRfpApprovalRequestFromNormalizedInput(
 
     const token = randomUUID();
     const sourceDealUrl = await buildSourceDealUrl(input.sourceSystem, input.sourceDealId);
+    // HubSpot resolves the owner via its own API; trock_crm sends the resolved owner (assigned_rep
+    // → name/email, with fallbacks) in the request payload. Previously the trock_crm branch was an
+    // empty stub, which left "Requested by" blank on every CRM-sourced RFP.
     const rawOwnerInfo = input.sourceSystem === 'hubspot'
       ? await getDealOwnerInfo(input.sourceDealId)
-      : { ownerName: '', ownerEmail: '' };
+      : { ownerName: input.deal.ownerName ?? '', ownerEmail: input.deal.ownerEmail ?? '' };
     const ownerInfo = {
       ownerName: rawOwnerInfo.ownerName || '',
       ownerEmail: rawOwnerInfo.ownerEmail || '',

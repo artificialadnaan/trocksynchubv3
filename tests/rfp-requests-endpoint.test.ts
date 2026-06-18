@@ -213,6 +213,40 @@ describe("POST /api/rfp-requests", () => {
     });
   });
 
+  it("stores the CRM-sent deal owner in deal_data (Requested by source)", async () => {
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({
+          deal: {
+            ...requestBody().deal,
+            projectNumber: "OWNER-1",
+            ownerName: "Maria Gonzalez",
+            ownerEmail: "maria@trockgc.com",
+          },
+        })
+      );
+      expect(response.status).toBe(201);
+      expect(rfpRows).toHaveLength(1);
+      // normalizedDealData writes ownerName/ownerEmail from the payload for trock_crm RFPs.
+      expect(rfpRows[0].dealData).toMatchObject({
+        ownerName: "Maria Gonzalez",
+        ownerEmail: "maria@trockgc.com",
+      });
+    });
+  });
+
+  it("still accepts a request with no owner fields and stores empty owner (backward compatible)", async () => {
+    await withServer(async (baseUrl) => {
+      const body = requestBody({ deal: { ...requestBody().deal, projectNumber: "NOOWNER-1" } });
+      // ensure the payload genuinely omits owner fields
+      expect((body.deal as any).ownerName).toBeUndefined();
+      const response = await postRfpRequest(baseUrl, body);
+      expect(response.status).toBe(201);
+      expect(rfpRows[0].dealData).toMatchObject({ ownerName: "", ownerEmail: "" });
+    });
+  });
+
   it("returns 200 for idempotent replay without inserting or sending email again", async () => {
     await withServer(async (baseUrl) => {
       const first = await postRfpRequest(baseUrl, requestBody());

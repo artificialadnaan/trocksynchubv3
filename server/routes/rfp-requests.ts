@@ -23,6 +23,10 @@ export const rfpRequestBodySchema = z.object({
     projectType: z.string().trim().min(1),
     amount: z.number().finite().nullable(),
     estimator: z.string().trim().nullable(),
+    // Deal owner / rep — the "Requested by" person. Optional + lenient (a soft display field
+    // must never cause RFP ingestion to 422); the CRM resolves it from assigned_rep → owner.
+    ownerName: z.string().trim().nullable().optional(),
+    ownerEmail: z.string().trim().nullable().optional(),
     companyName: z.string().trim().nullable(),
     contactName: z.string().trim().nullable(),
     clientEmail: z.string().trim().email().nullable(),
