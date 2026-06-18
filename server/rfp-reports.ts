@@ -223,7 +223,10 @@ export async function getRfpReportList(
     // Overlay reviewer-edited values (same precedence the amount already uses) so an approved
     // RFP's card reflects the final type/number/name, not the stale pre-edit dealData.
     const projectName = String(
-      (pickEditedValue(editedFields, "dealname") ?? dealData.dealname ?? dealData.project_name) || "—"
+      (pickEditedValue(editedFields, "dealname") ??
+        pickEditedValue(editedFields, "project_name") ??
+        dealData.dealname ??
+        dealData.project_name) || "—"
     );
     const projectNumber = String(
       (pickEditedValue(editedFields, "project_number") ?? dealData.project_number) || "—"
