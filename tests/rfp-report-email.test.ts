@@ -283,6 +283,20 @@ describe("buildRfpReportEmailHtml — R3 edge cases", () => {
     expect(html).toContain('href="https://app-na2.hubspot.com/contacts/123/record/0-3/555"'); // CRM still present
   });
 
+  it("never renders a Bid Board link on a non-approved row, even if bidBoardUrl is set", async () => {
+    // Defense-in-depth: a stray bidBoardUrl on a rejected row must not surface a Bid Board button.
+    const rejectedWithUrl = makeRow({
+      approvalStatus: "rejected",
+      approvedBy: null,
+      declinedBy: "boss@trockgc.com",
+      bidBoardUrl:
+        "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/9988/details",
+    });
+    const html = await renderEmail([rejectedWithUrl]);
+    expect(html).not.toContain("Bid Board →");
+    expect(html).not.toContain("/tools/bid-board/project/9988/details");
+  });
+
   it("shows a rejection state with the decliner", async () => {
     const rejected = makeRow({
       approvalStatus: "rejected",

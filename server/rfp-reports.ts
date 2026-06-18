@@ -252,7 +252,9 @@ export async function getRfpReportList(
     // "Requested by" = the deal owner (name preferred); distinct from the approver.
     const requestedBy = String(dealData.ownerName || dealData.ownerEmail || "—");
     const amount = resolveRfpAmount(dealData, editedFields);
-    const bidBoardUrl = buildBidBoardUrl(rfp.bidboardProjectId);
+    // A Bid Board project only exists once the RFP is approved; gate on status so a non-approved
+    // row can never surface a Bid Board link (defensive — bidboardProjectId is only set on approval).
+    const bidBoardUrl = rfp.status === "approved" ? buildBidBoardUrl(rfp.bidboardProjectId) : null;
     // Only emit an absolute http(s) link so a malformed/relative stored value never
     // produces a broken button in recipients' inboxes.
     const crmUrl = safeHttpUrl(dealData.sourceDealUrl ?? dealData.hubspotDealUrl);
@@ -661,8 +663,9 @@ export async function buildRfpReportEmailHtml(options: {
       const numberLine = [escapeHtml(r.projectNumber), typeBadge].filter(Boolean).join("&nbsp;&nbsp;");
 
       // Re-validate at the render boundary: this function is exported, so don't assume the
-      // caller already filtered the URLs to absolute http(s).
-      const bidBoardHref = safeHttpUrl(r.bidBoardUrl);
+      // caller already filtered the URLs to absolute http(s). The Bid Board link is additionally
+      // gated to approved RFPs so a non-approved row never shows one even if a caller set the field.
+      const bidBoardHref = r.approvalStatus === "approved" ? safeHttpUrl(r.bidBoardUrl) : null;
       const crmHref = safeHttpUrl(r.crmUrl);
       const buttons: string[] = [];
       if (bidBoardHref) buttons.push(linkButton(bidBoardHref, "Bid Board →", "#1e2024"));
