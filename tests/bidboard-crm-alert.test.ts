@@ -69,6 +69,12 @@ describe("renderPushAlertEmail (pure)", () => {
     const { subject } = renderPushAlertEmail({ kind: "recovered", office: "dallas", now: NOW });
     expect(subject.toLowerCase()).toMatch(/recover|resumed|back/);
   });
+
+  it("escapes HTML metacharacters in the office slug in the body", () => {
+    const { htmlBody } = renderPushAlertEmail({ kind: "failure", office: "a<b>&\"c", attempts: 1, now: NOW });
+    expect(htmlBody).toContain("a&lt;b&gt;&amp;&quot;c");
+    expect(htmlBody).not.toContain("<b>");
+  });
 });
 
 // In-memory fake of the alert-state table for the orchestrator tests.
@@ -192,5 +198,19 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     const db = { query: vi.fn(async () => { throw new Error("db down"); }) };
     await expect(run(db, { ok: false, attempts: 3, error: "x" }, NOW)).resolves.toBeTruthy();
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("a failed recovery send keeps state 'failing' and retries; a later success flips to ok", async () => {
+    const db = fakeDb();
+    await run(db, { ok: false, attempts: 3, error: "x" }, NOW); // failing
+    send.mockClear();
+    send.mockResolvedValueOnce({ success: false, provider: "gmail" }); // recovery email fails
+    const failed = await run(db, { ok: true, attempts: 1 }, new Date(NOW.getTime() + 20 * MIN));
+    expect((failed as any).action).toBe("alert_recovered");
+    expect(db.store.get("dallas").state).toBe("failing"); // NOT flipped to ok
+
+    const retried = await run(db, { ok: true, attempts: 1 }, new Date(NOW.getTime() + 40 * MIN));
+    expect((retried as any).action).toBe("alert_recovered"); // retried
+    expect(db.store.get("dallas").state).toBe("ok");
   });
 });

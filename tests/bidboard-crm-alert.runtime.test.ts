@@ -98,4 +98,15 @@ describe("recordPushOutcomeAndMaybeAlert against real Postgres — durable acros
     expect(send).toHaveBeenCalledTimes(1);
     expect((await readPushAlertState("dallas", db))?.state).toBe("ok");
   });
+
+  // Standalone entrypoints (the bidboard:stage-sync cron) never run the web-boot migration; the alert
+  // must self-heal the table rather than throw 'relation does not exist' and swallow the first alert.
+  it("self-heals the state table when it does not pre-exist (standalone entrypoint)", async () => {
+    await pg.exec(`DROP TABLE bidboard_crm_push_alert_state;`);
+    send.mockClear();
+    const res = await run({ ok: false, attempts: 3, status: 500, error: "x" }, NOW);
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((await readPushAlertState("dallas", db))?.state).toBe("failing");
+  });
 });

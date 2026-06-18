@@ -55,11 +55,12 @@ export interface PushAlertEmailInput {
 
 /** Pure email renderer — separate from sending so it is unit-testable without a transport. */
 export function renderPushAlertEmail(e: PushAlertEmailInput): { subject: string; htmlBody: string } {
+  const office = escapeHtml(e.office); // env-controlled, but escape defensively like the other body fields
   if (e.kind === "failure") {
     const subject = `⚠️ Bid Board → CRM push FAILED — office ${e.office}`;
     const htmlBody = `
       <h2>Bid Board → CRM ingestion push failed</h2>
-      <p><strong>Office:</strong> ${e.office}</p>
+      <p><strong>Office:</strong> ${office}</p>
       <p><strong>When:</strong> ${e.now.toISOString()}</p>
       <p><strong>Attempts before giving up:</strong> ${e.attempts ?? "—"}</p>
       <p><strong>HTTP status:</strong> ${e.status ?? "—"}</p>
@@ -75,7 +76,7 @@ export function renderPushAlertEmail(e: PushAlertEmailInput): { subject: string;
   const subject = `✅ Bid Board → CRM push RECOVERED — office ${e.office}`;
   const htmlBody = `
     <h2>Bid Board → CRM ingestion push has recovered</h2>
-    <p><strong>Office:</strong> ${e.office}</p>
+    <p><strong>Office:</strong> ${office}</p>
     <p><strong>When:</strong> ${e.now.toISOString()}</p>
     <p>A push has succeeded again; the prior failure has cleared.</p>
   `;
@@ -90,6 +91,26 @@ function escapeHtml(s: string): string {
 
 export interface Querier {
   query: (text: string, params?: any[]) => Promise<{ rows: any[] }>;
+}
+
+/**
+ * Idempotent table creation, co-located with its reader/writer. Called both from the startup migration
+ * (web boot) AND at the top of recordPushOutcomeAndMaybeAlert, so a STANDALONE entrypoint (e.g. the
+ * `bidboard:stage-sync` script / cron, which imports runBidBoardStageSync directly and never runs the
+ * web-server boot migrations) can't hit "relation does not exist" and silently swallow the first alert
+ * (Codex). TIMESTAMPTZ because the debounce compares instants across runs/processes.
+ */
+export async function ensurePushAlertStateTable(db: Querier = pool): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS bidboard_crm_push_alert_state (
+      office_slug TEXT PRIMARY KEY,
+      state TEXT NOT NULL DEFAULT 'ok' CHECK (state IN ('ok', 'failing')),
+      last_alerted_at TIMESTAMPTZ,
+      last_success_at TIMESTAMPTZ,
+      last_error TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 }
 
 interface PersistedPushAlertState {
@@ -189,6 +210,8 @@ export async function recordPushOutcomeAndMaybeAlert(
     const now = args.now ?? new Date();
     const realertMinutes = args.realertMinutes ?? realertMinutesFromEnv();
 
+    // Self-heal the table so a standalone sync entrypoint (no web-boot migration) can't throw here.
+    await ensurePushAlertStateTable(db);
     const prior = await readPushAlertState(args.officeSlug, db);
     const decision = decidePushAlert({
       pushOk: args.pushResult.ok,
@@ -220,20 +243,31 @@ export async function recordPushOutcomeAndMaybeAlert(
       }
     }
 
-    const lastAlertedAt =
-      decision.action === "alert_failure"
-        ? sent
-          ? now
-          : (prior?.last_alerted_at ?? null)
-        : decision.action === "alert_recovered"
-          ? null
-          : (prior?.last_alerted_at ?? null);
+    // State + throttle anchor gated on a SUCCESSFUL send:
+    //  - failure: advance last_alerted_at only when the email sent (else re-alert next cycle)
+    //  - recovered: only flip to 'ok' when the recovery email sent; if it failed, stay 'failing' so the
+    //    recovery notice is retried next successful cycle (Codex).
+    let persistedState: PushAlertState = decision.nextState;
+    let lastAlertedAt: Date | null;
+    if (decision.action === "alert_failure") {
+      lastAlertedAt = sent ? now : (prior?.last_alerted_at ?? null);
+    } else if (decision.action === "alert_recovered") {
+      if (sent) {
+        lastAlertedAt = null;
+      } else {
+        persistedState = "failing";
+        lastAlertedAt = prior?.last_alerted_at ?? null;
+      }
+    } else {
+      lastAlertedAt = prior?.last_alerted_at ?? null;
+    }
 
     await upsertPushAlertState(
       args.officeSlug,
       {
-        state: decision.nextState,
+        state: persistedState,
         lastAlertedAt,
+        // Record the success instant only when the push actually succeeded; preserve prior otherwise.
         lastSuccessAt: args.pushResult.ok ? now : (prior?.last_success_at ?? null),
         lastError: args.pushResult.ok ? null : (args.pushResult.error ?? null),
         now,
