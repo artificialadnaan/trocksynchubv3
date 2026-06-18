@@ -26,6 +26,27 @@ export function safeHttpUrl(raw: unknown): string | null {
   return /^https?:\/\//i.test(s) ? s : null;
 }
 
+/** Pick a reviewer-edited value for `key` (from editedFields), or undefined if absent/blank.
+ *  On approval the reviewer's final edits are persisted to editedFields while dealData keeps the
+ *  pre-edit values, so for any editable display field the edited value is the current truth. */
+export function pickEditedValue(
+  editedFields: Record<string, unknown> | null | undefined,
+  key: string
+): unknown {
+  const v = editedFields?.[key];
+  return v !== undefined && v !== null && String(v).trim() !== "" ? v : undefined;
+}
+
+/** Resolve the project-type badge, preferring the reviewer-edited type over the original. */
+export function resolveDisplayProjectType(
+  dealData: Record<string, unknown>,
+  editedFields: Record<string, unknown> | null | undefined,
+  projectNumber?: string | null
+): string | null {
+  const projectTypes = pickEditedValue(editedFields, "project_types") ?? dealData?.project_types;
+  return resolveProjectTypeLabel({ project_types: projectTypes }, projectNumber);
+}
+
 /** Resolve a human-readable project-type label (e.g. "Service", "Interior Renovation"). */
 export function resolveProjectTypeLabel(
   dealData: Record<string, unknown>,
@@ -199,9 +220,15 @@ export async function getRfpReportList(
   let data: RfpReportRow[] = rfps.map((rfp) => {
     const dealData = (rfp.dealData as Record<string, unknown>) || {};
     const editedFields = (rfp.editedFields as Record<string, unknown> | null) || null;
-    const projectName = String(dealData.dealname || dealData.project_name || "—");
-    const projectNumber = String(dealData.project_number || "—");
-    const projectType = resolveProjectTypeLabel(dealData, projectNumber);
+    // Overlay reviewer-edited values (same precedence the amount already uses) so an approved
+    // RFP's card reflects the final type/number/name, not the stale pre-edit dealData.
+    const projectName = String(
+      (pickEditedValue(editedFields, "dealname") ?? dealData.dealname ?? dealData.project_name) || "—"
+    );
+    const projectNumber = String(
+      (pickEditedValue(editedFields, "project_number") ?? dealData.project_number) || "—"
+    );
+    const projectType = resolveDisplayProjectType(dealData, editedFields, projectNumber);
     const recipient = String(dealData.ownerEmail || dealData.ownerName || "—");
     // "Requested by" = the deal owner (name preferred); distinct from the approver.
     const requestedBy = String(dealData.ownerName || dealData.ownerEmail || "—");

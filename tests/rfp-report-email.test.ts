@@ -13,6 +13,8 @@ import {
   formatRfpAmount,
   formatRfpDateTime,
   resolveProjectTypeLabel,
+  resolveDisplayProjectType,
+  pickEditedValue,
   safeHttpUrl,
   buildRfpReportEmailHtml,
   type RfpReportRow,
@@ -105,6 +107,35 @@ describe("buildBidBoardUrl", () => {
     expect(buildBidBoardUrl(null)).toBeNull();
     expect(buildBidBoardUrl("")).toBeNull();
     expect(buildBidBoardUrl(undefined)).toBeNull();
+  });
+});
+
+describe("pickEditedValue", () => {
+  it("returns the edited value when present and non-blank", () => {
+    expect(pickEditedValue({ project_types: "4" }, "project_types")).toBe("4");
+  });
+  it("ignores absent, null, or blank edited values", () => {
+    expect(pickEditedValue({}, "project_types")).toBeUndefined();
+    expect(pickEditedValue(null, "project_types")).toBeUndefined();
+    expect(pickEditedValue({ project_types: "" }, "project_types")).toBeUndefined();
+    expect(pickEditedValue({ project_types: "   " }, "project_types")).toBeUndefined();
+  });
+});
+
+describe("resolveDisplayProjectType — reviewer edit wins (Codex P2)", () => {
+  it("uses the reviewer-edited project type, not the stale original dealData", () => {
+    // Reviewer changed type 2 (Interior Renovation) → 4 (Service) on the approval form.
+    const dealData = { project_types: "2" };
+    const editedFields = { project_types: "4" };
+    expect(resolveDisplayProjectType(dealData, editedFields, "DFW-2-15626-ab")).toBe("Service");
+  });
+  it("falls back to the original type when there is no edit", () => {
+    expect(resolveDisplayProjectType({ project_types: "2" }, null, "DFW-2-1")).toBe(
+      "Interior Renovation"
+    );
+    expect(resolveDisplayProjectType({ project_types: "2" }, {}, "DFW-2-1")).toBe(
+      "Interior Renovation"
+    );
   });
 });
 
