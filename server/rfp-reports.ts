@@ -29,12 +29,16 @@ export function safeHttpUrl(raw: unknown): string | null {
 /** Pick a reviewer-edited value for `key` (from editedFields), or undefined if absent/blank.
  *  On approval the reviewer's final edits are persisted to editedFields while dealData keeps the
  *  pre-edit values, so for any editable display field the edited value is the current truth. */
+/** Normalize null/undefined/blank-string to undefined, so `??` chains skip blanks like `||` did. */
+export function blankToUndef(v: unknown): unknown {
+  return v !== undefined && v !== null && String(v).trim() !== "" ? v : undefined;
+}
+
 export function pickEditedValue(
   editedFields: Record<string, unknown> | null | undefined,
   key: string
 ): unknown {
-  const v = editedFields?.[key];
-  return v !== undefined && v !== null && String(v).trim() !== "" ? v : undefined;
+  return blankToUndef(editedFields?.[key]);
 }
 
 /** Resolve the project-type badge, preferring the reviewer-edited type over the original. */
@@ -157,11 +161,16 @@ export async function getRfpReportList(
   }
   if (filters.projectNumber?.trim()) {
     const pnPattern = `%${filters.projectNumber.trim()}%`;
+    // Search edited_fields and the top-level project_number column too, so a search for the
+    // (possibly reviewer-edited) value shown on the row still matches the RFP.
     conditions.push(
       sql`(
         COALESCE(${rfpApprovalRequests.dealData}->>'project_number', '') ILIKE ${pnPattern}
         OR COALESCE(${rfpApprovalRequests.dealData}->>'dealname', '') ILIKE ${pnPattern}
         OR COALESCE(${rfpApprovalRequests.dealData}->>'project_name', '') ILIKE ${pnPattern}
+        OR COALESCE(${rfpApprovalRequests.editedFields}->>'project_number', '') ILIKE ${pnPattern}
+        OR COALESCE(${rfpApprovalRequests.editedFields}->>'dealname', '') ILIKE ${pnPattern}
+        OR COALESCE(${rfpApprovalRequests.projectNumber}, '') ILIKE ${pnPattern}
       )`
     );
   }
@@ -173,6 +182,8 @@ export async function getRfpReportList(
         OR COALESCE(${rfpApprovalRequests.dealData}->>'ownerName', '') ILIKE ${recPattern}
         OR COALESCE(${rfpApprovalRequests.dealData}->>'dealname', '') ILIKE ${recPattern}
         OR COALESCE(${rfpApprovalRequests.dealData}->>'project_name', '') ILIKE ${recPattern}
+        OR COALESCE(${rfpApprovalRequests.editedFields}->>'dealname', '') ILIKE ${recPattern}
+        OR COALESCE(${rfpApprovalRequests.editedFields}->>'project_name', '') ILIKE ${recPattern}
       )`
     );
   }
@@ -222,14 +233,19 @@ export async function getRfpReportList(
     const editedFields = (rfp.editedFields as Record<string, unknown> | null) || null;
     // Overlay reviewer-edited values (same precedence the amount already uses) so an approved
     // RFP's card reflects the final type/number/name, not the stale pre-edit dealData.
+    // blankToUndef on the dealData reads so a present-but-blank dealname still falls through to
+    // project_name (matching the original `dealname || project_name` behavior).
     const projectName = String(
-      (pickEditedValue(editedFields, "dealname") ??
+      pickEditedValue(editedFields, "dealname") ??
         pickEditedValue(editedFields, "project_name") ??
-        dealData.dealname ??
-        dealData.project_name) || "—"
+        blankToUndef(dealData.dealname) ??
+        blankToUndef(dealData.project_name) ??
+        "—"
     );
     const projectNumber = String(
-      (pickEditedValue(editedFields, "project_number") ?? dealData.project_number) || "—"
+      pickEditedValue(editedFields, "project_number") ??
+        blankToUndef(dealData.project_number) ??
+        "—"
     );
     const projectType = resolveDisplayProjectType(dealData, editedFields, projectNumber);
     const recipient = String(dealData.ownerEmail || dealData.ownerName || "—");
@@ -568,7 +584,9 @@ export async function buildRfpReportEmailHtml(options: {
   changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>;
   approvalSummary: { pending: number; approved: number; rejected: number };
   includeRfpLog: boolean;
-  includeChangeHistory: boolean;
+  /** @deprecated The raw change-history section was removed in the redesign; this flag is
+   *  accepted for backward compatibility but ignored. `changes` is still used for the count stat. */
+  includeChangeHistory?: boolean;
   includeApprovalSummary: boolean;
   dashboardUrl: string;
 }): Promise<string> {
@@ -820,7 +838,7 @@ async function getRfpsForPeriod(
 
 /** Send scheduled RFP report email */
 export async function sendScheduledRfpReport(
-  config?: { recipients?: string[]; includeRfpLog?: boolean; includeChangeHistory?: boolean; includeApprovalSummary?: boolean }
+  config?: { recipients?: string[]; includeRfpLog?: boolean; includeApprovalSummary?: boolean }
 ): Promise<{ sent: number; failed: number }> {
   const cfg = await storage.getReportScheduleConfig();
   if (!cfg?.enabled || !cfg.recipients?.length) {
@@ -877,7 +895,6 @@ export async function sendScheduledRfpReport(
     changes,
     approvalSummary,
     includeRfpLog: config?.includeRfpLog ?? cfg.includeRfpLog,
-    includeChangeHistory: config?.includeChangeHistory ?? cfg.includeChangeHistory,
     includeApprovalSummary:
       config?.includeApprovalSummary ?? cfg.includeApprovalSummary,
     dashboardUrl: `${dashboardUrl}/settings`,
@@ -922,7 +939,6 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
     changes,
     approvalSummary,
     includeRfpLog: cfg?.includeRfpLog ?? true,
-    includeChangeHistory: cfg?.includeChangeHistory ?? true,
     includeApprovalSummary: cfg?.includeApprovalSummary ?? true,
     dashboardUrl: `${dashboardUrl}/settings`,
   });

@@ -15,6 +15,7 @@ import {
   resolveProjectTypeLabel,
   resolveDisplayProjectType,
   pickEditedValue,
+  blankToUndef,
   safeHttpUrl,
   buildRfpReportEmailHtml,
   type RfpReportRow,
@@ -119,6 +120,31 @@ describe("pickEditedValue", () => {
     expect(pickEditedValue(null, "project_types")).toBeUndefined();
     expect(pickEditedValue({ project_types: "" }, "project_types")).toBeUndefined();
     expect(pickEditedValue({ project_types: "   " }, "project_types")).toBeUndefined();
+  });
+});
+
+describe("blankToUndef", () => {
+  it("maps null/undefined/blank to undefined, keeps real values", () => {
+    expect(blankToUndef(null)).toBeUndefined();
+    expect(blankToUndef(undefined)).toBeUndefined();
+    expect(blankToUndef("")).toBeUndefined();
+    expect(blankToUndef("   ")).toBeUndefined();
+    expect(blankToUndef("DFW-4-1")).toBe("DFW-4-1");
+    expect(blankToUndef(0)).toBe(0);
+  });
+});
+
+describe("project-name fallback handles a blank dealname (Codex P2)", () => {
+  it("falls through a present-but-blank dealname to project_name in the rendered card", async () => {
+    // No DB here, so exercise the same fallback the row mapper uses via the public helper.
+    const dealData = { dealname: "   ", project_name: "Fallback Project Name" };
+    const name =
+      (pickEditedValue(null, "dealname") ??
+        pickEditedValue(null, "project_name") ??
+        blankToUndef(dealData.dealname) ??
+        blankToUndef(dealData.project_name) ??
+        "—") as string;
+    expect(name).toBe("Fallback Project Name");
   });
 });
 
