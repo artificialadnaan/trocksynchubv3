@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const logMock = vi.hoisted(() => vi.fn());
+const poolMock = vi.hoisted(() => ({ query: vi.fn(async () => ({ rows: [] })), connect: vi.fn() }));
 vi.mock("../server/index.ts", () => ({ log: logMock }));
 // The module imports pool from ../db and sendEmail from ../email-service at module load; stub both so
 // the unit tests never touch a real DB/transport (we inject fakes per-call too).
-vi.mock("../server/db.ts", () => ({ pool: { query: vi.fn(async () => ({ rows: [] })) } }));
+vi.mock("../server/db.ts", () => ({ pool: poolMock }));
 vi.mock("../server/email-service.ts", () => ({ sendEmail: vi.fn(async () => ({ success: true, provider: "gmail" })) }));
 
 const {
@@ -198,6 +199,51 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     const db = { query: vi.fn(async () => { throw new Error("db down"); }) };
     await expect(run(db, { ok: false, attempts: 3, error: "x" }, NOW)).resolves.toBeTruthy();
     expect(send).not.toHaveBeenCalled();
+  });
+
+  // Production path (no injected db): a per-office advisory lock serializes overlapping sync entrypoints.
+  function fakeLockedClient(got: boolean) {
+    const store = new Map<string, any>();
+    return {
+      query: vi.fn(async (text: string, params?: any[]) => {
+        const t = text.toLowerCase();
+        if (t.includes("pg_try_advisory_lock")) return { rows: [{ got }] };
+        if (t.includes("pg_advisory_unlock")) return { rows: [{}] };
+        if (t.includes("select") && t.includes("bidboard_crm_push_alert_state")) {
+          return { rows: store.has(params![0]) ? [store.get(params![0])] : [] };
+        }
+        if (t.includes("insert into") && t.includes("bidboard_crm_push_alert_state")) {
+          store.set(params![0], { office_slug: params![0], state: params![1], last_alerted_at: null, last_success_at: null });
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+  }
+
+  it("acquires the advisory lock and alerts when no db is injected (lock held)", async () => {
+    const client = fakeLockedClient(true);
+    poolMock.connect.mockResolvedValueOnce(client as any);
+    const res = await recordPushOutcomeAndMaybeAlert(
+      { pushResult: { ok: false, attempts: 3, status: 500, error: "x" }, officeSlug: "dallas", now: NOW, recipient: "ops@trock.test" },
+      { send }
+    );
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(client.query.mock.calls.some((c) => String(c[0]).includes("pg_advisory_unlock"))).toBe(true);
+    expect(client.release).toHaveBeenCalled();
+  });
+
+  it("skips (no send) when the advisory lock is already held by another run", async () => {
+    const client = fakeLockedClient(false);
+    poolMock.connect.mockResolvedValueOnce(client as any);
+    const res = await recordPushOutcomeAndMaybeAlert(
+      { pushResult: { ok: false, attempts: 3, status: 500, error: "x" }, officeSlug: "dallas", now: NOW, recipient: "ops@trock.test" },
+      { send }
+    );
+    expect((res as any).action).toBe("none");
+    expect(send).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalled();
   });
 
   it("a failed recovery send keeps state 'failing' and retries; a later success flips to ok", async () => {

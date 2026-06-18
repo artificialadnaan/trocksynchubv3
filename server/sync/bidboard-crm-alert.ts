@@ -179,10 +179,94 @@ function recipientFromEnv(): string | null {
   return v || null;
 }
 
+/** The read → decide → send → upsert core, parameterized on the querier so the caller can run it under
+ *  a held advisory lock (production) or directly against an injected fake (tests). */
+async function claimAndAlert(
+  args: { pushResult: PushResultLike; officeSlug: string; sourceFilename?: string },
+  db: Querier,
+  send: typeof sendEmail,
+  recipient: string,
+  now: Date,
+  realertMinutes: number
+): Promise<{ action: PushAlertAction }> {
+  // Self-heal the table so a standalone sync entrypoint (no web-boot migration) can't throw here.
+  await ensurePushAlertStateTable(db);
+  const prior = await readPushAlertState(args.officeSlug, db);
+  const decision = decidePushAlert({
+    pushOk: args.pushResult.ok,
+    prevState: prior?.state ?? null,
+    lastAlertedAt: prior?.last_alerted_at ?? null,
+    now,
+    realertMinutes,
+  });
+
+  // Send FIRST so the throttle anchor can be gated on a successful send: a failed first send must
+  // re-alert next cycle, not stay quiet for a whole window. A thrown/false send is swallowed.
+  let sent = false;
+  if (decision.action !== "none") {
+    const { subject, htmlBody } = renderPushAlertEmail({
+      kind: decision.action === "alert_recovered" ? "recovered" : "failure",
+      office: args.officeSlug,
+      attempts: args.pushResult.attempts,
+      status: args.pushResult.status,
+      error: args.pushResult.error,
+      sourceFilename: args.sourceFilename,
+      now,
+    });
+    try {
+      const res = await send({ to: recipient, subject, htmlBody });
+      sent = Boolean(res?.success);
+      log(`[BidBoardCRM] alert ${decision.action} email sent=${sent} to ${recipient}`, "sync");
+    } catch (err) {
+      log(`[BidBoardCRM] alert email send FAILED: ${err instanceof Error ? err.message : String(err)}`, "sync");
+    }
+  }
+
+  // State + throttle anchor gated on a SUCCESSFUL send:
+  //  - failure: advance last_alerted_at only when the email sent (else re-alert next cycle)
+  //  - recovered: only flip to 'ok' when the recovery email sent; if it failed, stay 'failing' so the
+  //    recovery notice is retried next successful cycle (Codex).
+  let persistedState: PushAlertState = decision.nextState;
+  let lastAlertedAt: Date | null;
+  if (decision.action === "alert_failure") {
+    lastAlertedAt = sent ? now : (prior?.last_alerted_at ?? null);
+  } else if (decision.action === "alert_recovered") {
+    if (sent) {
+      lastAlertedAt = null;
+    } else {
+      persistedState = "failing";
+      lastAlertedAt = prior?.last_alerted_at ?? null;
+    }
+  } else {
+    lastAlertedAt = prior?.last_alerted_at ?? null;
+  }
+
+  await upsertPushAlertState(
+    args.officeSlug,
+    {
+      state: persistedState,
+      lastAlertedAt,
+      // Record the success instant only when the push actually succeeded; preserve prior otherwise.
+      lastSuccessAt: args.pushResult.ok ? now : (prior?.last_success_at ?? null),
+      lastError: args.pushResult.ok ? null : (args.pushResult.error ?? null),
+      now,
+    },
+    db
+  );
+
+  return { action: decision.action };
+}
+
 /**
  * Record a push outcome and emit a failure/recovery email when warranted. NEVER throws — alerting must
  * never crash the sync cycle (a wrapped catch around everything, plus an inner catch around the send).
  * A 'skipped' push (CRM sync not configured) is ignored so disabling the integration can't spam.
+ *
+ * Concurrency: the read→send→upsert is serialized per office with a SESSION advisory lock on a
+ * dedicated pooled connection, so overlapping sync entrypoints (the scheduled cycle AND the unguarded
+ * POST /api/bidboard/stage-sync, which calls runBidBoardStageSync outside bidboardStageSyncRunning)
+ * can't both read 'ok' and both send a duplicate alert (Codex). try-lock + skip: alerting never blocks
+ * the sync, and a skipped run is harmless because the run holding the lock records the same outcome.
  */
 export async function recordPushOutcomeAndMaybeAlert(
   args: {
@@ -205,77 +289,32 @@ export async function recordPushOutcomeAndMaybeAlert(
       return { action: "none" };
     }
 
-    const db = deps.db ?? pool;
     const send = deps.send ?? sendEmail;
     const now = args.now ?? new Date();
     const realertMinutes = args.realertMinutes ?? realertMinutesFromEnv();
 
-    // Self-heal the table so a standalone sync entrypoint (no web-boot migration) can't throw here.
-    await ensurePushAlertStateTable(db);
-    const prior = await readPushAlertState(args.officeSlug, db);
-    const decision = decidePushAlert({
-      pushOk: args.pushResult.ok,
-      prevState: prior?.state ?? null,
-      lastAlertedAt: prior?.last_alerted_at ?? null,
-      now,
-      realertMinutes,
-    });
+    // Tests inject a db → run the claim directly (no real cross-connection locking to exercise).
+    if (deps.db) {
+      return await claimAndAlert(args, deps.db, send, recipient, now, realertMinutes);
+    }
 
-    // Send FIRST so the throttle anchor can be gated on a successful send: a failed first send must
-    // re-alert next cycle, not stay quiet for a whole window. A thrown/false send is swallowed.
-    let sent = false;
-    if (decision.action !== "none") {
-      const { subject, htmlBody } = renderPushAlertEmail({
-        kind: decision.action === "alert_recovered" ? "recovered" : "failure",
-        office: args.officeSlug,
-        attempts: args.pushResult.attempts,
-        status: args.pushResult.status,
-        error: args.pushResult.error,
-        sourceFilename: args.sourceFilename,
-        now,
-      });
+    // Production: hold a per-office session advisory lock across the claim on a dedicated connection.
+    const client = await pool.connect();
+    const lockArg = `bidboard_crm_alert:${args.officeSlug}`;
+    try {
+      const got = await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS got", [lockArg]);
+      if (!got.rows[0]?.got) {
+        log(`[BidBoardCRM] another run holds the alert lock for ${args.officeSlug} — skipping alert handling`, "sync");
+        return { action: "none" };
+      }
       try {
-        const res = await send({ to: recipient, subject, htmlBody });
-        sent = Boolean(res?.success);
-        log(`[BidBoardCRM] alert ${decision.action} email sent=${sent} to ${recipient}`, "sync");
-      } catch (err) {
-        log(`[BidBoardCRM] alert email send FAILED: ${err instanceof Error ? err.message : String(err)}`, "sync");
+        return await claimAndAlert(args, { query: (t, p) => client.query(t, p) }, send, recipient, now, realertMinutes);
+      } finally {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockArg]).catch(() => {});
       }
+    } finally {
+      client.release();
     }
-
-    // State + throttle anchor gated on a SUCCESSFUL send:
-    //  - failure: advance last_alerted_at only when the email sent (else re-alert next cycle)
-    //  - recovered: only flip to 'ok' when the recovery email sent; if it failed, stay 'failing' so the
-    //    recovery notice is retried next successful cycle (Codex).
-    let persistedState: PushAlertState = decision.nextState;
-    let lastAlertedAt: Date | null;
-    if (decision.action === "alert_failure") {
-      lastAlertedAt = sent ? now : (prior?.last_alerted_at ?? null);
-    } else if (decision.action === "alert_recovered") {
-      if (sent) {
-        lastAlertedAt = null;
-      } else {
-        persistedState = "failing";
-        lastAlertedAt = prior?.last_alerted_at ?? null;
-      }
-    } else {
-      lastAlertedAt = prior?.last_alerted_at ?? null;
-    }
-
-    await upsertPushAlertState(
-      args.officeSlug,
-      {
-        state: persistedState,
-        lastAlertedAt,
-        // Record the success instant only when the push actually succeeded; preserve prior otherwise.
-        lastSuccessAt: args.pushResult.ok ? now : (prior?.last_success_at ?? null),
-        lastError: args.pushResult.ok ? null : (args.pushResult.error ?? null),
-        now,
-      },
-      db
-    );
-
-    return { action: decision.action };
   } catch (err) {
     // Alerting must never crash the sync. Swallow and log (defensively, even logging is guarded).
     try {
