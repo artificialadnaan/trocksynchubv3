@@ -165,6 +165,14 @@ httpServer.listen(
     console.error("[startup] BidBoard stage sync runs table migration failed:", e);
   }
 
+  // Ensure bidboard_crm_push_alert_state exists (backs the CRM push failure/recovery alert debounce)
+  try {
+    const { ensureBidboardCrmPushAlertStateTable } = await import("./migrate-bidboard-crm-push-alert");
+    await ensureBidboardCrmPushAlertStateTable();
+  } catch (e) {
+    console.error("[startup] BidBoard CRM push alert state table migration failed:", e);
+  }
+
   // Seed default email templates if they don't exist
   try {
     await storage.seedEmailTemplates();

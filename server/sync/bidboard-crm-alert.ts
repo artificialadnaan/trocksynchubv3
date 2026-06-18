@@ -1,0 +1,238 @@
+// Bid Board → CRM push FAILURE alert.
+//
+// SyncHub pushes the scraped Bid Board export to the CRM ingest endpoint and retries 3x. The CRM
+// ingest runs in one transaction and ROLLS BACK on error, so a failed push leaves NO record in the
+// CRM — SyncHub is the only observer of the failure (it sits OUTSIDE that transaction). The
+// 2026-06-18 outage (a $16 type-inference 500 on every push) therefore ran ~24h silently. This module
+// emails when a push fails after retry-exhaustion, debounced so a sustained outage doesn't spam, and
+// sends one recovery email when pushes resume.
+//
+// Pairs with the CRM-side heartbeat (absence-of-success), which runs in a separate process and so
+// also catches the case where SyncHub itself is down.
+import { pool } from "../db";
+import { sendEmail } from "../email-service";
+import { log } from "../index";
+
+export type PushAlertState = "ok" | "failing";
+export type PushAlertAction = "alert_failure" | "alert_recovered" | "none";
+
+export interface PushAlertDecisionInput {
+  pushOk: boolean;
+  prevState: PushAlertState | null;
+  lastAlertedAt: Date | null;
+  now: Date;
+  realertMinutes: number;
+}
+
+export interface PushAlertDecision {
+  action: PushAlertAction;
+  nextState: PushAlertState;
+}
+
+/**
+ * Pure debounce decision. Alert on the transition INTO failing, then at most once per re-alert window
+ * while still failing; one recovery alert on the transition back to ok.
+ */
+export function decidePushAlert(i: PushAlertDecisionInput): PushAlertDecision {
+  if (!i.pushOk) {
+    if (i.prevState !== "failing") return { action: "alert_failure", nextState: "failing" };
+    const dueForRealert =
+      i.lastAlertedAt === null || i.now.getTime() - i.lastAlertedAt.getTime() >= i.realertMinutes * 60_000;
+    return { action: dueForRealert ? "alert_failure" : "none", nextState: "failing" };
+  }
+  return { action: i.prevState === "failing" ? "alert_recovered" : "none", nextState: "ok" };
+}
+
+export interface PushAlertEmailInput {
+  kind: "failure" | "recovered";
+  office: string;
+  attempts?: number;
+  status?: number;
+  error?: string;
+  sourceFilename?: string;
+  now: Date;
+}
+
+/** Pure email renderer — separate from sending so it is unit-testable without a transport. */
+export function renderPushAlertEmail(e: PushAlertEmailInput): { subject: string; htmlBody: string } {
+  if (e.kind === "failure") {
+    const subject = `⚠️ Bid Board → CRM push FAILED — office ${e.office}`;
+    const htmlBody = `
+      <h2>Bid Board → CRM ingestion push failed</h2>
+      <p><strong>Office:</strong> ${e.office}</p>
+      <p><strong>When:</strong> ${e.now.toISOString()}</p>
+      <p><strong>Attempts before giving up:</strong> ${e.attempts ?? "—"}</p>
+      <p><strong>HTTP status:</strong> ${e.status ?? "—"}</p>
+      <p><strong>Error:</strong> ${escapeHtml(e.error ?? "(none captured)")}</p>
+      <p><strong>Export file:</strong> ${escapeHtml(e.sourceFilename ?? "—")}</p>
+      <p>The scrape succeeded but the CRM rejected the push. Because a failed CRM ingest rolls back its
+      own run record, this alert (raised by SyncHub, outside that transaction) is the primary failure
+      signal. Further failures are throttled to roughly hourly until the push recovers.</p>
+    `;
+    return { subject, htmlBody };
+  }
+
+  const subject = `✅ Bid Board → CRM push RECOVERED — office ${e.office}`;
+  const htmlBody = `
+    <h2>Bid Board → CRM ingestion push has recovered</h2>
+    <p><strong>Office:</strong> ${e.office}</p>
+    <p><strong>When:</strong> ${e.now.toISOString()}</p>
+    <p>A push has succeeded again; the prior failure has cleared.</p>
+  `;
+  return { subject, htmlBody };
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string);
+}
+
+// ── DB I/O ──────────────────────────────────────────────────────────────────
+
+export interface Querier {
+  query: (text: string, params?: any[]) => Promise<{ rows: any[] }>;
+}
+
+interface PersistedPushAlertState {
+  state: PushAlertState;
+  last_alerted_at: Date | null;
+  last_success_at: Date | null;
+}
+
+export async function readPushAlertState(officeSlug: string, db: Querier = pool): Promise<PersistedPushAlertState | null> {
+  const { rows } = await db.query(
+    `SELECT state, last_alerted_at, last_success_at FROM bidboard_crm_push_alert_state WHERE office_slug = $1`,
+    [officeSlug]
+  );
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  return {
+    state: r.state as PushAlertState,
+    last_alerted_at: r.last_alerted_at ? new Date(r.last_alerted_at) : null,
+    last_success_at: r.last_success_at ? new Date(r.last_success_at) : null,
+  };
+}
+
+export async function upsertPushAlertState(
+  officeSlug: string,
+  fields: { state: PushAlertState; lastAlertedAt: Date | null; lastSuccessAt: Date | null; lastError: string | null; now: Date },
+  db: Querier = pool
+): Promise<void> {
+  await db.query(
+    `INSERT INTO bidboard_crm_push_alert_state (office_slug, state, last_alerted_at, last_success_at, last_error, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (office_slug) DO UPDATE
+       SET state = EXCLUDED.state,
+           last_alerted_at = EXCLUDED.last_alerted_at,
+           last_success_at = EXCLUDED.last_success_at,
+           last_error = EXCLUDED.last_error,
+           updated_at = EXCLUDED.updated_at`,
+    [officeSlug, fields.state, fields.lastAlertedAt, fields.lastSuccessAt, fields.lastError, fields.now]
+  );
+}
+
+// ── Orchestrator ──────────────────────────────────────────────────────────────
+
+export interface PushResultLike {
+  ok: boolean;
+  skipped?: boolean;
+  attempts: number;
+  status?: number;
+  error?: string;
+}
+
+export interface RecordPushDeps {
+  db?: Querier;
+  send?: typeof sendEmail;
+}
+
+function realertMinutesFromEnv(): number {
+  const n = Number(process.env.BIDBOARD_CRM_ALERT_REALERT_MINUTES);
+  return Number.isFinite(n) && n > 0 ? n : 60;
+}
+
+function recipientFromEnv(): string {
+  return (process.env.BIDBOARD_CRM_ALERT_RECIPIENT ?? "adnaan.iqbal@gmail.com").trim() || "adnaan.iqbal@gmail.com";
+}
+
+/**
+ * Record a push outcome and emit a failure/recovery email when warranted. NEVER throws — alerting must
+ * never crash the sync cycle (a wrapped catch around everything, plus an inner catch around the send).
+ * A 'skipped' push (CRM sync not configured) is ignored so disabling the integration can't spam.
+ */
+export async function recordPushOutcomeAndMaybeAlert(
+  args: {
+    pushResult: PushResultLike;
+    officeSlug: string;
+    sourceFilename?: string;
+    now?: Date;
+    realertMinutes?: number;
+    recipient?: string;
+  },
+  deps: RecordPushDeps = {}
+): Promise<{ action: PushAlertAction } | { skipped: true }> {
+  try {
+    if (args.pushResult.skipped) return { skipped: true };
+
+    const db = deps.db ?? pool;
+    const send = deps.send ?? sendEmail;
+    const now = args.now ?? new Date();
+    const realertMinutes = args.realertMinutes ?? realertMinutesFromEnv();
+    const recipient = args.recipient ?? recipientFromEnv();
+
+    const prior = await readPushAlertState(args.officeSlug, db);
+    const decision = decidePushAlert({
+      pushOk: args.pushResult.ok,
+      prevState: prior?.state ?? null,
+      lastAlertedAt: prior?.last_alerted_at ?? null,
+      now,
+      realertMinutes,
+    });
+
+    const lastAlertedAt =
+      decision.action === "alert_failure"
+        ? now
+        : decision.action === "alert_recovered"
+          ? null
+          : (prior?.last_alerted_at ?? null);
+
+    await upsertPushAlertState(
+      args.officeSlug,
+      {
+        state: decision.nextState,
+        lastAlertedAt,
+        lastSuccessAt: args.pushResult.ok ? now : (prior?.last_success_at ?? null),
+        lastError: args.pushResult.ok ? null : (args.pushResult.error ?? null),
+        now,
+      },
+      db
+    );
+
+    if (decision.action !== "none") {
+      const { subject, htmlBody } = renderPushAlertEmail({
+        kind: decision.action === "alert_recovered" ? "recovered" : "failure",
+        office: args.officeSlug,
+        attempts: args.pushResult.attempts,
+        status: args.pushResult.status,
+        error: args.pushResult.error,
+        sourceFilename: args.sourceFilename,
+        now,
+      });
+      try {
+        const res = await send({ to: recipient, subject, htmlBody });
+        log(`[BidBoardCRM] alert ${decision.action} email sent=${res?.success} to ${recipient}`, "sync");
+      } catch (err) {
+        log(`[BidBoardCRM] alert email send FAILED: ${err instanceof Error ? err.message : String(err)}`, "sync");
+      }
+    }
+
+    return { action: decision.action };
+  } catch (err) {
+    // Alerting must never crash the sync. Swallow and log (defensively, even logging is guarded).
+    try {
+      log(`[BidBoardCRM] push-alert handling failed: ${err instanceof Error ? err.message : String(err)}`, "sync");
+    } catch {
+      /* no-op */
+    }
+    return { action: "none" };
+  }
+}
