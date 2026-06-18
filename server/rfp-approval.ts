@@ -936,7 +936,9 @@ async function sendRfpReviewEmails(params: {
   const location = esc([params.dealData.address, params.dealData.city, params.dealData.state, params.dealData.zip].filter(Boolean).join(', ') || 'N/A');
   const description = esc(resolveRfpDescription(params.dealData) || 'N/A');
   const estimator = esc(params.dealData.estimator || 'N/A');
-  const ownerName = esc(params.ownerName || 'N/A');
+  // Fall back to the owner email when only an email was resolved (e.g. the CRM's hubspot_owner_email
+  // fallback supplies an email but no name) so "Deal Owner" shows the requester instead of N/A.
+  const ownerName = esc(params.ownerName || params.dealData.ownerEmail || 'N/A');
 
   const row = (label: string, value: string, isHtml = false) =>
     `<tr>

@@ -247,6 +247,37 @@ describe("POST /api/rfp-requests", () => {
     });
   });
 
+  it("drops a malformed owner value instead of rejecting the RFP (no 422)", async () => {
+    await withServer(async (baseUrl) => {
+      // Mid-rollout the CRM might send an object/number; a soft display field must not 422 the RFP.
+      const body = requestBody({
+        deal: {
+          ...requestBody().deal,
+          projectNumber: "BADOWNER-1",
+          ownerName: { id: 1, name: "Rep" } as any,
+          ownerEmail: 12345 as any,
+        },
+      });
+      const response = await postRfpRequest(baseUrl, body);
+      expect(response.status).toBe(201); // dropped via .catch(undefined), not 422
+      expect(rfpRows[0].dealData).toMatchObject({ ownerName: "", ownerEmail: "" });
+    });
+  });
+
+  it("review email shows the owner email as Deal Owner when only an email is resolved", async () => {
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({
+          deal: { ...requestBody().deal, projectNumber: "EMAILONLY-1", ownerEmail: "owner@trockgc.com" },
+        })
+      );
+      expect(response.status).toBe(201);
+      const html = (sendEmailMock.mock.calls[0]?.[0] as any)?.htmlBody ?? "";
+      expect(html).toContain("owner@trockgc.com"); // falls back to email instead of "N/A"
+    });
+  });
+
   it("returns 200 for idempotent replay without inserting or sending email again", async () => {
     await withServer(async (baseUrl) => {
       const first = await postRfpRequest(baseUrl, requestBody());

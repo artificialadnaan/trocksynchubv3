@@ -23,10 +23,11 @@ export const rfpRequestBodySchema = z.object({
     projectType: z.string().trim().min(1),
     amount: z.number().finite().nullable(),
     estimator: z.string().trim().nullable(),
-    // Deal owner / rep — the "Requested by" person. Optional + lenient (a soft display field
-    // must never cause RFP ingestion to 422); the CRM resolves it from assigned_rep → owner.
-    ownerName: z.string().trim().nullable().optional(),
-    ownerEmail: z.string().trim().nullable().optional(),
+    // Deal owner / rep — the "Requested by" person. Truly non-rejecting: a malformed value
+    // (e.g. an object/id sent mid-rollout) is DROPPED via .catch(undefined), not 422'd — a soft
+    // display field must never block RFP ingestion. The CRM resolves it from assigned_rep → owner.
+    ownerName: z.string().trim().nullable().optional().catch(undefined),
+    ownerEmail: z.string().trim().nullable().optional().catch(undefined),
     companyName: z.string().trim().nullable(),
     contactName: z.string().trim().nullable(),
     clientEmail: z.string().trim().email().nullable(),
