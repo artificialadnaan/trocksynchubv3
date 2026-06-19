@@ -94,22 +94,6 @@ function fakeDb() {
         store.set(office_slug, { office_slug, state, last_alerted_at, last_success_at, last_error, updated_at });
         return { rows: [] };
       }
-      // Un-claim UPDATEs run by sendAndReconcile after a failed send. Match the statement start (a bare
-      // "update" also appears in the CREATE TABLE's "updated_at" column and in "ON CONFLICT DO UPDATE").
-      if (t.includes("update bidboard_crm_push_alert_state set")) {
-        const row = store.get(params![0]);
-        if (row) {
-          if (t.includes("state = 'failing'") && row.state === "ok") {
-            // recovery un-claim: WHERE state='ok'
-            row.state = "failing";
-            row.last_alerted_at = params![1];
-          } else if (t.includes("set last_alerted_at")) {
-            // failure un-claim: SET last_alerted_at=$2 WHERE last_alerted_at=$3(now)
-            if (row.last_alerted_at === params![2]) row.last_alerted_at = params![1];
-          }
-        }
-        return { rows: [] };
-      }
       return { rows: [] };
     }),
   };
@@ -222,72 +206,6 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     const db = { query: vi.fn(async () => { throw new Error("db down"); }) };
     await expect(run(db, { ok: false, attempts: 3, error: "x" }, NOW)).resolves.toBeTruthy();
     expect(send).not.toHaveBeenCalled();
-  });
-
-  // Production path (no injected db): claim under a blocking advisory lock on a dedicated client, then
-  // RELEASE the client BEFORE sending (so the send can't deadlock against a small pool).
-  function fakeProdClient() {
-    const store = new Map<string, any>();
-    const order: string[] = [];
-    const client: any = {
-      query: vi.fn(async (text: string, params?: any[]) => {
-        const t = text.toLowerCase();
-        if (t.includes("pg_advisory_lock")) { order.push("lock"); return { rows: [] }; }
-        if (t.includes("pg_advisory_unlock")) { order.push("unlock"); return { rows: [] }; }
-        if (t.includes("select") && t.includes("bidboard_crm_push_alert_state")) {
-          return { rows: store.has(params![0]) ? [store.get(params![0])] : [] };
-        }
-        if (t.includes("insert into") && t.includes("bidboard_crm_push_alert_state")) {
-          store.set(params![0], { office_slug: params![0], state: params![1], last_alerted_at: params![2], last_success_at: params![3] });
-        }
-        return { rows: [] };
-      }),
-      release: vi.fn(() => order.push("release")),
-    };
-    return { client, order };
-  }
-
-  it("claims under a blocking advisory lock, releases the connection, THEN sends (no held conn during send)", async () => {
-    const { client, order } = fakeProdClient();
-    poolMock.connect.mockResolvedValueOnce(client as any);
-    // The phase-2 claim recheck runs on the pool (same DB as the client in prod); return the claim's
-    // updated_at (=NOW) so the recheck confirms the claim is current and the send proceeds.
-    poolMock.query.mockImplementation(async (t: string) =>
-      String(t).toLowerCase().includes("select updated_at") ? { rows: [{ updated_at: NOW }] } : { rows: [] }
-    );
-    // record the moment of send relative to the lock lifecycle
-    send.mockImplementationOnce(async () => { order.push("send"); return { success: true, provider: "gmail" }; });
-
-    const res = await recordPushOutcomeAndMaybeAlert(
-      { pushResult: { ok: false, attempts: 3, status: 500, error: "x" }, officeSlug: "dallas", now: NOW, recipient: "ops@trock.test" },
-      { send }
-    );
-    expect((res as any).action).toBe("alert_failure");
-    expect(send).toHaveBeenCalledTimes(1);
-    // The send must happen only AFTER unlock + release (connection no longer held).
-    expect(order.indexOf("send")).toBeGreaterThan(order.indexOf("unlock"));
-    expect(order.indexOf("send")).toBeGreaterThan(order.indexOf("release"));
-  });
-
-  it("does NOT send when the claim was superseded by a concurrent run (recheck token mismatch)", async () => {
-    // Simulate: we claim, but before the send the recheck SELECT shows a DIFFERENT updated_at (another
-    // overlapping run rewrote the row). The send must be skipped to avoid a stale alert.
-    const store = new Map<string, any>();
-    const db = {
-      query: vi.fn(async (text: string, params?: any[]) => {
-        const t = text.toLowerCase();
-        if (t.includes("select updated_at")) return { rows: [{ updated_at: new Date(NOW.getTime() + 5000) }] }; // changed!
-        if (t.includes("select") && t.includes("bidboard_crm_push_alert_state")) return { rows: store.has(params![0]) ? [store.get(params![0])] : [] };
-        if (t.includes("insert into") && t.includes("bidboard_crm_push_alert_state")) { store.set(params![0], { office_slug: params![0], state: params![1], updated_at: params![5] }); }
-        return { rows: [] };
-      }),
-    };
-    const res = await recordPushOutcomeAndMaybeAlert(
-      { pushResult: { ok: false, attempts: 3, status: 500, error: "x" }, officeSlug: "dallas", now: NOW, recipient: "ops@trock.test" },
-      { db, send }
-    );
-    expect((res as any).action).toBe("alert_failure"); // claim happened
-    expect(send).not.toHaveBeenCalled(); // but the stale send was skipped
   });
 
   it("a failed recovery send keeps state 'failing' and retries; a later success flips to ok", async () => {
