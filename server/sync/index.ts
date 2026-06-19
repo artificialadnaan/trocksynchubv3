@@ -24,6 +24,7 @@ import {
   type StageChange,
 } from "./bidboard-stage-sync";
 import { pushBidBoardRowsToCrm } from "./bidboard-crm-ingestion";
+import { recordPushOutcomeAndMaybeAlert } from "./bidboard-crm-alert";
 import { log } from "../index";
 import { storage } from "../storage";
 
@@ -114,6 +115,14 @@ export async function runBidBoardStageSync(
     if (!pushResult.ok && !pushResult.skipped) {
       log(`[BidBoardCRM] CRM ingestion push failed after ${pushResult.attempts} attempts; continuing stage sync`, "sync");
     }
+    // Record the push outcome and email on retry-exhausted failure / recovery. Never throws — a
+    // skipped (unconfigured) push is ignored. This is the failure half of the alerting pair; the CRM
+    // heartbeat covers absence-of-success independently.
+    await recordPushOutcomeAndMaybeAlert({
+      pushResult,
+      officeSlug: process.env.CRM_BID_BOARD_SYNC_OFFICE_SLUG ?? "dallas",
+      sourceFilename: exportPath,
+    });
 
     if (initialize) {
       await diffBidBoardStages(exportPath, { initializeOnly: true });

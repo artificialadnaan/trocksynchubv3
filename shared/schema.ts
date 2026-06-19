@@ -109,6 +109,22 @@ export const bidboardStageSyncRuns = pgTable("bidboard_stage_sync_runs", {
 
 export type BidboardStageSyncRun = typeof bidboardStageSyncRuns.$inferSelect;
 
+// BidBoard → CRM push failure/recovery alert debounce state. Also created via raw DDL at boot
+// (ensurePushAlertStateTable) for hosts where db:push is blocked; declared here so drizzle-kit
+// push --force manages it rather than treating it as out-of-schema and dropping it. timestamptz
+// because the debounce compares instants across runs/processes (a tz-naive column skews the window
+// off-UTC). Mirrors the bidboard_stage_sync_runs convention (pgTable + ensure-fn, no CHECK).
+export const bidboardCrmPushAlertState = pgTable("bidboard_crm_push_alert_state", {
+  officeSlug: text("office_slug").primaryKey(),
+  state: text("state").notNull().default("ok"), // ok | failing
+  lastAlertedAt: timestamp("last_alerted_at", { withTimezone: true }),
+  lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type BidboardCrmPushAlertState = typeof bidboardCrmPushAlertState.$inferSelect;
+
 // BidBoard automation logs
 export const bidboardAutomationLogs = pgTable("bidboard_automation_logs", {
   id: serial("id").primaryKey(),
