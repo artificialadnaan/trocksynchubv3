@@ -248,7 +248,8 @@ export async function recordPushOutcomeAndMaybeAlert(
         // Ops alert → only the configured recipient; skip the customer-facing GLOBAL_CC.
         const res = await send({ to: recipient, subject, htmlBody, bypassGlobalCc: true });
         sent = Boolean(res?.success);
-        log(`[BidBoardCRM] alert ${decision.action} email sent=${sent} to ${recipient}`, "sync");
+        // Log office/action, not the raw recipient address (PII should stay out of routine logs).
+        log(`[BidBoardCRM] alert ${decision.action} email sent=${sent} office=${args.officeSlug}`, "sync");
       } catch (err) {
         log(`[BidBoardCRM] alert email send FAILED: ${err instanceof Error ? err.message : String(err)}`, "sync");
       }
