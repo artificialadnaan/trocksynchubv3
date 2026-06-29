@@ -141,11 +141,34 @@ export async function navigateToBidBoard(
         /* try next */
       }
     }
-    // If we're on the new bid-board URL, treat as success - create flow will verify Create button
+    // None of the content markers appeared. Before trusting the URL alone — which let a blank/
+    // degraded render slip through and fail the create flow on Jun-29 — reload once and re-check
+    // the markers. If they show, we're genuinely loaded; otherwise fall back to the URL (kept as a
+    // last resort so non-create callers that do their own waits aren't regressed).
     const url = page.url();
     if (url.includes("/tools/bid-board")) {
-      log("BidBoard URL confirmed, treating as loaded (selectors may have changed)", "playwright");
-      return true;
+      log("BidBoard markers not found; reloading once before trusting the URL", "playwright");
+      try {
+        await page.reload({ waitUntil: "load", timeout: 60000 });
+        await randomDelay(3000, 5000);
+        for (const sel of newUiSelectors) {
+          try {
+            await page.waitForSelector(sel, { timeout: 8000 });
+            log(`BidBoard loaded after reload: ${sel}`, "playwright");
+            return true;
+          } catch {
+            /* try next */
+          }
+        }
+      } catch (reloadErr: any) {
+        log(`BidBoard reload attempt failed: ${reloadErr.message}`, "playwright");
+      }
+      // Re-read the URL after the reload: it could have redirected (e.g. session timeout → login),
+      // and we must not trust the stale pre-reload URL captured above.
+      if (page.url().includes("/tools/bid-board")) {
+        log("BidBoard URL confirmed, treating as loaded (selectors may have changed)", "playwright");
+        return true;
+      }
     }
   } catch (err: any) {
     log(`BidBoard navigation failed: ${err.message}`, "playwright");
@@ -985,6 +1008,36 @@ export interface CreateBidBoardProjectResult {
   screenshotPath?: string;
 }
 
+/**
+ * Locate the "Create New Project" button, tolerating a transient blank/slow BidBoard render.
+ * navigateToBidBoard can return "loaded" on the URL alone (when none of its content markers
+ * appeared), so a bare page.$() here could miss the button on a page that simply hadn't finished
+ * rendering — the failure mode that killed the Jun-29 RFP. We wait for the button, and if it never
+ * shows, reload the page once and retry before giving up. Returns the handle, or null if it never
+ * appears.
+ */
+export async function findCreateNewProjectButton(page: Page): ReturnType<Page["$"]> {
+  const selector = PROCORE_SELECTORS.bidboard.newUi.createNewProjectButton;
+  try {
+    await page.waitForSelector(selector, { state: "visible", timeout: 15000 });
+    return await page.$(selector);
+  } catch {
+    log("Create New Project button not visible; reloading BidBoard once and retrying", "playwright");
+    try {
+      await page.reload({ waitUntil: "load", timeout: 60000 });
+    } catch {
+      /* a failed reload still lets the retry below confirm/deny the button */
+    }
+    await randomDelay(3000, 5000);
+    try {
+      await page.waitForSelector(selector, { state: "visible", timeout: 15000 });
+      return await page.$(selector);
+    } catch {
+      return null;
+    }
+  }
+}
+
 export async function createBidBoardProject(
   projectData: NewBidBoardProjectData
 ): Promise<CreateBidBoardProjectResult> {
@@ -1026,7 +1079,7 @@ export async function createBidBoardProject(
         log(`Could not click stage tab for ${isService ? "service estimating" : "estimating"}`, "playwright");
       }
 
-      const createBtn = await page.$(PROCORE_SELECTORS.bidboard.newUi.createNewProjectButton);
+      const createBtn = await findCreateNewProjectButton(page);
       if (!createBtn) {
         result.error = "Create New Project button not found (new UI)";
         result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-button");
@@ -1890,6 +1943,8 @@ type CreateBidBoardProjectFromDealOptions = {
   /** proposalId for BidBoard URL */
   proposalId?: string;
   createProject?: (projectData: NewBidBoardProjectData) => Promise<CreateBidBoardProjectResult>;
+  /** Test seam: look up an existing Procore project by exact number (defaults to findProcoreProjectByExactNumber). */
+  findExistingProject?: (projectNumber: string) => Promise<ExistingProjectLookup>;
 };
 
 type CreateBidBoardProjectFromDealArgs = {
@@ -1917,6 +1972,53 @@ async function getAssociatedContactName(deal: any): Promise<string | null> {
     return name || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Outcome of looking up an existing Procore project by exact number. The states are distinct on
+ * purpose: the caller must create on "none", link on "found", and STOP on "ambiguous" (≥2 projects
+ * already share the number — creating another would compound the duplicate). "error" means the
+ * lookup couldn't complete.
+ */
+type ExistingProjectLookup =
+  | { status: "found"; id: string; name?: string }
+  | { status: "none" }
+  | { status: "ambiguous"; count: number }
+  | { status: "error"; message: string };
+
+/**
+ * Look up an existing Procore project by EXACT project number via the REST API.
+ * Lets us link a project that already exists — created manually, or by a prior run whose UI step
+ * failed after the project was made — instead of creating a duplicate.
+ */
+async function findProcoreProjectByExactNumber(projectNumber: string): Promise<ExistingProjectLookup> {
+  const trimmed = projectNumber?.trim();
+  if (!trimmed) return { status: "none" };
+  try {
+    const companyId = await getCompanyId();
+    if (!companyId) return { status: "error", message: "no Procore company id configured" };
+    const { getProcoreClient } = await import("../procore");
+    const client = await getProcoreClient();
+    const searchRes = await client.get(
+      `/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(trimmed)}&per_page=10`,
+    );
+    const projects = Array.isArray(searchRes.data) ? searchRes.data : [];
+    const exact = projects.filter(
+      (p: any) => p?.project_number != null && String(p.project_number).trim() === trimmed,
+    );
+    if (exact.length > 1) {
+      log(`Ambiguous Procore project number "${trimmed}" — ${exact.length} matches; not auto-linking`, "playwright");
+      return { status: "ambiguous", count: exact.length };
+    }
+    if (exact.length === 1 && exact[0]?.id != null) {
+      return { status: "found", id: String(exact[0].id), name: exact[0].name ?? undefined };
+    }
+    return { status: "none" };
+  } catch (err: any) {
+    const message = err?.message ?? String(err);
+    log(`Procore project lookup by number failed for "${trimmed}": ${message}`, "playwright");
+    return { status: "error", message };
   }
 }
 
@@ -2031,13 +2133,79 @@ export async function createBidBoardProjectFromDeal(
     }
 
     const createProject = effectiveOptions.createProject ?? createBidBoardProject;
-    const result: CreateBidBoardProjectFromDealResult = await createProject(projectData);
+    // Idempotency (Procore side): if a project with this EXACT number already exists in Procore —
+    // e.g. created manually, or by a prior run whose brittle UI step failed after the project was
+    // made — link it instead of creating a duplicate, then fall through to write the sync mapping
+    // and sync documents against it. A normal new RFP finds nothing here and creates as before, so
+    // this is purely additive. (The earlier guard only checks SyncHub's own mappings, which a
+    // manually-created project has none of.)
+    const findExistingProject = effectiveOptions.findExistingProject ?? findProcoreProjectByExactNumber;
+    let result: CreateBidBoardProjectFromDealResult;
+    const lookup: ExistingProjectLookup = projectNumber
+      ? await findExistingProject(projectNumber)
+      : { status: "none" };
+    if (lookup.status === "found") {
+      // Ownership guard: createSyncMapping below is a plain insert against a unique index on
+      // bidboardProjectId, and its failure is swallowed (logged, not surfaced). If this Procore
+      // project is already linked to a DIFFERENT deal, adopting it would throw on that insert and
+      // still report success with the deal silently unlinked. Only link when the project is
+      // unclaimed or already belongs to this deal.
+      const owner = await storage.getSyncMappingByBidboardProjectId(lookup.id);
+      const claimedByOtherDeal = Boolean(
+        owner && !(owner.sourceSystem === sourceSystem && owner.sourceDealId === dealId),
+      );
+      if (claimedByOtherDeal) {
+        log(
+          `Procore project ${lookup.id} (number ${projectNumber}) is already linked to ${owner!.sourceSystem} deal ${owner!.sourceDealId}; not linking to ${sourceSystem} deal ${dealId}`,
+          "playwright",
+        );
+        result = {
+          success: false,
+          projectName: projectData.name,
+          error: `BidBoard project ${lookup.id} (number ${projectNumber}) is already linked to another deal; resolve the conflict manually before linking.`,
+        };
+      } else {
+        log(
+          `Found existing Procore project ${lookup.id} for number ${projectNumber} — linking instead of creating a duplicate`,
+          "playwright",
+        );
+        result = {
+          success: true,
+          projectId: lookup.id,
+          // Persist the project's canonical Procore name (not the requested name) so the mapping matches reality.
+          projectName: lookup.name ?? projectData.name,
+          // Carry the RFP proposalId through so the mapping metadata keeps Procore's active-proposal context.
+          proposalId: effectiveOptions.proposalId,
+          adopted: true,
+        };
+      }
+    } else if (lookup.status === "ambiguous") {
+      // ≥2 existing projects already carry this exact number — creating another would compound the
+      // duplicate. Stop and surface for manual resolution instead of silently adding a third.
+      log(
+        `Not creating BidBoard project for number ${projectNumber}: ${lookup.count} existing projects share it — manual resolution required`,
+        "playwright",
+      );
+      result = {
+        success: false,
+        projectName: projectData.name,
+        error: `Multiple BidBoard projects (${lookup.count}) already have project number ${projectNumber}; resolve the duplicate manually before creating.`,
+      };
+    } else {
+      // status "none" (no existing match) or "error" (lookup couldn't complete). For "error" we still
+      // create — that matches the pre-existing behaviour, and blocking every RFP creation on a transient
+      // Procore API blip would be a worse regression than the rare duplicate the create UI might leave.
+      if (lookup.status === "error") {
+        log(`Existing-project lookup did not complete (${lookup.message}); proceeding to create`, "playwright");
+      }
+      result = await createProject(projectData);
+    }
 
     if (result.success && result.projectId) {
       try {
         await storage.upsertBidboardSyncState({
           projectId: result.projectId,
-          projectName: projectData.name,
+          projectName: result.projectName ?? projectData.name,
           currentStage: stage,
           metadata: {
             projectNumber: projectData.projectNumber || null,
@@ -2103,7 +2271,7 @@ export async function createBidBoardProjectFromDeal(
         hubspotDealId: sourceSystem === "hubspot" ? dealId : null,
         hubspotDealName: deal.dealName,
         bidboardProjectId: result.projectId,
-        bidboardProjectName: projectData.name,
+        bidboardProjectName: result.projectName ?? projectData.name,
         procoreProjectNumber: projectNumber || null,
         projectPhase: "bidboard",
         lastSyncAt: new Date(),
