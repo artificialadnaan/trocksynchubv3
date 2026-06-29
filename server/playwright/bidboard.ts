@@ -163,8 +163,12 @@ export async function navigateToBidBoard(
       } catch (reloadErr: any) {
         log(`BidBoard reload attempt failed: ${reloadErr.message}`, "playwright");
       }
-      log("BidBoard URL confirmed, treating as loaded (selectors may have changed)", "playwright");
-      return true;
+      // Re-read the URL after the reload: it could have redirected (e.g. session timeout → login),
+      // and we must not trust the stale pre-reload URL captured above.
+      if (page.url().includes("/tools/bid-board")) {
+        log("BidBoard URL confirmed, treating as loaded (selectors may have changed)", "playwright");
+        return true;
+      }
     }
   } catch (err: any) {
     log(`BidBoard navigation failed: ${err.message}`, "playwright");
@@ -1940,7 +1944,7 @@ type CreateBidBoardProjectFromDealOptions = {
   proposalId?: string;
   createProject?: (projectData: NewBidBoardProjectData) => Promise<CreateBidBoardProjectResult>;
   /** Test seam: look up an existing Procore project by exact number (defaults to findProcoreProjectByExactNumber). */
-  findExistingProject?: (projectNumber: string) => Promise<{ id: string; name?: string } | null>;
+  findExistingProject?: (projectNumber: string) => Promise<ExistingProjectLookup>;
 };
 
 type CreateBidBoardProjectFromDealArgs = {
@@ -1972,20 +1976,28 @@ async function getAssociatedContactName(deal: any): Promise<string | null> {
 }
 
 /**
+ * Outcome of looking up an existing Procore project by exact number. The states are distinct on
+ * purpose: the caller must create on "none", link on "found", and STOP on "ambiguous" (≥2 projects
+ * already share the number — creating another would compound the duplicate). "error" means the
+ * lookup couldn't complete.
+ */
+type ExistingProjectLookup =
+  | { status: "found"; id: string; name?: string }
+  | { status: "none" }
+  | { status: "ambiguous"; count: number }
+  | { status: "error"; message: string };
+
+/**
  * Look up an existing Procore project by EXACT project number via the REST API.
  * Lets us link a project that already exists — created manually, or by a prior run whose UI step
- * failed after the project was made — instead of creating a duplicate. Returns the single exact
- * match, or null when there are zero or multiple matches (multiple = ambiguous; caller must not
- * auto-link) or on any lookup error.
+ * failed after the project was made — instead of creating a duplicate.
  */
-async function findProcoreProjectByExactNumber(
-  projectNumber: string,
-): Promise<{ id: string; name?: string } | null> {
+async function findProcoreProjectByExactNumber(projectNumber: string): Promise<ExistingProjectLookup> {
   const trimmed = projectNumber?.trim();
-  if (!trimmed) return null;
+  if (!trimmed) return { status: "none" };
   try {
     const companyId = await getCompanyId();
-    if (!companyId) return null;
+    if (!companyId) return { status: "error", message: "no Procore company id configured" };
     const { getProcoreClient } = await import("../procore");
     const client = await getProcoreClient();
     const searchRes = await client.get(
@@ -1995,16 +2007,18 @@ async function findProcoreProjectByExactNumber(
     const exact = projects.filter(
       (p: any) => p?.project_number != null && String(p.project_number).trim() === trimmed,
     );
-    if (exact.length === 1 && exact[0]?.id != null) {
-      return { id: String(exact[0].id), name: exact[0].name ?? undefined };
-    }
     if (exact.length > 1) {
       log(`Ambiguous Procore project number "${trimmed}" — ${exact.length} matches; not auto-linking`, "playwright");
+      return { status: "ambiguous", count: exact.length };
     }
-    return null;
+    if (exact.length === 1 && exact[0]?.id != null) {
+      return { status: "found", id: String(exact[0].id), name: exact[0].name ?? undefined };
+    }
+    return { status: "none" };
   } catch (err: any) {
-    log(`Procore project lookup by number failed for "${trimmed}": ${err?.message ?? err}`, "playwright");
-    return null;
+    const message = err?.message ?? String(err);
+    log(`Procore project lookup by number failed for "${trimmed}": ${message}`, "playwright");
+    return { status: "error", message };
   }
 }
 
@@ -2127,19 +2141,42 @@ export async function createBidBoardProjectFromDeal(
     // manually-created project has none of.)
     const findExistingProject = effectiveOptions.findExistingProject ?? findProcoreProjectByExactNumber;
     let result: CreateBidBoardProjectFromDealResult;
-    const existingProcoreProject = projectNumber ? await findExistingProject(projectNumber) : null;
-    if (existingProcoreProject?.id) {
+    const lookup: ExistingProjectLookup = projectNumber
+      ? await findExistingProject(projectNumber)
+      : { status: "none" };
+    if (lookup.status === "found") {
       log(
-        `Found existing Procore project ${existingProcoreProject.id} for number ${projectNumber} — linking instead of creating a duplicate`,
+        `Found existing Procore project ${lookup.id} for number ${projectNumber} — linking instead of creating a duplicate`,
         "playwright",
       );
       result = {
         success: true,
-        projectId: existingProcoreProject.id,
-        projectName: existingProcoreProject.name ?? projectData.name,
+        projectId: lookup.id,
+        // Persist the project's canonical Procore name (not the requested name) so the mapping matches reality.
+        projectName: lookup.name ?? projectData.name,
+        // Carry the RFP proposalId through so the mapping metadata keeps Procore's active-proposal context.
+        proposalId: effectiveOptions.proposalId,
         adopted: true,
       };
+    } else if (lookup.status === "ambiguous") {
+      // ≥2 existing projects already carry this exact number — creating another would compound the
+      // duplicate. Stop and surface for manual resolution instead of silently adding a third.
+      log(
+        `Not creating BidBoard project for number ${projectNumber}: ${lookup.count} existing projects share it — manual resolution required`,
+        "playwright",
+      );
+      result = {
+        success: false,
+        projectName: projectData.name,
+        error: `Multiple BidBoard projects (${lookup.count}) already have project number ${projectNumber}; resolve the duplicate manually before creating.`,
+      };
     } else {
+      // status "none" (no existing match) or "error" (lookup couldn't complete). For "error" we still
+      // create — that matches the pre-existing behaviour, and blocking every RFP creation on a transient
+      // Procore API blip would be a worse regression than the rare duplicate the create UI might leave.
+      if (lookup.status === "error") {
+        log(`Existing-project lookup did not complete (${lookup.message}); proceeding to create`, "playwright");
+      }
       result = await createProject(projectData);
     }
 
@@ -2147,7 +2184,7 @@ export async function createBidBoardProjectFromDeal(
       try {
         await storage.upsertBidboardSyncState({
           projectId: result.projectId,
-          projectName: projectData.name,
+          projectName: result.projectName ?? projectData.name,
           currentStage: stage,
           metadata: {
             projectNumber: projectData.projectNumber || null,
@@ -2213,7 +2250,7 @@ export async function createBidBoardProjectFromDeal(
         hubspotDealId: sourceSystem === "hubspot" ? dealId : null,
         hubspotDealName: deal.dealName,
         bidboardProjectId: result.projectId,
-        bidboardProjectName: projectData.name,
+        bidboardProjectName: result.projectName ?? projectData.name,
         procoreProjectNumber: projectNumber || null,
         projectPhase: "bidboard",
         lastSyncAt: new Date(),
