@@ -9,6 +9,9 @@ vi.mock("../server/storage.ts", () => ({
     getBidboardMappingByProcoreProjectNumber: vi.fn(),
     createSyncMapping: vi.fn(),
     upsertBidboardSyncState: vi.fn(),
+    // Used by getCompanyId() inside the default Procore-lookup helper; returns undefined
+    // here so the helper short-circuits when no findExistingProject seam is injected.
+    getAutomationConfig: vi.fn(),
   },
 }));
 
@@ -97,6 +100,63 @@ describe("createBidBoardProjectFromDeal idempotency", () => {
     const createProject = vi.fn(async () => ({ success: true, projectId: "562949955849472", projectName: "jasonn ranches" } as any));
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs(createProject));
 
+    expect(createProject).toHaveBeenCalled();
+    expect(result.projectId).toBe("562949955849472");
+    expect(result.adopted).toBeFalsy();
+  });
+
+  // The Terraces/DFW-1-17326-ad scenario: the SyncHub mapping doesn't exist (the project was
+  // created manually in Procore after the UI create flow failed), but a Procore project with the
+  // exact number does. We must LINK it — not create a duplicate — and still write the sync mapping
+  // so the deal is connected and documents can sync.
+  it("links an existing Procore project by exact number when SyncHub has no mapping (manual creation)", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getBidboardMappingByProcoreProjectNumber).mockResolvedValue(undefined as any);
+
+    const createProject = vi.fn(async () => ({ success: true, projectId: "should-not-be-used" } as any));
+    const findExistingProject = vi.fn(async () => ({ id: "999000111", name: "terraces at highbury court" }));
+
+    const result = await bidboard.createBidBoardProjectFromDeal({
+      sourceSystem: "trock_crm" as const,
+      sourceDealId: "2a4b0d9f",
+      bidboardStage: "Estimate in Progress",
+      normalizedDealData: { dealname: "terraces at highbury court", project_number: "DFW-1-17326-ad" },
+      options: { syncDocuments: false, createProject, findExistingProject },
+    });
+
+    expect(findExistingProject).toHaveBeenCalledWith("DFW-1-17326-ad");
+    expect(createProject).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.projectId).toBe("999000111");
+    expect(result.adopted).toBe(true);
+    // Mapping must be written so the deal links to the manually-created Procore project.
+    expect(storage.createSyncMapping).toHaveBeenCalledWith(
+      expect.objectContaining({ bidboardProjectId: "999000111", procoreProjectNumber: "DFW-1-17326-ad" }),
+    );
+  });
+
+  it("creates a new project when no existing Procore project is found by number", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getBidboardMappingByProcoreProjectNumber).mockResolvedValue(undefined as any);
+
+    const createProject = vi.fn(async () => ({ success: true, projectId: "562949955849472", projectName: "x" } as any));
+    const findExistingProject = vi.fn(async () => null);
+
+    const result = await bidboard.createBidBoardProjectFromDeal({
+      sourceSystem: "trock_crm" as const,
+      sourceDealId: "deal-no-match",
+      bidboardStage: "Estimate in Progress",
+      normalizedDealData: { dealname: "x", project_number: "DFW-1-99999-zz" },
+      options: { syncDocuments: false, createProject, findExistingProject },
+    });
+
+    expect(findExistingProject).toHaveBeenCalledWith("DFW-1-99999-zz");
     expect(createProject).toHaveBeenCalled();
     expect(result.projectId).toBe("562949955849472");
     expect(result.adopted).toBeFalsy();
