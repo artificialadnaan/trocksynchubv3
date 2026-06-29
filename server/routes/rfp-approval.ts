@@ -364,6 +364,15 @@ async function renderRfpReviewPage(
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
+    // Escape server-supplied text before concatenating it into showResult()'s innerHTML, so a server
+    // message that contains markup (e.g. a CRM/HubSpot stage label in an ineligibility message) renders
+    // as text, not HTML.
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     function setLoading(btn, loading) {
       if (loading) {
         btn.disabled = true;
@@ -402,18 +411,18 @@ async function renderRfpReviewPage(
           throw new Error(raw || ('Request failed with status ' + resp.status));
         }
         if (data.success) {
-          const message = data.message || 'The deal has been updated in ${esc(source.label)} and a BidBoard project is being created in the background.';
-          showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + data.bidboardProjectId : ''), 'success');
+          const message = data.message ? escapeHtml(data.message) : 'The deal has been updated in ${esc(source.label)} and a BidBoard project is being created in the background.';
+          showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + escapeHtml(data.bidboardProjectId) : ''), 'success');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
           // Prefer the friendly user-facing message (e.g. the unauthorized-approver guidance);
           // fall back to the machine code in data.error only when no message is provided.
-          showResult('<strong>Error:</strong> ' + (data.message || data.error || 'Unknown error'), 'error');
+          showResult('<strong>Error:</strong> ' + escapeHtml(data.message || data.error || 'Unknown error'), 'error');
           setLoading(btn, false);
           decBtn.disabled = false;
         }
       } catch (e) {
-        showResult('<strong>Error:</strong> ' + e.message, 'error');
+        showResult('<strong>Error:</strong> ' + escapeHtml(e.message), 'error');
         setLoading(btn, false);
         decBtn.disabled = false;
       }
@@ -448,12 +457,12 @@ async function renderRfpReviewPage(
         } else {
           // Prefer the friendly user-facing message (e.g. the unauthorized-approver guidance);
           // fall back to the machine code in data.error only when no message is provided.
-          showResult('<strong>Error:</strong> ' + (data.message || data.error || 'Unknown error'), 'error');
+          showResult('<strong>Error:</strong> ' + escapeHtml(data.message || data.error || 'Unknown error'), 'error');
           setLoading(btn, false);
           appBtn.disabled = false;
         }
       } catch (e) {
-        showResult('<strong>Error:</strong> ' + e.message, 'error');
+        showResult('<strong>Error:</strong> ' + escapeHtml(e.message), 'error');
         setLoading(btn, false);
         appBtn.disabled = false;
       }
