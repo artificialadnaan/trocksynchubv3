@@ -19,6 +19,16 @@ let cronTask: ReturnType<typeof cron.schedule> | null = null;
 
 async function runPendingRfpDigest(): Promise<void> {
   try {
+    // Review links must use the public base URL. If it isn't configured, skip the
+    // send entirely rather than email out unusable localhost links.
+    const appUrl = process.env.APP_URL?.trim();
+    if (!appUrl) {
+      console.error(
+        "[pending-rfp-digest] APP_URL is not configured — skipping the digest to avoid sending unusable review links."
+      );
+      return;
+    }
+
     const rows = await db
       .select()
       .from(rfpApprovalRequests)
@@ -35,7 +45,8 @@ async function runPendingRfpDigest(): Promise<void> {
         editedFields: (r.editedFields as Record<string, unknown> | null) ?? null,
         sourceSystem: r.sourceSystem,
       })),
-      getRfpReviewRecipients
+      getRfpReviewRecipients,
+      appUrl
     );
     if (digest.skip || digest.recipients.length === 0) {
       console.log(

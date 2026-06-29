@@ -75,14 +75,18 @@ function formatDateSent(createdAt: Date | string | null | undefined): string {
 
 export async function buildPendingRfpDigest(
   rows: PendingRfpRow[],
-  resolveRecipients: RfpRecipientResolver
+  resolveRecipients: RfpRecipientResolver,
+  // Public base URL for the review links (prod: process.env.APP_URL). Required and
+  // passed in by the caller — the builder never falls back to localhost, so a
+  // missing config can't bake unusable links into a sent email (the scheduler
+  // refuses to send when it's absent).
+  appUrl: string
 ): Promise<PendingRfpDigest> {
   const pendingCount = rows.length;
   if (pendingCount === 0) {
     return { skip: true, recipients: [], subject: "", htmlBody: "", pendingCount: 0 };
   }
 
-  const appUrl = process.env.APP_URL || "http://localhost:5000";
   const recipientUnion = new Set<string>();
   const cells: Array<{
     projectName: string;
