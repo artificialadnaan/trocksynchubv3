@@ -1389,6 +1389,40 @@ export interface RfpApprovalAttachmentOptions {
   newFiles: Array<{ buffer: Buffer; originalname: string; mimetype?: string; size?: number }>;
 }
 
+/**
+ * The CANONICAL project-type digit an RFP approval will actually CREATE — the single source of truth
+ * shared by processRfpApproval (which selects the service vs non-service BidBoard stage from it) and
+ * the approve-route authorization gate, so the two can never drift.
+ *
+ * The precedence MIRRORS processRfpApproval's finalProjectTypeDigit derivation EXACTLY:
+ *   currentTypeDigit = parseProjectTypeFromNumber(project_number) ?? dealData.project_types ?? ''
+ *   base             = currentTypeDigit || editedFields.project_types || dealData.project_types || '2'
+ *   - if the approver edited project_types into a DIFFERENT routing group, the edited type wins
+ *     (processRfpApproval additionally rewrites the project number in that branch);
+ *   - otherwise the project-number-derived digit dominates. So a row with project_types '2' but a
+ *     project_number 'DFW-4-...' resolves to '4' — the SERVICE type the approval would actually
+ *     create, which the routed-type ('2') gate alone would miss.
+ *
+ * Returns the digit as a string (always at least '2' in practice via the fallback); null only if no
+ * digit can be derived at all.
+ */
+export function resolveEffectiveRfpProjectType(
+  dealData: Record<string, any> | null,
+  editedFields?: Record<string, any> | null,
+): string | null {
+  const currentProjectNumber = (dealData?.project_number ?? '') as string;
+  const currentTypeDigit = parseProjectTypeFromNumber(currentProjectNumber) ?? dealData?.project_types ?? '';
+  const submittedProjectType = editedFields?.project_types;
+
+  let finalProjectTypeDigit = currentTypeDigit || submittedProjectType || dealData?.project_types || '2';
+  if (submittedProjectType && submittedProjectType !== currentTypeDigit) {
+    finalProjectTypeDigit = submittedProjectType;
+  } else if (currentProjectNumber && !submittedProjectType && currentTypeDigit) {
+    finalProjectTypeDigit = currentTypeDigit;
+  }
+  return finalProjectTypeDigit ? String(finalProjectTypeDigit) : null;
+}
+
 export async function processRfpApproval(
   token: string,
   editedFields: Record<string, string>,
@@ -1435,18 +1469,21 @@ export async function processRfpApproval(
     const sourceDealId = identity.sourceDealId;
     const hubspotDealId = request.sourceSystem === 'hubspot' ? sourceDealId : null;
 
-    // Check if project type changed — update project number and HubSpot immediately
+    // Check if project type changed — update project number and HubSpot immediately.
+    // The canonical type digit (service vs non-service) is resolved via the shared helper so this
+    // processor and the approve-route authz gate pick the SAME type — no drift. See
+    // resolveEffectiveRfpProjectType; the inline branch below only rewrites the project NUMBER when the
+    // routing group changed (the type digit itself is already finalProjectTypeDigit).
     const submittedProjectType = editedFields.project_types;
     const currentProjectNumber = (dealData.project_number ?? '') as string;
     const currentTypeDigit = parseProjectTypeFromNumber(currentProjectNumber) ?? dealData.project_types ?? '';
 
     let finalProjectNumber = currentProjectNumber;
-    let finalProjectTypeDigit = currentTypeDigit || submittedProjectType || dealData.project_types || '2';
+    const finalProjectTypeDigit = resolveEffectiveRfpProjectType(dealData, editedFields) || '2';
 
     if (submittedProjectType && submittedProjectType !== currentTypeDigit) {
       const updatedProjectNumber = replaceProjectTypeInNumber(currentProjectNumber, submittedProjectType);
       finalProjectNumber = updatedProjectNumber;
-      finalProjectTypeDigit = submittedProjectType;
 
       try {
         if (hubspotDealId) await updateHubSpotDeal(hubspotDealId, {
@@ -1458,8 +1495,6 @@ export async function processRfpApproval(
         log(`[rfp-approval] Warning: Failed to update project number in HubSpot: ${err.message}`, 'rfp');
         // Non-fatal — continue with BidBoard creation
       }
-    } else if (currentProjectNumber && !submittedProjectType && currentTypeDigit) {
-      finalProjectTypeDigit = currentTypeDigit;
     }
 
     const changedFields: Record<string, string> = {};

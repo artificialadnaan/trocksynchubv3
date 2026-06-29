@@ -8,6 +8,7 @@ import {
   checkRfpApprovalSourceEligibility,
   isAuthorizedRfpApprover,
   isRfpApprovalRequestExpired,
+  resolveEffectiveRfpProjectType,
   resolveRfpDescription,
 } from "../rfp-approval";
 
@@ -580,26 +581,30 @@ export function registerRfpApprovalRoutes(app: Express) {
           return res.status(409).json({ success: false, error: `Request already ${request.status}` });
         }
 
-        // Authorize the submitter against the routing source (getRfpReviewRecipients / rfp_approver_config)
-        // plus the always-CC'd admin allowlist. TWO checks, because processRfpApproval honors an edited
-        // project_types downstream (project number + BidBoard creation):
-        //   (1) the STORED (as-received) project_types — they must be a legit approver for the RFP they got;
-        //   (2) if they EDITED project_types to a DIFFERENT routing group, that edited type too — otherwise a
-        //       non-service approver of a type-2 RFP could switch it to type 4 and approve a service project.
-        // (dealData.project_types is the CURRENT routed type, refreshable from source; a frozen send-time
-        // recipient snapshot — and binding the action to the recipient rather than a form email — is the
-        // separate recipient-binding follow-up #47.)
-        const storedProjectTypes = (request.dealData as Record<string, any> | null)?.project_types;
-        const editedProjectTypes = editedFields?.project_types;
-        const routingGroupChanged =
-          editedProjectTypes != null &&
-          String(editedProjectTypes).trim() !== '' &&
-          String(editedProjectTypes).trim() !== String(storedProjectTypes ?? '').trim();
-        const authorizedForReceived = await isAuthorizedRfpApprover(approverEmail, storedProjectTypes, request.sourceSystem);
-        const authorizedForEdited = routingGroupChanged
-          ? await isAuthorizedRfpApprover(approverEmail, editedProjectTypes, request.sourceSystem)
-          : true;
-        if (!authorizedForReceived || !authorizedForEdited) {
+        // Authorize the submitter (against rfp_approver_config + the always-CC'd admin allowlist) for
+        // BOTH project types in play, because processRfpApproval can create a project of a DIFFERENT
+        // type than the one the RFP was routed/received as:
+        //   (1) RECEIVED — the as-received routing type (dealData.project_types). They must be a legit
+        //       approver for the RFP they were actually sent.
+        //   (2) CREATED  — the CANONICAL type the approval will actually create. processRfpApproval
+        //       selects the service vs non-service BidBoard stage from finalProjectTypeDigit, which is
+        //       dominated by parseProjectTypeFromNumber(project_number) (and an edited project_types).
+        //       A row with project_types '2' but project_number 'DFW-4-...' creates a SERVICE ('4')
+        //       project, so a non-service approver must NOT be able to approve it — even with no edit.
+        //       resolveEffectiveRfpProjectType is the SAME single source the processor derives
+        //       finalProjectTypeDigit from, so the gate and the processor can never drift. This created
+        //       check subsumes the old edited-project_types check (when project_types is edited into a
+        //       new routing group, the canonical type IS the edited type).
+        // Both must pass; the admin/global-CC exemption lives inside isAuthorizedRfpApprover.
+        // (dealData.project_types is the CURRENT routed type, refreshable from source; a frozen
+        // send-time recipient snapshot — and binding the action to the recipient rather than a form
+        // email — are the separate recipient-binding follow-ups tracked in #47.)
+        const dealData = (request.dealData as Record<string, any> | null);
+        const receivedProjectType = dealData?.project_types;
+        const createdProjectType = resolveEffectiveRfpProjectType(dealData, editedFields);
+        const authorizedForReceived = await isAuthorizedRfpApprover(approverEmail, receivedProjectType, request.sourceSystem);
+        const authorizedForCreated = await isAuthorizedRfpApprover(approverEmail, createdProjectType, request.sourceSystem);
+        if (!authorizedForReceived || !authorizedForCreated) {
           await auditRouteAttempt(
             request,
             'rfp_approval_attempt',
@@ -607,7 +612,7 @@ export function registerRfpApprovalRoutes(app: Express) {
             approverEmail,
             !authorizedForReceived
               ? 'Approver email not in authorized approver set for this RFP type'
-              : 'Approver not in the authorized set for the edited project type (routing-group change)',
+              : 'Approver not in the authorized set for the canonical created project type',
           );
           return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
         }

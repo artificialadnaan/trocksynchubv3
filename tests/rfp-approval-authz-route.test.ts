@@ -26,16 +26,35 @@ vi.mock("../server/storage.ts", () => ({
   },
 }));
 
-vi.mock("../server/rfp-approval.ts", () => ({
-  processRfpApproval: processRfpApprovalMock,
-  processRfpDecline: processRfpDeclineMock,
-  resolveRfpDescription: vi.fn(() => ""),
-  isRfpApprovalRequestExpired: vi.fn(() => false),
-  buildExpiredRfpMessage: vi.fn(() => "expired"),
-  checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
-  cancelIneligibleRfpApproval: vi.fn(),
-  isAuthorizedRfpApprover: authorize,
-}));
+vi.mock("../server/rfp-approval.ts", async () => {
+  // Use the REAL canonical-type resolver so the route's "created type" gate is exercised against the
+  // exact derivation the processor uses. It only depends on the dependency-free constants module, so
+  // we can build it here without pulling in the heavy real rfp-approval module.
+  const { parseProjectTypeFromNumber } = await import("../server/constants.ts");
+  const resolveEffectiveRfpProjectType = (dealData: any, editedFields?: any): string | null => {
+    const currentProjectNumber = (dealData?.project_number ?? "") as string;
+    const currentTypeDigit = parseProjectTypeFromNumber(currentProjectNumber) ?? dealData?.project_types ?? "";
+    const submittedProjectType = editedFields?.project_types;
+    let finalProjectTypeDigit = currentTypeDigit || submittedProjectType || dealData?.project_types || "2";
+    if (submittedProjectType && submittedProjectType !== currentTypeDigit) {
+      finalProjectTypeDigit = submittedProjectType;
+    } else if (currentProjectNumber && !submittedProjectType && currentTypeDigit) {
+      finalProjectTypeDigit = currentTypeDigit;
+    }
+    return finalProjectTypeDigit ? String(finalProjectTypeDigit) : null;
+  };
+  return {
+    processRfpApproval: processRfpApprovalMock,
+    processRfpDecline: processRfpDeclineMock,
+    resolveRfpDescription: vi.fn(() => ""),
+    isRfpApprovalRequestExpired: vi.fn(() => false),
+    buildExpiredRfpMessage: vi.fn(() => "expired"),
+    checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
+    cancelIneligibleRfpApproval: vi.fn(),
+    isAuthorizedRfpApprover: authorize,
+    resolveEffectiveRfpProjectType,
+  };
+});
 
 function makeRequest(overrides: Partial<any> = {}) {
   return {
@@ -152,6 +171,53 @@ describe("RFP approve/decline route authorization", () => {
 
       expect(response.status).toBe(202);
       expect(body).toMatchObject({ success: true, queued: true });
+    });
+  });
+
+  it("rejects a non-service approver when the project NUMBER encodes a service type (canonical-type bypass, no edit)", async () => {
+    // The bypass: dealData.project_types is the routed type '2' (non-service) but the project NUMBER
+    // is 'DFW-4-...' (type 4 = service). processRfpApproval derives finalProjectTypeDigit '4' from the
+    // number and would create a SERVICE project. The OLD gate (routed project_types only) missed this;
+    // the canonical-created check catches it WITHOUT any edit.
+    requestRow.current = makeRequest({
+      projectNumber: "DFW-4-42001",
+      dealData: { dealname: "Sneaky Service", project_number: "DFW-4-42001", project_types: "2", attachments: [], description: "Scope" },
+    });
+    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "sgibson@trockgc.com");
+      form.append("editedFields", JSON.stringify({})); // NO edit — the bypass needs none
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+      const body = await response.json();
+
+      expect(response.status).toBe(403);
+      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+      // Authorized for the received routing type (2) but checked AND rejected against the canonical
+      // created type (4 — parsed from the project number), which the non-service approver lacks.
+      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "2", "hubspot");
+      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
+    });
+  });
+
+  it("allows a service approver on a row whose project NUMBER encodes a service type (canonical match → 202)", async () => {
+    requestRow.current = makeRequest({
+      projectNumber: "DFW-4-42001",
+      dealData: { dealname: "Service Job", project_number: "DFW-4-42001", project_types: "2", attachments: [], description: "Scope" },
+    });
+    authorize.mockResolvedValue(true); // service approver — authorized for both received (2) and created (4)
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "jhelms@trockgc.com");
+      form.append("editedFields", JSON.stringify({}));
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+      const body = await response.json();
+
+      expect(response.status).toBe(202);
+      expect(body).toMatchObject({ success: true, queued: true });
+      // The canonical created type (4) was authorized, not just the routed type (2).
+      expect(authorize).toHaveBeenCalledWith("jhelms@trockgc.com", "4", "hubspot");
     });
   });
 

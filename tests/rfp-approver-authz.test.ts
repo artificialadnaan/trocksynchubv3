@@ -127,3 +127,33 @@ describe("isAuthorizedRfpApprover", () => {
     await expect(isAuthorizedRfpApprover("adnaan.iqbal@gmail.com", "2", "trock_crm")).resolves.toBe(true);
   });
 });
+
+describe("resolveEffectiveRfpProjectType (canonical created type — single source for the authz gate)", () => {
+  it("derives the type from the project NUMBER even when project_types disagrees (the bypass case)", async () => {
+    const { resolveEffectiveRfpProjectType } = await import("../server/rfp-approval.ts");
+    // project_types says non-service '2' but the number encodes service '4' → the SERVICE type wins,
+    // which is exactly what processRfpApproval creates the BidBoard project as.
+    expect(resolveEffectiveRfpProjectType({ project_number: "DFW-4-06426-ah", project_types: "2" })).toBe("4");
+  });
+
+  it("lets an EDITED project_types override into a different routing group", async () => {
+    const { resolveEffectiveRfpProjectType } = await import("../server/rfp-approval.ts");
+    expect(
+      resolveEffectiveRfpProjectType({ project_number: "DFW-2-06426-ah", project_types: "2" }, { project_types: "4" }),
+    ).toBe("4");
+  });
+
+  it("keeps the project-number type when an edit matches it (no spurious change)", async () => {
+    const { resolveEffectiveRfpProjectType } = await import("../server/rfp-approval.ts");
+    expect(
+      resolveEffectiveRfpProjectType({ project_number: "DFW-2-06426-ah", project_types: "2" }, { project_types: "2" }),
+    ).toBe("2");
+  });
+
+  it("falls back to project_types when there is no project number, then to '2'", async () => {
+    const { resolveEffectiveRfpProjectType } = await import("../server/rfp-approval.ts");
+    expect(resolveEffectiveRfpProjectType({ project_types: "5" })).toBe("5");
+    expect(resolveEffectiveRfpProjectType({})).toBe("2");
+    expect(resolveEffectiveRfpProjectType(null)).toBe("2");
+  });
+});
