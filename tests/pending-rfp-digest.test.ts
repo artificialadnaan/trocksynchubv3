@@ -77,6 +77,22 @@ describe("buildPendingRfpDigest", () => {
     expect(digest.htmlBody).not.toContain("localhost");
   });
 
+  it("strips a trailing slash from the base URL (no // in the link)", async () => {
+    const rows: PendingRfpRow[] = [
+      {
+        token: "abc123",
+        createdAt: new Date("2026-06-20T15:00:00Z"),
+        dealData: { dealname: "Roof Replacement", project_number: "DFW-2-555", project_types: "2" },
+        sourceSystem: "hubspot",
+      },
+    ];
+
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, "https://hub.trockgc.com/", isExpired);
+
+    expect(digest.htmlBody).toContain("https://hub.trockgc.com/rfp-review/abc123");
+    expect(digest.htmlBody).not.toContain("//rfp-review");
+  });
+
   it("'awaiting' column reflects the per-row resolver output", async () => {
     const rows: PendingRfpRow[] = [
       {

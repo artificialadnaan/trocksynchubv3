@@ -96,6 +96,9 @@ export async function buildPendingRfpDigest(
     return { skip: true, recipients: [], subject: "", htmlBody: "", pendingCount: 0 };
   }
 
+  // Strip any trailing slash so a configured base URL like "https://host/" doesn't
+  // produce a malformed "//rfp-review/..." link.
+  const baseUrl = appUrl.replace(/\/+$/, "");
   const recipientUnion = new Set<string>();
   const cells: Array<{
     projectName: string;
@@ -122,7 +125,7 @@ export async function buildPendingRfpDigest(
         "—"
     );
     const dateSent = formatDateSent(row.createdAt);
-    const reviewUrl = `${appUrl}/rfp-review/${row.token}`;
+    const reviewUrl = `${baseUrl}/rfp-review/${row.token}`;
 
     // "Who it's awaiting" = the approver recipients for this row, via the SAME resolver the
     // approval email uses (so Item-3's Tim flows in automatically). Inputs mirror the live
