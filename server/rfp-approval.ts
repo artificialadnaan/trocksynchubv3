@@ -672,7 +672,9 @@ export async function isAuthorizedRfpApprover(
     // A missing config row is the legit fallback; a thrown read is handled by the catch below.
     configuredRecipients = configured?.length ? configured : hardcodedRfpSafetyNetRecipients(type);
   } catch (error: any) {
-    console.warn(`[rfp-approval] RFP approver config read failed during authorization; denying approver ${candidate}: ${error?.message || error}`);
+    // PII: do NOT log the candidate approver email here — who attempted is captured in the audit
+    // record (auditRouteAttempt logs approverEmail). Keep only the failure + routing context.
+    console.warn(`[rfp-approval] RFP approver config read failed during authorization; denying (projectType=${type || 'none'}, sourceSystem=${source}): ${error?.message || error}`);
     return false;
   }
 
