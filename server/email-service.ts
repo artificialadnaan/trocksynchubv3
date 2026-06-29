@@ -109,8 +109,9 @@ function normalizeOutgoingEmailHtml(htmlBody: string): string {
     );
 }
 
-// Global CC recipients for all outgoing emails
-const GLOBAL_CC_RECIPIENTS = [
+// Global CC recipients for all outgoing emails. Exported so the RFP approval-authz layer can treat
+// these always-CC'd admins/directors as authorized approvers (they receive every RFP review email).
+export const GLOBAL_CC_RECIPIENTS = [
   'adnaan.iqbal@gmail.com',
   'bbell@trockgc.com',
 ];

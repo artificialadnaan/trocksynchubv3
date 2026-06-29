@@ -52,6 +52,7 @@ describe("RFP approval route", () => {
       buildExpiredRfpMessage: vi.fn(() => "expired"),
       checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
       cancelIneligibleRfpApproval: vi.fn(),
+      isAuthorizedRfpApprover: vi.fn(async () => true),
     }));
 
     const { registerRfpApprovalRoutes } = await import("../server/routes/rfp-approval.ts");

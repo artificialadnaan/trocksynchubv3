@@ -1,0 +1,105 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Service-level coverage of isAuthorizedRfpApprover. Mirrors tests/rfp-approver-config.test.ts:
+// mock the deps, import the REAL rfp-approval module fresh per test (vi.resetModules clears the
+// per-process recipient cache), exercise the real getRfpReviewRecipients-backed authz logic.
+
+const getRfpApproverConfigs = vi.hoisted(() => vi.fn());
+const approverConfigRows = vi.hoisted(() => [] as Array<{
+  projectType: string;
+  sourceSystem: string | null;
+  approverEmails: string[];
+  isActive: boolean;
+}>);
+
+function insertApproverConfig(row: {
+  projectType: string;
+  sourceSystem: string | null;
+  approverEmails: string[];
+  isActive?: boolean;
+}) {
+  approverConfigRows.push({ isActive: true, ...row });
+}
+
+vi.mock("../server/storage.ts", () => ({
+  storage: {
+    getRfpApproverConfigs,
+  },
+}));
+
+vi.mock("../server/hubspot.ts", () => ({
+  getHubSpotClient: vi.fn(),
+  getAccessToken: vi.fn(),
+  getDealOwnerInfo: vi.fn(),
+  updateHubSpotDeal: vi.fn(),
+  updateHubSpotDealStage: vi.fn(),
+  syncSingleHubSpotDeal: vi.fn(),
+}));
+
+vi.mock("../server/email-service.ts", () => ({
+  sendEmail: vi.fn(),
+  renderTemplate: vi.fn(),
+  // Mirrors the real always-CC admin allowlist — these directors receive every review email.
+  GLOBAL_CC_RECIPIENTS: ["adnaan.iqbal@gmail.com", "bbell@trockgc.com"],
+}));
+
+vi.mock("../server/procore-hubspot-sync.ts", () => ({
+  resolveHubspotStageId: vi.fn(),
+}));
+
+vi.mock("../server/index.ts", () => ({
+  log: vi.fn(),
+}));
+
+describe("isAuthorizedRfpApprover", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    getRfpApproverConfigs.mockReset();
+    approverConfigRows.length = 0;
+    getRfpApproverConfigs.mockImplementation(async () => approverConfigRows.filter((row) => row.isActive));
+  });
+
+  it("ALLOWS a service approver on a service ('4') RFP (safety-net routing)", async () => {
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    // Safety net for type 4 = James + Colby.
+    await expect(isAuthorizedRfpApprover("cburling@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+    await expect(isAuthorizedRfpApprover("jhelms@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+  });
+
+  it("REJECTS a non-service approver (sgibson) on a service ('4') RFP", async () => {
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    await expect(isAuthorizedRfpApprover("sgibson@trockgc.com", "4", "hubspot")).resolves.toBe(false);
+  });
+
+  it("ALLOWS a non-service approver (sgibson) on a non-service ('2') RFP", async () => {
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    // Safety net for non-4 = Sidney + James.
+    await expect(isAuthorizedRfpApprover("sgibson@trockgc.com", "2", "hubspot")).resolves.toBe(true);
+  });
+
+  it("ALLOWS an always-CC admin/director (bbell / adnaan) outside the config (override exemption)", async () => {
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    await expect(isAuthorizedRfpApprover("bbell@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+    await expect(isAuthorizedRfpApprover("adnaan.iqbal@gmail.com", "4", "trock_crm")).resolves.toBe(true);
+  });
+
+  it("compares case-insensitively and trims surrounding whitespace", async () => {
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    await expect(isAuthorizedRfpApprover("  CBurling@TrockGC.com  ", "4", "hubspot")).resolves.toBe(true);
+  });
+
+  it("rejects an empty/missing email", async () => {
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    await expect(isAuthorizedRfpApprover("", "4", "hubspot")).resolves.toBe(false);
+    await expect(isAuthorizedRfpApprover(undefined, "2", "hubspot")).resolves.toBe(false);
+  });
+
+  it("authorizes against the SAME rfp_approver_config source the routing uses", async () => {
+    insertApproverConfig({ projectType: "4", sourceSystem: null, approverEmails: ["custom-approver@trockgc.com"] });
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    // Config row overrides the safety net: the configured approver is allowed...
+    await expect(isAuthorizedRfpApprover("custom-approver@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+    // ...and the old safety-net address is NOT (it is no longer the routed approver).
+    await expect(isAuthorizedRfpApprover("cburling@trockgc.com", "4", "hubspot")).resolves.toBe(false);
+  });
+});

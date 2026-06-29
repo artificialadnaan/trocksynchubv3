@@ -6,7 +6,7 @@ import { isUniqueViolation, storage, type SourceSystem } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from './constants';
 import { resolveHubspotStageId } from './procore-hubspot-sync';
-import { sendEmail, renderTemplate } from './email-service';
+import { sendEmail, renderTemplate, GLOBAL_CC_RECIPIENTS } from './email-service';
 import { log } from './index';
 import {
   buildBidBoardCreatedCallbackTargetUrl,
@@ -595,6 +595,45 @@ export async function getRfpReviewRecipients(projectType: string | null | undefi
   }
   rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: fallbackRecipients });
   return fallbackRecipients;
+}
+
+const normalizeApproverEmail = (email: string | null | undefined): string =>
+  String(email || '').trim().toLowerCase();
+
+/**
+ * Admin / always-CC approvers who legitimately receive EVERY RFP review email (they are CC'd on all
+ * outgoing mail via the email layer's GLOBAL_CC list) plus the RFP admin address. These people are
+ * NOT stored in rfp_approver_config but may approve/decline any RFP regardless of its project-type
+ * routing — so the authz check must exempt them. Single-sourced from email-service to avoid drift.
+ */
+function getRfpAdminApprovers(): string[] {
+  return [RFP_ADMIN_EMAIL, ...(GLOBAL_CC_RECIPIENTS || [])];
+}
+
+/**
+ * Authorization gate for the PUBLIC RFP review-link approve/decline actions. Resolves the authorized
+ * approver set from the SAME source the routing/notification uses — getRfpReviewRecipients
+ * (rfp_approver_config with the hardcoded safety net) — UNION the admin/global-CC allowlist who are
+ * CC'd on every review email. Comparison is case-insensitive and trimmed.
+ *
+ * NOTE: this intentionally does NOT gate the HMAC-secured override-approve path
+ * (processRfpApproval `force: true`, /api/rfp-requests/:id/override-approve), which is authenticated
+ * server-to-server and may legitimately carry a director's email outside any config row.
+ */
+export async function isAuthorizedRfpApprover(
+  approverEmail: string | null | undefined,
+  projectType: string | null | undefined,
+  sourceSystem: string | null | undefined = 'hubspot',
+): Promise<boolean> {
+  const candidate = normalizeApproverEmail(approverEmail);
+  if (!candidate) return false;
+  const recipients = await getRfpReviewRecipients(projectType, sourceSystem);
+  const authorized = new Set(
+    [...recipients, ...getRfpAdminApprovers()]
+      .map(normalizeApproverEmail)
+      .filter(Boolean),
+  );
+  return authorized.has(candidate);
 }
 
 const RFP_DEAL_PROPERTIES = [

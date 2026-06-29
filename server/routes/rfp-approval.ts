@@ -6,9 +6,13 @@ import {
   buildExpiredRfpMessage,
   cancelIneligibleRfpApproval,
   checkRfpApprovalSourceEligibility,
+  isAuthorizedRfpApprover,
   isRfpApprovalRequestExpired,
   resolveRfpDescription,
 } from "../rfp-approval";
+
+const UNAUTHORIZED_APPROVER_MESSAGE =
+  'This email address is not an authorized approver for this RFP. Please use the address the review request was sent to, or contact an administrator.';
 
 const inFlightApprovalTokens = new Set<string>();
 
@@ -30,7 +34,7 @@ async function auditRouteAttempt(request: any, action: string, outcome: string, 
     entityType: 'deal',
     entityId: identity.sourceDealId,
     source: 'rfp-approval',
-    status: outcome === 'expired' || outcome === 'cancelled_source_ineligible' ? 'failed' : 'success',
+    status: outcome === 'expired' || outcome === 'cancelled_source_ineligible' || outcome === 'unauthorized_approver' ? 'failed' : 'success',
     details: {
       approverEmail: approverEmail || null,
       sourceSystem: identity.sourceSystem,
@@ -563,6 +567,20 @@ export function registerRfpApprovalRoutes(app: Express) {
           return res.status(409).json({ success: false, error: `Request already ${request.status}` });
         }
 
+        // Authorize the submitter against the SAME routing source that decided who received this RFP
+        // (getRfpReviewRecipients / rfp_approver_config), plus the always-CC'd admin allowlist. The
+        // original (un-edited) project type governs authorization — editing the form must not let an
+        // unauthorized reviewer re-route themselves into the approver set.
+        const authorized = await isAuthorizedRfpApprover(
+          approverEmail,
+          (request.dealData as Record<string, any> | null)?.project_types,
+          request.sourceSystem,
+        );
+        if (!authorized) {
+          await auditRouteAttempt(request, 'rfp_approval_attempt', 'unauthorized_approver', approverEmail, 'Approver email not in authorized approver set for this RFP type');
+          return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
+        }
+
         const eligibility = await checkRfpApprovalSourceEligibility(request);
         if (!eligibility.eligible) {
           const result = await cancelIneligibleRfpApproval(
@@ -635,6 +653,19 @@ export function registerRfpApprovalRoutes(app: Express) {
         message,
         expiredAt: request.tokenExpiresAt,
       });
+    }
+
+    // Decline shares the public review-link surface and the same authorized-approver set as approve:
+    // only a routed approver (or an always-CC'd admin) may act on the RFP. (There is no HMAC override
+    // path for decline, so no exemption is needed here.)
+    const declineAuthorized = await isAuthorizedRfpApprover(
+      declinerEmail,
+      (request.dealData as Record<string, any> | null)?.project_types,
+      request.sourceSystem,
+    );
+    if (!declineAuthorized) {
+      await auditRouteAttempt(request, 'rfp_decline_attempt', 'unauthorized_approver', declinerEmail, 'Decliner email not in authorized approver set for this RFP type');
+      return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
     }
 
     const { processRfpDecline } = await import('../rfp-approval');
