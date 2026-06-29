@@ -111,11 +111,11 @@ describe("buildPendingRfpDigest", () => {
     expect(digestFor(digest, TIM)).toBeUndefined();
   });
 
-  it("routes a pending row by its EDITED project_types (the type the approval will create)", async () => {
-    // A pending row whose project_types was edited up to service (4) — both the baseline number (DFW-2)
-    // and raw project_types say non-service (2), but the approval will CREATE a service project. The
-    // digest must bucket under the SERVICE approvers (the created type the approve gate authorizes),
-    // not the stale non-service set. Without passing editedFields the resolver would return 2.
+  it("routes an edited pending row to the INTERSECTION of the baseline and created approvers", async () => {
+    // A pending row edited from the baseline non-service type (DFW-2 / project_types 2) up to service
+    // (4). The approve gate requires authorization for BOTH the baseline (2) AND the created (4) type,
+    // so only a DUAL-authorized approver can finalize it. James is in both sets; Colby (4-only) would
+    // be 403'd on the baseline and Sidney/Tim (2-only) on the created type — so only James is awaited.
     const rows: PendingRfpRow[] = [
       {
         token: "tok-edited",
@@ -128,7 +128,8 @@ describe("buildPendingRfpDigest", () => {
 
     const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
 
-    expect(digest.perRecipient.map((r) => r.recipient).sort()).toEqual([COLBY, JAMES].sort());
+    expect(digest.perRecipient.map((r) => r.recipient)).toEqual([JAMES]);
+    expect(digestFor(digest, COLBY)).toBeUndefined();
     expect(digestFor(digest, SIDNEY)).toBeUndefined();
     expect(digestFor(digest, TIM)).toBeUndefined();
   });

@@ -196,25 +196,25 @@ export async function buildPendingRfpDigest(
     const dateSent = formatDateSent(row.createdAt);
     const reviewUrl = `${baseUrl}/rfp-review/${row.token}`;
 
-    // "Who it's awaiting" = the approver recipients for this row, via the SAME resolver the
-    // approval email uses (so Item-3's Tim flows in automatically). Routes by the CANONICAL type the
-    // approval would create — resolveEffectiveRfpProjectType(dealData, editedFields), the same source
-    // the approve gate authorizes the created type against — NOT the raw project_types. So a row with
-    // project_types '2' but project_number 'DFW-4-...' buckets under the SERVICE approvers who can act,
-    // and a pending row whose project_types was edited into a new routing group buckets under the type
-    // the approval will actually create (not the stale routed type). No-op for consistent rows.
-    const awaiting = Array.from(
-      new Set(
-        (
-          await resolveRecipients(
-            resolveEffectiveRfpProjectType(dealData, editedFields),
-            row.sourceSystem ?? null
-          )
-        )
-          .map((r) => String(r ?? "").trim())
-          .filter((r) => r.length > 0)
-      )
+    // "Who it's awaiting" = the approvers who can ACTUALLY act on this row, mirroring the approve gate
+    // EXACTLY: authorized for BOTH the BASELINE (project-number) type AND the CREATED (edited) type.
+    // Uses the same resolver the approval email + gate use (so Item-3's Tim flows in). For an unedited
+    // row baseline === created, so this is just that type's set (and we skip the second lookup); for an
+    // edited pending row (e.g. project_types reset/edited away from the number's type) it's the
+    // INTERSECTION — only a dual-authorized approver can finalize a type change, so bucketing under the
+    // created type alone would remind created-type approvers the gate would 403.
+    const baselineType = resolveEffectiveRfpProjectType(dealData);
+    const createdType = resolveEffectiveRfpProjectType(dealData, editedFields);
+    const normRecipients = (list: string[]) =>
+      new Set(list.map((r) => String(r ?? "").trim()).filter((r) => r.length > 0));
+    const baselineRecipients = normRecipients(
+      await resolveRecipients(baselineType, row.sourceSystem ?? null)
     );
+    const createdRecipients =
+      createdType === baselineType
+        ? baselineRecipients
+        : normRecipients(await resolveRecipients(createdType, row.sourceSystem ?? null));
+    const awaiting = Array.from(baselineRecipients).filter((r) => createdRecipients.has(r));
 
     const cell: DigestCell = { projectName, projectNumber, dateSent, awaiting, reviewUrl };
     // Scope: this RFP only goes to its own authorized approvers.
