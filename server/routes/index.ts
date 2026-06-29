@@ -49,6 +49,7 @@ import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
 import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
 import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
+import { startPendingRfpDigestScheduler } from "../cron/pendingRfpDigestScheduler";
 
 const PgSession = connectPgSimple(session);
 
@@ -119,6 +120,7 @@ export async function registerRoutes(
   startAlertScheduler();
   startBidBoardCallbackWorker();
   startTrockCrmRelayScheduler();
+  startPendingRfpDigestScheduler();
 
   // Initialize polling systems from saved config
   initPolling().catch((err: any) => {

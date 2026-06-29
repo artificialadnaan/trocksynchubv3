@@ -569,8 +569,8 @@ function hardcodedRfpSafetyNetRecipients(type: string): string[] {
     // Project type 4: James + Colby
     return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
   }
-  // All other project types: Sidney + James
-  return ['sgibson@trockgc.com', 'jhelms@trockgc.com'];
+  // All other project types: Sidney + James + Tim (non-service routing — kept in sync with main's #45 change)
+  return ['sgibson@trockgc.com', 'jhelms@trockgc.com', 'tmitchell@trockgc.com'];
 }
 
 /**
