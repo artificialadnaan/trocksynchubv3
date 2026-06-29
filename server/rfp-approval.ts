@@ -6,7 +6,11 @@ import { isUniqueViolation, storage, type SourceSystem } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from './constants';
 import { resolveHubspotStageId } from './procore-hubspot-sync';
-import { sendEmail, renderTemplate, GLOBAL_CC_RECIPIENTS } from './email-service';
+import { sendEmail, renderTemplate } from './email-service';
+// Namespace-access GLOBAL_CC_RECIPIENTS (see getRfpAdminApprovers) rather than a named import: a
+// partial email-service mock in a test that omits it then resolves to undefined (handled by `|| []`)
+// instead of every such mock having to re-export it.
+import * as emailService from './email-service';
 import { log } from './index';
 import {
   buildBidBoardCreatedCallbackTargetUrl,
@@ -629,7 +633,7 @@ const normalizeApproverEmail = (email: string | null | undefined): string =>
  * routing — so the authz check must exempt them. Single-sourced from email-service to avoid drift.
  */
 function getRfpAdminApprovers(): string[] {
-  return [RFP_ADMIN_EMAIL, ...(GLOBAL_CC_RECIPIENTS || [])];
+  return [RFP_ADMIN_EMAIL, ...(emailService.GLOBAL_CC_RECIPIENTS || [])];
 }
 
 /**

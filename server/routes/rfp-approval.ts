@@ -572,9 +572,12 @@ export function registerRfpApprovalRoutes(app: Express) {
         }
 
         // Authorize the submitter against the SAME routing source that decided who received this RFP
-        // (getRfpReviewRecipients / rfp_approver_config), plus the always-CC'd admin allowlist. The
-        // original (un-edited) project type governs authorization — editing the form must not let an
-        // unauthorized reviewer re-route themselves into the approver set.
+        // (getRfpReviewRecipients / rfp_approver_config), plus the always-CC'd admin allowlist. Uses the
+        // request's STORED project_types (not a form field — a reviewer can't re-route themselves by
+        // editing the form). NOTE: dealData.project_types is refreshable from the source, so this is the
+        // CURRENT routed type, not a frozen send-time snapshot — persisting the routed recipients at send
+        // time (so a post-send type/config change can't admit/reject the wrong approver) is tracked in the
+        // recipient-binding follow-up (#47).
         const authorized = await isAuthorizedRfpApprover(
           approverEmail,
           (request.dealData as Record<string, any> | null)?.project_types,
