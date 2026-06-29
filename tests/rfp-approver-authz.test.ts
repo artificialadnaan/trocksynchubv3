@@ -102,4 +102,28 @@ describe("isAuthorizedRfpApprover", () => {
     // ...and the old safety-net address is NOT (it is no longer the routed approver).
     await expect(isAuthorizedRfpApprover("cburling@trockgc.com", "4", "hubspot")).resolves.toBe(false);
   });
+
+  it("FAILS CLOSED when the approver-config read THROWS (does not authorize the safety net)", async () => {
+    // Simulate rfp_approver_config being temporarily unreadable (DB error) while the request row
+    // itself is readable. The safety-net addresses MUST NOT be authorized off a config read error —
+    // otherwise the route would approve even though the live config can't confirm authorization.
+    getRfpApproverConfigs.mockRejectedValue(new Error("db unreadable"));
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    // Safety-net addresses for a service ('4') RFP are denied because the config could not be read.
+    await expect(isAuthorizedRfpApprover("cburling@trockgc.com", "4", "hubspot")).resolves.toBe(false);
+    await expect(isAuthorizedRfpApprover("jhelms@trockgc.com", "4", "hubspot")).resolves.toBe(false);
+    // Non-service safety-net address is likewise denied on a read error.
+    await expect(isAuthorizedRfpApprover("sgibson@trockgc.com", "2", "hubspot")).resolves.toBe(false);
+    // The route consumes this false → returns 403 and never calls processRfpApproval (proven in
+    // tests/rfp-approval-authz-route.test.ts "rejects an unauthorized approver with 403").
+  });
+
+  it("still authorizes a config-INDEPENDENT admin/director even when the config read THROWS", async () => {
+    // The always-CC admin allowlist comes from email-service, not the DB, so a transient config
+    // read failure must NOT lock out a director (bbell / adnaan).
+    getRfpApproverConfigs.mockRejectedValue(new Error("db unreadable"));
+    const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
+    await expect(isAuthorizedRfpApprover("bbell@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+    await expect(isAuthorizedRfpApprover("adnaan.iqbal@gmail.com", "2", "trock_crm")).resolves.toBe(true);
+  });
 });

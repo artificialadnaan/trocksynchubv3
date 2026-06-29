@@ -559,6 +559,38 @@ async function uploadFileToHubSpotAndAttachToDeal(
 const RFP_APPROVER_CACHE_TTL_MS = 60_000;
 const rfpApproverCache = new Map<string, { timestamp: number; recipients: string[] }>();
 
+/**
+ * Hardcoded routing used ONLY when rfp_approver_config has no matching active row — the legit
+ * intended fallback. (A config READ ERROR is a different, untrustworthy case; see
+ * selectConfiguredRfpRecipients + isAuthorizedRfpApprover.)
+ */
+function hardcodedRfpSafetyNetRecipients(type: string): string[] {
+  if (type === '4') {
+    // Project type 4: James + Colby
+    return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+  }
+  // All other project types: Sidney + James
+  return ['sgibson@trockgc.com', 'jhelms@trockgc.com'];
+}
+
+/**
+ * Read rfp_approver_config and select the best-matching active row's approver emails, or return
+ * null when NO active row matches (the legit "fall back to the hardcoded safety net" case).
+ *
+ * IMPORTANT: read errors are NOT swallowed here — they PROPAGATE so the authorization path
+ * (isAuthorizedRfpApprover) can fail closed. The non-security notification path
+ * (getRfpReviewRecipients) keeps catching them and using the safety net.
+ */
+async function selectConfiguredRfpRecipients(type: string, source: string): Promise<string[] | null> {
+  // TODO: Build an admin settings UI; for now rfp_approver_config is edited via SQL.
+  const configs = await storage.getRfpApproverConfigs(type, source);
+  const exactSource = configs.find((config) => config.projectType === type && config.sourceSystem === source);
+  const exactProjectType = configs.find((config) => config.projectType === type && config.sourceSystem === null);
+  const defaultConfig = configs.find((config) => config.projectType === '*' && config.sourceSystem === null);
+  const selected = exactSource ?? exactProjectType ?? defaultConfig;
+  return selected?.approverEmails?.length ? selected.approverEmails : null;
+}
+
 export async function getRfpReviewRecipients(projectType: string | null | undefined, sourceSystem: string | null | undefined = 'hubspot'): Promise<string[]> {
   const type = String(projectType || '').trim();
   const source = String(sourceSystem || 'hubspot').trim();
@@ -569,30 +601,20 @@ export async function getRfpReviewRecipients(projectType: string | null | undefi
   }
 
   try {
-    // TODO: Build an admin settings UI; for now rfp_approver_config is edited via SQL.
-    const configs = await storage.getRfpApproverConfigs(type, source);
-    const exactSource = configs.find((config) => config.projectType === type && config.sourceSystem === source);
-    const exactProjectType = configs.find((config) => config.projectType === type && config.sourceSystem === null);
-    const defaultConfig = configs.find((config) => config.projectType === '*' && config.sourceSystem === null);
-    const selected = exactSource ?? exactProjectType ?? defaultConfig;
-    if (selected?.approverEmails?.length) {
-      rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: selected.approverEmails });
-      return selected.approverEmails;
+    const configured = await selectConfiguredRfpRecipients(type, source);
+    if (configured?.length) {
+      rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: configured });
+      return configured;
     }
   } catch (error: any) {
+    // Notification routing is NOT a security decision — keep delivering to the safety net on a
+    // config read error so review emails still go out. (The authz gate fails closed instead.)
     console.warn(`[rfp-approval] Failed to load RFP approver config, using hardcoded safety net: ${error?.message || error}`);
   }
 
   // Safety net: preserve the original hardcoded routing if DB config is missing or invalid.
   console.warn(`[rfp-approval] No active RFP approver config for projectType=${type || '*'}, sourceSystem=${source}; using hardcoded safety net`);
-  let fallbackRecipients: string[];
-  if (type === '4') {
-    // Project type 4: James + Colby
-    fallbackRecipients = ['jhelms@trockgc.com', 'cburling@trockgc.com'];
-  } else {
-    // All other project types: Sidney + James
-    fallbackRecipients = ['sgibson@trockgc.com', 'jhelms@trockgc.com'];
-  }
+  const fallbackRecipients = hardcodedRfpSafetyNetRecipients(type);
   rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: fallbackRecipients });
   return fallbackRecipients;
 }
@@ -612,9 +634,18 @@ function getRfpAdminApprovers(): string[] {
 
 /**
  * Authorization gate for the PUBLIC RFP review-link approve/decline actions. Resolves the authorized
- * approver set from the SAME source the routing/notification uses — getRfpReviewRecipients
- * (rfp_approver_config with the hardcoded safety net) — UNION the admin/global-CC allowlist who are
- * CC'd on every review email. Comparison is case-insensitive and trimmed.
+ * approver set from the SAME rfp_approver_config source the routing/notification uses, UNION the
+ * admin/global-CC allowlist who are CC'd on every review email. Comparison is case-insensitive and
+ * trimmed.
+ *
+ * SECURITY — FAILS CLOSED on a config READ ERROR. Unlike getRfpReviewRecipients (a notification
+ * routing helper that swallows DB errors and falls back to the hardcoded safety net), this gate
+ * distinguishes the two cases:
+ *   - NO matching active config row  → legit intended fallback to the hardcoded safety net (allow).
+ *   - the config READ THREW (DB unreadable) → we cannot trust the safety net to reflect the live
+ *     authorized set, so DENY (return false). The route then returns a clean 403, never an approval.
+ * The admin / always-CC allowlist is config-INDEPENDENT (sourced from email-service, not the DB), so
+ * it still authorizes even when the config cannot be read.
  *
  * NOTE: this intentionally does NOT gate the HMAC-secured override-approve path
  * (processRfpApproval `force: true`, /api/rfp-requests/:id/override-approve), which is authenticated
@@ -627,12 +658,25 @@ export async function isAuthorizedRfpApprover(
 ): Promise<boolean> {
   const candidate = normalizeApproverEmail(approverEmail);
   if (!candidate) return false;
-  const recipients = await getRfpReviewRecipients(projectType, sourceSystem);
-  const authorized = new Set(
-    [...recipients, ...getRfpAdminApprovers()]
-      .map(normalizeApproverEmail)
-      .filter(Boolean),
-  );
+
+  // The admin / always-CC allowlist does not depend on the DB config, so check it first — these
+  // directors remain authorized even if rfp_approver_config is temporarily unreadable.
+  const adminApprovers = getRfpAdminApprovers().map(normalizeApproverEmail).filter(Boolean);
+  if (adminApprovers.includes(candidate)) return true;
+
+  const type = String(projectType || '').trim();
+  const source = String(sourceSystem || 'hubspot').trim();
+  let configuredRecipients: string[];
+  try {
+    const configured = await selectConfiguredRfpRecipients(type, source);
+    // A missing config row is the legit fallback; a thrown read is handled by the catch below.
+    configuredRecipients = configured?.length ? configured : hardcodedRfpSafetyNetRecipients(type);
+  } catch (error: any) {
+    console.warn(`[rfp-approval] RFP approver config read failed during authorization; denying approver ${candidate}: ${error?.message || error}`);
+    return false;
+  }
+
+  const authorized = new Set(configuredRecipients.map(normalizeApproverEmail).filter(Boolean));
   return authorized.has(candidate);
 }
 

@@ -406,7 +406,9 @@ async function renderRfpReviewPage(
           showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + data.bidboardProjectId : ''), 'success');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
-          showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
+          // Prefer the friendly user-facing message (e.g. the unauthorized-approver guidance);
+          // fall back to the machine code in data.error only when no message is provided.
+          showResult('<strong>Error:</strong> ' + (data.message || data.error || 'Unknown error'), 'error');
           setLoading(btn, false);
           decBtn.disabled = false;
         }
@@ -444,7 +446,9 @@ async function renderRfpReviewPage(
           showResult('This RFP has been <strong>declined</strong>. No BidBoard project will be created. The deal remains in ${esc(source.label)}.', 'declined');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
-          showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
+          // Prefer the friendly user-facing message (e.g. the unauthorized-approver guidance);
+          // fall back to the machine code in data.error only when no message is provided.
+          showResult('<strong>Error:</strong> ' + (data.message || data.error || 'Unknown error'), 'error');
           setLoading(btn, false);
           appBtn.disabled = false;
         }
