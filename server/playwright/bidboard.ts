@@ -2145,19 +2145,40 @@ export async function createBidBoardProjectFromDeal(
       ? await findExistingProject(projectNumber)
       : { status: "none" };
     if (lookup.status === "found") {
-      log(
-        `Found existing Procore project ${lookup.id} for number ${projectNumber} — linking instead of creating a duplicate`,
-        "playwright",
+      // Ownership guard: createSyncMapping below is a plain insert against a unique index on
+      // bidboardProjectId, and its failure is swallowed (logged, not surfaced). If this Procore
+      // project is already linked to a DIFFERENT deal, adopting it would throw on that insert and
+      // still report success with the deal silently unlinked. Only link when the project is
+      // unclaimed or already belongs to this deal.
+      const owner = await storage.getSyncMappingByBidboardProjectId(lookup.id);
+      const claimedByOtherDeal = Boolean(
+        owner && !(owner.sourceSystem === sourceSystem && owner.sourceDealId === dealId),
       );
-      result = {
-        success: true,
-        projectId: lookup.id,
-        // Persist the project's canonical Procore name (not the requested name) so the mapping matches reality.
-        projectName: lookup.name ?? projectData.name,
-        // Carry the RFP proposalId through so the mapping metadata keeps Procore's active-proposal context.
-        proposalId: effectiveOptions.proposalId,
-        adopted: true,
-      };
+      if (claimedByOtherDeal) {
+        log(
+          `Procore project ${lookup.id} (number ${projectNumber}) is already linked to ${owner!.sourceSystem} deal ${owner!.sourceDealId}; not linking to ${sourceSystem} deal ${dealId}`,
+          "playwright",
+        );
+        result = {
+          success: false,
+          projectName: projectData.name,
+          error: `BidBoard project ${lookup.id} (number ${projectNumber}) is already linked to another deal; resolve the conflict manually before linking.`,
+        };
+      } else {
+        log(
+          `Found existing Procore project ${lookup.id} for number ${projectNumber} — linking instead of creating a duplicate`,
+          "playwright",
+        );
+        result = {
+          success: true,
+          projectId: lookup.id,
+          // Persist the project's canonical Procore name (not the requested name) so the mapping matches reality.
+          projectName: lookup.name ?? projectData.name,
+          // Carry the RFP proposalId through so the mapping metadata keeps Procore's active-proposal context.
+          proposalId: effectiveOptions.proposalId,
+          adopted: true,
+        };
+      }
     } else if (lookup.status === "ambiguous") {
       // ≥2 existing projects already carry this exact number — creating another would compound the
       // duplicate. Stop and surface for manual resolution instead of silently adding a third.

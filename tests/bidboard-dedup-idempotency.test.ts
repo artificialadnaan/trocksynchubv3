@@ -7,6 +7,7 @@ vi.mock("../server/storage.ts", () => ({
     getHubspotDealByHubspotId: vi.fn(),
     getSyncMappingBySourceDealId: vi.fn(),
     getBidboardMappingByProcoreProjectNumber: vi.fn(),
+    getSyncMappingByBidboardProjectId: vi.fn(),
     createSyncMapping: vi.fn(),
     upsertBidboardSyncState: vi.fn(),
     // Used by getCompanyId() inside the default Procore-lookup helper; returns undefined
@@ -147,6 +148,37 @@ describe("createBidBoardProjectFromDeal idempotency", () => {
         metadata: { proposalId: "PROP-123" },
       }),
     );
+  });
+
+  // If the found Procore project is already linked to a different deal, linking it here would collide
+  // on the bidboardProjectId unique index (the insert is swallowed → false success). Refuse and surface.
+  it("does not link a Procore project already owned by another deal", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getBidboardMappingByProcoreProjectNumber).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getSyncMappingByBidboardProjectId).mockResolvedValue({
+      sourceSystem: "hubspot",
+      sourceDealId: "some-other-deal",
+      bidboardProjectId: "999000111",
+    } as any);
+
+    const createProject = vi.fn(async () => ({ success: true, projectId: "should-not-be-used" } as any));
+    const findExistingProject = vi.fn(async () => ({ status: "found" as const, id: "999000111", name: "x" }));
+
+    const result = await bidboard.createBidBoardProjectFromDeal({
+      sourceSystem: "trock_crm" as const,
+      sourceDealId: "2a4b0d9f",
+      bidboardStage: "Estimate in Progress",
+      normalizedDealData: { dealname: "x", project_number: "DFW-1-17326-ad" },
+      options: { syncDocuments: false, createProject, findExistingProject },
+    });
+
+    expect(createProject).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already linked to another deal/);
+    expect(storage.createSyncMapping).not.toHaveBeenCalled();
   });
 
   it("creates a new project when no existing Procore project is found by number", async () => {
