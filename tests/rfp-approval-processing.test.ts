@@ -24,6 +24,7 @@ vi.mock("../server/procore-hubspot-sync.ts", () => ({
 vi.mock("../server/email-service.ts", () => ({
   sendEmail: vi.fn().mockResolvedValue(undefined),
   renderTemplate: vi.fn(),
+  GLOBAL_CC_RECIPIENTS: [], // rfp-approval imports this; keep the partial mock complete
 }));
 
 vi.mock("../server/index.ts", () => ({
