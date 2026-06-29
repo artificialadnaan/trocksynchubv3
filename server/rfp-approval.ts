@@ -590,8 +590,8 @@ export async function getRfpReviewRecipients(projectType: string | null | undefi
     // Project type 4: James + Colby
     fallbackRecipients = ['jhelms@trockgc.com', 'cburling@trockgc.com'];
   } else {
-    // All other project types: Sidney + James
-    fallbackRecipients = ['sgibson@trockgc.com', 'jhelms@trockgc.com'];
+    // All other project types: Sidney + James + Tim
+    fallbackRecipients = ['sgibson@trockgc.com', 'jhelms@trockgc.com', 'tmitchell@trockgc.com'];
   }
   rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: fallbackRecipients });
   return fallbackRecipients;

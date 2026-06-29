@@ -93,6 +93,6 @@ describe("getRfpReviewRecipients", () => {
     const { getRfpReviewRecipients } = await import("../server/rfp-approval.ts");
 
     await expect(getRfpReviewRecipients("4", "hubspot")).resolves.toEqual(["jhelms@trockgc.com", "cburling@trockgc.com"]);
-    await expect(getRfpReviewRecipients("2", "hubspot")).resolves.toEqual(["sgibson@trockgc.com", "jhelms@trockgc.com"]);
+    await expect(getRfpReviewRecipients("2", "hubspot")).resolves.toEqual(["sgibson@trockgc.com", "jhelms@trockgc.com", "tmitchell@trockgc.com"]);
   });
 });
