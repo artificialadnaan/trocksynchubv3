@@ -27,22 +27,10 @@ vi.mock("../server/storage.ts", () => ({
 }));
 
 vi.mock("../server/rfp-approval.ts", async () => {
-  // Use the REAL canonical-type resolver so the route's "created type" gate is exercised against the
-  // exact derivation the processor uses. It only depends on the dependency-free constants module, so
-  // we can build it here without pulling in the heavy real rfp-approval module.
-  const { parseProjectTypeFromNumber } = await import("../server/constants.ts");
-  const resolveEffectiveRfpProjectType = (dealData: any, editedFields?: any): string | null => {
-    const currentProjectNumber = (dealData?.project_number ?? "") as string;
-    const currentTypeDigit = parseProjectTypeFromNumber(currentProjectNumber) ?? dealData?.project_types ?? "";
-    const submittedProjectType = editedFields?.project_types;
-    let finalProjectTypeDigit = currentTypeDigit || submittedProjectType || dealData?.project_types || "2";
-    if (submittedProjectType && submittedProjectType !== currentTypeDigit) {
-      finalProjectTypeDigit = submittedProjectType;
-    } else if (currentProjectNumber && !submittedProjectType && currentTypeDigit) {
-      finalProjectTypeDigit = currentTypeDigit;
-    }
-    return finalProjectTypeDigit ? String(finalProjectTypeDigit) : null;
-  };
+  // Use the REAL canonical-type resolver (the dependency-free source of truth in constants.ts) so the
+  // route's baseline/created gate is exercised against the exact derivation the processor uses — and
+  // can't drift from an inline copy if the canonical-type rules change again.
+  const { resolveEffectiveRfpProjectType } = await import("../server/constants.ts");
   return {
     processRfpApproval: processRfpApprovalMock,
     processRfpDecline: processRfpDeclineMock,
@@ -154,13 +142,39 @@ describe("RFP approve/decline route authorization", () => {
       expect(response.status).toBe(403);
       expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
       expect(processRfpApprovalMock).not.toHaveBeenCalled();
-      // The gate authorizes the CANONICAL created type: the edit re-classifies to service (4), so the
-      // non-service approver is checked against — and rejected for — 4, the type they'd actually create.
+      // Baseline type (2, from DFW-2) passes, but the edit re-classifies to service (4): the non-service
+      // approver is rejected against the CREATED type (4), the type they'd actually create.
+      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "2", "hubspot");
       expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
     });
   });
 
-  it("allows an edit within authority (approver authorized for the edited/created type)", async () => {
+  it("rejects a forwarded-link approver who re-types the RFP to their own authority (baseline leak)", async () => {
+    // Leak vector: a type-2 approver is forwarded a SERVICE link (project_number 'DFW-4-...'). They edit
+    // project_types to '2' (their own type) so the CREATED type becomes 2. Gating on the created type
+    // alone would let them through; the BASELINE check (the project-number type 4, which they cannot
+    // edit away) blocks them from acting on an RFP they were never authorized for.
+    requestRow.current = makeRequest({
+      projectNumber: "DFW-4-42001",
+      dealData: { dealname: "Forwarded Service", project_number: "DFW-4-42001", project_types: "4", attachments: [], description: "Scope" },
+    });
+    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "sgibson@trockgc.com");
+      form.append("editedFields", JSON.stringify({ project_types: "2" })); // re-type down to their own authority
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+      const body = await response.json();
+
+      expect(response.status).toBe(403);
+      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+      // Rejected against the baseline (project-number) type 4, which the edit can't change.
+      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
+    });
+  });
+
+  it("allows an edit within authority (approver authorized for both the baseline and edited/created type)", async () => {
     requestRow.current = makeRequest({
       dealData: { dealname: "Reno Job", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope" },
     });
@@ -174,6 +188,8 @@ describe("RFP approve/decline route authorization", () => {
 
       expect(response.status).toBe(202);
       expect(body).toMatchObject({ success: true, queued: true });
+      // Must actually dispatch the processor, not just return the queued envelope.
+      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
     });
   });
 
@@ -221,6 +237,8 @@ describe("RFP approve/decline route authorization", () => {
       expect(body).toMatchObject({ success: true, queued: true });
       // The canonical created type (4) was authorized, not just the routed type (2).
       expect(authorize).toHaveBeenCalledWith("jhelms@trockgc.com", "4", "hubspot");
+      // Must actually dispatch the processor, not just return the queued envelope.
+      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
     });
   });
 

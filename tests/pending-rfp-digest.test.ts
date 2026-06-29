@@ -111,6 +111,28 @@ describe("buildPendingRfpDigest", () => {
     expect(digestFor(digest, TIM)).toBeUndefined();
   });
 
+  it("routes a pending row by its EDITED project_types (the type the approval will create)", async () => {
+    // A pending row whose project_types was edited up to service (4) — both the baseline number (DFW-2)
+    // and raw project_types say non-service (2), but the approval will CREATE a service project. The
+    // digest must bucket under the SERVICE approvers (the created type the approve gate authorizes),
+    // not the stale non-service set. Without passing editedFields the resolver would return 2.
+    const rows: PendingRfpRow[] = [
+      {
+        token: "tok-edited",
+        createdAt: new Date("2026-06-20T15:00:00Z"),
+        dealData: { dealname: "Edited To Service", project_number: "DFW-2-400", project_types: "2" },
+        editedFields: { project_types: "4" },
+        sourceSystem: "hubspot",
+      },
+    ];
+
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
+
+    expect(digest.perRecipient.map((r) => r.recipient).sort()).toEqual([COLBY, JAMES].sort());
+    expect(digestFor(digest, SIDNEY)).toBeUndefined();
+    expect(digestFor(digest, TIM)).toBeUndefined();
+  });
+
   it("renders project name/number/date and an /rfp-review/<token> link for the recipient's row", async () => {
     const rows: PendingRfpRow[] = [
       {

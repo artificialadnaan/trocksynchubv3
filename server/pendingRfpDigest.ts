@@ -198,15 +198,16 @@ export async function buildPendingRfpDigest(
 
     // "Who it's awaiting" = the approver recipients for this row, via the SAME resolver the
     // approval email uses (so Item-3's Tim flows in automatically). Routes by the CANONICAL type the
-    // approval would create (resolveEffectiveRfpProjectType — the same source the approve/decline gates
-    // authorize against and the review email now routes by), NOT the raw project_types, so a row with
-    // project_types '2' but project_number 'DFW-4-...' is bucketed under the SERVICE approvers who can
-    // actually act on it. No editedFields at digest time → a NO-OP for consistent rows.
+    // approval would create — resolveEffectiveRfpProjectType(dealData, editedFields), the same source
+    // the approve gate authorizes the created type against — NOT the raw project_types. So a row with
+    // project_types '2' but project_number 'DFW-4-...' buckets under the SERVICE approvers who can act,
+    // and a pending row whose project_types was edited into a new routing group buckets under the type
+    // the approval will actually create (not the stale routed type). No-op for consistent rows.
     const awaiting = Array.from(
       new Set(
         (
           await resolveRecipients(
-            resolveEffectiveRfpProjectType(dealData),
+            resolveEffectiveRfpProjectType(dealData, editedFields),
             row.sourceSystem ?? null
           )
         )

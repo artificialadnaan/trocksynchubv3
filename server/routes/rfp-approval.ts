@@ -582,31 +582,36 @@ export function registerRfpApprovalRoutes(app: Express) {
         }
 
         // Authorize the submitter (against rfp_approver_config + the always-CC'd admin allowlist) for
-        // the CANONICAL type the approval will actually create — the single source of truth for routing,
-        // authorization, and creation. processRfpApproval selects the service vs non-service BidBoard
-        // stage from finalProjectTypeDigit, which resolveEffectiveRfpProjectType reproduces exactly:
-        // parseProjectTypeFromNumber(project_number) dominates, then an edited project_types. So a row
-        // with project_types '2' but project_number 'DFW-4-...' creates a SERVICE ('4') project, and an
-        // approver who re-classifies project_types via edit creates the EDITED type — gating on this one
-        // canonical value blocks BOTH escalation paths (number-mismatch and edit-to-service).
-        //
-        // We deliberately do NOT also gate on the as-received project_types: the review email + pending
-        // digest now route by this SAME canonical type (server/rfp-approval.ts sendRfpReviewEmails,
-        // pendingRfpDigest), so the approvers actually notified are exactly the canonical set. Requiring
-        // the (possibly-stale) routed project_types in addition would strand a canonical-routed approver
-        // on a mismatched row even though they own the type that gets created. The admin/global-CC
-        // exemption lives inside isAuthorizedRfpApprover. (Binding the action to the specific link
-        // recipient + a frozen send-time recipient snapshot remain the separate follow-ups in #47.)
+        // TWO project types, both via resolveEffectiveRfpProjectType — the same single source the
+        // processor derives finalProjectTypeDigit from and the email/digest route by:
+        //   (1) BASELINE — resolveEffectiveRfpProjectType(dealData) with NO editedFields. This is the
+        //       canonical type the RFP IS, derived from project_number (then project_types) — it is NOT
+        //       approver-controlled. editedFields is form-controlled, so without this check a reviewer
+        //       authorized only for type X could approve a leaked/forwarded type-Y link by editing
+        //       project_types to X before submitting (the created type would then be X, which they own).
+        //       Gating on the baseline blocks that: a type-2 approver can't act on a DFW-4 link at all.
+        //       The baseline is also the routing type, so a legitimately-notified approver always owns it
+        //       (no stranding on a project_types-vs-number-mismatched row).
+        //   (2) CREATED — resolveEffectiveRfpProjectType(dealData, editedFields), the type the approval
+        //       will actually create (incl. an edit into a new routing group). Blocks edit-to-service:
+        //       a type-2 approver editing a DFW-2 RFP up to type 4 can't create the service project.
+        // Both must pass; the admin/global-CC exemption lives inside isAuthorizedRfpApprover. (Binding
+        // the action to the specific link recipient + a frozen send-time recipient snapshot remain the
+        // separate recipient-binding follow-ups tracked in #47.)
         const dealData = (request.dealData as Record<string, any> | null);
+        const baselineProjectType = resolveEffectiveRfpProjectType(dealData);
         const createdProjectType = resolveEffectiveRfpProjectType(dealData, editedFields);
+        const authorizedForBaseline = await isAuthorizedRfpApprover(approverEmail, baselineProjectType, request.sourceSystem);
         const authorizedForCreated = await isAuthorizedRfpApprover(approverEmail, createdProjectType, request.sourceSystem);
-        if (!authorizedForCreated) {
+        if (!authorizedForBaseline || !authorizedForCreated) {
           await auditRouteAttempt(
             request,
             'rfp_approval_attempt',
             'unauthorized_approver',
             approverEmail,
-            'Approver not in the authorized set for the canonical created project type',
+            !authorizedForBaseline
+              ? 'Approver not authorized for the baseline (project-number) type of this RFP'
+              : 'Approver not in the authorized set for the canonical created project type',
           );
           return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
         }
