@@ -19,6 +19,11 @@
  * server/rfp-reports.ts so the digest reflects the same values the RFP report shows.
  */
 
+// Canonical-type resolver — imported from the dependency-free constants module (NOT rfp-approval) so
+// this builder stays PURE/unit-testable without a DB. Same single source the approve/decline gates
+// and the review-email routing use, so the digest buckets each RFP under the approvers who can act.
+import { resolveEffectiveRfpProjectType } from "./constants";
+
 /** Minimal shape of a pending rfp_approval_requests row this builder needs. */
 export interface PendingRfpRow {
   token: string;
@@ -192,13 +197,16 @@ export async function buildPendingRfpDigest(
     const reviewUrl = `${baseUrl}/rfp-review/${row.token}`;
 
     // "Who it's awaiting" = the approver recipients for this row, via the SAME resolver the
-    // approval email uses (so Item-3's Tim flows in automatically). Inputs mirror the live
-    // send path: dealData.project_types + the row's sourceSystem.
+    // approval email uses (so Item-3's Tim flows in automatically). Routes by the CANONICAL type the
+    // approval would create (resolveEffectiveRfpProjectType — the same source the approve/decline gates
+    // authorize against and the review email now routes by), NOT the raw project_types, so a row with
+    // project_types '2' but project_number 'DFW-4-...' is bucketed under the SERVICE approvers who can
+    // actually act on it. No editedFields at digest time → a NO-OP for consistent rows.
     const awaiting = Array.from(
       new Set(
         (
           await resolveRecipients(
-            dealData.project_types as string | null | undefined,
+            resolveEffectiveRfpProjectType(dealData),
             row.sourceSystem ?? null
           )
         )

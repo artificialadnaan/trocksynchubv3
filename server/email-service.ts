@@ -111,10 +111,12 @@ function normalizeOutgoingEmailHtml(htmlBody: string): string {
 
 // Global CC recipients for all outgoing emails. Exported so the RFP approval-authz layer can treat
 // these always-CC'd admins/directors as authorized approvers (they receive every RFP review email).
-export const GLOBAL_CC_RECIPIENTS = [
+// Frozen because it is now an AUTHORIZATION input (getRfpAdminApprovers reads it): an immutable
+// allowlist can't be mutated out from under the authz gate. All readers spread it into a new array.
+export const GLOBAL_CC_RECIPIENTS = Object.freeze([
   'adnaan.iqbal@gmail.com',
   'bbell@trockgc.com',
-];
+] as const);
 
 function buildFinalCcList(to: string, cc?: string[]): string[] {
   const ccSet = new Set(

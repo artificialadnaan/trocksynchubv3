@@ -85,6 +85,32 @@ describe("buildPendingRfpDigest", () => {
     }
   });
 
+  it("routes a row by the CANONICAL type (project NUMBER digit), not the raw project_types", async () => {
+    // Mismatch: routed project_types is '2' (non-service) but the project NUMBER encodes type 4
+    // (service) — the approval would CREATE a service project. The digest must bucket this under the
+    // SERVICE approvers who can actually act on it (the same canonical type the approve/decline gates
+    // authorize against), NOT the non-service set the raw project_types would have picked.
+    const rows: PendingRfpRow[] = [
+      {
+        token: "tok-mismatch",
+        createdAt: new Date("2026-06-20T15:00:00Z"),
+        dealData: { dealname: "Mismatched Service", project_number: "DFW-4-300", project_types: "2" },
+        sourceSystem: "hubspot",
+      },
+    ];
+
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
+
+    // Bucketed under the SERVICE approvers (canonical type 4), not the non-service set.
+    expect(digest.perRecipient.map((r) => r.recipient).sort()).toEqual([COLBY, JAMES].sort());
+    const colby = digestFor(digest, COLBY)!;
+    expect(colby.count).toBe(1);
+    expect(colby.htmlBody).toContain("Mismatched Service");
+    // Non-service approvers (raw project_types '2') must NOT receive this service RFP.
+    expect(digestFor(digest, SIDNEY)).toBeUndefined();
+    expect(digestFor(digest, TIM)).toBeUndefined();
+  });
+
   it("renders project name/number/date and an /rfp-review/<token> link for the recipient's row", async () => {
     const rows: PendingRfpRow[] = [
       {

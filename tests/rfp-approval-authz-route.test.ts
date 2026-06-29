@@ -131,6 +131,9 @@ describe("RFP approve/decline route authorization", () => {
 
       expect(response.status).toBe(202);
       expect(body).toMatchObject({ success: true, queued: true });
+      // The 202 must actually DISPATCH the background processor (it runs in setImmediate after the
+      // response), not just return the queued envelope — prove the authorized branch reached it.
+      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
     });
   });
 
@@ -151,13 +154,13 @@ describe("RFP approve/decline route authorization", () => {
       expect(response.status).toBe(403);
       expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
       expect(processRfpApprovalMock).not.toHaveBeenCalled();
-      // Authorized for the received type (2) but checked AND rejected against the edited type (4).
-      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "2", "hubspot");
+      // The gate authorizes the CANONICAL created type: the edit re-classifies to service (4), so the
+      // non-service approver is checked against — and rejected for — 4, the type they'd actually create.
       expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
     });
   });
 
-  it("allows an edit within authority (approver authorized for both the received and edited type)", async () => {
+  it("allows an edit within authority (approver authorized for the edited/created type)", async () => {
     requestRow.current = makeRequest({
       dealData: { dealname: "Reno Job", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope" },
     });
@@ -194,9 +197,8 @@ describe("RFP approve/decline route authorization", () => {
       expect(response.status).toBe(403);
       expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
       expect(processRfpApprovalMock).not.toHaveBeenCalled();
-      // Authorized for the received routing type (2) but checked AND rejected against the canonical
-      // created type (4 — parsed from the project number), which the non-service approver lacks.
-      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "2", "hubspot");
+      // The gate authorizes the canonical created type (4 — parsed from the project number), which the
+      // non-service approver lacks, so they're rejected even though they own the routed type (2).
       expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
     });
   });
@@ -206,7 +208,8 @@ describe("RFP approve/decline route authorization", () => {
       projectNumber: "DFW-4-42001",
       dealData: { dealname: "Service Job", project_number: "DFW-4-42001", project_types: "2", attachments: [], description: "Scope" },
     });
-    authorize.mockResolvedValue(true); // service approver — authorized for both received (2) and created (4)
+    // Service approver authorized for the canonical created type (4) — they do NOT need the routed type (2).
+    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "4");
     await withApp(async (baseUrl) => {
       const form = new FormData();
       form.append("approverEmail", "jhelms@trockgc.com");
@@ -234,6 +237,38 @@ describe("RFP approve/decline route authorization", () => {
       expect(response.status).toBe(403);
       expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
       expect(processRfpDeclineMock).not.toHaveBeenCalled();
+      expect(auditRows.at(-1)).toMatchObject({
+        action: "rfp_decline_attempt",
+        status: "failed",
+        details: expect.objectContaining({ outcome: "unauthorized_approver" }),
+      });
+    });
+  });
+
+  it("rejects a non-service decliner when the project NUMBER encodes a service type (canonical-type bypass)", async () => {
+    // Mirror of the approve canonical-bypass: dealData.project_types is the routed type '2'
+    // (non-service) but the project NUMBER is 'DFW-4-...' (service). A non-service approver authorized
+    // ONLY for '2' must NOT be able to DECLINE a row that would create a SERVICE project — the decline
+    // gate now checks the canonical created type ('4') too.
+    requestRow.current = makeRequest({
+      projectNumber: "DFW-4-42001",
+      dealData: { dealname: "Sneaky Service", project_number: "DFW-4-42001", project_types: "2", attachments: [], description: "Scope" },
+    });
+    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
+    await withApp(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/decline`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ declinerEmail: "sgibson@trockgc.com" }),
+      });
+      const body = await response.json();
+
+      expect(response.status).toBe(403);
+      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
+      expect(processRfpDeclineMock).not.toHaveBeenCalled();
+      // The decline gate authorizes the canonical created type (4 — parsed from the project number),
+      // which the non-service decliner lacks, so they're rejected despite owning the routed type (2).
+      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
       expect(auditRows.at(-1)).toMatchObject({
         action: "rfp_decline_attempt",
         status: "failed",

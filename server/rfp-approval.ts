@@ -4,7 +4,11 @@ import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import path from 'path';
 import { isUniqueViolation, storage, type SourceSystem } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
-import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from './constants';
+import { parseProjectTypeFromNumber, replaceProjectTypeInNumber, resolveEffectiveRfpProjectType } from './constants';
+// Re-exported so the approve/decline routes and tests keep importing the canonical-type resolver from
+// here (its long-standing import site). The function itself lives in the dependency-free constants
+// module so the PURE pendingRfpDigest builder can share it without pulling in this DB-coupled module.
+export { resolveEffectiveRfpProjectType };
 import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
 // Namespace-access GLOBAL_CC_RECIPIENTS (see getRfpAdminApprovers) rather than a named import: a
@@ -1123,8 +1127,15 @@ async function sendRfpReviewEmails(params: {
 </body>
 </html>`;
 
-  const rfpRecipients = await getRfpReviewRecipients(params.dealData.project_types, params.input.sourceSystem);
-  console.log(`[rfp-approval] Project type: ${params.dealData.project_types || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
+  // Route by the CANONICAL type the approval will actually create (the same single source the
+  // approve/decline gates authorize against), NOT the raw routed project_types — so a row with
+  // project_types '2' but project_number 'DFW-4-...' notifies the SERVICE approvers who can act on
+  // it, instead of stranding it with non-service approvers the gate would later 403. No editedFields
+  // at send time → this resolves parseProjectTypeFromNumber(project_number) ?? project_types ?? '2',
+  // a NO-OP for consistent rows (project_types already equals the number's type digit).
+  const effectiveProjectType = resolveEffectiveRfpProjectType(params.dealData);
+  const rfpRecipients = await getRfpReviewRecipients(effectiveProjectType, params.input.sourceSystem);
+  console.log(`[rfp-approval] Project type: ${effectiveProjectType || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
   for (const recipient of rfpRecipients) {
     try {
       const result = await sendEmail({
@@ -1387,40 +1398,6 @@ export async function createRfpApprovalRequest(
 export interface RfpApprovalAttachmentOptions {
   attachmentsOverride: Array<{ name: string; url?: string; _new?: boolean }>;
   newFiles: Array<{ buffer: Buffer; originalname: string; mimetype?: string; size?: number }>;
-}
-
-/**
- * The CANONICAL project-type digit an RFP approval will actually CREATE — the single source of truth
- * shared by processRfpApproval (which selects the service vs non-service BidBoard stage from it) and
- * the approve-route authorization gate, so the two can never drift.
- *
- * The precedence MIRRORS processRfpApproval's finalProjectTypeDigit derivation EXACTLY:
- *   currentTypeDigit = parseProjectTypeFromNumber(project_number) ?? dealData.project_types ?? ''
- *   base             = currentTypeDigit || editedFields.project_types || dealData.project_types || '2'
- *   - if the approver edited project_types into a DIFFERENT routing group, the edited type wins
- *     (processRfpApproval additionally rewrites the project number in that branch);
- *   - otherwise the project-number-derived digit dominates. So a row with project_types '2' but a
- *     project_number 'DFW-4-...' resolves to '4' — the SERVICE type the approval would actually
- *     create, which the routed-type ('2') gate alone would miss.
- *
- * Returns the digit as a string (always at least '2' in practice via the fallback); null only if no
- * digit can be derived at all.
- */
-export function resolveEffectiveRfpProjectType(
-  dealData: Record<string, any> | null,
-  editedFields?: Record<string, any> | null,
-): string | null {
-  const currentProjectNumber = (dealData?.project_number ?? '') as string;
-  const currentTypeDigit = parseProjectTypeFromNumber(currentProjectNumber) ?? dealData?.project_types ?? '';
-  const submittedProjectType = editedFields?.project_types;
-
-  let finalProjectTypeDigit = currentTypeDigit || submittedProjectType || dealData?.project_types || '2';
-  if (submittedProjectType && submittedProjectType !== currentTypeDigit) {
-    finalProjectTypeDigit = submittedProjectType;
-  } else if (currentProjectNumber && !submittedProjectType && currentTypeDigit) {
-    finalProjectTypeDigit = currentTypeDigit;
-  }
-  return finalProjectTypeDigit ? String(finalProjectTypeDigit) : null;
 }
 
 export async function processRfpApproval(

@@ -582,37 +582,31 @@ export function registerRfpApprovalRoutes(app: Express) {
         }
 
         // Authorize the submitter (against rfp_approver_config + the always-CC'd admin allowlist) for
-        // BOTH project types in play, because processRfpApproval can create a project of a DIFFERENT
-        // type than the one the RFP was routed/received as:
-        //   (1) RECEIVED — the as-received routing type (dealData.project_types). They must be a legit
-        //       approver for the RFP they were actually sent.
-        //   (2) CREATED  — the CANONICAL type the approval will actually create. processRfpApproval
-        //       selects the service vs non-service BidBoard stage from finalProjectTypeDigit, which is
-        //       dominated by parseProjectTypeFromNumber(project_number) (and an edited project_types).
-        //       A row with project_types '2' but project_number 'DFW-4-...' creates a SERVICE ('4')
-        //       project, so a non-service approver must NOT be able to approve it — even with no edit.
-        //       resolveEffectiveRfpProjectType is the SAME single source the processor derives
-        //       finalProjectTypeDigit from, so the gate and the processor can never drift. This created
-        //       check subsumes the old edited-project_types check (when project_types is edited into a
-        //       new routing group, the canonical type IS the edited type).
-        // Both must pass; the admin/global-CC exemption lives inside isAuthorizedRfpApprover.
-        // (dealData.project_types is the CURRENT routed type, refreshable from source; a frozen
-        // send-time recipient snapshot — and binding the action to the recipient rather than a form
-        // email — are the separate recipient-binding follow-ups tracked in #47.)
+        // the CANONICAL type the approval will actually create — the single source of truth for routing,
+        // authorization, and creation. processRfpApproval selects the service vs non-service BidBoard
+        // stage from finalProjectTypeDigit, which resolveEffectiveRfpProjectType reproduces exactly:
+        // parseProjectTypeFromNumber(project_number) dominates, then an edited project_types. So a row
+        // with project_types '2' but project_number 'DFW-4-...' creates a SERVICE ('4') project, and an
+        // approver who re-classifies project_types via edit creates the EDITED type — gating on this one
+        // canonical value blocks BOTH escalation paths (number-mismatch and edit-to-service).
+        //
+        // We deliberately do NOT also gate on the as-received project_types: the review email + pending
+        // digest now route by this SAME canonical type (server/rfp-approval.ts sendRfpReviewEmails,
+        // pendingRfpDigest), so the approvers actually notified are exactly the canonical set. Requiring
+        // the (possibly-stale) routed project_types in addition would strand a canonical-routed approver
+        // on a mismatched row even though they own the type that gets created. The admin/global-CC
+        // exemption lives inside isAuthorizedRfpApprover. (Binding the action to the specific link
+        // recipient + a frozen send-time recipient snapshot remain the separate follow-ups in #47.)
         const dealData = (request.dealData as Record<string, any> | null);
-        const receivedProjectType = dealData?.project_types;
         const createdProjectType = resolveEffectiveRfpProjectType(dealData, editedFields);
-        const authorizedForReceived = await isAuthorizedRfpApprover(approverEmail, receivedProjectType, request.sourceSystem);
         const authorizedForCreated = await isAuthorizedRfpApprover(approverEmail, createdProjectType, request.sourceSystem);
-        if (!authorizedForReceived || !authorizedForCreated) {
+        if (!authorizedForCreated) {
           await auditRouteAttempt(
             request,
             'rfp_approval_attempt',
             'unauthorized_approver',
             approverEmail,
-            !authorizedForReceived
-              ? 'Approver email not in authorized approver set for this RFP type'
-              : 'Approver not in the authorized set for the canonical created project type',
+            'Approver not in the authorized set for the canonical created project type',
           );
           return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
         }
@@ -692,15 +686,23 @@ export function registerRfpApprovalRoutes(app: Express) {
     }
 
     // Decline shares the public review-link surface and the same authorized-approver set as approve:
-    // only a routed approver (or an always-CC'd admin) may act on the RFP. (There is no HMAC override
-    // path for decline, so no exemption is needed here.)
-    const declineAuthorized = await isAuthorizedRfpApprover(
-      declinerEmail,
-      (request.dealData as Record<string, any> | null)?.project_types,
-      request.sourceSystem,
-    );
+    // gate on the CANONICAL type the RFP concerns (resolveEffectiveRfpProjectType — decline has no
+    // editedFields). A decline creates nothing, but a non-canonical approver must NOT be able to reject
+    // a row that would create a project of a type they don't own (e.g. project_types '2' but
+    // project_number 'DFW-4-...' = a SERVICE RFP). The review email + pending digest route by this same
+    // canonical type, so the approvers notified are exactly the ones authorized here — nothing strands.
+    // (No HMAC override path for decline → no exemption; recipient-binding is the #47 follow-up.)
+    const declineDealData = (request.dealData as Record<string, any> | null);
+    const declineCreatedType = resolveEffectiveRfpProjectType(declineDealData);
+    const declineAuthorized = await isAuthorizedRfpApprover(declinerEmail, declineCreatedType, request.sourceSystem);
     if (!declineAuthorized) {
-      await auditRouteAttempt(request, 'rfp_decline_attempt', 'unauthorized_approver', declinerEmail, 'Decliner email not in authorized approver set for this RFP type');
+      await auditRouteAttempt(
+        request,
+        'rfp_decline_attempt',
+        'unauthorized_approver',
+        declinerEmail,
+        'Decliner not in the authorized set for the canonical project type',
+      );
       return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
     }
 
