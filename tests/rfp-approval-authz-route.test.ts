@@ -115,6 +115,46 @@ describe("RFP approve/decline route authorization", () => {
     });
   });
 
+  it("rejects an approver who edits project_types into a routing group they're NOT authorized for", async () => {
+    // Non-service approver received a type-2 RFP, then edits it to type 4 (service) and approves.
+    requestRow.current = makeRequest({
+      projectNumber: "DFW-2-42001",
+      dealData: { dealname: "Reno Job", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope" },
+    });
+    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "sgibson@trockgc.com");
+      form.append("editedFields", JSON.stringify({ project_types: "4" })); // re-classify to service
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+      const body = await response.json();
+
+      expect(response.status).toBe(403);
+      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+      // Authorized for the received type (2) but checked AND rejected against the edited type (4).
+      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "2", "hubspot");
+      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
+    });
+  });
+
+  it("allows an edit within authority (approver authorized for both the received and edited type)", async () => {
+    requestRow.current = makeRequest({
+      dealData: { dealname: "Reno Job", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope" },
+    });
+    authorize.mockResolvedValue(true); // e.g. James — in both the non-service and service sets
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "jhelms@trockgc.com");
+      form.append("editedFields", JSON.stringify({ project_types: "4" }));
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+      const body = await response.json();
+
+      expect(response.status).toBe(202);
+      expect(body).toMatchObject({ success: true, queued: true });
+    });
+  });
+
   it("rejects an unauthorized decliner with 403 and audits the attempt", async () => {
     authorize.mockResolvedValue(false);
     await withApp(async (baseUrl) => {

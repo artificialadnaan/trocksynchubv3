@@ -580,20 +580,35 @@ export function registerRfpApprovalRoutes(app: Express) {
           return res.status(409).json({ success: false, error: `Request already ${request.status}` });
         }
 
-        // Authorize the submitter against the SAME routing source that decided who received this RFP
-        // (getRfpReviewRecipients / rfp_approver_config), plus the always-CC'd admin allowlist. Uses the
-        // request's STORED project_types (not a form field — a reviewer can't re-route themselves by
-        // editing the form). NOTE: dealData.project_types is refreshable from the source, so this is the
-        // CURRENT routed type, not a frozen send-time snapshot — persisting the routed recipients at send
-        // time (so a post-send type/config change can't admit/reject the wrong approver) is tracked in the
-        // recipient-binding follow-up (#47).
-        const authorized = await isAuthorizedRfpApprover(
-          approverEmail,
-          (request.dealData as Record<string, any> | null)?.project_types,
-          request.sourceSystem,
-        );
-        if (!authorized) {
-          await auditRouteAttempt(request, 'rfp_approval_attempt', 'unauthorized_approver', approverEmail, 'Approver email not in authorized approver set for this RFP type');
+        // Authorize the submitter against the routing source (getRfpReviewRecipients / rfp_approver_config)
+        // plus the always-CC'd admin allowlist. TWO checks, because processRfpApproval honors an edited
+        // project_types downstream (project number + BidBoard creation):
+        //   (1) the STORED (as-received) project_types — they must be a legit approver for the RFP they got;
+        //   (2) if they EDITED project_types to a DIFFERENT routing group, that edited type too — otherwise a
+        //       non-service approver of a type-2 RFP could switch it to type 4 and approve a service project.
+        // (dealData.project_types is the CURRENT routed type, refreshable from source; a frozen send-time
+        // recipient snapshot — and binding the action to the recipient rather than a form email — is the
+        // separate recipient-binding follow-up #47.)
+        const storedProjectTypes = (request.dealData as Record<string, any> | null)?.project_types;
+        const editedProjectTypes = editedFields?.project_types;
+        const routingGroupChanged =
+          editedProjectTypes != null &&
+          String(editedProjectTypes).trim() !== '' &&
+          String(editedProjectTypes).trim() !== String(storedProjectTypes ?? '').trim();
+        const authorizedForReceived = await isAuthorizedRfpApprover(approverEmail, storedProjectTypes, request.sourceSystem);
+        const authorizedForEdited = routingGroupChanged
+          ? await isAuthorizedRfpApprover(approverEmail, editedProjectTypes, request.sourceSystem)
+          : true;
+        if (!authorizedForReceived || !authorizedForEdited) {
+          await auditRouteAttempt(
+            request,
+            'rfp_approval_attempt',
+            'unauthorized_approver',
+            approverEmail,
+            !authorizedForReceived
+              ? 'Approver email not in authorized approver set for this RFP type'
+              : 'Approver not in the authorized set for the edited project type (routing-group change)',
+          );
           return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
         }
 
