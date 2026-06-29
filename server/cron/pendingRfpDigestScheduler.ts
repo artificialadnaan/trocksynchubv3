@@ -2,9 +2,11 @@
  * Pending RFP Digest Scheduler — end-of-day reminder of un-approved RFPs.
  * =======================================================================
  * Fires Mon–Sat at 5:00 PM America/Chicago. Reads every still-pending
- * rfp_approval_requests row, builds ONE union digest (buildPendingRfpDigest), and
- * sends a single email to the union of approvers across the pending set so they can
- * come approve them. Skips the send entirely when there are 0 pending RFPs.
+ * rfp_approval_requests row and builds a PER-RECIPIENT digest (buildPendingRfpDigest):
+ * each approver gets one email listing only the RFPs they're authorized to approve, so a
+ * recipient never receives an actionable link for an RFP outside their routing. Sends one
+ * scoped email per approver (bypassing GLOBAL_CC so links aren't fanned out to observers).
+ * Skips entirely when no approver has an actionable pending RFP.
  */
 
 import cron from "node-cron";
@@ -50,25 +52,39 @@ async function runPendingRfpDigest(): Promise<void> {
       appUrl,
       isRfpApprovalRequestExpired
     );
-    if (digest.skip || digest.recipients.length === 0) {
+    if (digest.skip || digest.perRecipient.length === 0) {
       console.log(
-        `[pending-rfp-digest] No email sent (fetched=${rows.length}, actionable=${digest.pendingCount}, recipients=${digest.recipients.length})`
+        `[pending-rfp-digest] No email sent (fetched=${rows.length}, actionable=${digest.pendingCount}, recipients=${digest.perRecipient.length})`
       );
       return;
     }
 
-    // Single union send: first approver in `to`, the rest cc'd (sendEmail.to is a single
-    // address; GLOBAL_CC is appended automatically). One email, the whole pending list.
-    const [primary, ...rest] = digest.recipients;
+    // One SCOPED email per approver — each gets only the RFPs they may approve. bypassGlobalCc
+    // keeps each approver's links from being fanned out to GLOBAL_CC observers (which would
+    // re-create the cross-type-approval exposure this per-recipient design exists to close).
+    let sent = 0;
+    let failed = 0;
+    for (const r of digest.perRecipient) {
+      // sendEmail can resolve { success: false, error } WITHOUT throwing (e.g. "Gmail not
+      // connected"); capture each result so a swallowed failure is logged, not silent.
+      const result = await sendEmail({
+        to: r.recipient,
+        subject: r.subject,
+        htmlBody: r.htmlBody,
+        bypassGlobalCc: true,
+      });
+      if (result.success) {
+        sent += 1;
+      } else {
+        failed += 1;
+        console.error(
+          `[pending-rfp-digest] Digest send FAILED to ${r.recipient} (count=${r.count}, provider=${result.provider}): ${result.error ?? "unknown error"}`
+        );
+      }
+    }
     console.log(
-      `[pending-rfp-digest] Sending digest: pending=${digest.pendingCount}, recipients=${digest.recipients.length}`
+      `[pending-rfp-digest] Per-recipient digest complete: pendingActionable=${digest.pendingCount}, recipients=${digest.perRecipient.length}, sent=${sent}, failed=${failed}`
     );
-    await sendEmail({
-      to: primary,
-      cc: rest,
-      subject: digest.subject,
-      htmlBody: digest.htmlBody,
-    });
   } catch (e: unknown) {
     console.error(
       "[pending-rfp-digest] Scheduled digest failed:",
