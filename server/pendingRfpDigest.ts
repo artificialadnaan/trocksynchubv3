@@ -22,6 +22,8 @@ export interface PendingRfpRow {
   dealData: Record<string, unknown> | null;
   editedFields?: Record<string, unknown> | null;
   sourceSystem?: string | null;
+  /** Review-token expiry; null = legacy never-expiring link. Used to drop dead-link rows. */
+  tokenExpiresAt?: Date | string | null;
 }
 
 export interface PendingRfpDigest {
@@ -80,9 +82,16 @@ export async function buildPendingRfpDigest(
   // passed in by the caller — the builder never falls back to localhost, so a
   // missing config can't bake unusable links into a sent email (the scheduler
   // refuses to send when it's absent).
-  appUrl: string
+  appUrl: string,
+  // Predicate marking a row's review token expired (prod: isRfpApprovalRequestExpired —
+  // the SAME check the public review route uses to 410 the link). Expired-but-still-'pending'
+  // rows are dropped: re-sending a /rfp-review/<token> link that can no longer be approved only
+  // frustrates approvers. Rows with null tokenExpiresAt are legacy never-expiring links → kept.
+  isExpired: (row: { tokenExpiresAt?: Date | string | null }) => boolean
 ): Promise<PendingRfpDigest> {
-  const pendingCount = rows.length;
+  // Only actionable (non-expired) pending RFPs belong in the reminder.
+  const actionable = rows.filter((row) => !isExpired(row));
+  const pendingCount = actionable.length;
   if (pendingCount === 0) {
     return { skip: true, recipients: [], subject: "", htmlBody: "", pendingCount: 0 };
   }
@@ -96,7 +105,7 @@ export async function buildPendingRfpDigest(
     reviewUrl: string;
   }> = [];
 
-  for (const row of rows) {
+  for (const row of actionable) {
     const dealData = (row.dealData as Record<string, unknown>) || {};
     const editedFields = (row.editedFields as Record<string, unknown> | null) || null;
 

@@ -4,6 +4,11 @@ import { buildPendingRfpDigest, type PendingRfpRow } from "../server/pendingRfpD
 // Public base URL is now an explicit input to the builder (no env / localhost fallback).
 const APP_URL = "https://hub.trockgc.com";
 
+// Mirrors the prod predicate (isRfpApprovalRequestExpired): expired only when a non-null
+// tokenExpiresAt is in the past; null = legacy never-expiring link (kept).
+const isExpired = (row: { tokenExpiresAt?: Date | string | null }) =>
+  !!row.tokenExpiresAt && new Date() > new Date(row.tokenExpiresAt);
+
 // Fake resolver mirroring the real approver routing: type '4' -> James + Colby,
 // everything else -> Sidney + James + Tim (the Item-3 non-service fallback).
 const TYPE4 = ["jhelms@trockgc.com", "cburling@trockgc.com"];
@@ -14,7 +19,7 @@ async function fakeResolver(projectType: string | null | undefined): Promise<str
 
 describe("buildPendingRfpDigest", () => {
   it("skips the send when there are no pending RFPs", async () => {
-    const digest = await buildPendingRfpDigest([], fakeResolver, APP_URL);
+    const digest = await buildPendingRfpDigest([], fakeResolver, APP_URL, isExpired);
     expect(digest.skip).toBe(true);
     expect(digest.pendingCount).toBe(0);
     expect(digest.recipients).toEqual([]);
@@ -37,7 +42,7 @@ describe("buildPendingRfpDigest", () => {
       },
     ];
 
-    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL);
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
 
     expect(digest.skip).toBe(false);
     expect(digest.pendingCount).toBe(2);
@@ -62,7 +67,7 @@ describe("buildPendingRfpDigest", () => {
       },
     ];
 
-    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL);
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
 
     expect(digest.htmlBody).toContain("Roof Replacement");
     expect(digest.htmlBody).toContain("DFW-2-555");
@@ -88,7 +93,7 @@ describe("buildPendingRfpDigest", () => {
       },
     ];
 
-    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL);
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
 
     // The service row awaits James + Colby; the non-service row awaits Sidney + James + Tim.
     expect(digest.htmlBody).toContain("jhelms@trockgc.com, cburling@trockgc.com");
@@ -106,10 +111,64 @@ describe("buildPendingRfpDigest", () => {
       },
     ];
 
-    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL);
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
 
     expect(digest.htmlBody).toContain("Final Name");
     expect(digest.htmlBody).toContain("NEW-2");
     expect(digest.htmlBody).not.toContain("Stale Name");
+  });
+
+  it("excludes expired-token rows but keeps future and legacy (null) ones", async () => {
+    const rows: PendingRfpRow[] = [
+      {
+        token: "expired-tok",
+        createdAt: new Date("2026-01-01T15:00:00Z"),
+        dealData: { dealname: "Expired Deal", project_number: "DFW-2-EXP", project_types: "2" },
+        tokenExpiresAt: new Date("2020-01-01T00:00:00Z"), // well in the past
+        sourceSystem: "hubspot",
+      },
+      {
+        token: "future-tok",
+        createdAt: new Date("2026-06-20T15:00:00Z"),
+        dealData: { dealname: "Live Deal", project_number: "DFW-2-LIVE", project_types: "2" },
+        tokenExpiresAt: new Date("2099-01-01T00:00:00Z"), // well in the future
+        sourceSystem: "hubspot",
+      },
+      {
+        token: "legacy-tok",
+        createdAt: new Date("2026-06-20T15:00:00Z"),
+        dealData: { dealname: "Legacy Deal", project_number: "DFW-2-LEG", project_types: "2" },
+        tokenExpiresAt: null, // legacy never-expiring link
+        sourceSystem: "hubspot",
+      },
+    ];
+
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
+
+    expect(digest.skip).toBe(false);
+    // Only the two non-expired rows are counted and rendered.
+    expect(digest.pendingCount).toBe(2);
+    expect(digest.htmlBody).toContain("Live Deal");
+    expect(digest.htmlBody).toContain("Legacy Deal");
+    expect(digest.htmlBody).not.toContain("Expired Deal");
+    expect(digest.htmlBody).not.toContain("/rfp-review/expired-tok");
+  });
+
+  it("skips the send when every pending row is expired", async () => {
+    const rows: PendingRfpRow[] = [
+      {
+        token: "exp-only",
+        createdAt: new Date("2026-01-01T15:00:00Z"),
+        dealData: { dealname: "Expired Only", project_number: "DFW-2-X", project_types: "2" },
+        tokenExpiresAt: new Date("2020-01-01T00:00:00Z"),
+        sourceSystem: "hubspot",
+      },
+    ];
+
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
+
+    expect(digest.skip).toBe(true);
+    expect(digest.pendingCount).toBe(0);
+    expect(digest.htmlBody).toBe("");
   });
 });

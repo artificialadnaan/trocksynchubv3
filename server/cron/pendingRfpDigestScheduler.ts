@@ -11,7 +11,7 @@ import cron from "node-cron";
 import { eq, asc } from "drizzle-orm";
 import { db } from "../db";
 import { rfpApprovalRequests } from "@shared/schema";
-import { getRfpReviewRecipients } from "../rfp-approval";
+import { getRfpReviewRecipients, isRfpApprovalRequestExpired } from "../rfp-approval";
 import { buildPendingRfpDigest } from "../pendingRfpDigest";
 import { sendEmail } from "../email-service";
 
@@ -44,13 +44,15 @@ async function runPendingRfpDigest(): Promise<void> {
         dealData: (r.dealData as Record<string, unknown> | null) ?? null,
         editedFields: (r.editedFields as Record<string, unknown> | null) ?? null,
         sourceSystem: r.sourceSystem,
+        tokenExpiresAt: r.tokenExpiresAt,
       })),
       getRfpReviewRecipients,
-      appUrl
+      appUrl,
+      isRfpApprovalRequestExpired
     );
     if (digest.skip || digest.recipients.length === 0) {
       console.log(
-        `[pending-rfp-digest] No email sent (pending=${digest.pendingCount}, recipients=${digest.recipients.length})`
+        `[pending-rfp-digest] No email sent (fetched=${rows.length}, actionable=${digest.pendingCount}, recipients=${digest.recipients.length})`
       );
       return;
     }
