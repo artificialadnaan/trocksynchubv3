@@ -134,6 +134,29 @@ describe("buildPendingRfpDigest", () => {
     expect(digestFor(digest, TIM)).toBeUndefined();
   });
 
+  it("intersects baseline and created approvers CASE-INSENSITIVELY", async () => {
+    // The same approver appears in the baseline (2) and created (4) sets under different casing. A
+    // case-sensitive intersection would drop them; matching the gate's normalizeApproverEmail (trim +
+    // lowercase) keeps them. Display is the normalized lowercase form.
+    const mixedCaseResolver = async (projectType: string | null | undefined): Promise<string[]> =>
+      String(projectType ?? "").trim() === "4"
+        ? ["JHelms@TrockGC.com", COLBY] // James, upper-cased in the created set
+        : [JAMES, SIDNEY]; // James, lower-cased in the baseline set
+    const rows: PendingRfpRow[] = [
+      {
+        token: "tok-case",
+        createdAt: new Date("2026-06-20T15:00:00Z"),
+        dealData: { dealname: "Edited To Service", project_number: "DFW-2-401", project_types: "2" },
+        editedFields: { project_types: "4" },
+        sourceSystem: "hubspot",
+      },
+    ];
+
+    const digest = await buildPendingRfpDigest(rows, mixedCaseResolver, APP_URL, isExpired);
+
+    expect(digest.perRecipient.map((r) => r.recipient)).toEqual([JAMES]);
+  });
+
   it("renders project name/number/date and an /rfp-review/<token> link for the recipient's row", async () => {
     const rows: PendingRfpRow[] = [
       {

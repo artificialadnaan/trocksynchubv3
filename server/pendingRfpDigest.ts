@@ -205,8 +205,10 @@ export async function buildPendingRfpDigest(
     // created type alone would remind created-type approvers the gate would 403.
     const baselineType = resolveEffectiveRfpProjectType(dealData);
     const createdType = resolveEffectiveRfpProjectType(dealData, editedFields);
+    // Trim AND lowercase, matching the approve gate's normalizeApproverEmail, so the baseline∩created
+    // intersection is case-insensitive (an approver in both sets under different casing still matches).
     const normRecipients = (list: string[]) =>
-      new Set(list.map((r) => String(r ?? "").trim()).filter((r) => r.length > 0));
+      new Set(list.map((r) => String(r ?? "").trim().toLowerCase()).filter((r) => r.length > 0));
     const baselineRecipients = normRecipients(
       await resolveRecipients(baselineType, row.sourceSystem ?? null)
     );
