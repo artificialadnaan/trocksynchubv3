@@ -6,9 +6,14 @@ import {
   buildExpiredRfpMessage,
   cancelIneligibleRfpApproval,
   checkRfpApprovalSourceEligibility,
+  isAuthorizedRfpApprover,
   isRfpApprovalRequestExpired,
+  resolveEffectiveRfpProjectType,
   resolveRfpDescription,
 } from "../rfp-approval";
+
+const UNAUTHORIZED_APPROVER_MESSAGE =
+  'This email address is not an authorized approver for this RFP. Please use the address the review request was sent to, or contact an administrator.';
 
 const inFlightApprovalTokens = new Set<string>();
 
@@ -30,7 +35,7 @@ async function auditRouteAttempt(request: any, action: string, outcome: string, 
     entityType: 'deal',
     entityId: identity.sourceDealId,
     source: 'rfp-approval',
-    status: outcome === 'expired' || outcome === 'cancelled_source_ineligible' ? 'failed' : 'success',
+    status: outcome === 'expired' || outcome === 'cancelled_source_ineligible' || outcome === 'unauthorized_approver' ? 'failed' : 'success',
     details: {
       approverEmail: approverEmail || null,
       sourceSystem: identity.sourceSystem,
@@ -360,6 +365,15 @@ async function renderRfpReviewPage(
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
+    // Escape server-supplied text before concatenating it into showResult()'s innerHTML, so a server
+    // message that contains markup (e.g. a CRM/HubSpot stage label in an ineligibility message) renders
+    // as text, not HTML.
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     function setLoading(btn, loading) {
       if (loading) {
         btn.disabled = true;
@@ -398,16 +412,18 @@ async function renderRfpReviewPage(
           throw new Error(raw || ('Request failed with status ' + resp.status));
         }
         if (data.success) {
-          const message = data.message || 'The deal has been updated in ${esc(source.label)} and a BidBoard project is being created in the background.';
-          showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + data.bidboardProjectId : ''), 'success');
+          const message = data.message ? escapeHtml(data.message) : 'The deal has been updated in ${esc(source.label)} and a BidBoard project is being created in the background.';
+          showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + escapeHtml(data.bidboardProjectId) : ''), 'success');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
-          showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
+          // Prefer the friendly user-facing message (e.g. the unauthorized-approver guidance);
+          // fall back to the machine code in data.error only when no message is provided.
+          showResult('<strong>Error:</strong> ' + escapeHtml(data.message || data.error || 'Unknown error'), 'error');
           setLoading(btn, false);
           decBtn.disabled = false;
         }
       } catch (e) {
-        showResult('<strong>Error:</strong> ' + e.message, 'error');
+        showResult('<strong>Error:</strong> ' + escapeHtml(e.message), 'error');
         setLoading(btn, false);
         decBtn.disabled = false;
       }
@@ -440,12 +456,14 @@ async function renderRfpReviewPage(
           showResult('This RFP has been <strong>declined</strong>. No BidBoard project will be created. The deal remains in ${esc(source.label)}.', 'declined');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
-          showResult('<strong>Error:</strong> ' + (data.error || 'Unknown error'), 'error');
+          // Prefer the friendly user-facing message (e.g. the unauthorized-approver guidance);
+          // fall back to the machine code in data.error only when no message is provided.
+          showResult('<strong>Error:</strong> ' + escapeHtml(data.message || data.error || 'Unknown error'), 'error');
           setLoading(btn, false);
           appBtn.disabled = false;
         }
       } catch (e) {
-        showResult('<strong>Error:</strong> ' + e.message, 'error');
+        showResult('<strong>Error:</strong> ' + escapeHtml(e.message), 'error');
         setLoading(btn, false);
         appBtn.disabled = false;
       }
@@ -563,6 +581,41 @@ export function registerRfpApprovalRoutes(app: Express) {
           return res.status(409).json({ success: false, error: `Request already ${request.status}` });
         }
 
+        // Authorize the submitter (against rfp_approver_config + the always-CC'd admin allowlist) for
+        // TWO project types, both via resolveEffectiveRfpProjectType — the same single source the
+        // processor derives finalProjectTypeDigit from and the email/digest route by:
+        //   (1) BASELINE — resolveEffectiveRfpProjectType(dealData) with NO editedFields. This is the
+        //       canonical type the RFP IS, derived from project_number (then project_types) — it is NOT
+        //       approver-controlled. editedFields is form-controlled, so without this check a reviewer
+        //       authorized only for type X could approve a leaked/forwarded type-Y link by editing
+        //       project_types to X before submitting (the created type would then be X, which they own).
+        //       Gating on the baseline blocks that: a type-2 approver can't act on a DFW-4 link at all.
+        //       The baseline is also the routing type, so a legitimately-notified approver always owns it
+        //       (no stranding on a project_types-vs-number-mismatched row).
+        //   (2) CREATED — resolveEffectiveRfpProjectType(dealData, editedFields), the type the approval
+        //       will actually create (incl. an edit into a new routing group). Blocks edit-to-service:
+        //       a type-2 approver editing a DFW-2 RFP up to type 4 can't create the service project.
+        // Both must pass; the admin/global-CC exemption lives inside isAuthorizedRfpApprover. (Binding
+        // the action to the specific link recipient + a frozen send-time recipient snapshot remain the
+        // separate recipient-binding follow-ups tracked in #47.)
+        const dealData = (request.dealData as Record<string, any> | null);
+        const baselineProjectType = resolveEffectiveRfpProjectType(dealData);
+        const createdProjectType = resolveEffectiveRfpProjectType(dealData, editedFields);
+        const authorizedForBaseline = await isAuthorizedRfpApprover(approverEmail, baselineProjectType, request.sourceSystem);
+        const authorizedForCreated = await isAuthorizedRfpApprover(approverEmail, createdProjectType, request.sourceSystem);
+        if (!authorizedForBaseline || !authorizedForCreated) {
+          await auditRouteAttempt(
+            request,
+            'rfp_approval_attempt',
+            'unauthorized_approver',
+            approverEmail,
+            !authorizedForBaseline
+              ? 'Approver not authorized for the baseline (project-number) type of this RFP'
+              : 'Approver not in the authorized set for the canonical created project type',
+          );
+          return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
+        }
+
         const eligibility = await checkRfpApprovalSourceEligibility(request);
         if (!eligibility.eligible) {
           const result = await cancelIneligibleRfpApproval(
@@ -635,6 +688,27 @@ export function registerRfpApprovalRoutes(app: Express) {
         message,
         expiredAt: request.tokenExpiresAt,
       });
+    }
+
+    // Decline shares the public review-link surface and the same authorized-approver set as approve:
+    // gate on the CANONICAL type the RFP concerns (resolveEffectiveRfpProjectType — decline has no
+    // editedFields). A decline creates nothing, but a non-canonical approver must NOT be able to reject
+    // a row that would create a project of a type they don't own (e.g. project_types '2' but
+    // project_number 'DFW-4-...' = a SERVICE RFP). The review email + pending digest route by this same
+    // canonical type, so the approvers notified are exactly the ones authorized here — nothing strands.
+    // (No HMAC override path for decline → no exemption; recipient-binding is the #47 follow-up.)
+    const declineDealData = (request.dealData as Record<string, any> | null);
+    const declineCreatedType = resolveEffectiveRfpProjectType(declineDealData);
+    const declineAuthorized = await isAuthorizedRfpApprover(declinerEmail, declineCreatedType, request.sourceSystem);
+    if (!declineAuthorized) {
+      await auditRouteAttempt(
+        request,
+        'rfp_decline_attempt',
+        'unauthorized_approver',
+        declinerEmail,
+        'Decliner not in the authorized set for the canonical project type',
+      );
+      return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
     }
 
     const { processRfpDecline } = await import('../rfp-approval');

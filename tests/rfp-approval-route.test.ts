@@ -52,6 +52,17 @@ describe("RFP approval route", () => {
       buildExpiredRfpMessage: vi.fn(() => "expired"),
       checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
       cancelIneligibleRfpApproval: vi.fn(),
+      isAuthorizedRfpApprover: vi.fn(async () => true),
+      // Mirrors the real canonical-type resolver the approve gate now calls (precedence: project_number
+      // digit, then an edited project_types, then dealData.project_types, then '2').
+      resolveEffectiveRfpProjectType: vi.fn((deal: any, edited?: any) => {
+        const pn = (deal?.project_number ?? "") as string;
+        const current = pn.match(/^DFW-(\d+)-/i)?.[1] ?? deal?.project_types ?? "";
+        const submitted = edited?.project_types;
+        let t = current || submitted || deal?.project_types || "2";
+        if (submitted && submitted !== current) t = submitted;
+        return t ? String(t) : null;
+      }),
     }));
 
     const { registerRfpApprovalRoutes } = await import("../server/routes/rfp-approval.ts");

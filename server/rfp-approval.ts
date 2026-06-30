@@ -4,9 +4,17 @@ import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import path from 'path';
 import { isUniqueViolation, storage, type SourceSystem } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
-import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from './constants';
+import { parseProjectTypeFromNumber, replaceProjectTypeInNumber, resolveEffectiveRfpProjectType } from './constants';
+// Re-exported so the approve/decline routes and tests keep importing the canonical-type resolver from
+// here (its long-standing import site). The function itself lives in the dependency-free constants
+// module so the PURE pendingRfpDigest builder can share it without pulling in this DB-coupled module.
+export { resolveEffectiveRfpProjectType };
 import { resolveHubspotStageId } from './procore-hubspot-sync';
 import { sendEmail, renderTemplate } from './email-service';
+// Namespace-access GLOBAL_CC_RECIPIENTS (see getRfpAdminApprovers) rather than a named import: a
+// partial email-service mock in a test that omits it then resolves to undefined (handled by `|| []`)
+// instead of every such mock having to re-export it.
+import * as emailService from './email-service';
 import { log } from './index';
 import {
   buildBidBoardCreatedCallbackTargetUrl,
@@ -559,6 +567,38 @@ async function uploadFileToHubSpotAndAttachToDeal(
 const RFP_APPROVER_CACHE_TTL_MS = 60_000;
 const rfpApproverCache = new Map<string, { timestamp: number; recipients: string[] }>();
 
+/**
+ * Hardcoded routing used ONLY when rfp_approver_config has no matching active row — the legit
+ * intended fallback. (A config READ ERROR is a different, untrustworthy case; see
+ * selectConfiguredRfpRecipients + isAuthorizedRfpApprover.)
+ */
+function hardcodedRfpSafetyNetRecipients(type: string): string[] {
+  if (type === '4') {
+    // Project type 4: James + Colby
+    return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+  }
+  // All other project types: Sidney + James + Tim (non-service routing — kept in sync with main's #45 change)
+  return ['sgibson@trockgc.com', 'jhelms@trockgc.com', 'tmitchell@trockgc.com'];
+}
+
+/**
+ * Read rfp_approver_config and select the best-matching active row's approver emails, or return
+ * null when NO active row matches (the legit "fall back to the hardcoded safety net" case).
+ *
+ * IMPORTANT: read errors are NOT swallowed here — they PROPAGATE so the authorization path
+ * (isAuthorizedRfpApprover) can fail closed. The non-security notification path
+ * (getRfpReviewRecipients) keeps catching them and using the safety net.
+ */
+async function selectConfiguredRfpRecipients(type: string, source: string): Promise<string[] | null> {
+  // TODO: Build an admin settings UI; for now rfp_approver_config is edited via SQL.
+  const configs = await storage.getRfpApproverConfigs(type, source);
+  const exactSource = configs.find((config) => config.projectType === type && config.sourceSystem === source);
+  const exactProjectType = configs.find((config) => config.projectType === type && config.sourceSystem === null);
+  const defaultConfig = configs.find((config) => config.projectType === '*' && config.sourceSystem === null);
+  const selected = exactSource ?? exactProjectType ?? defaultConfig;
+  return selected?.approverEmails?.length ? selected.approverEmails : null;
+}
+
 export async function getRfpReviewRecipients(projectType: string | null | undefined, sourceSystem: string | null | undefined = 'hubspot'): Promise<string[]> {
   const type = String(projectType || '').trim();
   const source = String(sourceSystem || 'hubspot').trim();
@@ -569,32 +609,85 @@ export async function getRfpReviewRecipients(projectType: string | null | undefi
   }
 
   try {
-    // TODO: Build an admin settings UI; for now rfp_approver_config is edited via SQL.
-    const configs = await storage.getRfpApproverConfigs(type, source);
-    const exactSource = configs.find((config) => config.projectType === type && config.sourceSystem === source);
-    const exactProjectType = configs.find((config) => config.projectType === type && config.sourceSystem === null);
-    const defaultConfig = configs.find((config) => config.projectType === '*' && config.sourceSystem === null);
-    const selected = exactSource ?? exactProjectType ?? defaultConfig;
-    if (selected?.approverEmails?.length) {
-      rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: selected.approverEmails });
-      return selected.approverEmails;
+    const configured = await selectConfiguredRfpRecipients(type, source);
+    if (configured?.length) {
+      rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: configured });
+      return configured;
     }
   } catch (error: any) {
+    // Notification routing is NOT a security decision — keep delivering to the safety net on a
+    // config read error so review emails still go out. (The authz gate fails closed instead.)
     console.warn(`[rfp-approval] Failed to load RFP approver config, using hardcoded safety net: ${error?.message || error}`);
   }
 
   // Safety net: preserve the original hardcoded routing if DB config is missing or invalid.
   console.warn(`[rfp-approval] No active RFP approver config for projectType=${type || '*'}, sourceSystem=${source}; using hardcoded safety net`);
-  let fallbackRecipients: string[];
-  if (type === '4') {
-    // Project type 4: James + Colby
-    fallbackRecipients = ['jhelms@trockgc.com', 'cburling@trockgc.com'];
-  } else {
-    // All other project types: Sidney + James + Tim
-    fallbackRecipients = ['sgibson@trockgc.com', 'jhelms@trockgc.com', 'tmitchell@trockgc.com'];
-  }
+  const fallbackRecipients = hardcodedRfpSafetyNetRecipients(type);
   rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: fallbackRecipients });
   return fallbackRecipients;
+}
+
+const normalizeApproverEmail = (email: string | null | undefined): string =>
+  String(email || '').trim().toLowerCase();
+
+/**
+ * Admin / always-CC approvers who legitimately receive EVERY RFP review email (they are CC'd on all
+ * outgoing mail via the email layer's GLOBAL_CC list) plus the RFP admin address. These people are
+ * NOT stored in rfp_approver_config but may approve/decline any RFP regardless of its project-type
+ * routing — so the authz check must exempt them. Single-sourced from email-service to avoid drift.
+ */
+function getRfpAdminApprovers(): string[] {
+  return [RFP_ADMIN_EMAIL, ...(emailService.GLOBAL_CC_RECIPIENTS || [])];
+}
+
+/**
+ * Authorization gate for the PUBLIC RFP review-link approve/decline actions. Resolves the authorized
+ * approver set from the SAME rfp_approver_config source the routing/notification uses, UNION the
+ * admin/global-CC allowlist who are CC'd on every review email. Comparison is case-insensitive and
+ * trimmed.
+ *
+ * SECURITY — FAILS CLOSED on a config READ ERROR. Unlike getRfpReviewRecipients (a notification
+ * routing helper that swallows DB errors and falls back to the hardcoded safety net), this gate
+ * distinguishes the two cases:
+ *   - NO matching active config row  → legit intended fallback to the hardcoded safety net (allow).
+ *   - the config READ THREW (DB unreadable) → we cannot trust the safety net to reflect the live
+ *     authorized set, so DENY (return false). The route then returns a clean 403, never an approval.
+ * The admin / always-CC allowlist is config-INDEPENDENT (sourced from email-service, not the DB), so
+ * it still authorizes even when the config cannot be read.
+ *
+ * NOTE: this intentionally does NOT gate the HMAC-secured override-approve path
+ * (processRfpApproval `force: true`, /api/rfp-requests/:id/override-approve), which is authenticated
+ * server-to-server and may legitimately carry a director's email outside any config row.
+ */
+export async function isAuthorizedRfpApprover(
+  approverEmail: string | null | undefined,
+  projectType: string | null | undefined,
+  sourceSystem: string | null | undefined = 'hubspot',
+): Promise<boolean> {
+  const candidate = normalizeApproverEmail(approverEmail);
+  if (!candidate) return false;
+
+  // The admin / always-CC allowlist does not depend on the DB config, so check it first — these
+  // directors remain authorized even if rfp_approver_config is temporarily unreadable.
+  const adminApprovers = getRfpAdminApprovers().map(normalizeApproverEmail).filter(Boolean);
+  if (adminApprovers.includes(candidate)) return true;
+
+  const type = String(projectType || '').trim();
+  const source = String(sourceSystem || 'hubspot').trim();
+  let configuredRecipients: string[];
+  try {
+    const configured = await selectConfiguredRfpRecipients(type, source);
+    // A missing config row is the legit fallback; a thrown read is handled by the catch below.
+    configuredRecipients = configured?.length ? configured : hardcodedRfpSafetyNetRecipients(type);
+  } catch (error: any) {
+    // PII: do NOT log the candidate approver email here — who attempted is captured in the audit
+    // record (auditRouteAttempt logs approverEmail). Keep only the failure + routing context.
+    console.warn(`[rfp-approval] RFP approver config read failed during authorization; denying (projectType=${type || 'none'}, sourceSystem=${source}): ${error?.message || error}`);
+    return false;
+  }
+
+  const authorized = new Set(configuredRecipients.map(normalizeApproverEmail).filter(Boolean));
+  return authorized.has(candidate);
 }
 
 const RFP_DEAL_PROPERTIES = [
@@ -1034,8 +1127,15 @@ async function sendRfpReviewEmails(params: {
 </body>
 </html>`;
 
-  const rfpRecipients = await getRfpReviewRecipients(params.dealData.project_types, params.input.sourceSystem);
-  console.log(`[rfp-approval] Project type: ${params.dealData.project_types || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
+  // Route by the CANONICAL type the approval will actually create (the same single source the
+  // approve/decline gates authorize against), NOT the raw routed project_types — so a row with
+  // project_types '2' but project_number 'DFW-4-...' notifies the SERVICE approvers who can act on
+  // it, instead of stranding it with non-service approvers the gate would later 403. No editedFields
+  // at send time → this resolves parseProjectTypeFromNumber(project_number) ?? project_types ?? '2',
+  // a NO-OP for consistent rows (project_types already equals the number's type digit).
+  const effectiveProjectType = resolveEffectiveRfpProjectType(params.dealData);
+  const rfpRecipients = await getRfpReviewRecipients(effectiveProjectType, params.input.sourceSystem);
+  console.log(`[rfp-approval] Project type: ${effectiveProjectType || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
   for (const recipient of rfpRecipients) {
     try {
       const result = await sendEmail({
@@ -1346,18 +1446,21 @@ export async function processRfpApproval(
     const sourceDealId = identity.sourceDealId;
     const hubspotDealId = request.sourceSystem === 'hubspot' ? sourceDealId : null;
 
-    // Check if project type changed — update project number and HubSpot immediately
+    // Check if project type changed — update project number and HubSpot immediately.
+    // The canonical type digit (service vs non-service) is resolved via the shared helper so this
+    // processor and the approve-route authz gate pick the SAME type — no drift. See
+    // resolveEffectiveRfpProjectType; the inline branch below only rewrites the project NUMBER when the
+    // routing group changed (the type digit itself is already finalProjectTypeDigit).
     const submittedProjectType = editedFields.project_types;
     const currentProjectNumber = (dealData.project_number ?? '') as string;
     const currentTypeDigit = parseProjectTypeFromNumber(currentProjectNumber) ?? dealData.project_types ?? '';
 
     let finalProjectNumber = currentProjectNumber;
-    let finalProjectTypeDigit = currentTypeDigit || submittedProjectType || dealData.project_types || '2';
+    const finalProjectTypeDigit = resolveEffectiveRfpProjectType(dealData, editedFields) || '2';
 
     if (submittedProjectType && submittedProjectType !== currentTypeDigit) {
       const updatedProjectNumber = replaceProjectTypeInNumber(currentProjectNumber, submittedProjectType);
       finalProjectNumber = updatedProjectNumber;
-      finalProjectTypeDigit = submittedProjectType;
 
       try {
         if (hubspotDealId) await updateHubSpotDeal(hubspotDealId, {
@@ -1369,8 +1472,6 @@ export async function processRfpApproval(
         log(`[rfp-approval] Warning: Failed to update project number in HubSpot: ${err.message}`, 'rfp');
         // Non-fatal — continue with BidBoard creation
       }
-    } else if (currentProjectNumber && !submittedProjectType && currentTypeDigit) {
-      finalProjectTypeDigit = currentTypeDigit;
     }
 
     const changedFields: Record<string, string> = {};

@@ -19,6 +19,11 @@
  * server/rfp-reports.ts so the digest reflects the same values the RFP report shows.
  */
 
+// Canonical-type resolver — imported from the dependency-free constants module (NOT rfp-approval) so
+// this builder stays PURE/unit-testable without a DB. Same single source the approve/decline gates
+// and the review-email routing use, so the digest buckets each RFP under the approvers who can act.
+import { resolveEffectiveRfpProjectType } from "./constants";
+
 /** Minimal shape of a pending rfp_approval_requests row this builder needs. */
 export interface PendingRfpRow {
   token: string;
@@ -191,21 +196,27 @@ export async function buildPendingRfpDigest(
     const dateSent = formatDateSent(row.createdAt);
     const reviewUrl = `${baseUrl}/rfp-review/${row.token}`;
 
-    // "Who it's awaiting" = the approver recipients for this row, via the SAME resolver the
-    // approval email uses (so Item-3's Tim flows in automatically). Inputs mirror the live
-    // send path: dealData.project_types + the row's sourceSystem.
-    const awaiting = Array.from(
-      new Set(
-        (
-          await resolveRecipients(
-            dealData.project_types as string | null | undefined,
-            row.sourceSystem ?? null
-          )
-        )
-          .map((r) => String(r ?? "").trim())
-          .filter((r) => r.length > 0)
-      )
+    // "Who it's awaiting" = the approvers who can ACTUALLY act on this row, mirroring the approve gate
+    // EXACTLY: authorized for BOTH the BASELINE (project-number) type AND the CREATED (edited) type.
+    // Uses the same resolver the approval email + gate use (so Item-3's Tim flows in). For an unedited
+    // row baseline === created, so this is just that type's set (and we skip the second lookup); for an
+    // edited pending row (e.g. project_types reset/edited away from the number's type) it's the
+    // INTERSECTION — only a dual-authorized approver can finalize a type change, so bucketing under the
+    // created type alone would remind created-type approvers the gate would 403.
+    const baselineType = resolveEffectiveRfpProjectType(dealData);
+    const createdType = resolveEffectiveRfpProjectType(dealData, editedFields);
+    // Trim AND lowercase, matching the approve gate's normalizeApproverEmail, so the baseline∩created
+    // intersection is case-insensitive (an approver in both sets under different casing still matches).
+    const normRecipients = (list: string[]) =>
+      new Set(list.map((r) => String(r ?? "").trim().toLowerCase()).filter((r) => r.length > 0));
+    const baselineRecipients = normRecipients(
+      await resolveRecipients(baselineType, row.sourceSystem ?? null)
     );
+    const createdRecipients =
+      createdType === baselineType
+        ? baselineRecipients
+        : normRecipients(await resolveRecipients(createdType, row.sourceSystem ?? null));
+    const awaiting = Array.from(baselineRecipients).filter((r) => createdRecipients.has(r));
 
     const cell: DigestCell = { projectName, projectNumber, dateSent, awaiting, reviewUrl };
     // Scope: this RFP only goes to its own authorized approvers.

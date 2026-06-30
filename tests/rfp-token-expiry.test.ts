@@ -17,6 +17,9 @@ vi.mock("../server/storage.ts", () => ({
     getHubspotDealByHubspotId: vi.fn(async () => undefined),
     createRfpApprovalEdit: vi.fn(async (row: any) => row),
     getAutomationConfig: vi.fn(async () => null),
+    // No config rows → real isAuthorizedRfpApprover falls through to the hardcoded safety net
+    // (type "2" → sgibson + jhelms).
+    getRfpApproverConfigs: vi.fn(async () => []),
   },
 }));
 
@@ -36,6 +39,7 @@ vi.mock("../server/hubspot.ts", () => ({
 vi.mock("../server/email-service.ts", () => ({
   sendEmail: vi.fn(async () => ({ success: true })),
   renderTemplate: vi.fn(),
+  GLOBAL_CC_RECIPIENTS: ["adnaan.iqbal@gmail.com", "bbell@trockgc.com"],
 }));
 
 vi.mock("../server/index.ts", () => ({
@@ -169,7 +173,8 @@ describe("RFP token expiry enforcement", () => {
   it("keeps valid non-expired approve flow unchanged", async () => {
     await withApp(async (baseUrl) => {
       const form = new FormData();
-      form.append("approverEmail", "approver@trockgc.com");
+      // Authorized approver for project type "2" (safety-net routing → sgibson + jhelms).
+      form.append("approverEmail", "sgibson@trockgc.com");
       form.append("editedFields", JSON.stringify({}));
       const response = await fetch(`${baseUrl}/api/rfp-approval/token-1/approve`, { method: "POST", body: form });
       const body = await response.json();
