@@ -376,6 +376,9 @@ async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBody
     description: d.description,
     bid_due_date: d.dueDate,
     attachments: input.attachments,
+    project_location: d.address?.street,
+    due_date: d.dueDate,
+    notes: d.description,
   };
 
   // Reuses the syncMappings adopt-guard inside createBidBoardProjectFromDeal (one deal -> one project).
@@ -386,6 +389,10 @@ async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBody
     normalizedDealData,
     options: { syncDocuments: true },
   });
+
+  if (!result.success) {
+    console.error(`[rfp-requests] create-from-rfp BidBoard create failed for deal ${input.sourceDealId}: ${result.error || "unknown"}`);
+  }
 
   const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
   if (!targetUrl) {

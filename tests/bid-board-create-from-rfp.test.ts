@@ -80,10 +80,10 @@ async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   const app = express();
   registerRfpRequestRoutes(app);
   const server = app.listen(0);
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("Test server did not bind");
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const port = (server.address() as any).port;
   try {
-    return await fn(`http://127.0.0.1:${address.port}`);
+    return await fn(`http://127.0.0.1:${port}`);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   }
