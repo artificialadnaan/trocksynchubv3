@@ -52,6 +52,13 @@ export const rfpRequestBodySchema = z.object({
 
 export type RfpRequestBody = z.infer<typeof rfpRequestBodySchema>;
 
+// Body for POST /api/bid-board/create-from-rfp: the CRM's normalized RFP body plus an explicit
+// decision guard. The CRM only calls this on a 2/3-approve vote (or override-approve), so decision
+// must be exactly "approved".
+const createFromRfpBodySchema = rfpRequestBodySchema.extend({
+  decision: z.literal("approved"),
+});
+
 export function signRfpRequestPayload(body: Buffer | string, secret: string): string {
   return `sha256=${crypto.createHmac("sha256", secret).update(body).digest("hex")}`;
 }
@@ -302,4 +309,144 @@ export function registerRfpRequestRoutes(app: Express): void {
       }
     });
   }));
+
+  // Create-on-command from a CRM RFP VOTE (2/3-approve or override-approve). The CRM already decided, so
+  // this creates the BidBoard project immediately (no email, no rfp_approval_requests row, no vote storage
+  // here) and posts the existing bid-board-created callback keyed by sourceDealId. HMAC-secured; 202 + async.
+  // NOTE: this endpoint NEVER returns 409 — duplicate creates are absorbed by the syncMappings adopt-guard
+  // inside createBidBoardProjectFromDeal (returns success), so the CRM's fire-and-forget delivery job needs
+  // no 409 handling.
+  app.post("/api/bid-board/create-from-rfp", jsonWithRawBody, asyncHandler(async (req, res) => {
+    const signature = verifyRfpRequestSignature(req);
+    if (!signature.ok) {
+      const body = signature.status === 401
+        ? { success: false, error: "Unauthorized", message: signature.message }
+        : { success: false, error: "Internal Server Error", message: signature.message };
+      return res.status(signature.status).json(body);
+    }
+
+    const parsed = createFromRfpBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(422).json({
+        success: false,
+        error: "Unprocessable Entity",
+        message: "create-from-rfp validation failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const input = parsed.data;
+
+    res.status(202).json({
+      success: true,
+      queued: true,
+      sourceDealId: input.sourceDealId,
+      projectNumber: input.deal.projectNumber,
+    });
+
+    setImmediate(async () => {
+      try {
+        await createBidBoardFromRfpVote(input);
+      } catch (err: any) {
+        console.error(`[rfp-requests] create-from-rfp failed for deal ${input.sourceDealId}:`, err?.message || err);
+      }
+    });
+  }));
+}
+
+async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBodySchema>): Promise<void> {
+  const { createBidBoardProjectFromDeal } = await import("../playwright/bidboard");
+  const { buildBidBoardCreatedCallbackTargetUrl } = await import("../sync/bidboard-callback-worker");
+
+  const d = input.deal;
+  const normalizedDealData: Record<string, any> = {
+    dealname: d.name,
+    project_number: d.projectNumber,
+    project_types: d.projectType,
+    amount: d.amount,
+    estimator: d.estimator,
+    company_name: d.companyName,
+    contact_name: d.contactName,
+    client_email: d.clientEmail,
+    client_phone: d.clientPhone,
+    address: d.address?.street,
+    city: d.address?.city,
+    state: d.address?.state,
+    zip: d.address?.zip,
+    country: d.address?.country,
+    description: d.description,
+    bid_due_date: d.dueDate,
+    attachments: input.attachments,
+  };
+
+  // Reuses the syncMappings adopt-guard inside createBidBoardProjectFromDeal (one deal -> one project).
+  const result = await createBidBoardProjectFromDeal({
+    sourceSystem: "trock_crm",
+    sourceDealId: input.sourceDealId,
+    bidboardStage: "Estimate in Progress",
+    normalizedDealData,
+    options: { syncDocuments: true },
+  });
+
+  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
+  if (!targetUrl) {
+    console.error(`[rfp-requests] TROCK_CRM_BASE_URL not configured; cannot deliver create-from-rfp callback for deal ${input.sourceDealId}`);
+    return;
+  }
+  const secret = process.env.RFP_REQUEST_SYNC_SECRET;
+  if (!secret) {
+    console.error("[rfp-requests] RFP_REQUEST_SYNC_SECRET not configured; cannot deliver create-from-rfp callback");
+    return;
+  }
+
+  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+
+  // Voting-path callback: NO rfpApprovalRequestId (no request row). The CRM resolves by sourceDealId.
+  const payload = result.success && result.projectId
+    ? {
+        status: "created" as const,
+        sourceDealId: input.sourceDealId,
+        bidboardProjectId: result.projectId,
+        projectNumber: input.deal.projectNumber,
+        procoreCompanyId,
+        createdAt: new Date().toISOString(),
+      }
+    : {
+        status: "failed" as const,
+        sourceDealId: input.sourceDealId,
+        projectNumber: input.deal.projectNumber,
+        procoreCompanyId,
+        error: result.error || "BidBoard project creation failed",
+        createdAt: new Date().toISOString(),
+      };
+
+  await deliverCreateFromRfpCallback(targetUrl, payload, secret);
+}
+
+async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined> {
+  const getAutomationConfig = (storage as any).getAutomationConfig;
+  const config = typeof getAutomationConfig === "function"
+    ? await getAutomationConfig.call(storage, "procore_config")
+    : null;
+  return String((config?.value as any)?.companyId || process.env.PROCORE_COMPANY_ID || "").trim() || undefined;
+}
+
+async function deliverCreateFromRfpCallback(targetUrl: string, payload: Record<string, any>, secret: string): Promise<void> {
+  const { fetchWithTimeout } = await import("../lib/fetch-with-timeout");
+  const rawBody = JSON.stringify(payload);
+  const sig = signRfpRequestPayload(rawBody, secret);
+  const MAX = 3;
+  for (let attempt = 1; attempt <= MAX; attempt++) {
+    try {
+      const resp = await fetchWithTimeout(targetUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sig },
+        body: rawBody,
+      });
+      if (resp.ok) return;
+      if (attempt === MAX) console.error(`[rfp-requests] create-from-rfp callback failed with ${resp.status}`);
+    } catch (err: any) {
+      if (attempt === MAX) console.error(`[rfp-requests] create-from-rfp callback error: ${err?.message || err}`);
+    }
+    if (attempt < MAX) await new Promise((r) => setTimeout(r, 1000 * attempt));
+  }
 }
