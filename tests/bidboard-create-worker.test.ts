@@ -10,6 +10,7 @@ const getRfpByNumMock = vi.hoisted(() => vi.fn(async (_p: string, _s: string) =>
 const getRfpBySourceMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string, _s: string) => undefined as any));
 const getMappingMock = vi.hoisted(() => vi.fn(async (_p: string) => undefined as any));
 const getDealMappingMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string) => undefined as any));
+const getAutomationConfigMock = vi.hoisted(() => vi.fn(async (_k: string) => ({ value: { companyId: "42" } }) as any));
 // A PGlite-backed db for the outbox lifecycle (enqueue/claim/mark). Set in beforeAll.
 const dbHolder = vi.hoisted(() => ({ db: null as any }));
 // Configurable callback target URL (X5 tests set it null).
@@ -26,7 +27,7 @@ vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
 }));
 vi.mock("../server/storage.ts", () => ({
   storage: {
-    getAutomationConfig: vi.fn(async () => ({ value: { companyId: "42" } })),
+    getAutomationConfig: getAutomationConfigMock,
     getRfpApprovalRequestByProjectNumberAndStatus: getRfpByNumMock,
     getRfpApprovalRequestBySourceDealAndStatus: getRfpBySourceMock,
     getBidboardMappingByProcoreProjectNumber: getMappingMock,
@@ -60,6 +61,8 @@ describe("performCreateFromRfpVote (create logic)", () => {
     getRfpBySourceMock.mockReset(); getRfpBySourceMock.mockResolvedValue(undefined);
     getMappingMock.mockReset(); getMappingMock.mockResolvedValue(undefined);
     getDealMappingMock.mockReset(); getDealMappingMock.mockResolvedValue(undefined);
+    getAutomationConfigMock.mockReset(); getAutomationConfigMock.mockResolvedValue({ value: { companyId: "42" } } as any);
+    delete process.env.PROCORE_COMPANY_ID;
   });
 
   it("happy: creates + enqueues a durable 'created' callback (NULL rfpApprovalRequestId, keyed by sourceDealId)", async () => {
@@ -86,12 +89,32 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(lastCallback().error).toContain("no longer in Opportunity");
   });
 
-  it("[S3/S4] a conflicting approval (approved by number / pending by source deal) -> failed callback, no create", async () => {
+  it("[S3] a conflicting APPROVED approval by project NUMBER -> failed callback, no create", async () => {
     getRfpByNumMock.mockImplementation(async (_p: string, s: string) => (s === "approved" ? { id: 7, status: "approved" } : undefined));
     await performCreateFromRfpVote(input());
     expect(createBidBoardMock).not.toHaveBeenCalled();
     expect(lastCallback().status).toBe("failed");
     expect(lastCallback().error).toContain("conflicting RFP approval");
+  });
+
+  it("[S4] a conflicting PENDING approval by SOURCE DEAL (not by number) -> failed callback, no create", async () => {
+    // Exercise the getRfpBySourceMock arm of the guard's ?? chain, distinct from the by-number (S3) arm above.
+    getRfpBySourceMock.mockImplementation(async (_ss: string, _sd: string, s: string) => (s === "pending" ? { id: 11, status: "pending" } : undefined));
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("conflicting RFP approval");
+    expect(getRfpBySourceMock).toHaveBeenCalledWith("trock_crm", "crm-deal-1", "pending");
+  });
+
+  it("[finding K] a create with NO Procore company id THROWS before enqueuing an unusable 'created' callback", async () => {
+    getAutomationConfigMock.mockResolvedValue({ value: {} } as any); // no companyId
+    delete process.env.PROCORE_COMPANY_ID; // and none from env
+    // createBidBoardMock returns success (default) -> the project is created, but the 'created' callback enqueue
+    // must throw (the CRM 422s a created with no procore_company_id). The throw keeps the command retryable.
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/company id/i);
+    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled();
   });
 
   it("[V1] refuses when the project number is owned by another deal -> failed callback, no create", async () => {
@@ -144,10 +167,17 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(lastCallback().bidboardProjectId).toBe("999");
   });
 
-  it("[X4] supersedes prior PENDING voting callbacks (DELETE) before enqueuing a new one", async () => {
+  it("[X4] supersedes prior PENDING voting callbacks with a SCOPED DELETE before enqueuing a new one", async () => {
     await performCreateFromRfpVote(input());
-    const executed = (dbHolder.db.execute as any).mock.calls.map((c: any[]) => JSON.stringify(c[0])).join(" ");
-    expect(executed).toMatch(/DELETE FROM bidboard_callback_outbox/i);
+    const deleteSql = (dbHolder.db.execute as any).mock.calls
+      .map((c: any[]) => JSON.stringify(c[0]))
+      .find((s: string) => /DELETE FROM bidboard_callback_outbox/i.test(s));
+    expect(deleteSql).toBeTruthy();
+    // finding: the DELETE must be SCOPED — not an unscoped table wipe. Assert the row-selection criteria are present
+    // (source_deal_id filter, NULL request id for voting rows, and status='pending'), not just the table name.
+    expect(deleteSql).toMatch(/source_deal_id/i);
+    expect(deleteSql).toMatch(/rfp_approval_request_id IS NULL/i);
+    expect(deleteSql).toMatch(/status = 'pending'/i);
     expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1);
   });
 
@@ -234,6 +264,21 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(new Date(rows[0].created_at).getTime()).toBeGreaterThan(new Date(before.created_at).getTime()); // receipt refreshed
   });
 
+  it("[finding] does NOT refresh a 'processing' row on a re-delivery (a live create owns it — never rewrite it)", async () => {
+    const mkDeal = (n: string) => ({ name: "d", projectNumber: n, projectType: "9", amount: 1, workflowRoute: "normal" });
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-1001") }));
+    // The worker claimed it (processing) and is mid-create — even a recent last_attempt_at is left alone now.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW(), created_at=NOW() - interval '1 hour'`);
+    const before = (await pg.query(`SELECT created_at FROM bidboard_create_outbox`)).rows[0] as any;
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-2002") })); // a corrected re-post arrives
+    const rows = (await pg.query(`SELECT status, project_number, created_at, payload FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("processing"); // unchanged — the in-flight attempt owns it
+    expect(rows[0].project_number).toBe("TR-1001"); // NOT refreshed to the corrected payload
+    expect(rows[0].payload.deal.projectNumber).toBe("TR-1001");
+    expect(new Date(rows[0].created_at).getTime()).toBe(new Date(before.created_at).getTime()); // receipt NOT bumped
+  });
+
   it("processBidboardCreateOutbox claims + drains pending commands serially and marks them done", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e1", sourceDealId: "d1" }));
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e2", sourceDealId: "d2" }));
@@ -255,6 +300,16 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     // best-effort failed callback so the CRM isn't left waiting
     expect(lastCallback().status).toBe("failed");
     expect(lastCallback().error).toContain("playwright boom");
+  });
+
+  it("[finding J] a perform() that RETURNS 'failed' (pre-create refusal) marks the command 'failed', not 'done'", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-refuse", sourceDealId: "d-refuse" }));
+    // perform took a pre-create terminal branch (ineligible / conflict / ownership) — it already sent a 'failed'
+    // callback and created NO project, so the command must be marked terminal 'failed', never 'done'.
+    const perform = vi.fn(async () => "failed" as const);
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("failed");
   });
 
   it("a POST-create failure (mapping exists) is NOT marked failed and emits NO failed callback — left for reclaim", async () => {

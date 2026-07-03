@@ -43,13 +43,16 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
           -- createdAt-vs-requested_at/reviewed_at freshness would reject it as stale. A re-queue IS a new receipt,
           -- so stamp created_at = NOW() (this also re-orders it fairly in the FIFO drain).
           created_at = NOW()
-      -- Re-queue + refresh a 'failed' row, a STILL-'pending' row (a corrected re-post that arrived BEFORE the
-      -- worker claimed it — otherwise the worker would run the STALE first payload), OR a STALE 'processing' row
-      -- (finding AA2: worker crashed after claiming). An ACTIVELY-processing row (recent last_attempt_at) is left
-      -- alone — its in-flight attempt owns it; a re-post after it fails/stalls will refresh it.
+      -- Re-queue + refresh a 'failed' row or a STILL-'pending' row (a corrected re-post that arrived BEFORE the
+      -- worker claimed it — otherwise the worker would run the STALE first payload). A 'processing' row is NEVER
+      -- refreshed here (finding): a create can legitimately run longer than any fixed window (slow Playwright + a
+      -- large attachment sync), so rewriting it back to 'pending' while a worker is mid-create would let that worker
+      -- finalize the refreshed row (markCreateCommandDone) and silently drop the corrected payload. The in-flight
+      -- attempt OWNS its row; a crashed worker's stuck 'processing' row is recovered by the stale-reclaim in
+      -- claimNextBidboardCreateCommand (which re-runs the row's payload), and a corrected re-post lands once the
+      -- attempt reaches a terminal state. (This deliberately supersedes the earlier AA2 refresh-processing behavior,
+      -- trading a rare corrected-re-post-during-create staleness for not corrupting a live long-running create.)
       WHERE bidboard_create_outbox.status IN ('failed', 'pending')
-         OR (bidboard_create_outbox.status = 'processing'
-             AND bidboard_create_outbox.last_attempt_at < NOW() - interval '10 minutes')
   `);
 }
 
@@ -174,10 +177,37 @@ async function enqueueFailedCallback(input: CreateFromRfpInput, error: string, c
   });
 }
 
-// The actual create work, run by the worker under serial processing. Throws on a CREATE failure (the caller
-// marks the command failed + delivers a failed callback); returns normally after enqueuing the created callback.
-// callbackAt stamps every callback with the command's receipt time (finding AA3).
-export async function performCreateFromRfpVote(input: CreateFromRfpInput, callbackAt?: string): Promise<void> {
+// Enqueue a durable 'created' callback. finding: the CRM's created-callback handler REQUIRES procore_company_id
+// (it 422s a 'created' that omits it, which would then 422-LOOP forever while this command is already marked
+// 'done' — the project would exist with no CRM link). So a missing company id is RETRYABLE: throw before enqueuing
+// so the command reclaims until procore_config.companyId / PROCORE_COMPANY_ID is configured, rather than sending an
+// unusable 'created'. (Failed callbacks don't need it and stay best-effort.)
+async function enqueueCreatedCallback(input: CreateFromRfpInput, bidboardProjectId: string, callbackAt?: string): Promise<void> {
+  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+  if (!procoreCompanyId) {
+    throw new Error("Procore company id not configured (procore_config.companyId / PROCORE_COMPANY_ID); cannot enqueue a 'created' callback the CRM would 422");
+  }
+  await enqueueCreateFromRfpCallback(input, {
+    status: "created" as const,
+    sourceDealId: input.sourceDealId,
+    bidboardProjectId,
+    projectNumber: input.deal.projectNumber,
+    procoreCompanyId,
+    // finding AA3: stamp with the command receipt time so a stale in-flight 'created' can't look newer than a
+    // later CRM round + slip past the CRM's createdAt-vs-requested_at/reviewed_at freshness.
+    createdAt: callbackAt ?? new Date().toISOString(),
+  });
+}
+
+// The actual create work, run by the worker under serial processing. Returns a discriminated outcome (finding):
+//   "created"  — a new BidBoard project was created + a 'created' callback enqueued.
+//   "adopted"  — a project already existed for this deal; re-sent the 'created' (adopt) callback.
+//   "failed"   — a PRE-create terminal branch (ineligible / conflict / ownership / revised-number) enqueued a
+//                'failed' callback and did NOT create a project.
+// Throws on a create failure that produced no callback (the caller delivers the failed callback + marks the
+// command failed/retryable). The caller uses the outcome to mark the command terminal WITHOUT assuming a normal
+// return implies a project was created. callbackAt stamps every callback with the command's receipt time (AA3).
+export async function performCreateFromRfpVote(input: CreateFromRfpInput, callbackAt?: string): Promise<"created" | "adopted" | "failed"> {
   const { createBidBoardProjectFromDeal } = await import("../playwright/bidboard");
   const projectNumber = input.deal.projectNumber;
 
@@ -196,18 +226,10 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
         `Deal ${input.sourceDealId} already has BidBoard project ${existingMapping.bidboardProjectId} under number ${existingMapping.procoreProjectNumber}; refusing to create/adopt under revised number ${projectNumber}`,
         callbackAt,
       );
-      return;
+      return "failed";
     }
-    const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
-    await enqueueCreateFromRfpCallback(input, {
-      status: "created" as const,
-      sourceDealId: input.sourceDealId,
-      bidboardProjectId: existingMapping.bidboardProjectId,
-      projectNumber: input.deal.projectNumber,
-      procoreCompanyId,
-      createdAt: callbackAt ?? new Date().toISOString(),
-    });
-    return;
+    await enqueueCreatedCallback(input, existingMapping.bidboardProjectId, callbackAt);
+    return "adopted";
   }
 
   // Eligibility recheck IMMEDIATELY before the create (findings T3 + V4): by now the command may have waited in
@@ -219,7 +241,7 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   });
   if (!eligibility.eligible) {
     await enqueueFailedCallback(input, eligibility.reason || "Source CRM deal is no longer eligible for BidBoard creation", callbackAt);
-    return;
+    return "failed";
   }
 
   // [Collision guard] (findings S3/S4) — block a conflicting email/override approval for the same project/deal.
@@ -240,7 +262,7 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
       `Project ${projectNumber} / deal ${input.sourceDealId} already has a conflicting RFP approval (request ${inFlightApproval.id}, status ${inFlightApproval.status}); not creating from vote`,
       callbackAt,
     );
-    return;
+    return "failed";
   }
 
   // [Ownership guard] (finding V1) — refuse to adopt a BidBoard project owned by a DIFFERENT deal. Because the
@@ -256,7 +278,7 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
       `Project ${projectNumber} is already linked to ${numberOwner.sourceSystem} deal ${numberOwner.sourceDealId} (BidBoard ${numberOwner.bidboardProjectId}); refusing to adopt for deal ${input.sourceDealId}`,
       callbackAt,
     );
-    return;
+    return "failed";
   }
 
   // (The same-deal revised-number guard, finding Y2, now runs FIRST via the mapping-first adopt block above — a
@@ -302,17 +324,8 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
     throw new Error(result.error || "BidBoard project creation failed");
   }
 
-  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
-  await enqueueCreateFromRfpCallback(input, {
-    status: "created" as const,
-    sourceDealId: input.sourceDealId,
-    bidboardProjectId: result.projectId,
-    projectNumber: input.deal.projectNumber,
-    procoreCompanyId,
-    // finding AA3: stamp with the command receipt time so a stale in-flight 'created' can't look newer than a
-    // later CRM round + slip past the CRM's createdAt-vs-requested_at/reviewed_at freshness.
-    createdAt: callbackAt ?? new Date().toISOString(),
-  });
+  await enqueueCreatedCallback(input, result.projectId, callbackAt);
+  return "created";
 }
 
 const CREATE_WORKER_LOCK_KEY = "bidboard_create_from_rfp_worker";
@@ -330,13 +343,14 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
   // skips. Holding one connection in a background worker (not a request thread) is fine — no request-pool
   // exhaustion. NOTE: pool.connect is dynamically imported so the test's ../db mock (drizzle-only) isn't required
   // to expose a pool — when absent, we fall back to non-cross-instance draining.
-  let lockClient: { query: (t: string) => Promise<any>; release: () => void } | null = null;
+  let lockClient: { query: (text: string, params?: any[]) => Promise<any>; release: () => void } | null = null;
   let locked = false;
   try {
     const dbModule: any = await import("../db");
     if (dbModule.pool?.connect) {
       lockClient = await dbModule.pool.connect();
-      const res = await lockClient!.query(`SELECT pg_try_advisory_lock(hashtext('${CREATE_WORKER_LOCK_KEY}')) AS locked`);
+      // Parameterized (not interpolated) even though CREATE_WORKER_LOCK_KEY is a constant — keeps the raw-SQL clean.
+      const res = await lockClient!.query(`SELECT pg_try_advisory_lock(hashtext($1)) AS locked`, [CREATE_WORKER_LOCK_KEY]);
       locked = Boolean((res.rows ?? res)[0]?.locked);
       if (!locked) return { processed: 0 }; // another instance is draining
     }
@@ -353,8 +367,9 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       // created + 'created' callback enqueued) and only markCreateCommandDone throws (transient DB error), we must
       // NOT enqueue a failed callback (which would delete the real 'created') — the project exists. Leave the row
       // 'processing' so the stale-reclaim path re-runs it idempotently (adopt-guard + latest-callback-wins).
+      let outcome: "created" | "adopted" | "failed";
       try {
-        await perform(input, callbackAt);
+        outcome = await perform(input, callbackAt);
       } catch (error: any) {
         const message = error?.message || String(error);
         // finding: if the project was ALREADY created (a mapping exists for this source deal) but a LATER step
@@ -390,11 +405,26 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         processed += 1;
         continue;
       }
+      // finding J: perform returned WITHOUT throwing. Distinguish a create from a pre-create terminal refusal — a
+      // normal return does NOT imply a project was created. A "failed" outcome enqueued a 'failed' callback and made
+      // NO project, so mark the command terminal via markCreateCommandFailed (NOT markCreateCommandDone): if that
+      // bookkeeping then failed and the row were left 'processing', a reclaim could CREATE a project after the CRM
+      // already received a terminal 'failed' result for this vote.
+      if (outcome === "failed") {
+        try {
+          await markCreateCommandFailed(row.id, "create refused before project creation (ineligible / conflict / ownership / revised-number)");
+        } catch (bookErr: any) {
+          log(`[bidboard-create] Command ${row.id} refused (no project) but markFailed failed (${bookErr?.message || bookErr}); a reclaim will re-refuse idempotently`, "sync");
+        }
+        processed += 1;
+        continue;
+      }
+      // "created" or "adopted" — the project exists + a 'created' callback was enqueued.
       try {
         await markCreateCommandDone(row.id);
       } catch (bookErr: any) {
         // Create + 'created' callback already happened; a failed markDone must NOT flip this to a failure. Leave it
-        // 'processing' for the stale-reclaim to finish (re-running is idempotent).
+        // 'processing' for the stale-reclaim to finish (re-running adopts idempotently via perform's mapping-first).
         log(`[bidboard-create] Command ${row.id} created OK but markDone failed (will re-reconcile): ${bookErr?.message || bookErr}`, "sync");
       }
       processed += 1;
@@ -403,7 +433,7 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
   } finally {
     if (lockClient) {
       if (locked) {
-        try { await lockClient.query(`SELECT pg_advisory_unlock(hashtext('${CREATE_WORKER_LOCK_KEY}'))`); } catch { /* connection may be gone */ }
+        try { await lockClient.query(`SELECT pg_advisory_unlock(hashtext($1))`, [CREATE_WORKER_LOCK_KEY]); } catch { /* connection may be gone */ }
       }
       lockClient.release();
     }
