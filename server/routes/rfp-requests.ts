@@ -378,18 +378,25 @@ async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBody
 
   const projectNumber = input.deal.projectNumber;
 
-  // [Collision guard] An email-based RFP approval is already in flight for this project number. The
-  // voting path mints no rfp_approval_requests row, so a 'pending' or 'override_approving' row here
-  // belongs to a DIFFERENT approval flow mid-creation for the same project — proceeding would bypass
-  // it and double-create. Refuse and fail for manual resolution (mirrors the collision check in
-  // createRfpApprovalRequestFromNormalizedInput).
+  // [Collision guard] An email-based RFP approval already exists for this project/deal. The voting path mints
+  // no rfp_approval_requests row, so any such row belongs to a DIFFERENT approval flow — proceeding would
+  // bypass it and double-create. Refuse and fail for manual resolution (mirrors the collision checks in
+  // createRfpApprovalRequestFromNormalizedInput). Four keys, matching the normal request path:
+  //   - by project number: 'pending' | override_approving (mid-flight for the same project), AND
+  //     'approved' (finding S3): an approved row whose sync_mappings row is missing/stale — the BidBoard
+  //     helper swallows mapping-insert failures — must still block a vote for a DIFFERENT deal on that number;
+  //   - by source deal (finding S4): the SAME deal already has an in-flight ('pending' | override_approving)
+  //     approval under a possibly-REVISED project number, which a project-number-only check would miss.
   const inFlightApproval =
     (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "pending"))
-    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_OVERRIDE_APPROVING_STATUS));
+    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_OVERRIDE_APPROVING_STATUS))
+    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "approved"))
+    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, "pending"))
+    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS));
   if (inFlightApproval) {
     await deliverCreateFromRfpFailedCallback(
       input,
-      `Project ${projectNumber} already has an in-flight RFP approval (request ${inFlightApproval.id}, status ${inFlightApproval.status}); not creating from vote`,
+      `Project ${projectNumber} / deal ${input.sourceDealId} already has a conflicting RFP approval (request ${inFlightApproval.id}, status ${inFlightApproval.status}); not creating from vote`,
     );
     return;
   }

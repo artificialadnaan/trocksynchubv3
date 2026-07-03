@@ -10,6 +10,7 @@ const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, 
 const callbackFetchMock = vi.hoisted(() => vi.fn(async () => ({ ok: true, status: 200, text: async () => "" })));
 // Default to "no collision" / "no conflicting owner"; individual tests override with mockResolvedValueOnce.
 const getRfpByProjectNumberAndStatusMock = vi.hoisted(() => vi.fn(async (_projectNumber: string, _status: string) => undefined as any));
+const getRfpBySourceDealAndStatusMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string, _status: string) => undefined as any));
 const getBidboardMappingByProcoreProjectNumberMock = vi.hoisted(() => vi.fn(async (_projectNumber: string) => undefined as any));
 
 vi.mock("../server/playwright/bidboard.ts", () => ({
@@ -25,6 +26,7 @@ vi.mock("../server/storage.ts", () => ({
   storage: {
     getAutomationConfig: vi.fn(async () => ({ value: { companyId: "42" } })),
     getRfpApprovalRequestByProjectNumberAndStatus: getRfpByProjectNumberAndStatusMock,
+    getRfpApprovalRequestBySourceDealAndStatus: getRfpBySourceDealAndStatusMock,
     getBidboardMappingByProcoreProjectNumber: getBidboardMappingByProcoreProjectNumberMock,
   },
 }));
@@ -105,6 +107,8 @@ describe("POST /api/bid-board/create-from-rfp", () => {
     callbackFetchMock.mockClear();
     getRfpByProjectNumberAndStatusMock.mockReset();
     getRfpByProjectNumberAndStatusMock.mockResolvedValue(undefined);
+    getRfpBySourceDealAndStatusMock.mockReset();
+    getRfpBySourceDealAndStatusMock.mockResolvedValue(undefined);
     getBidboardMappingByProcoreProjectNumberMock.mockReset();
     getBidboardMappingByProcoreProjectNumberMock.mockResolvedValue(undefined);
   });
@@ -241,7 +245,52 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
       const cbBody = JSON.parse(cbInit.body);
       expect(cbBody.status).toBe("failed");
-      expect(cbBody.error).toContain("in-flight RFP approval");
+      expect(cbBody.error).toContain("conflicting RFP approval");
+    });
+  });
+
+  it("[S3] delivers a 'failed' callback when an APPROVED RFP row exists for the project number (stale/missing mapping)", async () => {
+    // An earlier email/override approval is 'approved' but its sync_mappings row is missing/stale. A vote
+    // command for a different deal on the same number must stop for manual resolution, not adopt/create.
+    getRfpByProjectNumberAndStatusMock.mockImplementation(async (_projectNumber: string, status: string) =>
+      status === "approved" ? { id: 77, status: "approved" } : undefined
+    );
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      expect(createBidBoardMock).not.toHaveBeenCalled();
+      const cbBody = JSON.parse((callbackFetchMock.mock.calls[0] as any[])[1].body);
+      expect(cbBody.status).toBe("failed");
+      expect(cbBody.error).toContain("conflicting RFP approval");
+    });
+  });
+
+  it("[S4] delivers a 'failed' callback when the SAME source deal has an in-flight approval (revised project number)", async () => {
+    // The project-number check would miss it (the in-flight row carries a revised number), but the same deal
+    // already has a 'pending' approval flow — two flows for one deal must not both run.
+    getRfpBySourceDealAndStatusMock.mockImplementation(async (_ss: string, _sd: string, status: string) =>
+      status === "pending" ? { id: 88, status: "pending" } : undefined
+    );
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      expect(createBidBoardMock).not.toHaveBeenCalled();
+      const cbBody = JSON.parse((callbackFetchMock.mock.calls[0] as any[])[1].body);
+      expect(cbBody.status).toBe("failed");
+      expect(cbBody.error).toContain("conflicting RFP approval");
+      expect(getRfpBySourceDealAndStatusMock).toHaveBeenCalledWith("trock_crm", "crm-deal-1", "pending");
     });
   });
 
