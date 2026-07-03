@@ -14,6 +14,13 @@ import type { CreateFromRfpInput } from "../routes/rfp-requests";
 let createWorkerTimer: ReturnType<typeof setInterval> | null = null;
 let createWorkerRunning = false;
 
+// A create SUCCEEDED (Procore project exists) but its source-deal sync mapping wasn't persisted. This is NOT a
+// create failure: emitting a 'failed' callback would tell the CRM the create failed even though the project exists,
+// and marking the command 'failed' would strand it (never auto-reclaimed). The drain loop treats this distinctly —
+// leave the row 'processing' for the stale-reclaim to re-run (which adopts the existing project + persists the
+// mapping this time), and send NO callback.
+export class CreatedMappingMissingError extends Error {}
+
 async function getDb() {
   return (await import("../db")).db;
 }
@@ -361,7 +368,9 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   // rather than committing a 'created' the guards can't protect.
   const persistedMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
   if (!persistedMapping?.bidboardProjectId) {
-    throw new Error(
+    // Distinct RECOVERABLE error (not a create failure): the drain loop leaves the row 'processing' for reclaim +
+    // sends no callback, rather than emitting a false 'failed' and stranding a project that actually exists.
+    throw new CreatedMappingMissingError(
       `BidBoard project ${result.projectId} created for deal ${input.sourceDealId} but its sync mapping was not persisted; leaving the command recoverable rather than sending an unguarded 'created'`,
     );
   }
@@ -414,6 +423,17 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         outcome = await perform(input, callbackAt);
       } catch (error: any) {
         const message = error?.message || String(error);
+        // finding: a create that SUCCEEDED but whose sync mapping wasn't persisted is RECOVERABLE, not a failure —
+        // the project exists, so never emit a 'failed' callback (which would report a false failure + let a
+        // same-number command adopt the unlinked project). Leave the row 'processing' + reset attempt_count so the
+        // stale-reclaim re-runs (adopts the existing project + persists the mapping) — and send NO callback. This is
+        // handled BEFORE the mapping check below because, by definition, this case has no mapping yet.
+        if (error instanceof CreatedMappingMissingError) {
+          log(`[bidboard-create] Command ${row.id} created a project but the mapping wasn't persisted (${message}); leaving 'processing' for reclaim`, "sync");
+          try { await resetCreateCommandForReclaim(row.id, `created but mapping missing; pending reclaim: ${message}`); } catch { /* best-effort */ }
+          processed += 1;
+          continue;
+        }
         // finding: if the project was ALREADY created (a mapping exists for this source deal) but a LATER step
         // threw — the 'created' callback persist, or a transient DB error — this is NOT a create failure. Emitting a
         // 'failed' callback here would tell the CRM the create failed even though the project exists. Leave the row
