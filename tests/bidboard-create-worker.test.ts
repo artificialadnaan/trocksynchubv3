@@ -72,6 +72,12 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(enq.payload.bidboardProjectId).toBe("999");
   });
 
+  it("[AA3] stamps the callback createdAt with the command receipt time, not now", async () => {
+    const commandAt = "2026-07-03T14:00:00.000Z";
+    await performCreateFromRfpVote(input(), commandAt);
+    expect(enqueueBidboardCallbackMock.mock.calls[0][0].payload.createdAt).toBe(commandAt);
+  });
+
   it("[T3/V4] rechecks eligibility immediately before the create: ineligible -> failed callback, no create", async () => {
     checkEligibilityMock.mockResolvedValueOnce({ eligible: false, reason: "no longer in Opportunity" } as any);
     await performCreateFromRfpVote(input());
