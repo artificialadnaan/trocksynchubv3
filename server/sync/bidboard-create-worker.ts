@@ -36,12 +36,18 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       -- the stale one — so create/callback use the new project number / attachments, not the old.
       SET status = 'pending', next_attempt_at = NOW(), attempt_count = 0, last_error = NULL,
           payload = EXCLUDED.payload, project_number = EXCLUDED.project_number,
-          source_system = EXCLUDED.source_system, source_deal_id = EXCLUDED.source_deal_id
-      -- finding AA2: also re-queue+refresh a STALE 'processing' row (worker crashed after claiming). Otherwise a
-      -- corrected re-post is a no-op while the stale-reclaim path later runs the OLD payload. An ACTIVELY-processing
-      -- row (recent last_attempt_at) is left alone — its in-flight attempt owns it; a subsequent re-post after it
-      -- fails will refresh it. Threshold matches the reclaim window.
-      WHERE bidboard_create_outbox.status = 'failed'
+          source_system = EXCLUDED.source_system, source_deal_id = EXCLUDED.source_deal_id,
+          -- refresh the receipt time on re-queue: processBidboardCreateOutbox stamps every callback with the row's
+          -- created_at (≈ CRM vote time). Leaving it at the ORIGINAL attempt would make a corrected retry's
+          -- 'created' callback carry a timestamp OLDER than the CRM's fresh round/retry, and the CRM's
+          -- createdAt-vs-requested_at/reviewed_at freshness would reject it as stale. A re-queue IS a new receipt,
+          -- so stamp created_at = NOW() (this also re-orders it fairly in the FIFO drain).
+          created_at = NOW()
+      -- Re-queue + refresh a 'failed' row, a STILL-'pending' row (a corrected re-post that arrived BEFORE the
+      -- worker claimed it — otherwise the worker would run the STALE first payload), OR a STALE 'processing' row
+      -- (finding AA2: worker crashed after claiming). An ACTIVELY-processing row (recent last_attempt_at) is left
+      -- alone — its in-flight attempt owns it; a re-post after it fails/stalls will refresh it.
+      WHERE bidboard_create_outbox.status IN ('failed', 'pending')
          OR (bidboard_create_outbox.status = 'processing'
              AND bidboard_create_outbox.last_attempt_at < NOW() - interval '10 minutes')
   `);
@@ -115,6 +121,13 @@ async function enqueueCreateFromRfpCallback(input: CreateFromRfpInput, payload: 
   // 'failed' (from a create that failed while CRM delivery was down) is keyed by NULL rfpApprovalRequestId, so it
   // isn't deduped by the request-id unique index; without this it could be delivered AFTER a later successful
   // 'created', leaving the CRM with a stale failed terminal result. Only the LATEST callback for the deal wins.
+  // Residual race (accepted): if the callback worker has ALREADY claimed a stale 'failed' row (still status
+  // 'pending' while its HTTP is in flight), this DELETE removes the row but can't recall the in-flight request, so
+  // a stale 'failed' could still reach the CRM after this 'created'. That is covered RECEIVER-SIDE, which is the
+  // real supersede guarantee: the CRM's request-less 'failed' handler only applies to a deal still in a
+  // create-in-flight state (rfp_approval_status pending, or declined+approving) AND compares the callback createdAt
+  // to the round's freshness markers — so a 'failed' arriving after the deal is already 'approved' (or stamped by a
+  // newer round) is a no-op. We can't cancel an in-flight HTTP here; ordering is enforced where it can be.
   const db = await getDb();
   await db.execute(sql`
     DELETE FROM bidboard_callback_outbox
@@ -154,6 +167,35 @@ async function enqueueFailedCallback(input: CreateFromRfpInput, error: string, c
 export async function performCreateFromRfpVote(input: CreateFromRfpInput, callbackAt?: string): Promise<void> {
   const { createBidBoardProjectFromDeal } = await import("../playwright/bidboard");
   const projectNumber = input.deal.projectNumber;
+
+  // [Idempotent adopt / reclaim-after-create] If a BidBoard project ALREADY exists for THIS source deal — a prior
+  // attempt created it + wrote the mapping, but a LATER step failed (the 'created' callback persist, or
+  // markCreateCommandDone) and the command was reclaimed — do NOT re-check eligibility or re-create. Re-send the
+  // 'created' (adopt) callback idempotently. This guarantees a transient post-create error, OR the deal having
+  // since left Opportunity, can never flip an already-created project into a 'failed' CRM result (the CRM harmlessly
+  // ignores a 'created' for a cancelled deal via its status-not-null guard, but must never be told the create
+  // failed when the project exists). A revised projectNumber is the Y2 conflict and is refused, not adopted.
+  const existingMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+  if (existingMapping?.bidboardProjectId) {
+    if (projectNumber && existingMapping.procoreProjectNumber && existingMapping.procoreProjectNumber !== projectNumber) {
+      await enqueueFailedCallback(
+        input,
+        `Deal ${input.sourceDealId} already has BidBoard project ${existingMapping.bidboardProjectId} under number ${existingMapping.procoreProjectNumber}; refusing to create/adopt under revised number ${projectNumber}`,
+        callbackAt,
+      );
+      return;
+    }
+    const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+    await enqueueCreateFromRfpCallback(input, {
+      status: "created" as const,
+      sourceDealId: input.sourceDealId,
+      bidboardProjectId: existingMapping.bidboardProjectId,
+      projectNumber: input.deal.projectNumber,
+      procoreCompanyId,
+      createdAt: callbackAt ?? new Date().toISOString(),
+    });
+    return;
+  }
 
   // Eligibility recheck IMMEDIATELY before the create (findings T3 + V4): by now the command may have waited in
   // the queue, and the CRM deal could have been deleted or moved out of Opportunity. Fail-open on a config/5xx
@@ -204,25 +246,8 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
     return;
   }
 
-  // [Same-deal revised-number guard] (finding Y2) — createBidBoardProjectFromDeal adopts THIS deal's existing
-  // source-deal mapping BEFORE considering the requested number. If a prior voting command already created a
-  // project for this deal under a DIFFERENT number, a revised-number vote would silently return the old project
-  // while the callback reports the new projectNumber. Refuse for manual resolution instead. (A same-number
-  // re-delivery is the legit idempotent-retry case and is allowed through to the adopt-guard.)
-  const dealMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
-  if (
-    dealMapping?.bidboardProjectId &&
-    dealMapping.procoreProjectNumber &&
-    projectNumber &&
-    dealMapping.procoreProjectNumber !== projectNumber
-  ) {
-    await enqueueFailedCallback(
-      input,
-      `Deal ${input.sourceDealId} already has BidBoard project ${dealMapping.bidboardProjectId} under number ${dealMapping.procoreProjectNumber}; refusing to create/adopt under revised number ${projectNumber}`,
-      callbackAt,
-    );
-    return;
-  }
+  // (The same-deal revised-number guard, finding Y2, now runs FIRST via the mapping-first adopt block above — a
+  // mapping-exists deal never reaches here.)
 
   const d = input.deal;
   const normalizedDealData: Record<string, any> = {
@@ -319,6 +344,18 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         await perform(input, callbackAt);
       } catch (error: any) {
         const message = error?.message || String(error);
+        // finding: if the project was ALREADY created (a mapping exists for this source deal) but a LATER step
+        // threw — the 'created' callback persist, or a transient DB error — this is NOT a create failure. Emitting a
+        // 'failed' callback here would tell the CRM the create failed even though the project exists. Leave the row
+        // 'processing' (from claimNext) so the stale-reclaim re-runs it and adopts via perform's mapping-first path
+        // (which re-sends the 'created' callback), rather than marking it failed + reporting a false failure.
+        let createdMapping: any = null;
+        try { createdMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId); } catch { /* best-effort */ }
+        if (createdMapping?.bidboardProjectId) {
+          log(`[bidboard-create] Command ${row.id} created project ${createdMapping.bidboardProjectId} but a post-create step failed (${message}); leaving 'processing' for reclaim`, "sync");
+          processed += 1;
+          continue;
+        }
         log(`[bidboard-create] Command ${row.id} create for deal ${input.sourceDealId} failed: ${message}`, "sync");
         await markCreateCommandFailed(row.id, message);
         try { await enqueueFailedCallback(input, message, callbackAt); } catch { /* logged upstream */ }

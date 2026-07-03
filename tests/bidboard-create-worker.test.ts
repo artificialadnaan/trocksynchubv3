@@ -123,10 +123,25 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(lastCallback().error).toContain("revised number");
   });
 
-  it("[Y2] allows the idempotent same-number retry (mapping number == requested number)", async () => {
+  it("[Y2] idempotent same-number retry ADOPTS the existing project (re-sends 'created', no Playwright re-run)", async () => {
     getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
+    await performCreateFromRfpVote(input()); // input number TR-1001 == mapping number -> adopt
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // mapping-first short-circuits; no re-create
+    expect(lastCallback().status).toBe("created");
+    expect(lastCallback().bidboardProjectId).toBe("999"); // adopts the EXISTING project id
+  });
+
+  it("[finding] mapping-first adopt beats an ineligible recheck: a reclaim-after-create never reports a false failure", async () => {
+    // A prior attempt created the project (mapping exists); markCreateCommandDone then failed and the command was
+    // reclaimed. On the re-run the deal has since left Opportunity (ineligible) — but because the project already
+    // exists, we must ADOPT (re-send 'created'), NOT emit a 'failed' callback.
+    getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
+    checkEligibilityMock.mockResolvedValue({ eligible: false, reason: "Deal left Opportunity" } as any);
     await performCreateFromRfpVote(input());
-    expect(createBidBoardMock).toHaveBeenCalledTimes(1); // same number -> falls through to the adopt-guard
+    expect(checkEligibilityMock).not.toHaveBeenCalled(); // mapping-first returns before the eligibility recheck
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("created");
+    expect(lastCallback().bidboardProjectId).toBe("999");
   });
 
   it("[X4] supersedes prior PENDING voting callbacks (DELETE) before enqueuing a new one", async () => {
@@ -171,6 +186,9 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
   beforeEach(async () => {
     await pg.exec(`DELETE FROM bidboard_create_outbox; DELETE FROM bidboard_callback_outbox;`);
     enqueueBidboardCallbackMock.mockReset();
+    // The drain catch now probes getSyncMappingBySourceDealId (a post-create failure must not emit a 'failed'
+    // callback) — reset it to "no mapping" so the create-logic tests' mapping value can't leak in here.
+    getDealMappingMock.mockReset(); getDealMappingMock.mockResolvedValue(undefined);
     urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
   });
 
@@ -200,6 +218,22 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows[0].status).toBe("done");
   });
 
+  it("refreshes a still-PENDING command on a corrected re-delivery (payload + project_number + created_at receipt)", async () => {
+    const mkDeal = (n: string) => ({ name: "d", projectNumber: n, projectType: "9", amount: 1, workflowRoute: "normal" });
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-1001") }));
+    // Age the receipt so a refresh is observable, then a corrected re-post (same sourceEventId, revised number)
+    // arrives BEFORE the worker claimed the pending row.
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour'`);
+    const before = (await pg.query(`SELECT created_at FROM bidboard_create_outbox`)).rows[0] as any;
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-2002") }));
+    const rows = (await pg.query(`SELECT status, project_number, created_at, payload FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("pending");
+    expect(rows[0].project_number).toBe("TR-2002"); // refreshed, not the stale first payload
+    expect(rows[0].payload.deal.projectNumber).toBe("TR-2002");
+    expect(new Date(rows[0].created_at).getTime()).toBeGreaterThan(new Date(before.created_at).getTime()); // receipt refreshed
+  });
+
   it("processBidboardCreateOutbox claims + drains pending commands serially and marks them done", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e1", sourceDealId: "d1" }));
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e2", sourceDealId: "d2" }));
@@ -221,6 +255,18 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     // best-effort failed callback so the CRM isn't left waiting
     expect(lastCallback().status).toBe("failed");
     expect(lastCallback().error).toContain("playwright boom");
+  });
+
+  it("a POST-create failure (mapping exists) is NOT marked failed and emits NO failed callback — left for reclaim", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-pc", sourceDealId: "d-pc" }));
+    // The project was already created (a mapping exists), but perform then threw (e.g. the 'created' callback
+    // persist failed). This must NOT flip the command to a false 'failed' result.
+    getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
+    const perform = vi.fn(async () => { throw new Error("created-callback persist failed"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // left for the stale-reclaim, not 'failed'
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback
   });
 
   it("claimNextBidboardCreateCommand returns null when nothing is pending", async () => {
