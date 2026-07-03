@@ -102,6 +102,25 @@ describe("POST /api/bid-board/create-from-rfp", () => {
     delete process.env.TROCK_CRM_BASE_URL;
   });
 
+  it("409 (and does NOT create) when sourceSystem is not trock_crm", async () => {
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody({ sourceSystem: "hubspot" }));
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.success).toBe(false);
+      expect(body.error).toBe("Conflict");
+      // No create, no callback — the endpoint rejected before the 202/setImmediate.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(createBidBoardMock).not.toHaveBeenCalled();
+      expect(callbackFetchMock).not.toHaveBeenCalled();
+    });
+  });
+
   it("401 on a bad signature", async () => {
     await withServer(async (baseUrl) => {
       const raw = JSON.stringify(requestBody());

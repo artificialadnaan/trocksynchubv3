@@ -336,6 +336,17 @@ export function registerRfpRequestRoutes(app: Express): void {
     }
     const input = parsed.data;
 
+    // create-from-rfp is a trock_crm VOTING command only (the CRM's 2/3-approve / override-approve
+    // vote). Reject any other source before the 202 — a hubspot-shaped payload reaching here would
+    // otherwise mint a trock_crm BidBoard project + callback for a deal this endpoint doesn't own.
+    if (input.sourceSystem !== "trock_crm") {
+      return res.status(409).json({
+        success: false,
+        error: "Conflict",
+        message: "create-from-rfp is only supported for trock_crm voting requests",
+      });
+    }
+
     res.status(202).json({
       success: true,
       queued: true,
@@ -382,8 +393,10 @@ async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBody
   };
 
   // Reuses the syncMappings adopt-guard inside createBidBoardProjectFromDeal (one deal -> one project).
+  // sourceSystem is passed through (the route already rejected anything != trock_crm) rather than
+  // hardcoded, so the value can't silently drift from what was validated.
   const result = await createBidBoardProjectFromDeal({
-    sourceSystem: "trock_crm",
+    sourceSystem: input.sourceSystem,
     sourceDealId: input.sourceDealId,
     bidboardStage: "Estimate in Progress",
     normalizedDealData,
