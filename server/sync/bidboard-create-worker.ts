@@ -55,9 +55,11 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       -- Also re-queue a 'done' row for CALLBACK RECOVERY (finding): 'done' only means the created callback was
       -- ENQUEUED, not delivered. If that callback later went 'dead' (exhausted its retries) or was lost while the
       -- CRM stayed unaware, a same-sourceEventId retry would otherwise 202-no-op and leave the deal permanently
-      -- unlinked. Re-queue ONLY when NO live (pending/sent) request-less callback exists for the deal — the worker
-      -- then re-runs perform's mapping-first ADOPT and re-sends the 'created' callback. A 'done' row whose callback
-      -- is still pending or already sent stays put (preserves duplicate-delivery idempotency).
+      -- unlinked. Re-queue ONLY when NO live (pending/sent) CREATED callback exists for the deal — the worker then
+      -- re-runs perform's mapping-first ADOPT and re-sends the 'created' callback. Scope the check to CREATED
+      -- callbacks (payload.status='created'): a 'sent' FAILED callback from an earlier attempt must NOT block
+      -- recovery of a later successful create whose 'created' callback was lost. A live created callback stays put
+      -- (preserves duplicate-delivery idempotency).
       WHERE bidboard_create_outbox.status IN ('failed', 'pending')
          OR (
            bidboard_create_outbox.status = 'done'
@@ -67,6 +69,7 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
                 AND cb.source_deal_id = EXCLUDED.source_deal_id
                 AND cb.rfp_approval_request_id IS NULL
                 AND cb.status IN ('pending', 'sent')
+                AND cb.payload->>'status' = 'created'
            )
          )
   `);
@@ -348,6 +351,19 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
     // re-queues on the CRM rep's same-sourceEventId retry) + delivers a failed callback — rather than returning
     // normally, which would mark it 'done' and make the retry a silent no-op needing manual DB surgery.
     throw new Error(result.error || "BidBoard project creation failed");
+  }
+
+  // finding: createBidBoardProjectFromDeal can return success:true even when storage.createSyncMapping was caught +
+  // only logged, leaving NO source-deal/project mapping. That mapping is what the mapping-first adopt + ownership
+  // guards rely on — without it a same-number command could adopt this project for ANOTHER deal, or a retry for
+  // this deal can't find the project. Require the mapping to be persisted before sending the terminal 'created'
+  // callback; if it's missing, throw so the command stays recoverable (a retry re-creates/adopts + persists it)
+  // rather than committing a 'created' the guards can't protect.
+  const persistedMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+  if (!persistedMapping?.bidboardProjectId) {
+    throw new Error(
+      `BidBoard project ${result.projectId} created for deal ${input.sourceDealId} but its sync mapping was not persisted; leaving the command recoverable rather than sending an unguarded 'created'`,
+    );
   }
 
   await enqueueCreatedCallback(input, result.projectId, callbackAt);

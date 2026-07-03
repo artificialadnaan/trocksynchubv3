@@ -54,7 +54,13 @@ describe("performCreateFromRfpVote (create logic)", () => {
     // enqueueCreateFromRfpCallback now DELETEs stale pending callbacks via getDb() (finding X4); stub it.
     dbHolder.db = { execute: vi.fn(async () => ({ rows: [] })) } as any;
     urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
-    createBidBoardMock.mockReset(); createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any);
+    // A successful create PERSISTS the source-deal mapping (as the real createBidBoardProjectFromDeal does via
+    // storage.createSyncMapping) — simulate that so perform's post-create mapping check (finding) passes.
+    createBidBoardMock.mockReset();
+    createBidBoardMock.mockImplementation(async () => {
+      getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" } as any);
+      return { success: true, projectId: "999" } as any;
+    });
     enqueueBidboardCallbackMock.mockReset(); enqueueBidboardCallbackMock.mockResolvedValue({ id: 1 } as any);
     checkEligibilityMock.mockReset(); checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
     getRfpByNumMock.mockReset(); getRfpByNumMock.mockResolvedValue(undefined);
@@ -115,6 +121,15 @@ describe("performCreateFromRfpVote (create logic)", () => {
     await expect(performCreateFromRfpVote(input())).rejects.toThrow(/company id/i);
     expect(createBidBoardMock).toHaveBeenCalledTimes(1);
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled();
+  });
+
+  it("[finding] a create whose sync mapping was NOT persisted THROWS (recoverable), sends no unguarded 'created'", async () => {
+    // Simulate createBidBoardProjectFromDeal returning success while storage.createSyncMapping failed silently:
+    // the project exists but no source-deal mapping was written.
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any); // does NOT persist the mapping
+    getDealMappingMock.mockResolvedValue(undefined); // mapping-first sees none AND the post-create verify sees none
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/mapping was not persisted/i);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // the guards can't protect an unmapped project
   });
 
   it("[V1] refuses when the project number is owned by another deal -> failed callback, no create", async () => {
@@ -265,6 +280,21 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     await enqueueBidboardCreateCommand(input());
     const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
     expect(rows[0].status).toBe("pending"); // re-queued for callback recovery
+  });
+
+  it("[finding] a 'sent' FAILED callback does NOT block re-queue of a DONE command whose CREATED callback was lost", async () => {
+    await enqueueBidboardCreateCommand(input());
+    await pg.query(`UPDATE bidboard_create_outbox SET status='done'`);
+    // An earlier attempt's 'failed' callback was delivered ('sent'); the later successful create's 'created'
+    // callback was then lost. The live-callback check must look for CREATED callbacks only, so this sent FAILED
+    // one must NOT block recovery — the retry re-queues to re-adopt + re-send the 'created' callback.
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', 'crm-deal-1', NULL, '{"status":"failed"}'::jsonb, 'http://crm/cb', 'sent')`
+    );
+    await enqueueBidboardCreateCommand(input());
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("pending"); // re-queued despite the sent FAILED callback
   });
 
   it("refreshes a still-PENDING command on a corrected re-delivery (payload + project_number + created_at receipt)", async () => {
