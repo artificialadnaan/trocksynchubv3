@@ -51,7 +51,7 @@ import { eq, desc, and, gte, lte, sql, ilike, or, isNull, isNotNull } from "driz
 function escapeLike(input: string): string {
   return input.replace(/%/g, '\\%').replace(/_/g, '\\_');
 }
-import { db, pool } from "./db";
+import { db } from "./db";
 import {
   users, type User, type InsertUser,
   syncMappings, type SyncMapping, type InsertSyncMapping,
@@ -390,7 +390,6 @@ export interface IStorage {
   getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
   getRfpApproverConfigs(projectType: string, sourceSystem: SourceSystem): Promise<RfpApproverConfig[]>;
   enqueueBidboardCallback(data: InsertBidboardCallbackOutbox): Promise<BidboardCallbackOutbox>;
-  acquireCreateFromRfpLock(sourceSystem: string, sourceDealId: string): Promise<(() => Promise<void>) | null>;
   claimDeclinedRfpForOverride(id: number): Promise<RfpApprovalRequest | undefined>;
   approveRfpApprovalRequestWithOptionalCallback(
     id: number,
@@ -1967,35 +1966,6 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
-  // finding S1: a per-deal Postgres advisory lock so two concurrent create-from-rfp deliveries — even across
-  // app instances — can't both create a BidBoard project for the same deal. The process-local withBrowserLock
-  // (server/playwright/browser.ts) + the sync_mappings adopt-guard only dedupe WITHIN one instance. Non-blocking
-  // (pg_try_advisory_lock): returns a release fn if acquired, or null if another handler already holds it — the
-  // caller then SKIPS (that holder creates + delivers the callback), which never holds a connection while
-  // waiting. A sequential RETRY acquires it fine (the prior holder released) and the adopt-guard makes it
-  // idempotent, so this doesn't break the CRM's same-sourceEventId retries. Session-scoped, so a crashed holder
-  // releases it when its connection closes.
-  async acquireCreateFromRfpLock(sourceSystem: string, sourceDealId: string): Promise<(() => Promise<void>) | null> {
-    const client = await pool.connect();
-    const key = `create_from_rfp:${sourceSystem}:${sourceDealId}`;
-    try {
-      const res = await client.query(`SELECT pg_try_advisory_lock(hashtext($1)) AS locked`, [key]);
-      if (!res.rows[0]?.locked) {
-        client.release();
-        return null;
-      }
-      return async () => {
-        try {
-          await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [key]);
-        } finally {
-          client.release();
-        }
-      };
-    } catch (err) {
-      client.release();
-      throw err;
-    }
-  }
 
   // Atomically claim a declined RFP for override-approval: transition declined → override_approving
   // in a single conditional UPDATE so a concurrent override (or a second app instance) loses the race

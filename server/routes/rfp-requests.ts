@@ -4,6 +4,7 @@ import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
 import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval, checkRfpApprovalSourceEligibility } from "../rfp-approval";
 import { storage } from "../storage";
+import { enqueueBidboardCreateCommand } from "../sync/bidboard-create-worker";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 
 const SIGNATURE_HEADER = "x-rfp-request-signature";
@@ -55,9 +56,10 @@ export type RfpRequestBody = z.infer<typeof rfpRequestBodySchema>;
 // Body for POST /api/bid-board/create-from-rfp: the CRM's normalized RFP body plus an explicit
 // decision guard. The CRM only calls this on a 2/3-approve vote (or override-approve), so decision
 // must be exactly "approved".
-const createFromRfpBodySchema = rfpRequestBodySchema.extend({
+export const createFromRfpBodySchema = rfpRequestBodySchema.extend({
   decision: z.literal("approved"),
 });
+export type CreateFromRfpInput = z.infer<typeof createFromRfpBodySchema>;
 
 export function signRfpRequestPayload(body: Buffer | string, secret: string): string {
   return `sha256=${crypto.createHmac("sha256", secret).update(body).digest("hex")}`;
@@ -347,226 +349,26 @@ export function registerRfpRequestRoutes(app: Express): void {
       });
     }
 
-    res.status(202).json({
+    // Persist the create command BEFORE acknowledging (finding V3): a crash after this 202 still resumes,
+    // because the durable command row exists and the serial bidboard-create worker will pick it up. The worker
+    // does the eligibility recheck + guards + Playwright create + durable callback (findings V1/V2/V4). Idempotent
+    // on sourceEventId — a duplicate delivery is a no-op; a previously-failed command is re-queued.
+    try {
+      await enqueueBidboardCreateCommand(input);
+    } catch (err: any) {
+      console.error(`[rfp-requests] failed to enqueue create-from-rfp command for deal ${input.sourceDealId}:`, err?.message || err);
+      return res.status(500).json({
+        success: false,
+        error: "Internal Server Error",
+        message: "Failed to enqueue create-from-rfp command",
+      });
+    }
+
+    return res.status(202).json({
       success: true,
       queued: true,
       sourceDealId: input.sourceDealId,
       projectNumber: input.deal.projectNumber,
     });
-
-    setImmediate(async () => {
-      try {
-        await createBidBoardFromRfpVote(input);
-      } catch (err: any) {
-        console.error(`[rfp-requests] create-from-rfp failed for deal ${input.sourceDealId}:`, err?.message || err);
-        // The 202 already returned, so a throw (Playwright/storage/Procore) would otherwise leave the
-        // CRM waiting forever. Mirror the approval path and deliver a 'failed' callback so the CRM can
-        // surface it for manual resolution. Best-effort: a callback-delivery failure is only logged.
-        try {
-          await deliverCreateFromRfpFailedCallback(input, err?.message || "create-from-rfp threw during BidBoard creation");
-        } catch (cbErr: any) {
-          console.error(`[rfp-requests] create-from-rfp failure-callback delivery failed for deal ${input.sourceDealId}:`, cbErr?.message || cbErr);
-        }
-      }
-    });
   }));
-}
-
-// Wraps the actual create with a pre-create CRM eligibility recheck (finding T3) + a per-deal advisory lock
-// (finding S1). Keeps createBidBoardFromRfpVote as the entry point the setImmediate calls.
-async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBodySchema>): Promise<void> {
-  // T3: the CRM deal may have been deleted or moved out of Opportunity since the vote (a delayed/retried
-  // delivery). The normal approval/override paths run this guard immediately before creating; do the same here
-  // so a no-longer-eligible deal gets a 'failed' callback instead of a BidBoard project. Fail-open on a config/
-  // 5xx check failure (checkRfpApprovalSourceEligibility returns eligible:true then), so a CRM blip doesn't block
-  // legit creates — matching the normal path.
-  const eligibility = await checkRfpApprovalSourceEligibility({
-    sourceSystem: input.sourceSystem,
-    sourceDealId: input.sourceDealId,
-  });
-  if (!eligibility.eligible) {
-    await deliverCreateFromRfpFailedCallback(
-      input,
-      eligibility.reason || "Source CRM deal is no longer eligible for BidBoard creation",
-    );
-    return;
-  }
-
-  // S1: serialize per-deal across instances. Skip (no-op) if another handler already holds the lock — it will
-  // create + deliver the callback; a concurrent duplicate delivery must not create a second project. A later
-  // sequential retry acquires it fine and the adopt-guard makes it idempotent.
-  const releaseLock = await storage.acquireCreateFromRfpLock(input.sourceSystem, input.sourceDealId);
-  if (!releaseLock) {
-    console.log(`[rfp-requests] create-from-rfp for deal ${input.sourceDealId} already in progress on another handler; skipping duplicate`);
-    return;
-  }
-  try {
-    await performCreateFromRfpVote(input);
-  } finally {
-    await releaseLock();
-  }
-}
-
-async function performCreateFromRfpVote(input: z.infer<typeof createFromRfpBodySchema>): Promise<void> {
-  const { createBidBoardProjectFromDeal } = await import("../playwright/bidboard");
-  const { buildBidBoardCreatedCallbackTargetUrl } = await import("../sync/bidboard-callback-worker");
-
-  const projectNumber = input.deal.projectNumber;
-
-  // [Collision guard] An email-based RFP approval already exists for this project/deal. The voting path mints
-  // no rfp_approval_requests row, so any such row belongs to a DIFFERENT approval flow — proceeding would
-  // bypass it and double-create. Refuse and fail for manual resolution (mirrors the collision checks in
-  // createRfpApprovalRequestFromNormalizedInput). Four keys, matching the normal request path:
-  //   - by project number: 'pending' | override_approving (mid-flight for the same project), AND
-  //     'approved' (finding S3): an approved row whose sync_mappings row is missing/stale — the BidBoard
-  //     helper swallows mapping-insert failures — must still block a vote for a DIFFERENT deal on that number;
-  //   - by source deal (finding S4): the SAME deal already has an in-flight ('pending' | override_approving)
-  //     approval under a possibly-REVISED project number, which a project-number-only check would miss.
-  const inFlightApproval =
-    (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "pending"))
-    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_OVERRIDE_APPROVING_STATUS))
-    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "approved"))
-    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, "pending"))
-    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS));
-  if (inFlightApproval) {
-    await deliverCreateFromRfpFailedCallback(
-      input,
-      `Project ${projectNumber} / deal ${input.sourceDealId} already has a conflicting RFP approval (request ${inFlightApproval.id}, status ${inFlightApproval.status}); not creating from vote`,
-    );
-    return;
-  }
-
-  // [Ownership guard] Refuse to adopt a BidBoard project owned by a DIFFERENT deal. The number-mapping
-  // adopt-branch inside createBidBoardProjectFromDeal returns success for ANY mapping carrying this
-  // project number — including one linked to another deal — which would send a 'created' callback keyed
-  // by THIS sourceDealId pointing at another deal's project. Guard ownership up front (mirrors the
-  // claimedByOtherDeal check in bidboard.ts). A mapping for THIS deal is the legit idempotent-retry
-  // case and is allowed to fall through to the adopt-guard.
-  const numberOwner = await storage.getBidboardMappingByProcoreProjectNumber(projectNumber);
-  if (
-    numberOwner?.bidboardProjectId &&
-    !(numberOwner.sourceSystem === input.sourceSystem && numberOwner.sourceDealId === input.sourceDealId)
-  ) {
-    await deliverCreateFromRfpFailedCallback(
-      input,
-      `Project ${projectNumber} is already linked to ${numberOwner.sourceSystem} deal ${numberOwner.sourceDealId} (BidBoard ${numberOwner.bidboardProjectId}); refusing to adopt for deal ${input.sourceDealId}`,
-    );
-    return;
-  }
-
-  const d = input.deal;
-  const normalizedDealData: Record<string, any> = {
-    dealname: d.name,
-    project_number: d.projectNumber,
-    project_types: d.projectType,
-    amount: d.amount,
-    estimator: d.estimator,
-    company_name: d.companyName,
-    contact_name: d.contactName,
-    client_email: d.clientEmail,
-    client_phone: d.clientPhone,
-    address: d.address?.street,
-    city: d.address?.city,
-    state: d.address?.state,
-    zip: d.address?.zip,
-    country: d.address?.country,
-    description: d.description,
-    bid_due_date: d.dueDate,
-    attachments: input.attachments,
-    project_location: d.address?.street,
-    due_date: d.dueDate,
-    notes: d.description,
-  };
-
-  // Reuses the syncMappings adopt-guard inside createBidBoardProjectFromDeal (one deal -> one project).
-  // sourceSystem is passed through (the route already rejected anything != trock_crm) rather than
-  // hardcoded, so the value can't silently drift from what was validated.
-  const result = await createBidBoardProjectFromDeal({
-    sourceSystem: input.sourceSystem,
-    sourceDealId: input.sourceDealId,
-    bidboardStage: "Estimate in Progress",
-    normalizedDealData,
-    options: { syncDocuments: true },
-  });
-
-  if (!result.success) {
-    console.error(`[rfp-requests] create-from-rfp BidBoard create failed for deal ${input.sourceDealId}: ${result.error || "unknown"}`);
-  }
-
-  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
-
-  // Voting-path callback: NO rfpApprovalRequestId (no request row). The CRM resolves by sourceDealId.
-  const payload = result.success && result.projectId
-    ? {
-        status: "created" as const,
-        sourceDealId: input.sourceDealId,
-        bidboardProjectId: result.projectId,
-        projectNumber: input.deal.projectNumber,
-        procoreCompanyId,
-        createdAt: new Date().toISOString(),
-      }
-    : {
-        status: "failed" as const,
-        sourceDealId: input.sourceDealId,
-        projectNumber: input.deal.projectNumber,
-        procoreCompanyId,
-        error: result.error || "BidBoard project creation failed",
-        createdAt: new Date().toISOString(),
-      };
-
-  // finding S2: enqueue into the DURABLE bidboard_callback_outbox (delivered + retried by the already-running
-  // startBidBoardCallbackWorker) instead of a best-effort in-memory retry that drops on failure. So if the CRM
-  // is briefly down after the project exists, the callback is replayed until it lands — the deal can't stay
-  // unlinked. Keyed by sourceDealId with a NULL rfpApprovalRequestId (voting mints no request row).
-  await enqueueCreateFromRfpCallback(input, payload);
-}
-
-async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined> {
-  const getAutomationConfig = (storage as any).getAutomationConfig;
-  const config = typeof getAutomationConfig === "function"
-    ? await getAutomationConfig.call(storage, "procore_config")
-    : null;
-  return String((config?.value as any)?.companyId || process.env.PROCORE_COMPANY_ID || "").trim() || undefined;
-}
-
-// Deliver a 'failed' create-from-rfp callback (same shape/target as the returned-{success:false} arm
-// of performCreateFromRfpVote). Used by the guard rejections (in-flight approval / cross-deal project
-// number / ineligible source), and by the outer setImmediate catch when creation THROWS. Enqueued into the
-// durable outbox (finding S2) so a CRM outage doesn't drop it.
-async function deliverCreateFromRfpFailedCallback(
-  input: z.infer<typeof createFromRfpBodySchema>,
-  error: string,
-): Promise<void> {
-  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
-  await enqueueCreateFromRfpCallback(input, {
-    status: "failed",
-    sourceDealId: input.sourceDealId,
-    projectNumber: input.deal.projectNumber,
-    procoreCompanyId,
-    error,
-    createdAt: new Date().toISOString(),
-  });
-}
-
-// finding S2: persist the voting-path callback into bidboard_callback_outbox (NULL rfpApprovalRequestId, keyed
-// by sourceDealId) rather than a best-effort in-memory retry. The already-running startBidBoardCallbackWorker
-// delivers + retries it durably, so a transient CRM outage after the project exists can't leave the CRM
-// unlinked. Same signing (RFP_REQUEST_SYNC_SECRET) + target the worker uses for the email/override callbacks.
-async function enqueueCreateFromRfpCallback(
-  input: z.infer<typeof createFromRfpBodySchema>,
-  payload: Record<string, any>,
-): Promise<void> {
-  const { buildBidBoardCreatedCallbackTargetUrl } = await import("../sync/bidboard-callback-worker");
-  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
-  if (!targetUrl) {
-    console.error(`[rfp-requests] TROCK_CRM_BASE_URL not configured; cannot enqueue create-from-rfp callback for deal ${input.sourceDealId}`);
-    return;
-  }
-  await storage.enqueueBidboardCallback({
-    sourceSystem: input.sourceSystem,
-    sourceDealId: input.sourceDealId,
-    rfpApprovalRequestId: null,
-    payload,
-    targetUrl,
-  });
 }
