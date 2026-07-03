@@ -7,11 +7,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // test mirrors that convention. Assertions + mocks are otherwise identical to the plan.
 
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "999" })));
-const callbackFetchMock = vi.hoisted(() => vi.fn(async () => ({ ok: true, status: 200, text: async () => "" })));
+// finding S2: callbacks are now enqueued into the durable outbox (storage.enqueueBidboardCallback), not
+// delivered in-memory. This mock captures the enqueued rows so tests assert on the persisted payload.
+const enqueueBidboardCallbackMock = vi.hoisted(() => vi.fn(async () => ({ id: 1 })));
+// finding S1: a per-deal advisory lock; default returns a release fn (acquired). The S1 test overrides it to
+// null (another handler holds it) to assert the duplicate is skipped.
+const acquireLockMock = vi.hoisted(() => vi.fn(async () => (async () => {}) as (() => Promise<void>) | null));
+// finding T3: pre-create CRM eligibility recheck; default eligible.
+const checkEligibilityMock = vi.hoisted(() => vi.fn(async () => ({ eligible: true }) as any));
 // Default to "no collision" / "no conflicting owner"; individual tests override with mockResolvedValueOnce.
 const getRfpByProjectNumberAndStatusMock = vi.hoisted(() => vi.fn(async (_projectNumber: string, _status: string) => undefined as any));
 const getRfpBySourceDealAndStatusMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string, _status: string) => undefined as any));
 const getBidboardMappingByProcoreProjectNumberMock = vi.hoisted(() => vi.fn(async (_projectNumber: string) => undefined as any));
+
+// The last callback payload enqueued into the durable outbox.
+const lastCallbackPayload = () => (enqueueBidboardCallbackMock.mock.calls.at(-1)?.[0] as any)?.payload;
 
 vi.mock("../server/playwright/bidboard.ts", () => ({
   createBidBoardProjectFromDeal: createBidBoardMock,
@@ -19,8 +29,10 @@ vi.mock("../server/playwright/bidboard.ts", () => ({
 vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
   buildBidBoardCreatedCallbackTargetUrl: () => "https://crm.example.com/api/internal/bid-board-created",
 }));
-vi.mock("../server/lib/fetch-with-timeout.ts", () => ({
-  fetchWithTimeout: callbackFetchMock,
+vi.mock("../server/rfp-approval.ts", () => ({
+  createRfpApprovalRequestFromNormalizedInput: vi.fn(),
+  processRfpApproval: vi.fn(),
+  checkRfpApprovalSourceEligibility: checkEligibilityMock,
 }));
 vi.mock("../server/storage.ts", () => ({
   storage: {
@@ -28,6 +40,8 @@ vi.mock("../server/storage.ts", () => ({
     getRfpApprovalRequestByProjectNumberAndStatus: getRfpByProjectNumberAndStatusMock,
     getRfpApprovalRequestBySourceDealAndStatus: getRfpBySourceDealAndStatusMock,
     getBidboardMappingByProcoreProjectNumber: getBidboardMappingByProcoreProjectNumberMock,
+    enqueueBidboardCallback: enqueueBidboardCallbackMock,
+    acquireCreateFromRfpLock: acquireLockMock,
   },
 }));
 
@@ -104,7 +118,11 @@ describe("POST /api/bid-board/create-from-rfp", () => {
     process.env.RFP_REQUEST_SYNC_SECRET = SECRET;
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
     createBidBoardMock.mockClear();
-    callbackFetchMock.mockClear();
+    enqueueBidboardCallbackMock.mockClear();
+    acquireLockMock.mockReset();
+    acquireLockMock.mockResolvedValue((async () => {}) as any);
+    checkEligibilityMock.mockReset();
+    checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
     getRfpByProjectNumberAndStatusMock.mockReset();
     getRfpByProjectNumberAndStatusMock.mockResolvedValue(undefined);
     getRfpBySourceDealAndStatusMock.mockReset();
@@ -132,7 +150,7 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       // No create, no callback — the endpoint rejected before the 202/setImmediate.
       await new Promise((r) => setTimeout(r, 20));
       expect(createBidBoardMock).not.toHaveBeenCalled();
-      expect(callbackFetchMock).not.toHaveBeenCalled();
+      expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled();
     });
   });
 
@@ -158,7 +176,7 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       });
       expect(res.status).toBe(202);
 
-      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
 
       expect(createBidBoardMock).toHaveBeenCalledTimes(1);
       const createArgs = createBidBoardMock.mock.calls[0][0] as any;
@@ -167,15 +185,17 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       expect(createArgs.normalizedDealData.project_number).toBe("TR-1001");
       expect(createArgs.normalizedDealData.company_name).toBe("Acme");
 
-      const [cbUrl, cbInit] = callbackFetchMock.mock.calls[0] as any[];
-      expect(cbUrl).toBe("https://crm.example.com/api/internal/bid-board-created");
-      const cbBody = JSON.parse(cbInit.body);
+      const enqueued = enqueueBidboardCallbackMock.mock.calls[0][0] as any;
+      expect(enqueued.targetUrl).toBe("https://crm.example.com/api/internal/bid-board-created");
+      // Voting row: NULL rfpApprovalRequestId (keyed by sourceDealId); the worker signs + delivers it durably.
+      expect(enqueued.rfpApprovalRequestId).toBeNull();
+      expect(enqueued.sourceDealId).toBe("crm-deal-1");
+      const cbBody = enqueued.payload;
       expect(cbBody.status).toBe("created");
       expect(cbBody.sourceDealId).toBe("crm-deal-1");
       expect(cbBody.bidboardProjectId).toBe("999");
       expect(cbBody.procoreCompanyId).toBe("42");
       expect(cbBody.rfpApprovalRequestId).toBeUndefined();
-      expect(cbInit.headers["x-rfp-request-signature"]).toBe(sign(cbInit.body));
     });
   });
 
@@ -194,11 +214,10 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       });
       expect(res.status).toBe(202);
 
-      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
       // Refused to adopt: no create ran, and the callback is 'failed' (not 'created' pointing at 777).
       expect(createBidBoardMock).not.toHaveBeenCalled();
-      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
-      const cbBody = JSON.parse(cbInit.body);
+      const cbBody = lastCallbackPayload();
       expect(cbBody.status).toBe("failed");
       expect(cbBody.sourceDealId).toBe("crm-deal-1");
       expect(cbBody.bidboardProjectId).toBeUndefined();
@@ -220,10 +239,9 @@ describe("POST /api/bid-board/create-from-rfp", () => {
         body: raw,
       });
       expect(res.status).toBe(202);
-      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
       expect(createBidBoardMock).toHaveBeenCalledTimes(1);
-      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
-      expect(JSON.parse(cbInit.body).status).toBe("created");
+      expect(lastCallbackPayload().status).toBe("created");
     });
   });
 
@@ -240,10 +258,9 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       });
       expect(res.status).toBe(202);
 
-      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
       expect(createBidBoardMock).not.toHaveBeenCalled();
-      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
-      const cbBody = JSON.parse(cbInit.body);
+      const cbBody = lastCallbackPayload();
       expect(cbBody.status).toBe("failed");
       expect(cbBody.error).toContain("conflicting RFP approval");
     });
@@ -263,9 +280,9 @@ describe("POST /api/bid-board/create-from-rfp", () => {
         body: raw,
       });
       expect(res.status).toBe(202);
-      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
       expect(createBidBoardMock).not.toHaveBeenCalled();
-      const cbBody = JSON.parse((callbackFetchMock.mock.calls[0] as any[])[1].body);
+      const cbBody = lastCallbackPayload();
       expect(cbBody.status).toBe("failed");
       expect(cbBody.error).toContain("conflicting RFP approval");
     });
@@ -285,9 +302,9 @@ describe("POST /api/bid-board/create-from-rfp", () => {
         body: raw,
       });
       expect(res.status).toBe(202);
-      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
       expect(createBidBoardMock).not.toHaveBeenCalled();
-      const cbBody = JSON.parse((callbackFetchMock.mock.calls[0] as any[])[1].body);
+      const cbBody = lastCallbackPayload();
       expect(cbBody.status).toBe("failed");
       expect(cbBody.error).toContain("conflicting RFP approval");
       expect(getRfpBySourceDealAndStatusMock).toHaveBeenCalledWith("trock_crm", "crm-deal-1", "pending");
@@ -305,15 +322,61 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       });
       expect(res.status).toBe(202);
 
-      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
-      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
-      const cbBody = JSON.parse(cbInit.body);
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
+      const cbBody = lastCallbackPayload();
       expect(cbBody.status).toBe("failed");
       expect(cbBody.sourceDealId).toBe("crm-deal-1");
       expect(cbBody.projectNumber).toBe("TR-1001");
       expect(cbBody.error).toContain("playwright boom");
       expect(cbBody.bidboardProjectId).toBeUndefined();
-      expect(cbInit.headers["x-rfp-request-signature"]).toBe(sign(cbInit.body));
+    });
+  });
+
+  it("[S1] skips (no create, no callback) when the per-deal advisory lock is already held by another handler", async () => {
+    // A concurrent duplicate delivery: another handler/instance holds the lock, so acquire returns null.
+    acquireLockMock.mockResolvedValueOnce(null as any);
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(202); // still ACKed; the OTHER holder does the work
+      await new Promise((r) => setTimeout(r, 30));
+      expect(createBidBoardMock).not.toHaveBeenCalled();
+      expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("[S1] releases the lock after the create (so a subsequent delivery can acquire it)", async () => {
+    const release = vi.fn(async () => {});
+    acquireLockMock.mockResolvedValueOnce(release as any);
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST", headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) }, body: raw,
+      });
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("[T3] delivers a 'failed' callback and does NOT create when the CRM deal is no longer eligible", async () => {
+    // A delayed/retried delivery for a deal the CRM has since deleted or moved out of Opportunity.
+    checkEligibilityMock.mockResolvedValueOnce({ eligible: false, reason: "Source CRM deal is no longer in Opportunity stage" } as any);
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST", headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) }, body: raw,
+      });
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1));
+      expect(createBidBoardMock).not.toHaveBeenCalled(); // no BidBoard project for an ineligible deal
+      expect(acquireLockMock).not.toHaveBeenCalled(); // eligibility is checked before the lock/create
+      const cbBody = lastCallbackPayload();
+      expect(cbBody.status).toBe("failed");
+      expect(cbBody.error).toContain("no longer in Opportunity");
     });
   });
 });

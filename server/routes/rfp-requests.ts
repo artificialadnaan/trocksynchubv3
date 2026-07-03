@@ -372,7 +372,42 @@ export function registerRfpRequestRoutes(app: Express): void {
   }));
 }
 
+// Wraps the actual create with a pre-create CRM eligibility recheck (finding T3) + a per-deal advisory lock
+// (finding S1). Keeps createBidBoardFromRfpVote as the entry point the setImmediate calls.
 async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBodySchema>): Promise<void> {
+  // T3: the CRM deal may have been deleted or moved out of Opportunity since the vote (a delayed/retried
+  // delivery). The normal approval/override paths run this guard immediately before creating; do the same here
+  // so a no-longer-eligible deal gets a 'failed' callback instead of a BidBoard project. Fail-open on a config/
+  // 5xx check failure (checkRfpApprovalSourceEligibility returns eligible:true then), so a CRM blip doesn't block
+  // legit creates — matching the normal path.
+  const eligibility = await checkRfpApprovalSourceEligibility({
+    sourceSystem: input.sourceSystem,
+    sourceDealId: input.sourceDealId,
+  });
+  if (!eligibility.eligible) {
+    await deliverCreateFromRfpFailedCallback(
+      input,
+      eligibility.reason || "Source CRM deal is no longer eligible for BidBoard creation",
+    );
+    return;
+  }
+
+  // S1: serialize per-deal across instances. Skip (no-op) if another handler already holds the lock — it will
+  // create + deliver the callback; a concurrent duplicate delivery must not create a second project. A later
+  // sequential retry acquires it fine and the adopt-guard makes it idempotent.
+  const releaseLock = await storage.acquireCreateFromRfpLock(input.sourceSystem, input.sourceDealId);
+  if (!releaseLock) {
+    console.log(`[rfp-requests] create-from-rfp for deal ${input.sourceDealId} already in progress on another handler; skipping duplicate`);
+    return;
+  }
+  try {
+    await performCreateFromRfpVote(input);
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function performCreateFromRfpVote(input: z.infer<typeof createFromRfpBodySchema>): Promise<void> {
   const { createBidBoardProjectFromDeal } = await import("../playwright/bidboard");
   const { buildBidBoardCreatedCallbackTargetUrl } = await import("../sync/bidboard-callback-worker");
 
@@ -458,17 +493,6 @@ async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBody
     console.error(`[rfp-requests] create-from-rfp BidBoard create failed for deal ${input.sourceDealId}: ${result.error || "unknown"}`);
   }
 
-  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
-  if (!targetUrl) {
-    console.error(`[rfp-requests] TROCK_CRM_BASE_URL not configured; cannot deliver create-from-rfp callback for deal ${input.sourceDealId}`);
-    return;
-  }
-  const secret = process.env.RFP_REQUEST_SYNC_SECRET;
-  if (!secret) {
-    console.error("[rfp-requests] RFP_REQUEST_SYNC_SECRET not configured; cannot deliver create-from-rfp callback");
-    return;
-  }
-
   const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
 
   // Voting-path callback: NO rfpApprovalRequestId (no request row). The CRM resolves by sourceDealId.
@@ -490,7 +514,11 @@ async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBody
         createdAt: new Date().toISOString(),
       };
 
-  await deliverCreateFromRfpCallback(targetUrl, payload, secret);
+  // finding S2: enqueue into the DURABLE bidboard_callback_outbox (delivered + retried by the already-running
+  // startBidBoardCallbackWorker) instead of a best-effort in-memory retry that drops on failure. So if the CRM
+  // is briefly down after the project exists, the callback is replayed until it lands — the deal can't stay
+  // unlinked. Keyed by sourceDealId with a NULL rfpApprovalRequestId (voting mints no request row).
+  await enqueueCreateFromRfpCallback(input, payload);
 }
 
 async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined> {
@@ -502,56 +530,43 @@ async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined>
 }
 
 // Deliver a 'failed' create-from-rfp callback (same shape/target as the returned-{success:false} arm
-// of createBidBoardFromRfpVote). Used by the guard rejections (in-flight approval / cross-deal
-// project number) and by the outer setImmediate catch when creation THROWS. Resolves its own
-// targetUrl/secret/companyId so it works even if the throw happened before those were read.
+// of performCreateFromRfpVote). Used by the guard rejections (in-flight approval / cross-deal project
+// number / ineligible source), and by the outer setImmediate catch when creation THROWS. Enqueued into the
+// durable outbox (finding S2) so a CRM outage doesn't drop it.
 async function deliverCreateFromRfpFailedCallback(
   input: z.infer<typeof createFromRfpBodySchema>,
   error: string,
 ): Promise<void> {
+  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+  await enqueueCreateFromRfpCallback(input, {
+    status: "failed",
+    sourceDealId: input.sourceDealId,
+    projectNumber: input.deal.projectNumber,
+    procoreCompanyId,
+    error,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+// finding S2: persist the voting-path callback into bidboard_callback_outbox (NULL rfpApprovalRequestId, keyed
+// by sourceDealId) rather than a best-effort in-memory retry. The already-running startBidBoardCallbackWorker
+// delivers + retries it durably, so a transient CRM outage after the project exists can't leave the CRM
+// unlinked. Same signing (RFP_REQUEST_SYNC_SECRET) + target the worker uses for the email/override callbacks.
+async function enqueueCreateFromRfpCallback(
+  input: z.infer<typeof createFromRfpBodySchema>,
+  payload: Record<string, any>,
+): Promise<void> {
   const { buildBidBoardCreatedCallbackTargetUrl } = await import("../sync/bidboard-callback-worker");
   const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
   if (!targetUrl) {
-    console.error(`[rfp-requests] TROCK_CRM_BASE_URL not configured; cannot deliver create-from-rfp failure callback for deal ${input.sourceDealId}`);
+    console.error(`[rfp-requests] TROCK_CRM_BASE_URL not configured; cannot enqueue create-from-rfp callback for deal ${input.sourceDealId}`);
     return;
   }
-  const secret = process.env.RFP_REQUEST_SYNC_SECRET;
-  if (!secret) {
-    console.error("[rfp-requests] RFP_REQUEST_SYNC_SECRET not configured; cannot deliver create-from-rfp failure callback");
-    return;
-  }
-  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
-  await deliverCreateFromRfpCallback(
+  await storage.enqueueBidboardCallback({
+    sourceSystem: input.sourceSystem,
+    sourceDealId: input.sourceDealId,
+    rfpApprovalRequestId: null,
+    payload,
     targetUrl,
-    {
-      status: "failed",
-      sourceDealId: input.sourceDealId,
-      projectNumber: input.deal.projectNumber,
-      procoreCompanyId,
-      error,
-      createdAt: new Date().toISOString(),
-    },
-    secret,
-  );
-}
-
-async function deliverCreateFromRfpCallback(targetUrl: string, payload: Record<string, any>, secret: string): Promise<void> {
-  const { fetchWithTimeout } = await import("../lib/fetch-with-timeout");
-  const rawBody = JSON.stringify(payload);
-  const sig = signRfpRequestPayload(rawBody, secret);
-  const MAX = 3;
-  for (let attempt = 1; attempt <= MAX; attempt++) {
-    try {
-      const resp = await fetchWithTimeout(targetUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-rfp-request-signature": sig },
-        body: rawBody,
-      });
-      if (resp.ok) return;
-      if (attempt === MAX) console.error(`[rfp-requests] create-from-rfp callback failed with ${resp.status}`);
-    } catch (err: any) {
-      if (attempt === MAX) console.error(`[rfp-requests] create-from-rfp callback error: ${err?.message || err}`);
-    }
-    if (attempt < MAX) await new Promise((r) => setTimeout(r, 1000 * attempt));
-  }
+  });
 }

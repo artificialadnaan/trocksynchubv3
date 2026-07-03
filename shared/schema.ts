@@ -1054,8 +1054,12 @@ export const bidboardCallbackOutbox = pgTable("bidboard_callback_outbox", {
   id: serial("id").primaryKey(),
   sourceSystem: text("source_system").notNull(),
   sourceDealId: text("source_deal_id").notNull(),
+  // NULLABLE (finding S2): the voting create-from-rfp path mints no rfp_approval_requests row, so its
+  // callbacks carry no request id and are routed through this durable outbox keyed by sourceDealId instead of
+  // best-effort in-memory retries. The unique index below only dedupes the request-backed (email/override)
+  // path; NULLs are distinct, so voting rows aren't collapsed by it (the create-side advisory lock prevents
+  // duplicate voting creates → duplicate rows).
   rfpApprovalRequestId: integer("rfp_approval_request_id")
-    .notNull()
     .references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
   payload: jsonb("payload").notNull(),
   targetUrl: text("target_url").notNull(),
