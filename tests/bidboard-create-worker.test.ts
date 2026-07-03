@@ -374,6 +374,28 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows[0].status).toBe("failed");
   });
 
+  it("[finding] the terminal 'failed' bookkeeping RETRIES a transient error so a refused command lands 'failed' (never left create-capable)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-retry", sourceDealId: "d-retry" }));
+    // Make the FIRST status='failed' UPDATE throw (transient DB blip), then delegate to the real PGlite db.
+    const realDb = dbHolder.db;
+    let failMarkThrows = 0;
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/status = 'failed'/.test(JSON.stringify(q)) && failMarkThrows++ === 0) throw new Error("transient bookkeeping blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => "failed" as const);
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+      const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+      expect(rows[0].status).toBe("failed"); // retried past the blip -> terminal, not left 'processing'
+      expect(failMarkThrows).toBeGreaterThan(1); // proves the mark was retried
+    } finally {
+      dbHolder.db = realDb;
+    }
+  });
+
   it("a POST-create failure (mapping exists) is NOT marked failed and emits NO failed callback — left for reclaim", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-pc", sourceDealId: "d-pc" }));
     // The project was already created (a mapping exists), but perform then threw (e.g. the 'created' callback

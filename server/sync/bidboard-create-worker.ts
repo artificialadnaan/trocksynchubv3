@@ -128,6 +128,28 @@ async function markCreateCommandFailed(id: number, error: string): Promise<void>
   `);
 }
 
+// finding: once perform has delivered the terminal FAILED callback (a genuine create failure OR a pre-create
+// refusal — ineligible/conflict/ownership), the command is logically terminal and must NOT re-run the create path.
+// If the terminal-status bookkeeping (markCreateCommandFailed) throws, the row would be left 'processing' and a
+// reclaim would re-run perform from scratch — so an RFP the CRM was already told FAILED could later create a project
+// once the external eligibility/conflict condition changes. Retry ONLY the status bookkeeping (a fresh pool
+// connection usually clears a transient blip) so the row reliably lands 'failed' (never re-picked). Returns false
+// only if every attempt fails — an extended DB outage, during which a reclaim's create can't run either.
+async function markCreateCommandFailedResilient(id: number, error: string): Promise<boolean> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await markCreateCommandFailed(id, error);
+      return true;
+    } catch (e: any) {
+      if (attempt === 3) {
+        log(`[bidboard-create] Command ${id} markCreateCommandFailed exhausted ${attempt} attempts (${e?.message || e}); left 'processing' — a later reclaim re-refuses idempotently`, "sync");
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
 // finding: a POST-create failure (the project was created but the 'created' callback couldn't be enqueued — e.g.
 // TROCK_CRM_BASE_URL missing) leaves the row 'processing' for the stale-reclaim to re-run + adopt. RESET
 // attempt_count so this callback-delivery recovery is NOT capped by max_attempts — otherwise a config fixed later
@@ -463,7 +485,9 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
           processed += 1;
           continue;
         }
-        await markCreateCommandFailed(row.id, message);
+        // The failed callback is delivered — mark terminal RESILIENTLY so a bookkeeping blip can't leave the row
+        // create-capable for a reclaim (finding).
+        await markCreateCommandFailedResilient(row.id, message);
         processed += 1;
         continue;
       }
@@ -473,11 +497,10 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       // bookkeeping then failed and the row were left 'processing', a reclaim could CREATE a project after the CRM
       // already received a terminal 'failed' result for this vote.
       if (outcome === "failed") {
-        try {
-          await markCreateCommandFailed(row.id, "create refused before project creation (ineligible / conflict / ownership / revised-number)");
-        } catch (bookErr: any) {
-          log(`[bidboard-create] Command ${row.id} refused (no project) but markFailed failed (${bookErr?.message || bookErr}); a reclaim will re-refuse idempotently`, "sync");
-        }
+        // Mark terminal RESILIENTLY (finding): a bookkeeping throw must not leave a REFUSED command 'processing',
+        // where a reclaim re-runs the create path and could create a project after the CRM already got 'failed'
+        // (once the eligibility/conflict condition changes).
+        await markCreateCommandFailedResilient(row.id, "create refused before project creation (ineligible / conflict / ownership / revised-number)");
         processed += 1;
         continue;
       }
