@@ -4,7 +4,6 @@ import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
 import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval, checkRfpApprovalSourceEligibility } from "../rfp-approval";
 import { storage } from "../storage";
-import { enqueueBidboardCreateCommand } from "../sync/bidboard-create-worker";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 
 const SIGNATURE_HEADER = "x-rfp-request-signature";
@@ -354,6 +353,11 @@ export function registerRfpRequestRoutes(app: Express): void {
     // does the eligibility recheck + guards + Playwright create + durable callback (findings V1/V2/V4). Idempotent
     // on sourceEventId — a duplicate delivery is a no-op; a previously-failed command is re-queued.
     try {
+      // finding: lazy-load the create worker so it's only imported when a create-from-rfp actually arrives. A
+      // top-level import pulls in bidboard-create-worker -> ../index -> server/db.ts for EVERY rfp-requests route
+      // (override-approve, etc.), which throws at import time in environments where DATABASE_URL is intentionally
+      // unset — stranding unrelated routes. The dynamic import keeps that cost on this handler only.
+      const { enqueueBidboardCreateCommand } = await import("../sync/bidboard-create-worker");
       await enqueueBidboardCreateCommand(input);
     } catch (err: any) {
       console.error(`[rfp-requests] failed to enqueue create-from-rfp command for deal ${input.sourceDealId}:`, err?.message || err);

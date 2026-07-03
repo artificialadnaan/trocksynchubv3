@@ -99,6 +99,19 @@ async function markCreateCommandFailed(id: number, error: string): Promise<void>
   `);
 }
 
+// finding: a POST-create failure (the project was created but the 'created' callback couldn't be enqueued — e.g.
+// TROCK_CRM_BASE_URL missing) leaves the row 'processing' for the stale-reclaim to re-run + adopt. RESET
+// attempt_count so this callback-delivery recovery is NOT capped by max_attempts — otherwise a config fixed later
+// than max_attempts reclaims would never deliver the 'created' callback without a manual same-sourceEventId re-post,
+// leaving the accepted vote with a BidBoard project but no CRM notification. The row stays 'processing' with its
+// claim-time last_attempt_at, so it reclaims on the next stale window.
+async function resetCreateCommandForReclaim(id: number, note: string): Promise<void> {
+  const db = await getDb();
+  await db.execute(sql`
+    UPDATE bidboard_create_outbox SET attempt_count = 0, last_error = ${note} WHERE id = ${id}
+  `);
+}
+
 async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined> {
   const getAutomationConfig = (storage as any).getAutomationConfig;
   const config = typeof getAutomationConfig === "function"
@@ -353,6 +366,8 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         try { createdMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId); } catch { /* best-effort */ }
         if (createdMapping?.bidboardProjectId) {
           log(`[bidboard-create] Command ${row.id} created project ${createdMapping.bidboardProjectId} but a post-create step failed (${message}); leaving 'processing' for reclaim`, "sync");
+          // finding: reset attempt_count so the callback-delivery recovery isn't capped by max_attempts.
+          try { await resetCreateCommandForReclaim(row.id, `created ${createdMapping.bidboardProjectId}; callback pending reclaim: ${message}`); } catch { /* best-effort */ }
           processed += 1;
           continue;
         }

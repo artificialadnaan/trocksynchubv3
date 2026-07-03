@@ -264,8 +264,9 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
     const perform = vi.fn(async () => { throw new Error("created-callback persist failed"); });
     await processBidboardCreateOutbox({ performImpl: perform as any });
-    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
     expect(rows[0].status).toBe("processing"); // left for the stale-reclaim, not 'failed'
+    expect(rows[0].attempt_count).toBe(0); // finding: reset so callback-delivery recovery isn't capped by max_attempts
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback
   });
 
