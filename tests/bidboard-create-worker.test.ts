@@ -240,12 +240,31 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows[0].last_error).toBeNull();
   });
 
-  it("does NOT disturb a DONE command on a re-delivery (idempotent, no re-create)", async () => {
+  it("does NOT disturb a DONE command on a re-delivery when its callback was DELIVERED (idempotent, no re-create)", async () => {
     await enqueueBidboardCreateCommand(input());
     await pg.query(`UPDATE bidboard_create_outbox SET status='done'`);
+    // The created callback was delivered ('sent') — a duplicate delivery must stay a no-op.
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', 'crm-deal-1', NULL, '{"status":"created"}'::jsonb, 'http://crm/cb', 'sent')`
+    );
     await enqueueBidboardCreateCommand(input());
     const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
     expect(rows[0].status).toBe("done");
+  });
+
+  it("[finding] re-queues a DONE command whose created callback went DEAD/lost so the retry re-adopts + re-sends", async () => {
+    await enqueueBidboardCreateCommand(input());
+    await pg.query(`UPDATE bidboard_create_outbox SET status='done'`);
+    // The created callback exhausted its retries -> 'dead' (no live pending/sent callback for the deal). A
+    // same-sourceEventId retry must re-queue so the worker re-runs mapping-first adopt + enqueues a fresh callback.
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', 'crm-deal-1', NULL, '{"status":"created"}'::jsonb, 'http://crm/cb', 'dead')`
+    );
+    await enqueueBidboardCreateCommand(input());
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("pending"); // re-queued for callback recovery
   });
 
   it("refreshes a still-PENDING command on a corrected re-delivery (payload + project_number + created_at receipt)", async () => {
@@ -277,6 +296,19 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows[0].project_number).toBe("TR-1001"); // NOT refreshed to the corrected payload
     expect(rows[0].payload.deal.projectNumber).toBe("TR-1001");
     expect(new Date(rows[0].created_at).getTime()).toBe(new Date(before.created_at).getTime()); // receipt NOT bumped
+  });
+
+  it("[finding] the supersede DELETE spares a NEWER round's pending callback, removing only OLDER ones", async () => {
+    // A NEWER round's still-pending callback (createdAt AFTER the one we're about to enqueue) — must survive.
+    await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T15:00:00.000Z"}'::jsonb, 'http://crm/cb', 'pending')`);
+    // An OLDER stale pending callback that SHOULD be superseded.
+    await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T08:00:00.000Z"}'::jsonb, 'http://crm/cb', 'pending')`);
+    getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" }); // adopt path
+    // Enqueue a 'created' callback stamped 10:00 -> supersede only rows strictly OLDER than 10:00.
+    await performCreateFromRfpVote(input(), "2026-07-03T10:00:00.000Z");
+    const times = ((await pg.query(`SELECT payload->>'createdAt' AS c FROM bidboard_callback_outbox`)).rows as any[]).map((r) => r.c);
+    expect(times).toContain("2026-07-03T15:00:00.000Z"); // newer round's callback NOT deleted
+    expect(times).not.toContain("2026-07-03T08:00:00.000Z"); // older stale one superseded
   });
 
   it("processBidboardCreateOutbox claims + drains pending commands serially and marks them done", async () => {

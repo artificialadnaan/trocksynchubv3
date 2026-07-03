@@ -87,13 +87,15 @@ describe("POST /api/bid-board/create-from-rfp (endpoint)", () => {
     });
   });
 
-  it("409 (no command) when sourceSystem is not trock_crm", async () => {
+  it("422 (no command) when sourceSystem is not trock_crm (contract-safe, not 409)", async () => {
     await withServer(async (baseUrl) => {
       const raw = JSON.stringify(requestBody({ sourceSystem: "hubspot" }));
       const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
         method: "POST", headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) }, body: raw,
       });
-      expect(res.status).toBe(409);
+      // finding: the CRM delivery job's contract is 401/500/422/202 — an unsupported sourceSystem is a validation
+      // failure (422), not a 409 the caller would treat as an unhandled conflict.
+      expect(res.status).toBe(422);
       expect(enqueueCommandMock).not.toHaveBeenCalled();
     });
   });

@@ -340,10 +340,12 @@ export function registerRfpRequestRoutes(app: Express): void {
     // create-from-rfp is a trock_crm VOTING command only (the CRM's 2/3-approve / override-approve
     // vote). Reject any other source before the 202 — a hubspot-shaped payload reaching here would
     // otherwise mint a trock_crm BidBoard project + callback for a deal this endpoint doesn't own.
+    // finding: return 422 (not 409) — this endpoint's contract with the CRM delivery job is 401/500/422/202, so a
+    // 409 reads as an unhandled conflict. An unsupported sourceSystem is a payload-validation failure -> 422.
     if (input.sourceSystem !== "trock_crm") {
-      return res.status(409).json({
+      return res.status(422).json({
         success: false,
-        error: "Conflict",
+        error: "Unprocessable Entity",
         message: "create-from-rfp is only supported for trock_crm voting requests",
       });
     }

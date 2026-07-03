@@ -52,7 +52,23 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       -- claimNextBidboardCreateCommand (which re-runs the row's payload), and a corrected re-post lands once the
       -- attempt reaches a terminal state. (This deliberately supersedes the earlier AA2 refresh-processing behavior,
       -- trading a rare corrected-re-post-during-create staleness for not corrupting a live long-running create.)
+      -- Also re-queue a 'done' row for CALLBACK RECOVERY (finding): 'done' only means the created callback was
+      -- ENQUEUED, not delivered. If that callback later went 'dead' (exhausted its retries) or was lost while the
+      -- CRM stayed unaware, a same-sourceEventId retry would otherwise 202-no-op and leave the deal permanently
+      -- unlinked. Re-queue ONLY when NO live (pending/sent) request-less callback exists for the deal — the worker
+      -- then re-runs perform's mapping-first ADOPT and re-sends the 'created' callback. A 'done' row whose callback
+      -- is still pending or already sent stays put (preserves duplicate-delivery idempotency).
       WHERE bidboard_create_outbox.status IN ('failed', 'pending')
+         OR (
+           bidboard_create_outbox.status = 'done'
+           AND NOT EXISTS (
+             SELECT 1 FROM bidboard_callback_outbox cb
+              WHERE cb.source_system = EXCLUDED.source_system
+                AND cb.source_deal_id = EXCLUDED.source_deal_id
+                AND cb.rfp_approval_request_id IS NULL
+                AND cb.status IN ('pending', 'sent')
+           )
+         )
   `);
 }
 
@@ -137,6 +153,11 @@ async function enqueueCreateFromRfpCallback(input: CreateFromRfpInput, payload: 
   // 'failed' (from a create that failed while CRM delivery was down) is keyed by NULL rfpApprovalRequestId, so it
   // isn't deduped by the request-id unique index; without this it could be delivered AFTER a later successful
   // 'created', leaving the CRM with a stale failed terminal result. Only the LATEST callback for the deal wins.
+  // finding: scope the supersede to callbacks STRICTLY OLDER than the one being enqueued (by payload createdAt =
+  // the command's receipt time). Deleting EVERY pending request-less callback would let an OLDER reclaimed command
+  // (A, still 'processing' with a lagging createdAt) erase a NEWER round's still-pending callback (B) and replace
+  // it with A's older createdAt, which the CRM's freshness check then ignores — permanently unlinking B's round.
+  // A callback with no createdAt (legacy/pre-AA3) is left alone rather than risking deleting a newer one.
   // Residual race (accepted): if the callback worker has ALREADY claimed a stale 'failed' row (still status
   // 'pending' while its HTTP is in flight), this DELETE removes the row but can't recall the in-flight request, so
   // a stale 'failed' could still reach the CRM after this 'created'. That is covered RECEIVER-SIDE, which is the
@@ -145,13 +166,18 @@ async function enqueueCreateFromRfpCallback(input: CreateFromRfpInput, payload: 
   // to the round's freshness markers — so a 'failed' arriving after the deal is already 'approved' (or stamped by a
   // newer round) is a no-op. We can't cancel an in-flight HTTP here; ordering is enforced where it can be.
   const db = await getDb();
-  await db.execute(sql`
-    DELETE FROM bidboard_callback_outbox
-     WHERE source_system = ${input.sourceSystem}
-       AND source_deal_id = ${input.sourceDealId}
-       AND rfp_approval_request_id IS NULL
-       AND status = 'pending'
-  `);
+  const supersedeBefore = typeof payload.createdAt === "string" ? payload.createdAt : null;
+  if (supersedeBefore) {
+    await db.execute(sql`
+      DELETE FROM bidboard_callback_outbox
+       WHERE source_system = ${input.sourceSystem}
+         AND source_deal_id = ${input.sourceDealId}
+         AND rfp_approval_request_id IS NULL
+         AND status = 'pending'
+         AND payload->>'createdAt' IS NOT NULL
+         AND (payload->>'createdAt')::timestamptz < ${supersedeBefore}::timestamptz
+    `);
+  }
   await storage.enqueueBidboardCallback({
     sourceSystem: input.sourceSystem,
     sourceDealId: input.sourceDealId,
