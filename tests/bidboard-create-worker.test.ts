@@ -9,6 +9,7 @@ const checkEligibilityMock = vi.hoisted(() => vi.fn(async () => ({ eligible: tru
 const getRfpByNumMock = vi.hoisted(() => vi.fn(async (_p: string, _s: string) => undefined as any));
 const getRfpBySourceMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string, _s: string) => undefined as any));
 const getMappingMock = vi.hoisted(() => vi.fn(async (_p: string) => undefined as any));
+const getDealMappingMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string) => undefined as any));
 // A PGlite-backed db for the outbox lifecycle (enqueue/claim/mark). Set in beforeAll.
 const dbHolder = vi.hoisted(() => ({ db: null as any }));
 // Configurable callback target URL (X5 tests set it null).
@@ -29,6 +30,7 @@ vi.mock("../server/storage.ts", () => ({
     getRfpApprovalRequestByProjectNumberAndStatus: getRfpByNumMock,
     getRfpApprovalRequestBySourceDealAndStatus: getRfpBySourceMock,
     getBidboardMappingByProcoreProjectNumber: getMappingMock,
+    getSyncMappingBySourceDealId: getDealMappingMock,
     enqueueBidboardCallback: enqueueBidboardCallbackMock,
   },
 }));
@@ -57,6 +59,7 @@ describe("performCreateFromRfpVote (create logic)", () => {
     getRfpByNumMock.mockReset(); getRfpByNumMock.mockResolvedValue(undefined);
     getRfpBySourceMock.mockReset(); getRfpBySourceMock.mockResolvedValue(undefined);
     getMappingMock.mockReset(); getMappingMock.mockResolvedValue(undefined);
+    getDealMappingMock.mockReset(); getDealMappingMock.mockResolvedValue(undefined);
   });
 
   it("happy: creates + enqueues a durable 'created' callback (NULL rfpApprovalRequestId, keyed by sourceDealId)", async () => {
@@ -99,6 +102,25 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(createBidBoardMock).not.toHaveBeenCalled();
     expect(lastCallback().status).toBe("failed");
     expect(getRfpBySourceMock).toHaveBeenCalledWith("trock_crm", "crm-deal-1", "approved");
+  });
+
+  it("[Y1] THROWS when createBidBoardProjectFromDeal returns success:false (so the command stays retryable, not done)", async () => {
+    createBidBoardMock.mockResolvedValueOnce({ success: false, error: "playwright UI failure" } as any);
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/playwright UI failure/);
+  });
+
+  it("[Y2] refuses when this deal already has a BidBoard project under a DIFFERENT number -> failed callback, no create", async () => {
+    getDealMappingMock.mockResolvedValue({ bidboardProjectId: "555", procoreProjectNumber: "TR-9999" });
+    await performCreateFromRfpVote(input()); // input's number is TR-1001, mapping's is TR-9999
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("revised number");
+  });
+
+  it("[Y2] allows the idempotent same-number retry (mapping number == requested number)", async () => {
+    getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).toHaveBeenCalledTimes(1); // same number -> falls through to the adopt-guard
   });
 
   it("[X4] supersedes prior PENDING voting callbacks (DELETE) before enqueuing a new one", async () => {

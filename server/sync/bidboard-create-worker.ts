@@ -31,7 +31,12 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       ${input.deal.projectNumber ?? null}, ${JSON.stringify(input)}::jsonb, 'pending', NOW(), NOW()
     )
     ON CONFLICT (source_event_id) DO UPDATE
-      SET status = 'pending', next_attempt_at = NOW(), attempt_count = 0, last_error = NULL
+      -- finding Y4: refresh the stored payload + project_number + source fields on re-queue. A rep who corrected
+      -- the CRM deal and re-posts the same sourceEventId must have the worker retry with the CORRECTED body, not
+      -- the stale one — so create/callback use the new project number / attachments, not the old.
+      SET status = 'pending', next_attempt_at = NOW(), attempt_count = 0, last_error = NULL,
+          payload = EXCLUDED.payload, project_number = EXCLUDED.project_number,
+          source_system = EXCLUDED.source_system, source_deal_id = EXCLUDED.source_deal_id
       WHERE bidboard_create_outbox.status = 'failed'
   `);
 }
@@ -187,6 +192,25 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput): Promi
     return;
   }
 
+  // [Same-deal revised-number guard] (finding Y2) — createBidBoardProjectFromDeal adopts THIS deal's existing
+  // source-deal mapping BEFORE considering the requested number. If a prior voting command already created a
+  // project for this deal under a DIFFERENT number, a revised-number vote would silently return the old project
+  // while the callback reports the new projectNumber. Refuse for manual resolution instead. (A same-number
+  // re-delivery is the legit idempotent-retry case and is allowed through to the adopt-guard.)
+  const dealMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+  if (
+    dealMapping?.bidboardProjectId &&
+    dealMapping.procoreProjectNumber &&
+    projectNumber &&
+    dealMapping.procoreProjectNumber !== projectNumber
+  ) {
+    await enqueueFailedCallback(
+      input,
+      `Deal ${input.sourceDealId} already has BidBoard project ${dealMapping.bidboardProjectId} under number ${dealMapping.procoreProjectNumber}; refusing to create/adopt under revised number ${projectNumber}`,
+    );
+    return;
+  }
+
   const d = input.deal;
   const normalizedDealData: Record<string, any> = {
     dealname: d.name,
@@ -219,29 +243,23 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput): Promi
     options: { syncDocuments: true },
   });
 
-  if (!result.success) {
-    log(`[bidboard-create] BidBoard create failed for deal ${input.sourceDealId}: ${result.error || "unknown"}`, "sync");
+  if (!result.success || !result.projectId) {
+    // finding Y1: a create FAILURE (Playwright/UI error, ambiguous existing project, ...) must stay RETRYABLE.
+    // Throw so processBidboardCreateOutbox marks the command 'failed' (which enqueueBidboardCreateCommand
+    // re-queues on the CRM rep's same-sourceEventId retry) + delivers a failed callback — rather than returning
+    // normally, which would mark it 'done' and make the retry a silent no-op needing manual DB surgery.
+    throw new Error(result.error || "BidBoard project creation failed");
   }
 
   const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
-  const payload = result.success && result.projectId
-    ? {
-        status: "created" as const,
-        sourceDealId: input.sourceDealId,
-        bidboardProjectId: result.projectId,
-        projectNumber: input.deal.projectNumber,
-        procoreCompanyId,
-        createdAt: new Date().toISOString(),
-      }
-    : {
-        status: "failed" as const,
-        sourceDealId: input.sourceDealId,
-        projectNumber: input.deal.projectNumber,
-        procoreCompanyId,
-        error: result.error || "BidBoard project creation failed",
-        createdAt: new Date().toISOString(),
-      };
-  await enqueueCreateFromRfpCallback(input, payload);
+  await enqueueCreateFromRfpCallback(input, {
+    status: "created" as const,
+    sourceDealId: input.sourceDealId,
+    bidboardProjectId: result.projectId,
+    projectNumber: input.deal.projectNumber,
+    procoreCompanyId,
+    createdAt: new Date().toISOString(),
+  });
 }
 
 const CREATE_WORKER_LOCK_KEY = "bidboard_create_from_rfp_worker";
