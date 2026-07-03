@@ -11,13 +11,17 @@ const getRfpBySourceMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: strin
 const getMappingMock = vi.hoisted(() => vi.fn(async (_p: string) => undefined as any));
 // A PGlite-backed db for the outbox lifecycle (enqueue/claim/mark). Set in beforeAll.
 const dbHolder = vi.hoisted(() => ({ db: null as any }));
+// Configurable callback target URL (X5 tests set it null).
+const urlHolder = vi.hoisted(() => ({ url: "https://crm.example.com/api/internal/bid-board-created" as string | null }));
 
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
-vi.mock("../server/db.ts", () => ({ get db() { return dbHolder.db; } }));
+// pool is undefined here so processBidboardCreateOutbox skips the cross-instance advisory lock (X2) and drains
+// directly — the lock path needs a real pg Pool, which PGlite isn't. The serial-drain behaviour is still tested.
+vi.mock("../server/db.ts", () => ({ pool: undefined, get db() { return dbHolder.db; } }));
 vi.mock("../server/playwright/bidboard.ts", () => ({ createBidBoardProjectFromDeal: createBidBoardMock }));
 vi.mock("../server/rfp-approval.ts", () => ({ checkRfpApprovalSourceEligibility: checkEligibilityMock }));
 vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
-  buildBidBoardCreatedCallbackTargetUrl: () => "https://crm.example.com/api/internal/bid-board-created",
+  buildBidBoardCreatedCallbackTargetUrl: () => urlHolder.url,
 }));
 vi.mock("../server/storage.ts", () => ({
   storage: {
@@ -44,6 +48,9 @@ const lastCallback = () => (enqueueBidboardCallbackMock.mock.calls.at(-1)?.[0] a
 
 describe("performCreateFromRfpVote (create logic)", () => {
   beforeEach(() => {
+    // enqueueCreateFromRfpCallback now DELETEs stale pending callbacks via getDb() (finding X4); stub it.
+    dbHolder.db = { execute: vi.fn(async () => ({ rows: [] })) } as any;
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
     createBidBoardMock.mockReset(); createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any);
     enqueueBidboardCallbackMock.mockReset(); enqueueBidboardCallbackMock.mockResolvedValue({ id: 1 } as any);
     checkEligibilityMock.mockReset(); checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
@@ -85,6 +92,29 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(lastCallback().status).toBe("failed");
     expect(lastCallback().error).toContain("other-deal");
   });
+
+  it("[X6] refuses when the SAME source deal already has an APPROVED RFP (revised project number) -> failed, no create", async () => {
+    getRfpBySourceMock.mockImplementation(async (_ss: string, _sd: string, s: string) => (s === "approved" ? { id: 9, status: "approved" } : undefined));
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(getRfpBySourceMock).toHaveBeenCalledWith("trock_crm", "crm-deal-1", "approved");
+  });
+
+  it("[X4] supersedes prior PENDING voting callbacks (DELETE) before enqueuing a new one", async () => {
+    await performCreateFromRfpVote(input());
+    const executed = (dbHolder.db.execute as any).mock.calls.map((c: any[]) => JSON.stringify(c[0])).join(" ");
+    expect(executed).toMatch(/DELETE FROM bidboard_callback_outbox/i);
+    expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("[X5] THROWS (so the command stays retryable, not 'done') when the callback URL is missing", async () => {
+    urlHolder.url = null;
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/TROCK_CRM_BASE_URL/);
+    // the project was created but the callback couldn't be enqueued -> throw -> command marked failed upstream
+    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled();
+  });
 });
 
 // ---- outbox lifecycle (V3 durability + idempotency) on PGlite ----
@@ -100,11 +130,21 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
         last_error text, last_attempt_at timestamptz, next_attempt_at timestamptz NOT NULL DEFAULT now(),
         created_at timestamptz NOT NULL DEFAULT now(), processed_at timestamptz
       );
+      -- enqueueCreateFromRfpCallback DELETEs stale pending rows here (X4) before enqueuing.
+      CREATE TABLE bidboard_callback_outbox (
+        id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL,
+        rfp_approval_request_id integer, payload jsonb NOT NULL, target_url text NOT NULL,
+        status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now()
+      );
     `);
     dbHolder.db = drizzle(pg);
   });
   afterAll(async () => { await pg?.close?.(); });
-  beforeEach(async () => { await pg.exec(`DELETE FROM bidboard_create_outbox;`); enqueueBidboardCallbackMock.mockReset(); });
+  beforeEach(async () => {
+    await pg.exec(`DELETE FROM bidboard_create_outbox; DELETE FROM bidboard_callback_outbox;`);
+    enqueueBidboardCallbackMock.mockReset();
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
+  });
 
   it("[V3] enqueue persists a pending command; a duplicate sourceEventId is idempotent (no second row)", async () => {
     await enqueueBidboardCreateCommand(input());
@@ -157,5 +197,16 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
 
   it("claimNextBidboardCreateCommand returns null when nothing is pending", async () => {
     expect(await claimNextBidboardCreateCommand()).toBeNull();
+  });
+
+  it("[X3] re-claims a STALE 'processing' row (worker crashed after claim) but not a fresh one", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-stale", sourceDealId: "d-stale" }));
+    // Fresh processing (just claimed) — must NOT be re-claimed.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW()`);
+    expect(await claimNextBidboardCreateCommand()).toBeNull();
+    // Stale processing (claimed >10m ago, crashed before done/failed) — re-claimed.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW() - interval '20 minutes'`);
+    const reclaimed = await claimNextBidboardCreateCommand();
+    expect(reclaimed?.source_event_id).toBe("e-stale");
   });
 });

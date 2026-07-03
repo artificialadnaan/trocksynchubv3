@@ -38,7 +38,11 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
 
 // Claim ONE pending/retryable command at a time (serial → satisfies the same-project-number ordering V1 needs +
 // keeps at most one Playwright create in flight, matching withBrowserLock). FOR UPDATE SKIP LOCKED so overlapping
-// ticks / a second process can't double-claim.
+// ticks can't double-claim. Also RE-CLAIMS a stale 'processing' row (finding X3): if the worker crashed after
+// claiming but before marking done/failed, the row would otherwise be stuck 'processing' forever and the
+// 202-accepted vote would sit with no project/callback — so a processing row untouched for >10m (well past any
+// real create) is picked back up, bounded by attempt_count < max_attempts.
+const STALE_PROCESSING_INTERVAL = "10 minutes";
 export async function claimNextBidboardCreateCommand(): Promise<any | null> {
   const db = await getDb();
   const result = await db.execute(sql`
@@ -46,7 +50,11 @@ export async function claimNextBidboardCreateCommand(): Promise<any | null> {
        SET status = 'processing', last_attempt_at = NOW(), attempt_count = attempt_count + 1
      WHERE id IN (
        SELECT id FROM bidboard_create_outbox
-        WHERE status = 'pending' AND next_attempt_at <= NOW()
+        WHERE attempt_count < max_attempts
+          AND (
+            (status = 'pending' AND next_attempt_at <= NOW())
+            OR (status = 'processing' AND last_attempt_at < NOW() - interval '${sql.raw(STALE_PROCESSING_INTERVAL)}')
+          )
         ORDER BY created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
@@ -87,9 +95,23 @@ async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined>
 async function enqueueCreateFromRfpCallback(input: CreateFromRfpInput, payload: Record<string, any>): Promise<void> {
   const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
   if (!targetUrl) {
-    log(`[bidboard-create] TROCK_CRM_BASE_URL not configured; cannot enqueue callback for deal ${input.sourceDealId}`, "sync");
-    return;
+    // finding X5: do NOT swallow this. If we returned normally the worker would mark the command 'done' — a
+    // 202-accepted vote could then create/adopt a project with NO callback row for the CRM to recover from.
+    // Throw so the command is marked failed + retryable (the rep-retry re-posts once TROCK_CRM_BASE_URL is set).
+    throw new Error("TROCK_CRM_BASE_URL not configured; cannot enqueue create-from-rfp callback");
   }
+  // finding X4: supersede any prior PENDING voting callback for this deal before enqueuing. A previously-enqueued
+  // 'failed' (from a create that failed while CRM delivery was down) is keyed by NULL rfpApprovalRequestId, so it
+  // isn't deduped by the request-id unique index; without this it could be delivered AFTER a later successful
+  // 'created', leaving the CRM with a stale failed terminal result. Only the LATEST callback for the deal wins.
+  const db = await getDb();
+  await db.execute(sql`
+    DELETE FROM bidboard_callback_outbox
+     WHERE source_system = ${input.sourceSystem}
+       AND source_deal_id = ${input.sourceDealId}
+       AND rfp_approval_request_id IS NULL
+       AND status = 'pending'
+  `);
   await storage.enqueueBidboardCallback({
     sourceSystem: input.sourceSystem,
     sourceDealId: input.sourceDealId,
@@ -136,7 +158,12 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput): Promi
     ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_OVERRIDE_APPROVING_STATUS))
     ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "approved"))
     ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, "pending"))
-    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS));
+    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS))
+    // finding X6: also block an already-APPROVED RFP for the SAME source deal. If this deal was approved earlier
+    // with project number A and a later vote arrives with a revised number B, createBidBoardProjectFromDeal would
+    // adopt the existing source-deal mapping and send a 'created' callback for B pointing at A's old project.
+    // Refuse so it stops for manual resolution instead.
+    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, "approved"));
   if (inFlightApproval) {
     await enqueueFailedCallback(
       input,
@@ -217,12 +244,32 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput): Promi
   await enqueueCreateFromRfpCallback(input, payload);
 }
 
+const CREATE_WORKER_LOCK_KEY = "bidboard_create_from_rfp_worker";
+
 export async function processBidboardCreateOutbox(deps: { performImpl?: typeof performCreateFromRfpVote } = {}): Promise<{ processed: number }> {
   if (createWorkerRunning) return { processed: 0 };
   createWorkerRunning = true;
   const perform = deps.performImpl ?? performCreateFromRfpVote;
   let processed = 0;
+  // finding X2: serialize the DRAIN across app instances with a single global advisory lock held on a dedicated
+  // connection for the whole drain. FOR UPDATE SKIP LOCKED alone lets instance A claim row 1 while instance B
+  // claims row 2 — two same-project creates could then both see no mapping before either writes one. The global
+  // lock guarantees only ONE instance's worker creates at a time, so performCreateFromRfpVote is truly serial and
+  // the ownership guard's ordering holds. Non-blocking (pg_try_advisory_lock): a second instance's tick just
+  // skips. Holding one connection in a background worker (not a request thread) is fine — no request-pool
+  // exhaustion. NOTE: pool.connect is dynamically imported so the test's ../db mock (drizzle-only) isn't required
+  // to expose a pool — when absent, we fall back to non-cross-instance draining.
+  let lockClient: { query: (t: string) => Promise<any>; release: () => void } | null = null;
+  let locked = false;
   try {
+    const dbModule: any = await import("../db");
+    if (dbModule.pool?.connect) {
+      lockClient = await dbModule.pool.connect();
+      const res = await lockClient!.query(`SELECT pg_try_advisory_lock(hashtext('${CREATE_WORKER_LOCK_KEY}')) AS locked`);
+      locked = Boolean((res.rows ?? res)[0]?.locked);
+      if (!locked) return { processed: 0 }; // another instance is draining
+    }
+
     // Drain the queue one command at a time (serial).
     for (;;) {
       const row = await claimNextBidboardCreateCommand();
@@ -242,6 +289,12 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
     }
     return { processed };
   } finally {
+    if (lockClient) {
+      if (locked) {
+        try { await lockClient.query(`SELECT pg_advisory_unlock(hashtext('${CREATE_WORKER_LOCK_KEY}'))`); } catch { /* connection may be gone */ }
+      }
+      lockClient.release();
+    }
     createWorkerRunning = false;
   }
 }
