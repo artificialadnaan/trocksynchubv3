@@ -270,6 +270,17 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback
   });
 
+  it("a create failure whose FAILURE callback can't be enqueued stays retryable (processing), not terminal 'failed'", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-cbfail", sourceDealId: "d-cbfail" }));
+    getDealMappingMock.mockResolvedValue(undefined); // genuine create failure — no project created
+    urlHolder.url = null; // TROCK_CRM_BASE_URL unset -> enqueueFailedCallback throws (buildBidBoardCreatedCallbackTargetUrl null)
+    const perform = vi.fn(async () => { throw new Error("playwright create failed"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // NOT 'failed' — claimNext would never re-pick a 'failed' row
+    expect(rows[0].attempt_count).toBe(0); // reset so reclaim keeps re-attempting until the callback can be delivered
+  });
+
   it("claimNextBidboardCreateCommand returns null when nothing is pending", async () => {
     expect(await claimNextBidboardCreateCommand()).toBeNull();
   });

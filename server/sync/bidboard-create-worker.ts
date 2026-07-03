@@ -371,9 +371,22 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
           processed += 1;
           continue;
         }
+        // Genuine create failure (NO project created). Deliver the failure callback to the CRM BEFORE marking the
+        // command terminal (finding): claimNextBidboardCreateCommand never re-picks a 'failed' row, so if we marked
+        // it failed first and the failure callback couldn't be enqueued (e.g. TROCK_CRM_BASE_URL unset, or the
+        // outbox insert throws), the accepted vote would strand with neither a project nor a failure callback. On a
+        // callback-enqueue failure, leave the row 'processing' + reset attempt_count so reclaim re-runs and
+        // re-attempts (the create may then succeed, or the failure callback finally enqueues once config is fixed).
         log(`[bidboard-create] Command ${row.id} create for deal ${input.sourceDealId} failed: ${message}`, "sync");
+        try {
+          await enqueueFailedCallback(input, message, callbackAt);
+        } catch (cbErr: any) {
+          log(`[bidboard-create] Command ${row.id} failed AND its failure callback could not be enqueued (${cbErr?.message || cbErr}); leaving 'processing' for reclaim`, "sync");
+          try { await resetCreateCommandForReclaim(row.id, `create failed; failure callback pending reclaim: ${message}`); } catch { /* best-effort */ }
+          processed += 1;
+          continue;
+        }
         await markCreateCommandFailed(row.id, message);
-        try { await enqueueFailedCallback(input, message, callbackAt); } catch { /* logged upstream */ }
         processed += 1;
         continue;
       }
