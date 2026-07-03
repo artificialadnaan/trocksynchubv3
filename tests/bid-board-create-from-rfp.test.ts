@@ -8,6 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "999" })));
 const callbackFetchMock = vi.hoisted(() => vi.fn(async () => ({ ok: true, status: 200, text: async () => "" })));
+// Default to "no collision" / "no conflicting owner"; individual tests override with mockResolvedValueOnce.
+const getRfpByProjectNumberAndStatusMock = vi.hoisted(() => vi.fn(async (_projectNumber: string, _status: string) => undefined as any));
+const getBidboardMappingByProcoreProjectNumberMock = vi.hoisted(() => vi.fn(async (_projectNumber: string) => undefined as any));
 
 vi.mock("../server/playwright/bidboard.ts", () => ({
   createBidBoardProjectFromDeal: createBidBoardMock,
@@ -19,7 +22,11 @@ vi.mock("../server/lib/fetch-with-timeout.ts", () => ({
   fetchWithTimeout: callbackFetchMock,
 }));
 vi.mock("../server/storage.ts", () => ({
-  storage: { getAutomationConfig: vi.fn(async () => ({ value: { companyId: "42" } })) },
+  storage: {
+    getAutomationConfig: vi.fn(async () => ({ value: { companyId: "42" } })),
+    getRfpApprovalRequestByProjectNumberAndStatus: getRfpByProjectNumberAndStatusMock,
+    getBidboardMappingByProcoreProjectNumber: getBidboardMappingByProcoreProjectNumberMock,
+  },
 }));
 
 // Cut the rfp-requests -> rfp-approval -> {hubspot,email-service,procore-hubspot-sync,index} -> db.ts
@@ -96,6 +103,10 @@ describe("POST /api/bid-board/create-from-rfp", () => {
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
     createBidBoardMock.mockClear();
     callbackFetchMock.mockClear();
+    getRfpByProjectNumberAndStatusMock.mockReset();
+    getRfpByProjectNumberAndStatusMock.mockResolvedValue(undefined);
+    getBidboardMappingByProcoreProjectNumberMock.mockReset();
+    getBidboardMappingByProcoreProjectNumberMock.mockResolvedValue(undefined);
   });
   afterEach(() => {
     delete process.env.RFP_REQUEST_SYNC_SECRET;
@@ -161,6 +172,76 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       expect(cbBody.procoreCompanyId).toBe("42");
       expect(cbBody.rfpApprovalRequestId).toBeUndefined();
       expect(cbInit.headers["x-rfp-request-signature"]).toBe(sign(cbInit.body));
+    });
+  });
+
+  it("delivers a 'failed' callback (not 'created') when the project number is owned by another deal", async () => {
+    getBidboardMappingByProcoreProjectNumberMock.mockResolvedValue({
+      sourceSystem: "trock_crm",
+      sourceDealId: "some-other-deal",
+      bidboardProjectId: "777",
+    });
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(202);
+
+      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      // Refused to adopt: no create ran, and the callback is 'failed' (not 'created' pointing at 777).
+      expect(createBidBoardMock).not.toHaveBeenCalled();
+      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
+      const cbBody = JSON.parse(cbInit.body);
+      expect(cbBody.status).toBe("failed");
+      expect(cbBody.sourceDealId).toBe("crm-deal-1");
+      expect(cbBody.bidboardProjectId).toBeUndefined();
+      expect(cbBody.error).toContain("some-other-deal");
+    });
+  });
+
+  it("allows the idempotent retry: an existing mapping for THIS deal falls through to create/adopt", async () => {
+    getBidboardMappingByProcoreProjectNumberMock.mockResolvedValue({
+      sourceSystem: "trock_crm",
+      sourceDealId: "crm-deal-1",
+      bidboardProjectId: "999",
+    });
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
+      expect(JSON.parse(cbInit.body).status).toBe("created");
+    });
+  });
+
+  it("delivers a 'failed' callback (not 'created') when an RFP approval is already in flight for the project number", async () => {
+    getRfpByProjectNumberAndStatusMock.mockImplementation(async (_projectNumber: string, status: string) =>
+      status === "pending" ? { id: 55, status: "pending" } : undefined
+    );
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(202);
+
+      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      expect(createBidBoardMock).not.toHaveBeenCalled();
+      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
+      const cbBody = JSON.parse(cbInit.body);
+      expect(cbBody.status).toBe("failed");
+      expect(cbBody.error).toContain("in-flight RFP approval");
     });
   });
 

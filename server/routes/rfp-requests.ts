@@ -376,6 +376,42 @@ async function createBidBoardFromRfpVote(input: z.infer<typeof createFromRfpBody
   const { createBidBoardProjectFromDeal } = await import("../playwright/bidboard");
   const { buildBidBoardCreatedCallbackTargetUrl } = await import("../sync/bidboard-callback-worker");
 
+  const projectNumber = input.deal.projectNumber;
+
+  // [Collision guard] An email-based RFP approval is already in flight for this project number. The
+  // voting path mints no rfp_approval_requests row, so a 'pending' or 'override_approving' row here
+  // belongs to a DIFFERENT approval flow mid-creation for the same project — proceeding would bypass
+  // it and double-create. Refuse and fail for manual resolution (mirrors the collision check in
+  // createRfpApprovalRequestFromNormalizedInput).
+  const inFlightApproval =
+    (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "pending"))
+    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_OVERRIDE_APPROVING_STATUS));
+  if (inFlightApproval) {
+    await deliverCreateFromRfpFailedCallback(
+      input,
+      `Project ${projectNumber} already has an in-flight RFP approval (request ${inFlightApproval.id}, status ${inFlightApproval.status}); not creating from vote`,
+    );
+    return;
+  }
+
+  // [Ownership guard] Refuse to adopt a BidBoard project owned by a DIFFERENT deal. The number-mapping
+  // adopt-branch inside createBidBoardProjectFromDeal returns success for ANY mapping carrying this
+  // project number — including one linked to another deal — which would send a 'created' callback keyed
+  // by THIS sourceDealId pointing at another deal's project. Guard ownership up front (mirrors the
+  // claimedByOtherDeal check in bidboard.ts). A mapping for THIS deal is the legit idempotent-retry
+  // case and is allowed to fall through to the adopt-guard.
+  const numberOwner = await storage.getBidboardMappingByProcoreProjectNumber(projectNumber);
+  if (
+    numberOwner?.bidboardProjectId &&
+    !(numberOwner.sourceSystem === input.sourceSystem && numberOwner.sourceDealId === input.sourceDealId)
+  ) {
+    await deliverCreateFromRfpFailedCallback(
+      input,
+      `Project ${projectNumber} is already linked to ${numberOwner.sourceSystem} deal ${numberOwner.sourceDealId} (BidBoard ${numberOwner.bidboardProjectId}); refusing to adopt for deal ${input.sourceDealId}`,
+    );
+    return;
+  }
+
   const d = input.deal;
   const normalizedDealData: Record<string, any> = {
     dealname: d.name,
