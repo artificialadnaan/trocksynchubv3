@@ -359,6 +359,14 @@ export function registerRfpRequestRoutes(app: Express): void {
         await createBidBoardFromRfpVote(input);
       } catch (err: any) {
         console.error(`[rfp-requests] create-from-rfp failed for deal ${input.sourceDealId}:`, err?.message || err);
+        // The 202 already returned, so a throw (Playwright/storage/Procore) would otherwise leave the
+        // CRM waiting forever. Mirror the approval path and deliver a 'failed' callback so the CRM can
+        // surface it for manual resolution. Best-effort: a callback-delivery failure is only logged.
+        try {
+          await deliverCreateFromRfpFailedCallback(input, err?.message || "create-from-rfp threw during BidBoard creation");
+        } catch (cbErr: any) {
+          console.error(`[rfp-requests] create-from-rfp failure-callback delivery failed for deal ${input.sourceDealId}:`, cbErr?.message || cbErr);
+        }
       }
     });
   }));
@@ -448,6 +456,40 @@ async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined>
     ? await getAutomationConfig.call(storage, "procore_config")
     : null;
   return String((config?.value as any)?.companyId || process.env.PROCORE_COMPANY_ID || "").trim() || undefined;
+}
+
+// Deliver a 'failed' create-from-rfp callback (same shape/target as the returned-{success:false} arm
+// of createBidBoardFromRfpVote). Used by the guard rejections (in-flight approval / cross-deal
+// project number) and by the outer setImmediate catch when creation THROWS. Resolves its own
+// targetUrl/secret/companyId so it works even if the throw happened before those were read.
+async function deliverCreateFromRfpFailedCallback(
+  input: z.infer<typeof createFromRfpBodySchema>,
+  error: string,
+): Promise<void> {
+  const { buildBidBoardCreatedCallbackTargetUrl } = await import("../sync/bidboard-callback-worker");
+  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
+  if (!targetUrl) {
+    console.error(`[rfp-requests] TROCK_CRM_BASE_URL not configured; cannot deliver create-from-rfp failure callback for deal ${input.sourceDealId}`);
+    return;
+  }
+  const secret = process.env.RFP_REQUEST_SYNC_SECRET;
+  if (!secret) {
+    console.error("[rfp-requests] RFP_REQUEST_SYNC_SECRET not configured; cannot deliver create-from-rfp failure callback");
+    return;
+  }
+  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+  await deliverCreateFromRfpCallback(
+    targetUrl,
+    {
+      status: "failed",
+      sourceDealId: input.sourceDealId,
+      projectNumber: input.deal.projectNumber,
+      procoreCompanyId,
+      error,
+      createdAt: new Date().toISOString(),
+    },
+    secret,
+  );
 }
 
 async function deliverCreateFromRfpCallback(targetUrl: string, payload: Record<string, any>, secret: string): Promise<void> {

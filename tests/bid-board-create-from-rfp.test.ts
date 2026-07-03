@@ -163,4 +163,27 @@ describe("POST /api/bid-board/create-from-rfp", () => {
       expect(cbInit.headers["x-rfp-request-signature"]).toBe(sign(cbInit.body));
     });
   });
+
+  it("delivers a 'failed' callback (not silence) when creation THROWS", async () => {
+    createBidBoardMock.mockRejectedValueOnce(new Error("playwright boom"));
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody());
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) },
+        body: raw,
+      });
+      expect(res.status).toBe(202);
+
+      await vi.waitFor(() => expect(callbackFetchMock).toHaveBeenCalledTimes(1));
+      const [, cbInit] = callbackFetchMock.mock.calls[0] as any[];
+      const cbBody = JSON.parse(cbInit.body);
+      expect(cbBody.status).toBe("failed");
+      expect(cbBody.sourceDealId).toBe("crm-deal-1");
+      expect(cbBody.projectNumber).toBe("TR-1001");
+      expect(cbBody.error).toContain("playwright boom");
+      expect(cbBody.bidboardProjectId).toBeUndefined();
+      expect(cbInit.headers["x-rfp-request-signature"]).toBe(sign(cbInit.body));
+    });
+  });
 });
