@@ -191,7 +191,21 @@ describe("performCreateFromRfpVote (create logic)", () => {
   });
 
   it("[F3] a NON-service RFP (projectType '9') is NOT rejected by the service guard (proceeds to create)", async () => {
-    await performCreateFromRfpVote(input()); // projectType '9'
+    await performCreateFromRfpVote(input()); // projectType '9', number TR-1001 (no DFW type digit)
+    expect(createBidBoardMock).toHaveBeenCalled();
+    expect(lastCallback().status).toBe("created");
+  });
+
+  it("[F10] REFUSES a service RFP identified by the project NUMBER digit even when projectType is stale/non-4", async () => {
+    // The project number's type digit is canonical: DFW-4-… is service even though project_types says '9'.
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "DFW-4-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("service RFP");
+  });
+
+  it("[F10] a NON-service project NUMBER digit (DFW-9-…) proceeds to create", async () => {
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "DFW-9-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
     expect(createBidBoardMock).toHaveBeenCalled();
     expect(lastCallback().status).toBe("created");
   });
@@ -347,6 +361,7 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     // number) arrives -> the earlier pending command must be 'superseded' so the FIFO drain doesn't create round
     // 1's obsolete project first and then refuse round 2 on the same-deal revised-number guard.
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-super-1", sourceDealId: "d-super", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour' WHERE source_event_id='e-super-1'`); // an earlier round
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-super-2", sourceDealId: "d-super", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
     const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
     expect(rows.find((r) => r.source_event_id === "e-super-1").status).toBe("superseded"); // earlier round retired
@@ -355,6 +370,21 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     const perform = vi.fn(async () => {});
     await processBidboardCreateOutbox({ performImpl: perform as any });
     expect(perform).toHaveBeenCalledTimes(1);
+  });
+
+  it("[F9] a LATE duplicate of an OLDER event does NOT supersede the newer pending round", async () => {
+    // Round 1 pending, then round 2 arrives (supersedes round 1). A late duplicate delivery of round 1 then lands:
+    // its ON CONFLICT is a no-op (row already 'superseded'), so it must NOT retire round 2 (the latest approved
+    // vote) — else the deal strands with no pending command to create its project.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r1", sourceDealId: "d-late", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour' WHERE source_event_id='e-r1'`);
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r2", sourceDealId: "d-late", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox WHERE source_event_id='e-r1'`)).rows[0]).toMatchObject({ status: "superseded" });
+    // The late duplicate of round 1 (already 'superseded') re-arrives:
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r1", sourceDealId: "d-late", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-r1").status).toBe("superseded"); // stays retired (no-op re-queue)
+    expect(rows.find((r) => r.source_event_id === "e-r2").status).toBe("pending"); // the newer round SURVIVES
   });
 
   it("[F4] leaves an in-flight 'processing' same-deal command alone (can't cancel a live create)", async () => {

@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { log } from "../index";
 import { storage } from "../storage";
+import { parseProjectTypeFromNumber } from "../constants";
 import { checkRfpApprovalSourceEligibility } from "../rfp-approval";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 import { buildBidBoardCreatedCallbackTargetUrl } from "./bidboard-callback-worker";
@@ -40,7 +41,7 @@ async function getDb() {
 // the same source_event_id, so DO NOTHING would otherwise strand the retry).
 export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
   const db = await getDb();
-  await db.execute(sql`
+  const insertResult: any = await db.execute(sql`
     INSERT INTO bidboard_create_outbox
       (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at)
     VALUES (
@@ -89,6 +90,7 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
                 AND cb.payload->>'status' = 'created'
            )
          )
+    RETURNING id
   `);
 
   // finding: supersede any OLDER still-PENDING create command for the SAME source deal. The CRM opens a fresh
@@ -96,19 +98,29 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
   // the worker's 15s tick hasn't claimed it, or the worker was down — the FIFO drain (ORDER BY created_at) would
   // run that earlier command FIRST and create its (possibly revised-number) project, after which THIS newer
   // command hits the same-deal revised-number guard and is REFUSED, so the latest approved vote never creates its
-  // intended project. Mark the earlier PENDING same-deal rows 'superseded' (a terminal, non-claimable status) so
-  // only the latest round creates. A row already 'processing' owns an in-flight Playwright create and is left
-  // alone — that residual (an earlier round mid-create when a newer arrives) can't be safely cancelled here and
-  // self-corrects via the revised-number guard + the CRM's re-trigger of the latest round.
-  await db.execute(sql`
-    UPDATE bidboard_create_outbox
-       SET status = 'superseded', processed_at = NOW(),
-           last_error = 'superseded by a newer create command for the same source deal'
-     WHERE source_system = ${input.sourceSystem}
-       AND source_deal_id = ${input.sourceDealId}
-       AND source_event_id <> ${input.sourceEventId}
-       AND status = 'pending'
-  `);
+  // intended project. Mark the earlier PENDING same-deal rows 'superseded' (a terminal, non-claimable status).
+  //
+  // finding (stale-event guard): only supersede when THIS command was actually inserted OR re-queued as the latest
+  // (the INSERT/ON CONFLICT DO UPDATE returned a row). A LATE duplicate delivery of an OLDER source_event_id whose
+  // row is already 'superseded'/'done'/'processing' makes the ON CONFLICT WHERE a NO-OP → RETURNING is empty → we
+  // must NOT supersede, else that stale re-delivery would retire the newer approved round and strand it with no
+  // pending command. And even when we do supersede, restrict to rows STRICTLY OLDER than the row we just
+  // wrote/refreshed (created_at < ours) so a re-delivery can never retire a newer round. A row already 'processing'
+  // owns an in-flight Playwright create and is left alone (it isn't 'pending').
+  const insertedRows = Array.isArray(insertResult) ? insertResult : (insertResult?.rows ?? []);
+  const insertedId = insertedRows[0]?.id;
+  if (insertedId != null) {
+    await db.execute(sql`
+      UPDATE bidboard_create_outbox
+         SET status = 'superseded', processed_at = NOW(),
+             last_error = 'superseded by a newer create command for the same source deal'
+       WHERE source_system = ${input.sourceSystem}
+         AND source_deal_id = ${input.sourceDealId}
+         AND id <> ${insertedId}
+         AND status = 'pending'
+         AND created_at < (SELECT created_at FROM bidboard_create_outbox WHERE id = ${insertedId})
+    `);
+  }
 }
 
 // Claim ONE pending/retryable command at a time (serial → satisfies the same-project-number ordering V1 needs +
@@ -300,10 +312,12 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
 
   // finding: create-from-rfp is a NON-service voting path — it hard-codes the non-service "Estimate in Progress"
   // stage below. A service RFP is created by its OWN service flow ("Service – Estimating" tab + Colby), never
-  // through the CRM vote outbox. The request schema accepts any projectType string, so defensively REFUSE a
-  // service RFP (project type code "4", per the CRM's resolveProjectTypeCode) here rather than mis-creating it in
-  // the wrong stage; a 'failed' callback tells the CRM it was not created.
-  if (input.deal.projectType?.trim() === "4") {
+  // through the CRM vote outbox. Derive the EFFECTIVE type the way the rest of the RFP flow does: the project
+  // NUMBER's type digit is canonical (e.g. DFW-4-… is service even when a stale project_types says otherwise),
+  // falling back to the payload projectType. Refuse a service RFP (type "4") with a 'failed' callback rather than
+  // mis-creating it in the wrong stage.
+  const effectiveProjectType = parseProjectTypeFromNumber(input.deal.projectNumber ?? "") ?? input.deal.projectType?.trim();
+  if (effectiveProjectType === "4") {
     await enqueueFailedCallback(
       input,
       `Deal ${input.sourceDealId} is a service RFP (project type 4); create-from-rfp is a non-service path and will not create it in the non-service "Estimate in Progress" stage`,
