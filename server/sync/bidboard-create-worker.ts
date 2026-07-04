@@ -105,8 +105,12 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
   // row is already 'superseded'/'done'/'processing' makes the ON CONFLICT WHERE a NO-OP → RETURNING is empty → we
   // must NOT supersede, else that stale re-delivery would retire the newer approved round and strand it with no
   // pending command. And even when we do supersede, restrict to rows STRICTLY OLDER than the row we just
-  // wrote/refreshed (created_at < ours) so a re-delivery can never retire a newer round. A row already 'processing'
-  // owns an in-flight Playwright create and is left alone (it isn't 'pending').
+  // wrote/refreshed. Order by the immutable serial `id` (insertion order), NOT created_at: a re-queue of a
+  // FAILED/PENDING older round refreshes its created_at to NOW() (finding Y4), which would make that older round
+  // look NEWEST by timestamp and wrongly supersede a genuinely newer pending round. `id` is assigned at first
+  // INSERT and never changes on ON CONFLICT DO UPDATE, so `id < ours` == "arrived before us" regardless of any
+  // created_at refresh. A row already 'processing' owns an in-flight Playwright create and is left alone (not
+  // 'pending'). (id < ${insertedId} also excludes the just-written row itself.)
   const insertedRows = Array.isArray(insertResult) ? insertResult : (insertResult?.rows ?? []);
   const insertedId = insertedRows[0]?.id;
   if (insertedId != null) {
@@ -116,9 +120,8 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
              last_error = 'superseded by a newer create command for the same source deal'
        WHERE source_system = ${input.sourceSystem}
          AND source_deal_id = ${input.sourceDealId}
-         AND id <> ${insertedId}
          AND status = 'pending'
-         AND created_at < (SELECT created_at FROM bidboard_create_outbox WHERE id = ${insertedId})
+         AND id < ${insertedId}
     `);
   }
 }

@@ -387,6 +387,28 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows.find((r) => r.source_event_id === "e-r2").status).toBe("pending"); // the newer round SURVIVES
   });
 
+  it("[F9] re-queuing a FAILED older round (fresh created_at) does NOT supersede the newer pending round", async () => {
+    // The subtle case: round 1 was 'processing' (so round 2's enqueue could not supersede it), then FAILED, while
+    // round 2 stayed pending. A rep retries round 1 -> ON CONFLICT refreshes it to pending with created_at = NOW(),
+    // which is NEWER than round 2's. Superseding by created_at would then wrongly retire round 2; superseding by
+    // the immutable insertion-order id must keep round 2 pending.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq1", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing' WHERE source_event_id='e-fq1'`); // claimed before round 2
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq2", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    // round 1 (processing) was NOT superseded by round 2; now its create fails.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='failed' WHERE source_event_id='e-fq1'`);
+    // Age round 2 so round 1's refreshed created_at is unambiguously NEWER (proves id, not created_at, is used).
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour' WHERE source_event_id='e-fq2'`);
+    // Rep retries round 1: failed -> pending, created_at refreshed to NOW().
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq1", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    const rows = (await pg.query(`SELECT source_event_id, status, created_at FROM bidboard_create_outbox`)).rows as any[];
+    const r1 = rows.find((r) => r.source_event_id === "e-fq1");
+    const r2 = rows.find((r) => r.source_event_id === "e-fq2");
+    expect(r1.status).toBe("pending"); // round 1 re-queued
+    expect(new Date(r1.created_at).getTime()).toBeGreaterThan(new Date(r2.created_at).getTime()); // round 1 IS newer by ts
+    expect(r2.status).toBe("pending"); // ...yet the genuinely-newer round 2 (higher id) is NOT superseded
+  });
+
   it("[F4] leaves an in-flight 'processing' same-deal command alone (can't cancel a live create)", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-live-1", sourceDealId: "d-live" }));
     await pg.query(`UPDATE bidboard_create_outbox SET status='processing' WHERE source_event_id='e-live-1'`);
