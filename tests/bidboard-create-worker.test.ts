@@ -246,6 +246,13 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(arg.normalizedDealData.project_types).toBe("2"); // canonical digit from DFW-2-…, NOT the stale "9"
   });
 
+  it("[H1] recognizes a NON-DFW (ATL-4-…) service number and refuses it, even with a stale projectType", async () => {
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "ATL-4-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // ATL-4 parsed as service -> refused (was mis-routed when DFW-only)
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("service RFP");
+  });
+
   it("[finding] mapping-first adopt beats an ineligible recheck: a reclaim-after-create never reports a false failure", async () => {
     // A prior attempt created the project (mapping exists); markCreateCommandDone then failed and the command was
     // reclaimed. On the re-run the deal has since left Opportunity (ineligible) — but because the project already
@@ -424,26 +431,21 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows.find((r) => r.source_event_id === "e-r2").status).toBe("pending"); // the newer round SURVIVES
   });
 
-  it("[F9] re-queuing a FAILED older round (fresh created_at) does NOT supersede the newer pending round", async () => {
+  it("[F9/H2] re-queuing a FAILED older round is BLOCKED while a newer same-deal round is pending", async () => {
     // The subtle case: round 1 was 'processing' (so round 2's enqueue could not supersede it), then FAILED, while
-    // round 2 stayed pending. A rep retries round 1 -> ON CONFLICT refreshes it to pending with created_at = NOW(),
-    // which is NEWER than round 2's. Superseding by created_at would then wrongly retire round 2; superseding by
-    // the immutable insertion-order id must keep round 2 pending.
+    // round 2 stayed pending. A rep re-post of the OLDER round 1 must NOT flip it back to pending (it would drain
+    // first by id order and create round 1's obsolete number, then round 2 gets Y2-refused). The enqueue's ON
+    // CONFLICT skips the re-queue because a newer (higher-id) active same-deal round exists — round 1 stays 'failed'
+    // and round 2 remains the one that drains.
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq1", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
     await pg.query(`UPDATE bidboard_create_outbox SET status='processing' WHERE source_event_id='e-fq1'`); // claimed before round 2
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq2", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
-    // round 1 (processing) was NOT superseded by round 2; now its create fails.
-    await pg.query(`UPDATE bidboard_create_outbox SET status='failed' WHERE source_event_id='e-fq1'`);
-    // Age round 2 so round 1's refreshed created_at is unambiguously NEWER (proves id, not created_at, is used).
-    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour' WHERE source_event_id='e-fq2'`);
-    // Rep retries round 1: failed -> pending, created_at refreshed to NOW().
+    await pg.query(`UPDATE bidboard_create_outbox SET status='failed' WHERE source_event_id='e-fq1'`); // round 1's create fails
+    // Rep re-posts round 1 (older sourceEventId):
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq1", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
-    const rows = (await pg.query(`SELECT source_event_id, status, created_at FROM bidboard_create_outbox`)).rows as any[];
-    const r1 = rows.find((r) => r.source_event_id === "e-fq1");
-    const r2 = rows.find((r) => r.source_event_id === "e-fq2");
-    expect(r1.status).toBe("pending"); // round 1 re-queued
-    expect(new Date(r1.created_at).getTime()).toBeGreaterThan(new Date(r2.created_at).getTime()); // round 1 IS newer by ts
-    expect(r2.status).toBe("pending"); // ...yet the genuinely-newer round 2 (higher id) is NOT superseded
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-fq1").status).toBe("failed"); // re-queue BLOCKED — stays failed
+    expect(rows.find((r) => r.source_event_id === "e-fq2").status).toBe("pending"); // the newer round remains the one that drains
   });
 
   it("[F4] leaves an in-flight 'processing' same-deal command alone (can't cancel a live create)", async () => {
@@ -696,6 +698,30 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(getMappingByBidIdMock).toHaveBeenCalledWith("999"); // looked up by the CREATED project id
     expect((await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows[0].status).toBe("done");
     expect(lastCallback().bidboardProjectId).toBe("999"); // callback reports the project WE created, not the dup 555
+  });
+
+  it("[H4] recovery where the created project is now mapped to ANOTHER deal -> 'needs_manual', no wrong 'created' callback", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-taken", sourceDealId: "d-mine" }));
+    // The project 999 was manually re-linked / adopted by a DIFFERENT deal while this row was in recovery.
+    getMappingByBidIdMock.mockResolvedValue({ bidboardProjectId: "999", sourceSystem: "trock_crm", sourceDealId: "d-other" } as any);
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-mine", bidboardProjectId: "999" } as any);
+    await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => { throw err; })) as any });
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows[0].status).toBe("needs_manual");
+    expect(createSyncMappingMock).not.toHaveBeenCalled(); // did NOT overwrite the other deal's mapping
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // NO 'created' callback misattributing another deal's project
+  });
+
+  it("[H3] claimNext does NOT jump to a later same-deal row while a FRESH lower-id 'processing' row is in flight (but a DIFFERENT deal is free)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p1", sourceDealId: "d-block" }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p2", sourceDealId: "d-block" }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-other", sourceDealId: "d-free" }));
+    // round 1 (lowest id) is mid-create (fresh processing); its maybe-created project is invisible to the guards.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW() WHERE source_event_id='e-p1'`);
+    // claimNext skips the same-deal round 2 (blocked behind the in-flight round 1) and takes the DIFFERENT deal instead.
+    expect((await claimNextBidboardCreateCommand())?.source_event_id).toBe("e-other");
+    // once round 1 goes stale (crashed), it (the lower id) is reclaimed first — NOT round 2.
+    await pg.query(`UPDATE bidboard_create_outbox SET last_attempt_at=NOW() - interval '11 minutes' WHERE source_event_id='e-p1'`);
+    expect((await claimNextBidboardCreateCommand())?.source_event_id).toBe("e-p1");
   });
 
   it("[F14/P2-C] an UNCONFIRMED create is parked 'needs_manual' (NO auto re-drain -> no duplicate), NO 'failed' callback", async () => {

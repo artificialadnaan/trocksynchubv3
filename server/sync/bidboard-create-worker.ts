@@ -109,7 +109,8 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       -- callbacks (payload.status='created'): a 'sent' FAILED callback from an earlier attempt must NOT block
       -- recovery of a later successful create whose 'created' callback was lost. A live created callback stays put
       -- (preserves duplicate-delivery idempotency).
-      WHERE bidboard_create_outbox.status IN ('failed', 'pending')
+      WHERE (
+           bidboard_create_outbox.status IN ('failed', 'pending')
          OR (
            bidboard_create_outbox.status = 'done'
            AND NOT EXISTS (
@@ -121,6 +122,22 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
                 AND cb.payload->>'status' = 'created'
            )
          )
+      )
+      -- finding (don't revive a stale round ahead of a newer vote): do NOT re-queue THIS (older, lower-id) row when
+      -- a NEWER same-deal round already exists in a live/completed state. A rep retry of an older sourceEventId would
+      -- otherwise flip the older 'failed'/'pending' row back to pending; the supersede below only retires rows with
+      -- id < the row it just wrote, so the newer higher-id round stays pending, and the id-ordered drain would run
+      -- the OLDER (obsolete, possibly revised-number) create first and then refuse the actual latest vote. Skip the
+      -- re-queue if a higher-id same-deal row is active (pending/processing/reclaiming/needs_manual) or already done
+      -- — only a 'superseded'/'failed' newer row (itself stale) does not block. The rep's retry then no-ops, and the
+      -- newer round remains the one that drains.
+      AND NOT EXISTS (
+        SELECT 1 FROM bidboard_create_outbox nb
+         WHERE nb.source_system = EXCLUDED.source_system
+           AND nb.source_deal_id = EXCLUDED.source_deal_id
+           AND nb.id > bidboard_create_outbox.id
+           AND nb.status NOT IN ('superseded', 'failed')
+      )
     RETURNING id
     )
     -- Supersede any OLDER still-PENDING create command for the SAME source deal. The CRM opens a fresh round (a new
@@ -174,6 +191,21 @@ export async function claimNextBidboardCreateCommand(): Promise<any | null> {
             -- id), never a Playwright re-create.
             OR (status = 'reclaiming' AND next_attempt_at <= NOW())
             OR (status = 'processing' AND last_attempt_at < NOW() - interval '${sql.raw(STALE_PROCESSING_INTERVAL)}')
+          )
+          -- finding (don't drain past an in-flight/just-crashed same-deal create): do NOT claim a candidate when a
+          -- LOWER-id same-deal row is still 'processing' and NOT yet stale-reclaimable. Such a row may have already
+          -- clicked create (a maybe-created project invisible to the ownership guard until its mapping lands), so a
+          -- later same-deal/number command jumping ahead could adopt it for the wrong deal or duplicate it. Wait
+          -- behind it until it completes or its 10-min stale window lets it be reclaimed + resolved. (In normal
+          -- single-tick draining the in-flight row is already terminal before the next claim, so this only bites the
+          -- cross-tick crash case.)
+          AND NOT EXISTS (
+            SELECT 1 FROM bidboard_create_outbox p
+             WHERE p.source_system = bidboard_create_outbox.source_system
+               AND p.source_deal_id = bidboard_create_outbox.source_deal_id
+               AND p.id < bidboard_create_outbox.id
+               AND p.status = 'processing'
+               AND p.last_attempt_at >= NOW() - interval '${sql.raw(STALE_PROCESSING_INTERVAL)}'
           )
         -- finding: drain by the immutable serial id (arrival order), NOT created_at. created_at is REFRESHED to
         -- NOW() when a still-pending/failed command is re-queued (Y4), which would reorder the FIFO drain and let a
@@ -653,7 +685,7 @@ async function reconcileCreatedMappingMissing(
   error: CreatedMappingMissingError,
   input: CreateFromRfpInput,
   callbackAt: string,
-): Promise<"reconciled" | "callback_pending"> {
+): Promise<"reconciled" | "callback_pending" | "owned_by_other"> {
   // finding: key idempotency + success on the PROJECT we actually created (error.bidboardProjectId), NOT a
   // sourceDealId lookup. This repo tolerates legacy DUPLICATE sync_mappings rows for one source deal, so a
   // by-sourceDealId read can return a DIFFERENT duplicate (or one lacking the created project) — we could then
@@ -661,15 +693,26 @@ async function reconcileCreatedMappingMissing(
   // unique index is on bidboardProjectId, so the by-project read is the authoritative "is it persisted?" check,
   // and the callback always reports error.bidboardProjectId (the project this command created).
   const byProject = await storage.getSyncMappingByBidboardProjectId(error.bidboardProjectId);
+  let ownerMapping = byProject;
   if (!byProject?.bidboardProjectId) {
     try {
-      await storage.createSyncMapping(error.mappingPayload);
+      await storage.createSyncMapping(error.mappingPayload); // writes the mapping to THIS command's deal
     } catch (writeErr: any) {
       // A concurrent insert (unique violation on bidboardProjectId) means the mapping for THIS project is now
       // persisted — confirm by project id before surfacing the error so we don't loop on a write that landed.
       const after = await storage.getSyncMappingByBidboardProjectId(error.bidboardProjectId);
       if (!after?.bidboardProjectId) throw writeErr;
+      ownerMapping = after; // whoever won the race — verify it's still THIS deal below
     }
+  }
+  // finding: the mapping for this project must belong to THIS command's deal. If the project was manually re-linked
+  // or adopted by a DIFFERENT deal while this row was in recovery, a pre-existing / race-won mapping records another
+  // owner — reporting 'created' for input.sourceDealId would misattribute another deal's project. Refuse to manual
+  // resolution rather than send a wrong 'created'. (After our OWN successful createSyncMapping, ownerMapping stays
+  // the pre-write byProject=undefined, so this check is skipped — the row we just wrote is ours by construction.)
+  if (ownerMapping?.bidboardProjectId && (ownerMapping.sourceSystem !== input.sourceSystem || ownerMapping.sourceDealId !== input.sourceDealId)) {
+    log(`[bidboard-create] recovered project ${error.bidboardProjectId} is now mapped to ${ownerMapping.sourceSystem} deal ${ownerMapping.sourceDealId}, not ${input.sourceSystem} ${input.sourceDealId}; needs manual resolution`, "sync");
+    return "owned_by_other";
   }
   // The mapping is now persisted (the guards protect the project). Send the 'created' callback. If ONLY the callback
   // enqueue fails (e.g. TROCK_CRM_BASE_URL / procore company id missing), do NOT surface it as a mapping-reconcile
@@ -698,7 +741,7 @@ async function runMappingReconcile(
   input: CreateFromRfpInput,
   callbackAt: string,
 ): Promise<"reconciled" | "blocked"> {
-  let outcome: "reconciled" | "callback_pending" | null = null;
+  let outcome: "reconciled" | "callback_pending" | "owned_by_other" | null = null;
   for (let attempt = 1; attempt <= 3 && outcome === null; attempt++) {
     try {
       outcome = await reconcileCreatedMappingMissing(error, input, callbackAt);
@@ -711,6 +754,13 @@ async function runMappingReconcile(
       log(`[bidboard-create] Command ${row.id} mapping reconciled but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
     }
     return "reconciled";
+  }
+  if (outcome === "owned_by_other") {
+    // The created project is now mapped to ANOTHER deal (manual re-link / adopt during recovery). Retrying can't fix
+    // ownership and we must NOT send a 'created' for this deal. Park 'needs_manual' immediately (no callback) — and
+    // stop the drain (return "blocked") so a human resolves the misattribution.
+    try { await markNeedsManual(row.id, `recovered project ${error.bidboardProjectId} is mapped to another deal; needs manual resolution`); } catch { /* best-effort */ }
+    return "blocked";
   }
   if (outcome === "callback_pending") {
     // The mapping IS persisted (the ownership guard now protects the project, so no duplicate risk) — only the

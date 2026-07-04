@@ -18,15 +18,19 @@ export const PROJECT_TYPES: Record<string, string> = {
   "9": "Residential",
 };
 
-/** Extract the type digit from a project number (e.g. DFW-2-06426-ah → "2"). */
+// Match the office prefix generically, not just DFW: the CRM also generates ATL-… numbers (e.g. ATL-5-06326-af),
+// and hard-coding DFW would make an ATL-4-… service RFP parse as null and mis-route as non-service.
+const PROJECT_NUMBER_PREFIX_RE = /^[A-Za-z]{2,4}-(\d+)-/;
+
+/** Extract the type digit from a project number (e.g. DFW-2-06426-ah → "2", ATL-4-… → "4"). */
 export function parseProjectTypeFromNumber(projectNumber: string): string | null {
-  const match = projectNumber?.match(/^DFW-(\d+)-/i);
+  const match = projectNumber?.match(PROJECT_NUMBER_PREFIX_RE);
   return match ? match[1] : null;
 }
 
-/** Replace the type digit in a project number with a new one. */
+/** Replace the type digit in a project number with a new one (any office prefix). */
 export function replaceProjectTypeInNumber(projectNumber: string, newTypeDigit: string): string {
-  return projectNumber.replace(/^(DFW-)\d+(-)/i, `$1${newTypeDigit}$2`);
+  return projectNumber.replace(/^([A-Za-z]{2,4}-)\d+(-)/, `$1${newTypeDigit}$2`);
 }
 
 /**
