@@ -109,9 +109,36 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       -- callbacks (payload.status='created'): a 'sent' FAILED callback from an earlier attempt must NOT block
       -- recovery of a later successful create whose 'created' callback was lost. A live created callback stays put
       -- (preserves duplicate-delivery idempotency).
+      -- The newer-round guard is applied PER-BRANCH (not once over the whole WHERE) because the two re-queue kinds
+      -- need DIFFERENT "which newer rounds block me" rules:
       WHERE (
+        (
            bidboard_create_outbox.status IN ('failed', 'pending')
-         OR (
+           -- RE-QUEUE-TO-PENDING branch: this flips the row back to 'pending' and it will DRAIN (create a project).
+           -- finding (don't revive a stale round ahead of a newer vote): do NOT re-queue THIS (older, lower-id) row
+           -- when a NEWER same-deal round exists. A rep retry of an older sourceEventId would otherwise flip the
+           -- older 'failed'/'pending' row back to pending; the supersede below only retires rows with id < the row it
+           -- just wrote, so the newer higher-id round stays put, and the id-ordered drain would run the OLDER
+           -- (obsolete, possibly revised-number) create first and then refuse the actual latest vote.
+           -- finding (block older retries behind newer FAILED rounds too): a newer round that FAILED is NOT stale for
+           -- the DRAIN concern — it is the latest reviewed vote awaiting ITS OWN retry (e.g. a transient Playwright
+           -- error under a revised number). If BOTH rounds are 'failed' (round 1 was 'processing' when round 2
+           -- enqueued, so round 2's supersede couldn't retire it, then both failed), excluding 'failed' here let an
+           -- older round's late retry re-queue and drain ahead of round 2: it would create round 1's obsolete
+           -- project, after which round 2's retry hits the same-deal revised-number guard and is refused — so the
+           -- latest vote never creates. So here ONLY a 'superseded' newer row (definitively retired by an even-newer
+           -- round) does NOT block; a newer row in ANY other status blocks. A purely-'superseded' newer chain always
+           -- terminates in a non-superseded row (the one that did the last supersede), so the top of the chain still
+           -- blocks; the NEWEST round's own retry is never blocked (nothing has a higher id than it).
+           AND NOT EXISTS (
+             SELECT 1 FROM bidboard_create_outbox nb
+              WHERE nb.source_system = EXCLUDED.source_system
+                AND nb.source_deal_id = EXCLUDED.source_deal_id
+                AND nb.id > bidboard_create_outbox.id
+                AND nb.status <> 'superseded'
+           )
+        )
+        OR (
            bidboard_create_outbox.status = 'done'
            AND NOT EXISTS (
              SELECT 1 FROM bidboard_callback_outbox cb
@@ -121,22 +148,21 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
                 AND cb.status IN ('pending', 'sent')
                 AND cb.payload->>'status' = 'created'
            )
-         )
-      )
-      -- finding (don't revive a stale round ahead of a newer vote): do NOT re-queue THIS (older, lower-id) row when
-      -- a NEWER same-deal round already exists in a live/completed state. A rep retry of an older sourceEventId would
-      -- otherwise flip the older 'failed'/'pending' row back to pending; the supersede below only retires rows with
-      -- id < the row it just wrote, so the newer higher-id round stays pending, and the id-ordered drain would run
-      -- the OLDER (obsolete, possibly revised-number) create first and then refuse the actual latest vote. Skip the
-      -- re-queue if a higher-id same-deal row is active (pending/processing/reclaiming/needs_manual) or already done
-      -- — only a 'superseded'/'failed' newer row (itself stale) does not block. The rep's retry then no-ops, and the
-      -- newer round remains the one that drains.
-      AND NOT EXISTS (
-        SELECT 1 FROM bidboard_create_outbox nb
-         WHERE nb.source_system = EXCLUDED.source_system
-           AND nb.source_deal_id = EXCLUDED.source_deal_id
-           AND nb.id > bidboard_create_outbox.id
-           AND nb.status NOT IN ('superseded', 'failed')
+           -- CALLBACK-RECOVERY branch: this re-runs perform's mapping-first ADOPT (the project already exists) to
+           -- re-send a lost 'created' callback — it does NOT create a new project. So it must NOT inherit the
+           -- failed-blocks-too rule above: a newer FAILED round created/linked NOTHING, so this 'done' row's project
+           -- is still the deal's actual mapping and its lost 'created' callback must stay recoverable. Defer only to a
+           -- newer round that is itself live/completed (pending/processing/reclaiming/needs_manual/done) — a newer
+           -- 'superseded' OR 'failed' round is stale for the LINK and does not block re-sending this project's
+           -- callback. (This preserves the pre-finding behavior of the callback-recovery re-queue.)
+           AND NOT EXISTS (
+             SELECT 1 FROM bidboard_create_outbox nb
+              WHERE nb.source_system = EXCLUDED.source_system
+                AND nb.source_deal_id = EXCLUDED.source_deal_id
+                AND nb.id > bidboard_create_outbox.id
+                AND nb.status NOT IN ('superseded', 'failed')
+           )
+        )
       )
     RETURNING id
     )
@@ -486,7 +512,14 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   // since left Opportunity, can never flip an already-created project into a 'failed' CRM result (the CRM harmlessly
   // ignores a 'created' for a cancelled deal via its status-not-null guard, but must never be told the create
   // failed when the project exists). A revised projectNumber is the Y2 conflict and is refused, not adopted.
-  const existingMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+  // finding (robust against duplicate source-deal mapping rows): use the BID-BOARD-LINKED lookup, not the plain
+  // by-sourceDealId read. This repo tolerates legacy DUPLICATE sync_mappings rows for one source deal; the plain read
+  // returns a single UNORDERED row, so a partial/portfolio row with a NULL bidboard_project_id could shadow a sibling
+  // row that DOES link this deal to a BidBoard project. Missing that link, a vote carrying a revised number would
+  // fall through and create a SECOND project for the same deal. getBidboardMappingBySourceDealId filters to rows that
+  // carry a bid-board id (mirroring getBidboardMappingByProcoreProjectNumber), so this adopt/refuse guard sees the
+  // real linked project.
+  const existingMapping = await storage.getBidboardMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
   if (existingMapping?.bidboardProjectId) {
     // finding Y2 + ambiguous-adopt: only re-send the 'created' (adopt) callback when the requested number MATCHES
     // the mapping's recorded number. A DIFFERENT number is the Y2 revised-number conflict; a MISSING recorded
@@ -636,7 +669,24 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   // the new project stays unmapped and invisible to the guards. Require a mapping FOR result.projectId owned by this
   // command; if it's missing (or owned by another deal), throw so the command stays recoverable (the reconcile then
   // persists it / routes an owner-mismatch to manual) rather than committing a 'created' the guards can't protect.
-  const persistedMapping = await storage.getSyncMappingByBidboardProjectId(result.projectId);
+  //
+  // finding (treat a post-create verify-lookup error as created-but-unmapped, NOT a create failure): the project WAS
+  // created (result.projectId is set). If this verification query itself THROWS (transient DB blip), letting it
+  // propagate would fall into the drain's GENERIC catch, whose by-sourceDealId probe could then find no mapping (if
+  // the internal createSyncMapping was the very step that failed) and emit a terminal 'failed' callback for a project
+  // that EXISTS. Route the throw into the created-but-unmapped RECOVERY path instead (CreatedMappingMissingError):
+  // reconcile keys on result.projectId, is idempotent (adopts the mapping if it persisted, writes it if not, refuses
+  // an owner mismatch), and never re-runs the Playwright create — so no false 'failed' and no duplicate.
+  let persistedMapping: Awaited<ReturnType<typeof storage.getSyncMappingByBidboardProjectId>>;
+  try {
+    persistedMapping = await storage.getSyncMappingByBidboardProjectId(result.projectId);
+  } catch (lookupErr: any) {
+    throw new CreatedMappingMissingError(
+      `BidBoard project ${result.projectId} created for deal ${input.sourceDealId} but its mapping could not be verified (${lookupErr?.message || lookupErr}); leaving the command recoverable rather than risking a false 'failed'`,
+      result.projectId,
+      buildBidboardMappingPayload(input, result.projectId, result.projectName, result.proposalId),
+    );
+  }
   const persistedForThisDeal = persistedMapping?.bidboardProjectId
     && persistedMapping.sourceSystem === input.sourceSystem
     && persistedMapping.sourceDealId === input.sourceDealId;
@@ -946,7 +996,10 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         let createdMapping: any = null;
         let mappingLookupFailed = false;
         try {
-          createdMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+          // finding: use the BID-BOARD-LINKED lookup (not the plain by-sourceDealId read) for the same duplicate-row
+          // reason as the adopt guard — a partial null-bidboard duplicate row must not shadow the real linked project
+          // and make a created project look un-created (which would emit a false 'failed' for a project that exists).
+          createdMapping = await storage.getBidboardMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
         } catch (lookupErr: any) {
           // finding: the mapping LOOKUP itself errored (transient DB), so we CANNOT prove no project was created.
           // Treating that as "no mapping -> genuine create failure" would risk a false 'failed' callback for a

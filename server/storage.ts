@@ -215,6 +215,8 @@ export interface IStorage {
   /** Find mapping by Procore project number (e.g. DFW-1-06426-ah) */
   getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
   getBidboardMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
+  /** Find the BID-BOARD-linked mapping for a source deal, skipping partial/portfolio duplicate rows */
+  getBidboardMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined>;
   /** Create a new sync mapping linking entities */
   createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
   /** Update an existing sync mapping */
@@ -488,6 +490,28 @@ export class DatabaseStorage implements IStorage {
         sql`length(trim(${syncMappings.bidboardProjectId})) > 0`,
       )
     );
+    return mapping;
+  }
+
+  // The bid-board-linked row for a source deal, when duplicate mapping rows share the deal (a partial/portfolio-only
+  // row with a NULL bidboard_project_id may otherwise be returned first by getSyncMappingBySourceDealId, shadowing
+  // the row that actually links this deal to a BidBoard project). Filters to rows that carry a bid-board id — mirrors
+  // getBidboardMappingByProcoreProjectNumber but keyed by source deal — so the create-from-rfp adopt/recovery guards
+  // can't miss an existing linked project and create a duplicate. Ordered by lastSyncAt desc for a deterministic pick
+  // if several linked rows exist — NULLS LAST (lastSyncAt is nullable) so a legacy/foreign-path row with no sync
+  // timestamp never outranks the current worker-written row (default DESC is NULLS FIRST), with id desc as a tiebreak
+  // (the most recently inserted linked row wins an equal-timestamp tie).
+  async getBidboardMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined> {
+    const [mapping] = await db.select().from(syncMappings).where(
+      and(
+        eq(syncMappings.sourceSystem, sourceSystem),
+        eq(syncMappings.sourceDealId, sourceDealId),
+        isNotNull(syncMappings.bidboardProjectId),
+        // Exclude blank/whitespace-only bid-board ids — IS NOT NULL alone matches '' rows, which the guards'
+        // `!mapping.bidboardProjectId` check would then reject as no link.
+        sql`length(trim(${syncMappings.bidboardProjectId})) > 0`,
+      )
+    ).orderBy(sql`${syncMappings.lastSyncAt} DESC NULLS LAST`, desc(syncMappings.id));
     return mapping;
   }
 
