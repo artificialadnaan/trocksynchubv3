@@ -14,12 +14,22 @@ import type { CreateFromRfpInput } from "../routes/rfp-requests";
 let createWorkerTimer: ReturnType<typeof setInterval> | null = null;
 let createWorkerRunning = false;
 
-// A create SUCCEEDED (Procore project exists) but its source-deal sync mapping wasn't persisted. This is NOT a
-// create failure: emitting a 'failed' callback would tell the CRM the create failed even though the project exists,
-// and marking the command 'failed' would strand it (never auto-reclaimed). The drain loop treats this distinctly —
-// leave the row 'processing' for the stale-reclaim to re-run (which adopts the existing project + persists the
-// mapping this time), and send NO callback.
-export class CreatedMappingMissingError extends Error {}
+// A create SUCCEEDED (Procore project exists) but its source-deal sync mapping wasn't persisted (the internal
+// createSyncMapping was caught + only logged). This is NOT a create failure: emitting a 'failed' callback would
+// tell the CRM the create failed even though the project exists. Carries the created project id + the exact mapping
+// row to write so the drain can reconcile the mapping DIRECTLY (storage.createSyncMapping) — WITHOUT re-running the
+// Playwright create, which could create a SECOND project for the same accepted vote if its exact-number lookup
+// transiently errors (createBidBoardProjectFromDeal proceeds to create on lookup "error").
+export class CreatedMappingMissingError extends Error {
+  constructor(
+    message: string,
+    readonly bidboardProjectId: string,
+    readonly mappingPayload: Parameters<typeof storage.createSyncMapping>[0],
+  ) {
+    super(message);
+    this.name = "CreatedMappingMissingError";
+  }
+}
 
 async function getDb() {
   return (await import("../db")).db;
@@ -79,6 +89,25 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
                 AND cb.payload->>'status' = 'created'
            )
          )
+  `);
+
+  // finding: supersede any OLDER still-PENDING create command for the SAME source deal. The CRM opens a fresh
+  // round (a new source_event_id) when a deal is re-reviewed; if an earlier round's command is still pending —
+  // the worker's 15s tick hasn't claimed it, or the worker was down — the FIFO drain (ORDER BY created_at) would
+  // run that earlier command FIRST and create its (possibly revised-number) project, after which THIS newer
+  // command hits the same-deal revised-number guard and is REFUSED, so the latest approved vote never creates its
+  // intended project. Mark the earlier PENDING same-deal rows 'superseded' (a terminal, non-claimable status) so
+  // only the latest round creates. A row already 'processing' owns an in-flight Playwright create and is left
+  // alone — that residual (an earlier round mid-create when a newer arrives) can't be safely cancelled here and
+  // self-corrects via the revised-number guard + the CRM's re-trigger of the latest round.
+  await db.execute(sql`
+    UPDATE bidboard_create_outbox
+       SET status = 'superseded', processed_at = NOW(),
+           last_error = 'superseded by a newer create command for the same source deal'
+     WHERE source_system = ${input.sourceSystem}
+       AND source_deal_id = ${input.sourceDealId}
+       AND source_event_id <> ${input.sourceEventId}
+       AND status = 'pending'
   `);
 }
 
@@ -269,6 +298,20 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   const { createBidBoardProjectFromDeal } = await import("../playwright/bidboard");
   const projectNumber = input.deal.projectNumber;
 
+  // finding: create-from-rfp is a NON-service voting path — it hard-codes the non-service "Estimate in Progress"
+  // stage below. A service RFP is created by its OWN service flow ("Service – Estimating" tab + Colby), never
+  // through the CRM vote outbox. The request schema accepts any projectType string, so defensively REFUSE a
+  // service RFP (project type code "4", per the CRM's resolveProjectTypeCode) here rather than mis-creating it in
+  // the wrong stage; a 'failed' callback tells the CRM it was not created.
+  if (input.deal.projectType?.trim() === "4") {
+    await enqueueFailedCallback(
+      input,
+      `Deal ${input.sourceDealId} is a service RFP (project type 4); create-from-rfp is a non-service path and will not create it in the non-service "Estimate in Progress" stage`,
+      callbackAt,
+    );
+    return "failed";
+  }
+
   // [Idempotent adopt / reclaim-after-create] If a BidBoard project ALREADY exists for THIS source deal — a prior
   // attempt created it + wrote the mapping, but a LATER step failed (the 'created' callback persist, or
   // markCreateCommandDone) and the command was reclaimed — do NOT re-check eligibility or re-create. Re-send the
@@ -278,10 +321,16 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   // failed when the project exists). A revised projectNumber is the Y2 conflict and is refused, not adopted.
   const existingMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
   if (existingMapping?.bidboardProjectId) {
-    if (projectNumber && existingMapping.procoreProjectNumber && existingMapping.procoreProjectNumber !== projectNumber) {
+    // finding Y2 + ambiguous-adopt: only re-send the 'created' (adopt) callback when the requested number MATCHES
+    // the mapping's recorded number. A DIFFERENT number is the Y2 revised-number conflict; a MISSING recorded
+    // number (a legacy/partial or cross-path mapping — note create-from-rfp always carries a number, so a null here
+    // means the row was written by another path) is AMBIGUOUS: we can't confirm the existing project is the one the
+    // CRM asked to create, so we must not silently adopt it under the requested number. Both are refused for manual
+    // resolution rather than adopted. (No requested number → nothing to reconcile → adopt as before.)
+    if (projectNumber && existingMapping.procoreProjectNumber !== projectNumber) {
       await enqueueFailedCallback(
         input,
-        `Deal ${input.sourceDealId} already has BidBoard project ${existingMapping.bidboardProjectId} under number ${existingMapping.procoreProjectNumber}; refusing to create/adopt under revised number ${projectNumber}`,
+        `Deal ${input.sourceDealId} already has BidBoard project ${existingMapping.bidboardProjectId} under number ${existingMapping.procoreProjectNumber ?? "(unknown)"}; refusing to adopt it under requested number ${projectNumber} without a verified match`,
         callbackAt,
       );
       return "failed";
@@ -390,15 +439,63 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   // rather than committing a 'created' the guards can't protect.
   const persistedMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
   if (!persistedMapping?.bidboardProjectId) {
-    // Distinct RECOVERABLE error (not a create failure): the drain loop leaves the row 'processing' for reclaim +
-    // sends no callback, rather than emitting a false 'failed' and stranding a project that actually exists.
+    // Distinct RECOVERABLE error (not a create failure). Carry the created project id + the exact mapping row so the
+    // drain can persist the mapping DIRECTLY (storage.createSyncMapping) instead of re-running this Playwright
+    // create — a re-run could create a SECOND project if the exact-number lookup transiently errors. Mirror the
+    // shape createBidBoardProjectFromDeal writes internally (the write that was caught + only logged).
+    const mappingPayload = {
+      sourceSystem: input.sourceSystem,
+      sourceDealId: input.sourceDealId,
+      hubspotDealId: input.sourceSystem === "hubspot" ? input.sourceDealId : null,
+      hubspotDealName: d.name,
+      bidboardProjectId: result.projectId,
+      bidboardProjectName: result.projectName ?? d.name,
+      procoreProjectNumber: projectNumber || null,
+      projectPhase: "bidboard",
+      lastSyncAt: new Date(),
+      lastSyncStatus: input.sourceSystem === "hubspot" ? "created_from_hubspot" : "created_from_trock_crm",
+      lastSyncDirection: "hubspot_to_procore",
+      metadata: result.proposalId ? { proposalId: result.proposalId } : undefined,
+    };
     throw new CreatedMappingMissingError(
       `BidBoard project ${result.projectId} created for deal ${input.sourceDealId} but its sync mapping was not persisted; leaving the command recoverable rather than sending an unguarded 'created'`,
+      result.projectId,
+      mappingPayload,
     );
   }
 
   await enqueueCreatedCallback(input, result.projectId, callbackAt);
   return "created";
+}
+
+// Recovery for CreatedMappingMissingError: the Procore/BidBoard project was created but its sync mapping wasn't
+// persisted. Reconcile the mapping DIRECTLY — never re-run performCreateFromRfpVote, which re-enters the Playwright
+// create path and could create a SECOND project for the same accepted vote (createBidBoardProjectFromDeal proceeds
+// to create when its exact-number lookup errors), or emit a false 'failed' if the deal left Opportunity mid-
+// recovery. Idempotent: if the mapping now exists (a prior attempt or concurrent path wrote it) the write is
+// skipped. Returns true once the mapping is persisted AND the 'created' callback is enqueued; throws (for the
+// caller to retry) only when the write can't land.
+async function reconcileCreatedMappingMissing(
+  error: CreatedMappingMissingError,
+  input: CreateFromRfpInput,
+  callbackAt: string,
+): Promise<boolean> {
+  const existing = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+  let bidboardProjectId = existing?.bidboardProjectId || error.bidboardProjectId;
+  if (!existing?.bidboardProjectId) {
+    try {
+      await storage.createSyncMapping(error.mappingPayload);
+    } catch (writeErr: any) {
+      // A concurrent insert (unique violation on the source-deal / bidboard-project index) means the mapping is now
+      // persisted — re-read before surfacing the error so we don't loop on a write that effectively already landed.
+      const after = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+      if (!after?.bidboardProjectId) throw writeErr;
+      bidboardProjectId = after.bidboardProjectId;
+    }
+  }
+  if (!bidboardProjectId) return false;
+  await enqueueCreatedCallback(input, bidboardProjectId, callbackAt);
+  return true;
 }
 
 const CREATE_WORKER_LOCK_KEY = "bidboard_create_from_rfp_worker";
@@ -446,39 +543,38 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       } catch (error: any) {
         const message = error?.message || String(error);
         // finding: a create that SUCCEEDED but whose sync mapping wasn't persisted is RECOVERABLE, not a failure —
-        // the project exists, so never emit a 'failed' callback (which would report a false failure). Retry
-        // IMMEDIATELY (before draining later commands), NOT via the 10-min stale reclaim: the worker is serial, so
-        // until the mapping is written a NEXT same-projectNumber command would see no numberOwner and could adopt
-        // this unlinked project for the WRONG deal. perform is idempotent — the retry's mapping-first adopts the
-        // existing Procore project + persists the mapping this time (then sends the 'created' callback + markDone).
+        // the project exists, so never emit a 'failed' callback (which would report a false failure). Reconcile the
+        // mapping DIRECTLY (storage.createSyncMapping via the payload carried on the error), IMMEDIATELY — before
+        // draining later commands, since the worker is serial and until the mapping is written a NEXT same-
+        // projectNumber command would see no numberOwner and could adopt this unlinked project for the WRONG deal.
+        // Direct reconcile (not a perform re-run) can never create a SECOND project [F6] nor return a false 'failed'
+        // [F5]; a transient DB blip is covered by a few bounded retries.
         if (error instanceof CreatedMappingMissingError) {
-          log(`[bidboard-create] Command ${row.id} created a project but the mapping wasn't persisted (${message}); retrying immediately to persist it`, "sync");
-          let settled = false;
-          for (let attempt = 1; attempt <= 3 && !settled; attempt++) {
+          log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} but the mapping wasn't persisted (${message}); reconciling the mapping directly`, "sync");
+          let reconciled = false;
+          for (let attempt = 1; attempt <= 3 && !reconciled; attempt++) {
             try {
-              const retryOutcome = await perform(input, callbackAt);
-              settled = true;
-              if (retryOutcome === "failed") {
-                await markCreateCommandFailedResilient(row.id, "create refused on mapping-recovery retry");
-              } else {
-                try { await markCreateCommandDone(row.id); } catch (bookErr: any) {
-                  log(`[bidboard-create] Command ${row.id} mapping recovered but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
-                }
-              }
-            } catch (retryErr: any) {
-              if (retryErr instanceof CreatedMappingMissingError) continue; // still unmapped — try again
-              // A DIFFERENT error on retry — leave for reclaim (which re-runs perform later).
-              log(`[bidboard-create] Command ${row.id} mapping-recovery retry errored (${retryErr?.message || retryErr}); leaving 'processing' for reclaim`, "sync");
-              try { await resetCreateCommandForReclaim(row.id, `mapping-recovery retry errored: ${retryErr?.message || retryErr}`); } catch { /* best-effort */ }
-              settled = true;
+              reconciled = await reconcileCreatedMappingMissing(error, input, callbackAt);
+            } catch (recErr: any) {
+              log(`[bidboard-create] Command ${row.id} mapping reconcile attempt ${attempt} failed (${recErr?.message || recErr})`, "sync");
             }
           }
-          if (!settled) {
-            log(`[bidboard-create] Command ${row.id} mapping still not persisted after immediate retries; leaving 'processing' for reclaim`, "sync");
-            try { await resetCreateCommandForReclaim(row.id, `created but mapping missing after retries: ${message}`); } catch { /* best-effort */ }
+          if (reconciled) {
+            try { await markCreateCommandDone(row.id); } catch (bookErr: any) {
+              log(`[bidboard-create] Command ${row.id} mapping reconciled but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
+            }
+            processed += 1;
+            continue;
           }
+          // F1: the created project is STILL unmapped after the immediate retries. Do NOT drain later commands — a
+          // same-projectNumber command would find no numberOwner and could adopt this unlinked project for the
+          // WRONG deal. Reset for the stale-reclaim to finish it and STOP this tick (break, not continue) so no
+          // later command runs while the project is unmapped. (The 10-min reclaim re-runs perform, whose mapping-
+          // first + exact-number adopt re-links + persists the mapping once the DB blip clears.)
+          log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} still unmapped after immediate retries; STOPPING the drain so no later command adopts it, leaving 'processing' for reclaim`, "sync");
+          try { await resetCreateCommandForReclaim(row.id, `created but mapping missing after retries: ${message}`); } catch { /* best-effort */ }
           processed += 1;
-          continue;
+          break;
         }
         // finding: if the project was ALREADY created (a mapping exists for this source deal) but a LATER step
         // threw — the 'created' callback persist, or a transient DB error — this is NOT a create failure. Emitting a
