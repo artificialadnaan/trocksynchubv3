@@ -239,6 +239,13 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(lastCallback().status).toBe("created");
   });
 
+  it("[G4] forwards the CANONICAL project type (from the number digit) to the create, not the stale projectType", async () => {
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "DFW-2-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
+    expect(createBidBoardMock).toHaveBeenCalled();
+    const arg = (createBidBoardMock.mock.calls.at(-1) as any)[0];
+    expect(arg.normalizedDealData.project_types).toBe("2"); // canonical digit from DFW-2-…, NOT the stale "9"
+  });
+
   it("[finding] mapping-first adopt beats an ineligible recheck: a reclaim-after-create never reports a false failure", async () => {
     // A prior attempt created the project (mapping exists); markCreateCommandDone then failed and the command was
     // reclaimed. On the re-run the deal has since left Opportunity (ineligible) — but because the project already
@@ -622,6 +629,41 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     const row = (await pg.query(`SELECT status, payload FROM bidboard_create_outbox`)).rows[0] as any;
     expect(row.status).toBe("needs_manual"); // escalated (was 'reclaiming', attempts exhausted)
     expect(row.payload.__recoveredProjectId).toBe("999"); // project id preserved for the operator
+  });
+
+  it("[G2] mapping persisted but the 'created' callback can't enqueue -> UNCAPPED 'processing' reclaim, NOT capped needs_manual", async () => {
+    // The mapping write SUCCEEDS (project is now guarded), but enqueueCreatedCallback throws (no procore company id).
+    // That must NOT be treated as a mapping-reconcile failure that caps at max_attempts -> needs_manual; route it to
+    // the uncapped post-create callback-delivery reclaim ('processing', attempt_count reset) so a config fix later
+    // still delivers the 'created' callback.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-cbp", sourceDealId: "d-cbp" }));
+    getMappingByBidIdMock.mockResolvedValue(undefined); // mapping not yet present -> reconcile writes it
+    createSyncMappingMock.mockResolvedValue({ id: 3 } as any); // mapping write SUCCEEDS
+    getAutomationConfigMock.mockResolvedValue({ value: {} } as any); // no companyId -> enqueueCreatedCallback throws
+    delete process.env.PROCORE_COMPANY_ID;
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-cbp", bidboardProjectId: "999" } as any);
+    await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => { throw err; })) as any });
+    const row = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows[0] as any;
+    expect(row.status).toBe("processing"); // uncapped callback-delivery reclaim, NOT 'reclaiming'/'needs_manual'
+    expect(Number(row.attempt_count)).toBe(0); // reset so callback delivery isn't capped by max_attempts
+    expect(createSyncMappingMock).toHaveBeenCalled(); // the mapping WAS persisted (project guarded)
+  });
+
+  it("[G3] the sibling-recovery guard also matches a DIFFERENT deal with the SAME project number (defense-in-depth)", async () => {
+    // A prior round for deal A is 'needs_manual' with project_number TR-1001. A fresh create for deal B reusing
+    // TR-1001 must be refused (the unmapped project is invisible to the mapping ownership guard).
+    await pg.query(`INSERT INTO bidboard_create_outbox (source_system, source_deal_id, source_event_id, project_number, payload, status) VALUES ('trock_crm','deal-A','e-A','TR-1001','{}'::jsonb,'needs_manual')`);
+    dbHolder.db = drizzle(pg as any) as any; // real db so findSiblingRecoveryRow queries the outbox
+    createBidBoardMock.mockReset(); // isolate: only assert THIS test's create calls (lifecycle beforeEach doesn't reset it)
+    getDealMappingMock.mockResolvedValue(undefined);
+    getMappingMock.mockResolvedValue(undefined);
+    getRfpByNumMock.mockResolvedValue(undefined); getRfpBySourceMock.mockResolvedValue(undefined);
+    checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
+    getAutomationConfigMock.mockResolvedValue({ value: { companyId: "42" } } as any);
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
+    const outcome = await performCreateFromRfpVote(input({ sourceDealId: "deal-B", sourceEventId: "e-B", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    expect(outcome).toBe("failed"); // refused: a sibling recovery row owns TR-1001
+    expect(createBidBoardMock).not.toHaveBeenCalled();
   });
 
   it("[F6] a created-but-UNMAPPED result RECONCILES the mapping DIRECTLY (no perform re-run) -> 'done' + 'created' callback", async () => {

@@ -251,12 +251,20 @@ async function resetCreateCommandForReclaim(id: number, note: string): Promise<v
 // that id rather than re-running the Playwright create). claimNext also claims 'reclaiming' (by ascending id), so
 // this low-id row is re-claimed before any later same-number command until the mapping reconciles. attempt_count is
 // NOT reset — bounded by max_attempts, then it sits 'reclaiming' for manual resolution rather than wedging forever.
-async function markReclaiming(id: number, bidboardProjectId: string, note: string): Promise<void> {
+// finding: also persist the RFP proposalId alongside the project id. The cross-tick reclaim rebuilds the mapping via
+// buildBidboardMappingPayload(input, recoveredProjectId, ...); without the stored proposalId that reconstruction
+// drops metadata.proposalId, which downstream portfolio automation reads to build BidBoard detail URLs. Stamp both
+// so a project recovered across ticks keeps its active-proposal context.
+async function markReclaiming(id: number, bidboardProjectId: string, proposalId: string | undefined, note: string): Promise<void> {
   const db = await getDb();
+  // Stamp __recoveredProjectId always; add __recoveredProposalId ONLY when present. (to_jsonb(NULL::text) is SQL
+  // NULL and jsonb_set is STRICT, so folding a null proposalId in would blank the whole payload → NOT NULL error.)
+  const payloadExpr = proposalId
+    ? sql`jsonb_set(jsonb_set(payload, '{__recoveredProjectId}', to_jsonb(${bidboardProjectId}::text)), '{__recoveredProposalId}', to_jsonb(${proposalId}::text))`
+    : sql`jsonb_set(payload, '{__recoveredProjectId}', to_jsonb(${bidboardProjectId}::text))`;
   await db.execute(sql`
     UPDATE bidboard_create_outbox
-       SET status = 'reclaiming', next_attempt_at = NOW(), last_error = ${note},
-           payload = jsonb_set(payload, '{__recoveredProjectId}', to_jsonb(${bidboardProjectId}::text))
+       SET status = 'reclaiming', next_attempt_at = NOW(), last_error = ${note}, payload = ${payloadExpr}
      WHERE id = ${id}
   `);
 }
@@ -285,21 +293,27 @@ async function markNeedsManual(id: number, note: string, bidboardProjectId?: str
   `);
 }
 
-// A sibling outbox row for the SAME deal that is in a recovery state ('reclaiming' = created-but-unmapped project;
-// 'needs_manual' = unconfirmed maybe-created project), other than this command itself. Its existence means the deal
-// already has a Procore project we can't yet see via the sync mapping, so a fresh create would DUPLICATE it. Used by
-// the sibling-recovery guard in performCreateFromRfpVote to refuse a create until the prior round is resolved —
-// independent of drain order / attempt_count. NOTE: source_deal_id is enough (cross-deal project-number collisions
-// are precluded by the DFW/ATL numbering, so a sibling recovery for a DIFFERENT deal can't own this deal's number).
+// A sibling outbox row in a recovery state ('reclaiming' = created-but-unmapped project; 'needs_manual' = unconfirmed
+// maybe-created project), other than this command itself, that would collide with a fresh create. Match on EITHER
+// the same source deal OR the same project_number: an unmapped recovery project is invisible to the sync-mapping
+// ownership guard, so a later create for the same deal (revised number) OR any command reusing that project_number
+// would DUPLICATE / mis-adopt it. (Cross-deal number collisions should be precluded by the DFW/ATL numbering, but
+// guarding by number too is cheap defense-in-depth against a reused/legacy number.) Used by the sibling-recovery
+// guard in performCreateFromRfpVote to refuse the create until the prior round is resolved — independent of drain
+// order / attempt_count.
 async function findSiblingRecoveryRow(input: CreateFromRfpInput): Promise<{ status: string; recovered_project_id: string | null } | null> {
   const db = await getDb();
+  const projectNumber = input.deal.projectNumber ?? null;
   const res: any = await db.execute(sql`
     SELECT status, payload->>'__recoveredProjectId' AS recovered_project_id
       FROM bidboard_create_outbox
      WHERE source_system = ${input.sourceSystem}
-       AND source_deal_id = ${input.sourceDealId}
        AND source_event_id <> ${input.sourceEventId}
        AND status IN ('reclaiming', 'needs_manual')
+       AND (
+         source_deal_id = ${input.sourceDealId}
+         OR (${projectNumber}::text IS NOT NULL AND project_number = ${projectNumber})
+       )
      LIMIT 1
   `);
   const rows = Array.isArray(res) ? res : (res?.rows ?? []);
@@ -528,7 +542,10 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   const normalizedDealData: Record<string, any> = {
     dealname: d.name,
     project_number: d.projectNumber,
-    project_types: d.projectType,
+    // finding: forward the CANONICAL type to the BidBoard create, not the raw (possibly stale) payload projectType.
+    // The project NUMBER's digit is authoritative (e.g. DFW-2-… is roofing even if project_types says "9"), exactly
+    // as the normal approval path resolves it — otherwise the created project carries the wrong type.
+    project_types: effectiveProjectType,
     amount: d.amount,
     estimator: d.estimator,
     company_name: d.companyName,
@@ -627,13 +644,16 @@ function buildBidboardMappingPayload(
 // create path and could create a SECOND project for the same accepted vote (createBidBoardProjectFromDeal proceeds
 // to create when its exact-number lookup errors), or emit a false 'failed' if the deal left Opportunity mid-
 // recovery. Idempotent: if the mapping now exists (a prior attempt or concurrent path wrote it) the write is
-// skipped. Returns true once the mapping is persisted AND the 'created' callback is enqueued; throws (for the
-// caller to retry) only when the write can't land.
+// skipped. Returns "reconciled" once the mapping is persisted AND the 'created' callback is enqueued; throws (for
+// the caller to retry, capped) ONLY when the mapping write can't land; returns "callback_pending" when the mapping
+// IS persisted but only the callback enqueue failed — the caller must route THAT to the UNCAPPED post-create
+// callback-delivery reclaim, NOT the capped mapping-reconcile path (retrying the write is pointless, and capping a
+// MAPPED project's callback at max_attempts would strand its 'created' notification once config is fixed).
 async function reconcileCreatedMappingMissing(
   error: CreatedMappingMissingError,
   input: CreateFromRfpInput,
   callbackAt: string,
-): Promise<boolean> {
+): Promise<"reconciled" | "callback_pending"> {
   // finding: key idempotency + success on the PROJECT we actually created (error.bidboardProjectId), NOT a
   // sourceDealId lookup. This repo tolerates legacy DUPLICATE sync_mappings rows for one source deal, so a
   // by-sourceDealId read can return a DIFFERENT duplicate (or one lacking the created project) — we could then
@@ -651,8 +671,16 @@ async function reconcileCreatedMappingMissing(
       if (!after?.bidboardProjectId) throw writeErr;
     }
   }
-  await enqueueCreatedCallback(input, error.bidboardProjectId, callbackAt);
-  return true;
+  // The mapping is now persisted (the guards protect the project). Send the 'created' callback. If ONLY the callback
+  // enqueue fails (e.g. TROCK_CRM_BASE_URL / procore company id missing), do NOT surface it as a mapping-reconcile
+  // failure — the mapping is done; signal callback_pending so the caller routes to the uncapped reclaim.
+  try {
+    await enqueueCreatedCallback(input, error.bidboardProjectId, callbackAt);
+  } catch (cbErr: any) {
+    log(`[bidboard-create] mapping for project ${error.bidboardProjectId} persisted but 'created' callback enqueue failed (${cbErr?.message || cbErr}); routing to uncapped callback-delivery reclaim`, "sync");
+    return "callback_pending";
+  }
+  return "reconciled";
 }
 
 // Shared recovery for a created-but-unmapped project, used both in-tick (the CreatedMappingMissingError catch) and
@@ -670,31 +698,41 @@ async function runMappingReconcile(
   input: CreateFromRfpInput,
   callbackAt: string,
 ): Promise<"reconciled" | "blocked"> {
-  let reconciled = false;
-  for (let attempt = 1; attempt <= 3 && !reconciled; attempt++) {
+  let outcome: "reconciled" | "callback_pending" | null = null;
+  for (let attempt = 1; attempt <= 3 && outcome === null; attempt++) {
     try {
-      reconciled = await reconcileCreatedMappingMissing(error, input, callbackAt);
+      outcome = await reconcileCreatedMappingMissing(error, input, callbackAt);
     } catch (recErr: any) {
       log(`[bidboard-create] Command ${row.id} mapping reconcile attempt ${attempt} failed (${recErr?.message || recErr})`, "sync");
     }
   }
-  if (reconciled) {
+  if (outcome === "reconciled") {
     try { await markCreateCommandDone(row.id); } catch (bookErr: any) {
       log(`[bidboard-create] Command ${row.id} mapping reconciled but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
     }
     return "reconciled";
   }
+  if (outcome === "callback_pending") {
+    // The mapping IS persisted (the ownership guard now protects the project, so no duplicate risk) — only the
+    // 'created' callback couldn't be enqueued. Route to the UNCAPPED post-create callback-delivery reclaim (leave
+    // 'processing' + reset attempt_count) rather than the capped reclaiming/needs_manual path: the stale-reclaim
+    // re-runs perform → mapping-first adopt → re-sends the 'created' callback once the config is fixed, uncapped.
+    try { await resetCreateCommandForReclaim(row.id, `mapping persisted for project ${error.bidboardProjectId}; 'created' callback pending reclaim`); } catch { /* best-effort */ }
+    return "reconciled"; // handled for the drain: the row is safe (mapping exists) and will re-deliver the callback
+  }
   const exhausted = Number(row.attempt_count) >= Number(row.max_attempts);
-  // Park the row RESILIENTLY: this write carries the recovery marker (status + payload.__recoveredProjectId). If it
-  // silently failed, the row would drop to bare 'processing' with no marker — then the stale-reclaim would route it
-  // to perform (not reconcile) and could DUPLICATE the created project. Retry so a transient blip can't drop it.
+  const proposalId = (error.mappingPayload as any)?.metadata?.proposalId as string | undefined;
+  // Park the row RESILIENTLY: this write carries the recovery marker (status + payload.__recoveredProjectId /
+  // __recoveredProposalId). If it silently failed, the row would drop to bare 'processing' with no marker — then the
+  // stale-reclaim would route it to perform (not reconcile) and could DUPLICATE the created project. Retry so a
+  // transient blip can't drop it.
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       if (exhausted) {
         if (attempt === 1) log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} but mapping is UNRECOVERABLE after ${row.attempt_count} attempts; escalating to 'needs_manual'`, "sync");
         await markNeedsManual(row.id, `created project ${error.bidboardProjectId} but mapping unrecoverable after ${row.attempt_count} attempts; needs manual resolution`, error.bidboardProjectId);
       } else {
-        await markReclaiming(row.id, error.bidboardProjectId, `created but mapping missing after retries: ${error.message}`);
+        await markReclaiming(row.id, error.bidboardProjectId, proposalId, `created but mapping missing after retries: ${error.message}`);
       }
       break;
     } catch (parkErr: any) {
@@ -745,10 +783,13 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       // 'reclaiming' (re-claimed first by id order, blocking later same-number commands) until it resolves.
       const recoveredProjectId = (row.payload as any)?.__recoveredProjectId as string | undefined;
       if (recoveredProjectId) {
+        // Carry the proposalId stamped by markReclaiming so the rebuilt mapping keeps metadata.proposalId (downstream
+        // portfolio automation reads it for BidBoard detail URLs).
+        const recoveredProposalId = (row.payload as any)?.__recoveredProposalId as string | undefined;
         const recoveryErr = new CreatedMappingMissingError(
           `reclaiming BidBoard project ${recoveredProjectId} for deal ${input.sourceDealId} (mapping not yet persisted)`,
           recoveredProjectId,
-          buildBidboardMappingPayload(input, recoveredProjectId),
+          buildBidboardMappingPayload(input, recoveredProjectId, undefined, recoveredProposalId || undefined),
         );
         log(`[bidboard-create] Command ${row.id} re-claimed 'reclaiming' project ${recoveredProjectId}; reconciling its mapping (no re-create)`, "sync");
         const result = await runMappingReconcile(row, recoveryErr, input, callbackAt);
@@ -794,9 +835,18 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // override-approve path's indeterminate handling.
         if (error instanceof UnconfirmedCreateError) {
           log(`[bidboard-create] Command ${row.id} create is UNCONFIRMED (${message}); parking 'needs_manual' for resolution (no 'failed' callback — a project may exist; no auto re-drain — would risk a duplicate)`, "sync");
-          try { await markNeedsManual(row.id, `create unconfirmed, may exist; needs manual resolution: ${message}`); } catch { /* best-effort */ }
+          // finding: park RESILIENTLY. If markNeedsManual silently failed, the row would stay 'processing' with no
+          // recovery marker — the stale-reclaim would then re-run perform (risking a duplicate of the maybe-created
+          // project) and later commands would proceed unguarded. Retry; if it can't be parked, STOP the drain (do
+          // not continue to later commands) so nothing runs while this row is unguarded.
+          let parked = false;
+          for (let attempt = 1; attempt <= 3 && !parked; attempt++) {
+            try { await markNeedsManual(row.id, `create unconfirmed, may exist; needs manual resolution: ${message}`); parked = true; }
+            catch (parkErr: any) { if (attempt === 3) log(`[bidboard-create] Command ${row.id} could not park 'needs_manual' after 3 tries (${parkErr?.message || parkErr}); STOPPING the drain`, "sync"); }
+          }
           processed += 1;
-          continue;
+          if (parked) continue;
+          break; // unguarded — stop so no later command runs before this is safely parked
         }
         // finding: if the project was ALREADY created (a mapping exists for this source deal) but a LATER step
         // threw — the 'created' callback persist, or a transient DB error — this is NOT a create failure. Emitting a
