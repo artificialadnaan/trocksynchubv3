@@ -32,6 +32,21 @@ export class CreatedMappingMissingError extends Error {
   }
 }
 
+// createBidBoardProjectFromDeal returned success:false with an INDETERMINATE outcome ("Could not confirm project
+// creation") — the create UI click happened but neither a success toast nor an error message was seen, so a project
+// MAY exist in Procore without a mapping/known id. This is NOT a genuine no-project failure: a terminal 'failed'
+// callback would tell the CRM the vote failed while Procore may hold the project. It is parked 'needs_manual' (no
+// callback, not supersedable, and NOT auto re-drained — a re-drain could DUPLICATE the maybe-created project, since
+// createBidBoardProjectFromDeal re-creates on an inconclusive number lookup). A fresh same-deal round is still
+// blocked from creating a duplicate by the sibling-recovery guard in performCreateFromRfpVote (which refuses when a
+// sibling row is 'reclaiming'/'needs_manual'). A human resolves it — matching the override-approve path.
+export class UnconfirmedCreateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnconfirmedCreateError";
+  }
+}
+
 async function getDb() {
   return (await import("../db")).db;
 }
@@ -41,7 +56,23 @@ async function getDb() {
 // the same source_event_id, so DO NOTHING would otherwise strand the retry).
 export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
   const db = await getDb();
-  const insertResult: any = await db.execute(sql`
+  // finding (atomic enqueue+supersede): the INSERT and the same-deal supersede run as ONE statement via a
+  // data-modifying CTE. Two separate statements leave a window where the INSERT has committed but the supersede
+  // hasn't run yet, during which a worker tick (this or another instance) can claim the older pending row (flip it
+  // to 'processing'); the supersede then skips it (it only touches 'pending') and the worker creates the stale
+  // project the supersede was meant to retire. As a single statement the older rows are superseded atomically with
+  // the insert — a concurrent claim's FOR UPDATE SKIP LOCKED either runs before (sees only the old round) or after
+  // (sees the rows already superseded), never in between.
+  //
+  // KNOWN bounded residual (P3, deferred): this atomicity is enqueue-vs-worker-claim, NOT enqueue-vs-enqueue. Two
+  // DISTINCT rounds for the same deal enqueued CONCURRENTLY each run their CTE in its own READ COMMITTED snapshot
+  // and miss the other's uncommitted INSERT, so neither supersedes the other; both sit 'pending' and the serial
+  // drain runs the lower-id (older) round, after which the newer round is Y2-refused for manual resolution. Damage
+  // is bounded — NO duplicate project, just the older round winning a near-simultaneous tie. A full fix is a
+  // per-deal pg_advisory_xact_lock(hashtext(source_system||':'||source_deal_id)) around this CTE in a transaction;
+  // deferred because it cannot be regression-tested on single-connection PGlite and the impact is bounded.
+  await db.execute(sql`
+    WITH upsert AS (
     INSERT INTO bidboard_create_outbox
       (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at)
     VALUES (
@@ -91,39 +122,33 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
            )
          )
     RETURNING id
+    )
+    -- Supersede any OLDER still-PENDING create command for the SAME source deal. The CRM opens a fresh round (a new
+    -- source_event_id) when a deal is re-reviewed; if an earlier round's command is still pending — the worker's
+    -- 15s tick hasn't claimed it, or the worker was down — the drain would run that earlier command FIRST and
+    -- create its (possibly revised-number) project, after which THIS newer command hits the same-deal
+    -- revised-number guard and is REFUSED, so the latest approved vote never creates its intended project. Mark the
+    -- earlier PENDING same-deal rows 'superseded' (a terminal, non-claimable status).
+    --
+    -- Stale-event guard: joining FROM upsert means the supersede runs ONLY when THIS command was actually inserted
+    -- OR re-queued (the ON CONFLICT WHERE matched). A LATE duplicate of an OLDER source_event_id whose row is
+    -- already superseded/done/processing makes the ON CONFLICT a NO-OP, upsert is EMPTY, the join yields no rows,
+    -- and nothing is superseded, so that stale re-delivery can't retire the newer approved round.
+    --
+    -- Order by the immutable serial id (t.id < upsert.id), NOT created_at: a re-queue of a FAILED/PENDING older
+    -- round refreshes its created_at to NOW() (finding Y4), which would make that older round look NEWEST by
+    -- timestamp and wrongly supersede a genuinely newer pending round. id is assigned at first INSERT and never
+    -- changes on ON CONFLICT DO UPDATE, so id-less-than-ours == "arrived before us" regardless of created_at.
+    -- (t.id < upsert.id also excludes the just-written row; a 'processing' row is left alone -- it isn't 'pending'.)
+    UPDATE bidboard_create_outbox t
+       SET status = 'superseded', processed_at = NOW(),
+           last_error = 'superseded by a newer create command for the same source deal'
+      FROM upsert
+     WHERE t.source_system = ${input.sourceSystem}
+       AND t.source_deal_id = ${input.sourceDealId}
+       AND t.status = 'pending'
+       AND t.id < upsert.id
   `);
-
-  // finding: supersede any OLDER still-PENDING create command for the SAME source deal. The CRM opens a fresh
-  // round (a new source_event_id) when a deal is re-reviewed; if an earlier round's command is still pending —
-  // the worker's 15s tick hasn't claimed it, or the worker was down — the FIFO drain (ORDER BY created_at) would
-  // run that earlier command FIRST and create its (possibly revised-number) project, after which THIS newer
-  // command hits the same-deal revised-number guard and is REFUSED, so the latest approved vote never creates its
-  // intended project. Mark the earlier PENDING same-deal rows 'superseded' (a terminal, non-claimable status).
-  //
-  // finding (stale-event guard): only supersede when THIS command was actually inserted OR re-queued as the latest
-  // (the INSERT/ON CONFLICT DO UPDATE returned a row). A LATE duplicate delivery of an OLDER source_event_id whose
-  // row is already 'superseded'/'done'/'processing' makes the ON CONFLICT WHERE a NO-OP → RETURNING is empty → we
-  // must NOT supersede, else that stale re-delivery would retire the newer approved round and strand it with no
-  // pending command. And even when we do supersede, restrict to rows STRICTLY OLDER than the row we just
-  // wrote/refreshed. Order by the immutable serial `id` (insertion order), NOT created_at: a re-queue of a
-  // FAILED/PENDING older round refreshes its created_at to NOW() (finding Y4), which would make that older round
-  // look NEWEST by timestamp and wrongly supersede a genuinely newer pending round. `id` is assigned at first
-  // INSERT and never changes on ON CONFLICT DO UPDATE, so `id < ours` == "arrived before us" regardless of any
-  // created_at refresh. A row already 'processing' owns an in-flight Playwright create and is left alone (not
-  // 'pending'). (id < ${insertedId} also excludes the just-written row itself.)
-  const insertedRows = Array.isArray(insertResult) ? insertResult : (insertResult?.rows ?? []);
-  const insertedId = insertedRows[0]?.id;
-  if (insertedId != null) {
-    await db.execute(sql`
-      UPDATE bidboard_create_outbox
-         SET status = 'superseded', processed_at = NOW(),
-             last_error = 'superseded by a newer create command for the same source deal'
-       WHERE source_system = ${input.sourceSystem}
-         AND source_deal_id = ${input.sourceDealId}
-         AND status = 'pending'
-         AND id < ${insertedId}
-    `);
-  }
 }
 
 // Claim ONE pending/retryable command at a time (serial → satisfies the same-project-number ordering V1 needs +
@@ -143,9 +168,20 @@ export async function claimNextBidboardCreateCommand(): Promise<any | null> {
         WHERE attempt_count < max_attempts
           AND (
             (status = 'pending' AND next_attempt_at <= NOW())
+            -- 'reclaiming' = a created-but-unmapped project awaiting mapping reconciliation. It is claimed (and
+            -- re-claimed by id order, so it blocks later same-number commands) but is NOT 'pending', so the enqueue
+            -- supersede can never retire it. The drain routes it to the mapping reconcile (by its persisted project
+            -- id), never a Playwright re-create.
+            OR (status = 'reclaiming' AND next_attempt_at <= NOW())
             OR (status = 'processing' AND last_attempt_at < NOW() - interval '${sql.raw(STALE_PROCESSING_INTERVAL)}')
           )
-        ORDER BY created_at ASC
+        -- finding: drain by the immutable serial id (arrival order), NOT created_at. created_at is REFRESHED to
+        -- NOW() when a still-pending/failed command is re-queued (Y4), which would reorder the FIFO drain and let a
+        -- later-arrived same-project-number command create/link the project first while the corrected original then
+        -- fails the ownership guard — reversing the serial ownership guarantee. id never changes on re-queue, so it
+        -- is the stable arrival order. (Callbacks still stamp the refreshed created_at for CRM freshness — receipt
+        -- time is deliberately decoupled from drain order here.)
+        ORDER BY id ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
      )
@@ -205,6 +241,69 @@ async function resetCreateCommandForReclaim(id: number, note: string): Promise<v
   await db.execute(sql`
     UPDATE bidboard_create_outbox SET attempt_count = 0, last_error = ${note} WHERE id = ${id}
   `);
+}
+
+// finding (block later commands until recovery resolves, WITHOUT being supersede-killable): a command that created
+// a project it can't yet map must be re-drained BEFORE any later same-project command, and must NOT be retired by a
+// newer same-deal round (which would orphan the real project + let the newer round create a duplicate). Park it at a
+// DISTINCT status 'reclaiming' — NOT 'pending' — so the enqueue supersede (scoped to status='pending') can never
+// touch it, and persist the created project id INTO THE PAYLOAD so it survives across ticks (the drain reconciles by
+// that id rather than re-running the Playwright create). claimNext also claims 'reclaiming' (by ascending id), so
+// this low-id row is re-claimed before any later same-number command until the mapping reconciles. attempt_count is
+// NOT reset — bounded by max_attempts, then it sits 'reclaiming' for manual resolution rather than wedging forever.
+async function markReclaiming(id: number, bidboardProjectId: string, note: string): Promise<void> {
+  const db = await getDb();
+  await db.execute(sql`
+    UPDATE bidboard_create_outbox
+       SET status = 'reclaiming', next_attempt_at = NOW(), last_error = ${note},
+           payload = jsonb_set(payload, '{__recoveredProjectId}', to_jsonb(${bidboardProjectId}::text))
+     WHERE id = ${id}
+  `);
+}
+
+// finding: an INDETERMINATE create ("Could not confirm project creation") — a project MAY exist but its id is
+// UNKNOWN, so we can neither reconcile a mapping (no id) nor safely re-drain (createBidBoardProjectFromDeal would
+// re-create on an inconclusive number lookup — indexing lag / Procore blip — DUPLICATING the maybe-created project).
+// Park it at 'needs_manual': NOT claimed by claimNext (no auto re-drain → no duplicate), NOT supersedable (not
+// 'pending'), NO callback (never tell the CRM it failed when a project may exist). A human resolves it — matching
+// the override-approve path's indeterminate handling.
+async function markNeedsManual(id: number, note: string, bidboardProjectId?: string): Promise<void> {
+  const db = await getDb();
+  if (bidboardProjectId) {
+    // Escalation of a 'reclaiming' row: preserve the created project id in the payload (belt-and-suspenders — it was
+    // already stamped by markReclaiming at any max_attempts > 1, but stamp it here too so the operator always has it).
+    await db.execute(sql`
+      UPDATE bidboard_create_outbox
+         SET status = 'needs_manual', processed_at = NOW(), last_error = ${note},
+             payload = jsonb_set(payload, '{__recoveredProjectId}', to_jsonb(${bidboardProjectId}::text))
+       WHERE id = ${id}
+    `);
+    return;
+  }
+  await db.execute(sql`
+    UPDATE bidboard_create_outbox SET status = 'needs_manual', processed_at = NOW(), last_error = ${note} WHERE id = ${id}
+  `);
+}
+
+// A sibling outbox row for the SAME deal that is in a recovery state ('reclaiming' = created-but-unmapped project;
+// 'needs_manual' = unconfirmed maybe-created project), other than this command itself. Its existence means the deal
+// already has a Procore project we can't yet see via the sync mapping, so a fresh create would DUPLICATE it. Used by
+// the sibling-recovery guard in performCreateFromRfpVote to refuse a create until the prior round is resolved —
+// independent of drain order / attempt_count. NOTE: source_deal_id is enough (cross-deal project-number collisions
+// are precluded by the DFW/ATL numbering, so a sibling recovery for a DIFFERENT deal can't own this deal's number).
+async function findSiblingRecoveryRow(input: CreateFromRfpInput): Promise<{ status: string; recovered_project_id: string | null } | null> {
+  const db = await getDb();
+  const res: any = await db.execute(sql`
+    SELECT status, payload->>'__recoveredProjectId' AS recovered_project_id
+      FROM bidboard_create_outbox
+     WHERE source_system = ${input.sourceSystem}
+       AND source_deal_id = ${input.sourceDealId}
+       AND source_event_id <> ${input.sourceEventId}
+       AND status IN ('reclaiming', 'needs_manual')
+     LIMIT 1
+  `);
+  const rows = Array.isArray(res) ? res : (res?.rows ?? []);
+  return rows[0] ?? null;
 }
 
 async function resolveProcoreCompanyIdForCallback(): Promise<string | undefined> {
@@ -408,6 +507,23 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   // (The same-deal revised-number guard, finding Y2, now runs FIRST via the mapping-first adopt block above — a
   // mapping-exists deal never reaches here.)
 
+  // finding (sibling-recovery guard): the ownership guard above only sees MAPPED projects. A prior round for THIS
+  // deal may have created a Procore project whose mapping isn't persisted yet ('reclaiming') or an unconfirmed
+  // maybe-created project ('needs_manual') — neither is visible via getBidboardMappingByProcoreProjectNumber. If we
+  // created now we'd DUPLICATE that project. So before creating, refuse when a sibling outbox row for the same deal
+  // is in a recovery state. This blocks the duplicate INDEPENDENT of drain id-ordering and of the reclaiming row
+  // still being claimable (which lapses at max_attempts) — restoring the block the id-ordering alone can't
+  // guarantee. The rep re-triggers once the prior round is reconciled/resolved.
+  const siblingRecovery = await findSiblingRecoveryRow(input);
+  if (siblingRecovery) {
+    await enqueueFailedCallback(
+      input,
+      `Deal ${input.sourceDealId} has an unresolved prior create round (${siblingRecovery.status}${siblingRecovery.recovered_project_id ? `, BidBoard project ${siblingRecovery.recovered_project_id}` : ""}); resolve it before creating a new round to avoid a duplicate project`,
+      callbackAt,
+    );
+    return "failed";
+  }
+
   const d = input.deal;
   const normalizedDealData: Record<string, any> = {
     dealname: d.name,
@@ -441,8 +557,18 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   });
 
   if (!result.success || !result.projectId) {
-    // finding Y1: a create FAILURE (Playwright/UI error, ambiguous existing project, ...) must stay RETRYABLE.
-    // Throw so processBidboardCreateOutbox marks the command 'failed' (which enqueueBidboardCreateCommand
+    // finding: distinguish an INDETERMINATE post-click outcome from a genuine no-project failure. When the create
+    // UI click succeeded but confirmation/API lookup couldn't verify it, createBidBoardProjectFromDeal returns
+    // { success:false, error:"Could not confirm project creation" } — a project MAY exist. Routing that to the
+    // generic failure path (terminal 'failed' callback + retryable) can tell the CRM the vote failed while Procore
+    // holds the project, and a retry can create a DUPLICATE. Throw the recoverable UnconfirmedCreateError instead:
+    // the drain leaves the command re-drainable + sends NO callback (createBidBoardProjectFromDeal adopts the
+    // existing project by number on re-drain), matching the override path's indeterminate handling.
+    if (/could not confirm project creation/i.test(result.error ?? "")) {
+      throw new UnconfirmedCreateError(result.error ?? "Could not confirm project creation");
+    }
+    // finding Y1: a genuine create FAILURE (Playwright/UI error, ambiguous existing project, ...) must stay
+    // RETRYABLE. Throw so processBidboardCreateOutbox marks the command 'failed' (which enqueueBidboardCreateCommand
     // re-queues on the CRM rep's same-sourceEventId retry) + delivers a failed callback — rather than returning
     // normally, which would mark it 'done' and make the retry a silent no-op needing manual DB surgery.
     throw new Error(result.error || "BidBoard project creation failed");
@@ -458,31 +584,42 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   if (!persistedMapping?.bidboardProjectId) {
     // Distinct RECOVERABLE error (not a create failure). Carry the created project id + the exact mapping row so the
     // drain can persist the mapping DIRECTLY (storage.createSyncMapping) instead of re-running this Playwright
-    // create — a re-run could create a SECOND project if the exact-number lookup transiently errors. Mirror the
-    // shape createBidBoardProjectFromDeal writes internally (the write that was caught + only logged).
-    const mappingPayload = {
-      sourceSystem: input.sourceSystem,
-      sourceDealId: input.sourceDealId,
-      hubspotDealId: input.sourceSystem === "hubspot" ? input.sourceDealId : null,
-      hubspotDealName: d.name,
-      bidboardProjectId: result.projectId,
-      bidboardProjectName: result.projectName ?? d.name,
-      procoreProjectNumber: projectNumber || null,
-      projectPhase: "bidboard",
-      lastSyncAt: new Date(),
-      lastSyncStatus: input.sourceSystem === "hubspot" ? "created_from_hubspot" : "created_from_trock_crm",
-      lastSyncDirection: "hubspot_to_procore",
-      metadata: result.proposalId ? { proposalId: result.proposalId } : undefined,
-    };
+    // create — a re-run could create a SECOND project if the exact-number lookup transiently errors.
     throw new CreatedMappingMissingError(
       `BidBoard project ${result.projectId} created for deal ${input.sourceDealId} but its sync mapping was not persisted; leaving the command recoverable rather than sending an unguarded 'created'`,
       result.projectId,
-      mappingPayload,
+      buildBidboardMappingPayload(input, result.projectId, result.projectName, result.proposalId),
     );
   }
 
   await enqueueCreatedCallback(input, result.projectId, callbackAt);
   return "created";
+}
+
+// The sync-mapping row that createBidBoardProjectFromDeal writes internally (the write that gets caught + only
+// logged when it fails). Used both at the throw site (with the live result's name/proposalId) and on the cross-tick
+// reclaim of a 'reclaiming' row (reconstructed from the stored payload + recovered project id — the name/proposalId
+// metadata isn't persisted across ticks, so it falls back to the deal name, which is cosmetic for the mapping).
+function buildBidboardMappingPayload(
+  input: CreateFromRfpInput,
+  bidboardProjectId: string,
+  bidboardProjectName?: string,
+  proposalId?: string,
+): Parameters<typeof storage.createSyncMapping>[0] {
+  return {
+    sourceSystem: input.sourceSystem,
+    sourceDealId: input.sourceDealId,
+    hubspotDealId: input.sourceSystem === "hubspot" ? input.sourceDealId : null,
+    hubspotDealName: input.deal.name,
+    bidboardProjectId,
+    bidboardProjectName: bidboardProjectName ?? input.deal.name,
+    procoreProjectNumber: input.deal.projectNumber || null,
+    projectPhase: "bidboard",
+    lastSyncAt: new Date(),
+    lastSyncStatus: input.sourceSystem === "hubspot" ? "created_from_hubspot" : "created_from_trock_crm",
+    lastSyncDirection: "hubspot_to_procore",
+    metadata: proposalId ? { proposalId } : undefined,
+  };
 }
 
 // Recovery for CreatedMappingMissingError: the Procore/BidBoard project was created but its sync mapping wasn't
@@ -497,22 +634,74 @@ async function reconcileCreatedMappingMissing(
   input: CreateFromRfpInput,
   callbackAt: string,
 ): Promise<boolean> {
-  const existing = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
-  let bidboardProjectId = existing?.bidboardProjectId || error.bidboardProjectId;
-  if (!existing?.bidboardProjectId) {
+  // finding: key idempotency + success on the PROJECT we actually created (error.bidboardProjectId), NOT a
+  // sourceDealId lookup. This repo tolerates legacy DUPLICATE sync_mappings rows for one source deal, so a
+  // by-sourceDealId read can return a DIFFERENT duplicate (or one lacking the created project) — we could then
+  // stop draining even though the mapping exists, or send a 'created' callback pointing at the WRONG project. The
+  // unique index is on bidboardProjectId, so the by-project read is the authoritative "is it persisted?" check,
+  // and the callback always reports error.bidboardProjectId (the project this command created).
+  const byProject = await storage.getSyncMappingByBidboardProjectId(error.bidboardProjectId);
+  if (!byProject?.bidboardProjectId) {
     try {
       await storage.createSyncMapping(error.mappingPayload);
     } catch (writeErr: any) {
-      // A concurrent insert (unique violation on the source-deal / bidboard-project index) means the mapping is now
-      // persisted — re-read before surfacing the error so we don't loop on a write that effectively already landed.
-      const after = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+      // A concurrent insert (unique violation on bidboardProjectId) means the mapping for THIS project is now
+      // persisted — confirm by project id before surfacing the error so we don't loop on a write that landed.
+      const after = await storage.getSyncMappingByBidboardProjectId(error.bidboardProjectId);
       if (!after?.bidboardProjectId) throw writeErr;
-      bidboardProjectId = after.bidboardProjectId;
     }
   }
-  if (!bidboardProjectId) return false;
-  await enqueueCreatedCallback(input, bidboardProjectId, callbackAt);
+  await enqueueCreatedCallback(input, error.bidboardProjectId, callbackAt);
   return true;
+}
+
+// Shared recovery for a created-but-unmapped project, used both in-tick (the CreatedMappingMissingError catch) and
+// across ticks (a re-claimed 'reclaiming' row). Reconcile the mapping DIRECTLY (never re-run perform → never
+// double-create) up to 3 times. On success mark the command done. On persistent failure park it 'reclaiming' (a
+// non-supersedable, id-ordered-blocking status carrying the project id) so the NEXT tick re-claims it before any
+// later same-number command — UNLESS this row has exhausted its attempts (claimNext gates on attempt_count <
+// max_attempts, so it would never be re-claimed), in which case ESCALATE it to 'needs_manual' so it surfaces for an
+// operator instead of sitting 'reclaiming' silently. Either way the sibling-recovery guard keeps blocking a fresh
+// same-deal create (both statuses are checked), so a duplicate can't slip in after exhaustion. `row` carries the
+// post-claim attempt_count + max_attempts.
+async function runMappingReconcile(
+  row: { id: number; attempt_count: number; max_attempts: number },
+  error: CreatedMappingMissingError,
+  input: CreateFromRfpInput,
+  callbackAt: string,
+): Promise<"reconciled" | "blocked"> {
+  let reconciled = false;
+  for (let attempt = 1; attempt <= 3 && !reconciled; attempt++) {
+    try {
+      reconciled = await reconcileCreatedMappingMissing(error, input, callbackAt);
+    } catch (recErr: any) {
+      log(`[bidboard-create] Command ${row.id} mapping reconcile attempt ${attempt} failed (${recErr?.message || recErr})`, "sync");
+    }
+  }
+  if (reconciled) {
+    try { await markCreateCommandDone(row.id); } catch (bookErr: any) {
+      log(`[bidboard-create] Command ${row.id} mapping reconciled but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
+    }
+    return "reconciled";
+  }
+  const exhausted = Number(row.attempt_count) >= Number(row.max_attempts);
+  // Park the row RESILIENTLY: this write carries the recovery marker (status + payload.__recoveredProjectId). If it
+  // silently failed, the row would drop to bare 'processing' with no marker — then the stale-reclaim would route it
+  // to perform (not reconcile) and could DUPLICATE the created project. Retry so a transient blip can't drop it.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (exhausted) {
+        if (attempt === 1) log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} but mapping is UNRECOVERABLE after ${row.attempt_count} attempts; escalating to 'needs_manual'`, "sync");
+        await markNeedsManual(row.id, `created project ${error.bidboardProjectId} but mapping unrecoverable after ${row.attempt_count} attempts; needs manual resolution`, error.bidboardProjectId);
+      } else {
+        await markReclaiming(row.id, error.bidboardProjectId, `created but mapping missing after retries: ${error.message}`);
+      }
+      break;
+    } catch (parkErr: any) {
+      if (attempt === 3) log(`[bidboard-create] Command ${row.id} could not park recovery row after 3 tries (${parkErr?.message || parkErr}); left 'processing' — sibling guard degraded until stale-reclaim re-parks`, "sync");
+    }
+  }
+  return "blocked";
 }
 
 const CREATE_WORKER_LOCK_KEY = "bidboard_create_from_rfp_worker";
@@ -549,6 +738,25 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       const input = (row.payload ?? {}) as CreateFromRfpInput;
       // The command's receipt time (≈ CRM vote time) stamps every callback (finding AA3).
       const callbackAt = row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString();
+
+      // finding: a re-claimed 'reclaiming' row already created a Procore project (id persisted in the payload) whose
+      // mapping wasn't yet written. Reconcile that mapping DIRECTLY by the stored id — NEVER re-run perform, which
+      // could create a SECOND project when the exact-number lookup is inconclusive. On persistent failure it stays
+      // 'reclaiming' (re-claimed first by id order, blocking later same-number commands) until it resolves.
+      const recoveredProjectId = (row.payload as any)?.__recoveredProjectId as string | undefined;
+      if (recoveredProjectId) {
+        const recoveryErr = new CreatedMappingMissingError(
+          `reclaiming BidBoard project ${recoveredProjectId} for deal ${input.sourceDealId} (mapping not yet persisted)`,
+          recoveredProjectId,
+          buildBidboardMappingPayload(input, recoveredProjectId),
+        );
+        log(`[bidboard-create] Command ${row.id} re-claimed 'reclaiming' project ${recoveredProjectId}; reconciling its mapping (no re-create)`, "sync");
+        const result = await runMappingReconcile(row, recoveryErr, input, callbackAt);
+        processed += 1;
+        if (result === "reconciled") continue;
+        break; // still unmapped — stop so no later same-number command runs while it is unmapped
+      }
+
       // finding AA1: keep the CREATE and the DONE bookkeeping in SEPARATE try/catches. A create failure (perform
       // throws) must deliver a failed callback + mark the command failed. But if perform SUCCEEDED (project
       // created + 'created' callback enqueued) and only markCreateCommandDone throws (transient DB error), we must
@@ -567,31 +775,28 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // Direct reconcile (not a perform re-run) can never create a SECOND project [F6] nor return a false 'failed'
         // [F5]; a transient DB blip is covered by a few bounded retries.
         if (error instanceof CreatedMappingMissingError) {
+          // Reconcile the mapping DIRECTLY (never re-run perform → never double-create [F6], never a false 'failed'
+          // [F5]). On persistent failure the helper parks the row 'reclaiming' (carrying the project id, id-ordered
+          // + non-supersedable) so the next tick re-claims it before any later same-number command and no newer
+          // same-deal round can retire it and orphan the project.
           log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} but the mapping wasn't persisted (${message}); reconciling the mapping directly`, "sync");
-          let reconciled = false;
-          for (let attempt = 1; attempt <= 3 && !reconciled; attempt++) {
-            try {
-              reconciled = await reconcileCreatedMappingMissing(error, input, callbackAt);
-            } catch (recErr: any) {
-              log(`[bidboard-create] Command ${row.id} mapping reconcile attempt ${attempt} failed (${recErr?.message || recErr})`, "sync");
-            }
-          }
-          if (reconciled) {
-            try { await markCreateCommandDone(row.id); } catch (bookErr: any) {
-              log(`[bidboard-create] Command ${row.id} mapping reconciled but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
-            }
-            processed += 1;
-            continue;
-          }
-          // F1: the created project is STILL unmapped after the immediate retries. Do NOT drain later commands — a
-          // same-projectNumber command would find no numberOwner and could adopt this unlinked project for the
-          // WRONG deal. Reset for the stale-reclaim to finish it and STOP this tick (break, not continue) so no
-          // later command runs while the project is unmapped. (The 10-min reclaim re-runs perform, whose mapping-
-          // first + exact-number adopt re-links + persists the mapping once the DB blip clears.)
-          log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} still unmapped after immediate retries; STOPPING the drain so no later command adopts it, leaving 'processing' for reclaim`, "sync");
-          try { await resetCreateCommandForReclaim(row.id, `created but mapping missing after retries: ${message}`); } catch { /* best-effort */ }
+          const result = await runMappingReconcile(row, error, input, callbackAt);
           processed += 1;
-          break;
+          if (result === "reconciled") continue;
+          break; // still unmapped — STOP the drain so no later same-number command runs while it is unmapped
+        }
+        // finding: an INDETERMINATE create ("Could not confirm project creation") — a project MAY exist but its id is
+        // UNKNOWN. This is NOT a genuine failure: do NOT emit a 'failed' callback (the CRM would be told the vote
+        // failed while Procore may hold the project). And do NOT auto re-drain it: re-running perform would call
+        // createBidBoardProjectFromDeal again, which CREATES on an inconclusive number lookup (indexing lag / Procore
+        // blip — the very conditions that produced the unconfirmed result), DUPLICATING the maybe-created project.
+        // Park it 'needs_manual' (not claimed, not supersedable, no callback) for human resolution — matching the
+        // override-approve path's indeterminate handling.
+        if (error instanceof UnconfirmedCreateError) {
+          log(`[bidboard-create] Command ${row.id} create is UNCONFIRMED (${message}); parking 'needs_manual' for resolution (no 'failed' callback — a project may exist; no auto re-drain — would risk a duplicate)`, "sync");
+          try { await markNeedsManual(row.id, `create unconfirmed, may exist; needs manual resolution: ${message}`); } catch { /* best-effort */ }
+          processed += 1;
+          continue;
         }
         // finding: if the project was ALREADY created (a mapping exists for this source deal) but a LATER step
         // threw — the 'created' callback persist, or a transient DB error — this is NOT a create failure. Emitting a
