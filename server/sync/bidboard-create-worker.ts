@@ -462,11 +462,23 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // 'processing' (from claimNext) so the stale-reclaim re-runs it and adopts via perform's mapping-first path
         // (which re-sends the 'created' callback), rather than marking it failed + reporting a false failure.
         let createdMapping: any = null;
-        try { createdMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId); } catch { /* best-effort */ }
-        if (createdMapping?.bidboardProjectId) {
-          log(`[bidboard-create] Command ${row.id} created project ${createdMapping.bidboardProjectId} but a post-create step failed (${message}); leaving 'processing' for reclaim`, "sync");
-          // finding: reset attempt_count so the callback-delivery recovery isn't capped by max_attempts.
-          try { await resetCreateCommandForReclaim(row.id, `created ${createdMapping.bidboardProjectId}; callback pending reclaim: ${message}`); } catch { /* best-effort */ }
+        let mappingLookupFailed = false;
+        try {
+          createdMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
+        } catch (lookupErr: any) {
+          // finding: the mapping LOOKUP itself errored (transient DB), so we CANNOT prove no project was created.
+          // Treating that as "no mapping -> genuine create failure" would risk a false 'failed' callback for a
+          // project that may exist. Keep the command recoverable instead.
+          mappingLookupFailed = true;
+          log(`[bidboard-create] Command ${row.id} mapping lookup failed (${lookupErr?.message || lookupErr}); treating as recoverable, not a create failure`, "sync");
+        }
+        if (createdMapping?.bidboardProjectId || mappingLookupFailed) {
+          const detail = createdMapping?.bidboardProjectId
+            ? `created project ${createdMapping.bidboardProjectId} but a post-create step failed`
+            : `mapping lookup indeterminate`;
+          log(`[bidboard-create] Command ${row.id} ${detail} (${message}); leaving 'processing' for reclaim`, "sync");
+          // finding: reset attempt_count so the callback-delivery / re-check recovery isn't capped by max_attempts.
+          try { await resetCreateCommandForReclaim(row.id, `${detail}; pending reclaim: ${message}`); } catch { /* best-effort */ }
           processed += 1;
           continue;
         }

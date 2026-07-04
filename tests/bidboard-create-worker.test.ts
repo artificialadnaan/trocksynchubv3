@@ -409,6 +409,18 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback
   });
 
+  it("[finding] a mapping-LOOKUP error (indeterminate) is recoverable, not a false create failure", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-lookup", sourceDealId: "d-lookup" }));
+    // perform threw, and the post-create mapping lookup ALSO errors -> we can't prove no project exists.
+    getDealMappingMock.mockRejectedValue(new Error("mapping lookup db blip"));
+    const perform = vi.fn(async () => { throw new Error("perform blew up"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // recoverable, not 'failed'
+    expect(rows[0].attempt_count).toBe(0);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback while indeterminate
+  });
+
   it("[finding] a created-but-UNMAPPED result is left 'processing' for reclaim (no false 'failed' callback)", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unmapped", sourceDealId: "d-unmapped" }));
     // The project was created but its sync mapping wasn't persisted -> a distinct RECOVERABLE error, NOT a failure.
