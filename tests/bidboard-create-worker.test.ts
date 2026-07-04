@@ -421,15 +421,29 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback while indeterminate
   });
 
-  it("[finding] a created-but-UNMAPPED result is left 'processing' for reclaim (no false 'failed' callback)", async () => {
+  it("[finding] a created-but-UNMAPPED result that STAYS unmapped (retries exhausted) is left 'processing' for reclaim", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unmapped", sourceDealId: "d-unmapped" }));
-    // The project was created but its sync mapping wasn't persisted -> a distinct RECOVERABLE error, NOT a failure.
+    // The mapping can't be persisted (every attempt throws) -> after the immediate retries, leave 'processing' for
+    // the reclaim. A RECOVERABLE error, NOT a failure: never a 'failed' callback for a project that exists.
     const perform = vi.fn(async () => { throw new CreatedMappingMissingError("mapping not persisted"); });
     await processBidboardCreateOutbox({ performImpl: perform as any });
     const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
-    expect(rows[0].status).toBe("processing"); // recoverable — the reclaim re-runs, adopts + persists the mapping
+    expect(rows[0].status).toBe("processing");
     expect(rows[0].attempt_count).toBe(0); // reset so it isn't capped by max_attempts
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // NO 'failed' callback for a project that exists
+    expect(perform.mock.calls.length).toBeGreaterThan(1); // proves the immediate mapping-recovery retry ran
+  });
+
+  it("[finding] a created-but-UNMAPPED result RECOVERS via an immediate retry (mapping persists) -> 'done'", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-recover", sourceDealId: "d-recover" }));
+    // First run: project created but mapping not persisted. Immediate retry: adopts + persists the mapping -> created.
+    const perform = vi.fn<any>()
+      .mockRejectedValueOnce(new CreatedMappingMissingError("mapping not persisted"))
+      .mockResolvedValue("created");
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("done"); // recovered immediately, before draining later commands
+    expect(perform).toHaveBeenCalledTimes(2);
   });
 
   it("a create failure whose FAILURE callback can't be enqueued stays retryable (processing), not terminal 'failed'", async () => {

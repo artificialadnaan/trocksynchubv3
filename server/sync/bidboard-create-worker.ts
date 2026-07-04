@@ -446,13 +446,37 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       } catch (error: any) {
         const message = error?.message || String(error);
         // finding: a create that SUCCEEDED but whose sync mapping wasn't persisted is RECOVERABLE, not a failure —
-        // the project exists, so never emit a 'failed' callback (which would report a false failure + let a
-        // same-number command adopt the unlinked project). Leave the row 'processing' + reset attempt_count so the
-        // stale-reclaim re-runs (adopts the existing project + persists the mapping) — and send NO callback. This is
-        // handled BEFORE the mapping check below because, by definition, this case has no mapping yet.
+        // the project exists, so never emit a 'failed' callback (which would report a false failure). Retry
+        // IMMEDIATELY (before draining later commands), NOT via the 10-min stale reclaim: the worker is serial, so
+        // until the mapping is written a NEXT same-projectNumber command would see no numberOwner and could adopt
+        // this unlinked project for the WRONG deal. perform is idempotent — the retry's mapping-first adopts the
+        // existing Procore project + persists the mapping this time (then sends the 'created' callback + markDone).
         if (error instanceof CreatedMappingMissingError) {
-          log(`[bidboard-create] Command ${row.id} created a project but the mapping wasn't persisted (${message}); leaving 'processing' for reclaim`, "sync");
-          try { await resetCreateCommandForReclaim(row.id, `created but mapping missing; pending reclaim: ${message}`); } catch { /* best-effort */ }
+          log(`[bidboard-create] Command ${row.id} created a project but the mapping wasn't persisted (${message}); retrying immediately to persist it`, "sync");
+          let settled = false;
+          for (let attempt = 1; attempt <= 3 && !settled; attempt++) {
+            try {
+              const retryOutcome = await perform(input, callbackAt);
+              settled = true;
+              if (retryOutcome === "failed") {
+                await markCreateCommandFailedResilient(row.id, "create refused on mapping-recovery retry");
+              } else {
+                try { await markCreateCommandDone(row.id); } catch (bookErr: any) {
+                  log(`[bidboard-create] Command ${row.id} mapping recovered but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
+                }
+              }
+            } catch (retryErr: any) {
+              if (retryErr instanceof CreatedMappingMissingError) continue; // still unmapped — try again
+              // A DIFFERENT error on retry — leave for reclaim (which re-runs perform later).
+              log(`[bidboard-create] Command ${row.id} mapping-recovery retry errored (${retryErr?.message || retryErr}); leaving 'processing' for reclaim`, "sync");
+              try { await resetCreateCommandForReclaim(row.id, `mapping-recovery retry errored: ${retryErr?.message || retryErr}`); } catch { /* best-effort */ }
+              settled = true;
+            }
+          }
+          if (!settled) {
+            log(`[bidboard-create] Command ${row.id} mapping still not persisted after immediate retries; leaving 'processing' for reclaim`, "sync");
+            try { await resetCreateCommandForReclaim(row.id, `created but mapping missing after retries: ${message}`); } catch { /* best-effort */ }
+          }
           processed += 1;
           continue;
         }
