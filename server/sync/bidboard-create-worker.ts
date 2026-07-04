@@ -201,11 +201,16 @@ export async function claimNextBidboardCreateCommand(): Promise<any | null> {
           -- cross-tick crash case.)
           AND NOT EXISTS (
             SELECT 1 FROM bidboard_create_outbox p
-             WHERE p.source_system = bidboard_create_outbox.source_system
-               AND p.source_deal_id = bidboard_create_outbox.source_deal_id
-               AND p.id < bidboard_create_outbox.id
+             WHERE p.id < bidboard_create_outbox.id
                AND p.status = 'processing'
                AND p.last_attempt_at >= NOW() - interval '${sql.raw(STALE_PROCESSING_INTERVAL)}'
+               -- same deal OR same project_number: a fresh in-flight create for either could own the maybe-created
+               -- Procore project this candidate would otherwise duplicate/mis-adopt (cross-deal number collisions
+               -- should be precluded by the DFW/ATL numbering, but guarding by number too is cheap defense-in-depth).
+               AND (
+                 (p.source_system = bidboard_create_outbox.source_system AND p.source_deal_id = bidboard_create_outbox.source_deal_id)
+                 OR (bidboard_create_outbox.project_number IS NOT NULL AND p.project_number = bidboard_create_outbox.project_number)
+               )
           )
         -- finding: drain by the immutable serial id (arrival order), NOT created_at. created_at is REFRESHED to
         -- NOW() when a still-pending/failed command is re-queued (Y4), which would reorder the FIFO drain and let a
@@ -624,13 +629,18 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   }
 
   // finding: createBidBoardProjectFromDeal can return success:true even when storage.createSyncMapping was caught +
-  // only logged, leaving NO source-deal/project mapping. That mapping is what the mapping-first adopt + ownership
-  // guards rely on — without it a same-number command could adopt this project for ANOTHER deal, or a retry for
-  // this deal can't find the project. Require the mapping to be persisted before sending the terminal 'created'
-  // callback; if it's missing, throw so the command stays recoverable (a retry re-creates/adopts + persists it)
-  // rather than committing a 'created' the guards can't protect.
-  const persistedMapping = await storage.getSyncMappingBySourceDealId(input.sourceSystem as any, input.sourceDealId);
-  if (!persistedMapping?.bidboardProjectId) {
+  // only logged, leaving NO mapping for THIS project. That mapping is what the mapping-first adopt + ownership
+  // guards rely on. Verify by the JUST-CREATED project id (result.projectId) + owner, NOT by source deal: this repo
+  // tolerates legacy DUPLICATE sync_mappings rows per source deal, so a by-sourceDealId lookup could return an OLDER
+  // row and wrongly "prove" the new project is mapped when it isn't — we'd then send a 'created' + mark done while
+  // the new project stays unmapped and invisible to the guards. Require a mapping FOR result.projectId owned by this
+  // command; if it's missing (or owned by another deal), throw so the command stays recoverable (the reconcile then
+  // persists it / routes an owner-mismatch to manual) rather than committing a 'created' the guards can't protect.
+  const persistedMapping = await storage.getSyncMappingByBidboardProjectId(result.projectId);
+  const persistedForThisDeal = persistedMapping?.bidboardProjectId
+    && persistedMapping.sourceSystem === input.sourceSystem
+    && persistedMapping.sourceDealId === input.sourceDealId;
+  if (!persistedForThisDeal) {
     // Distinct RECOVERABLE error (not a create failure). Carry the created project id + the exact mapping row so the
     // drain can persist the mapping DIRECTLY (storage.createSyncMapping) instead of re-running this Playwright
     // create — a re-run could create a SECOND project if the exact-number lookup transiently errors.
@@ -750,9 +760,18 @@ async function runMappingReconcile(
     }
   }
   if (outcome === "reconciled") {
-    try { await markCreateCommandDone(row.id); } catch (bookErr: any) {
-      log(`[bidboard-create] Command ${row.id} mapping reconciled but markDone failed (${bookErr?.message || bookErr}); leaving for reclaim`, "sync");
+    // The mapping + 'created' callback are done; only the DONE bookkeeping remains. Retry it, and if it still fails
+    // (finding) RESET attempt_count so the stale-reclaim isn't capped: otherwise a markDone failure on the LAST
+    // allowed attempt would strand the row 'processing' with attempt_count >= max_attempts — never re-claimed and
+    // (enqueue won't refresh a processing row) unrecoverable if the enqueued callback later dies. Reset lets the
+    // reclaim re-run perform → mapping-first adopt → re-send callback + markDone, uncapped.
+    let done = false;
+    for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+      try { await markCreateCommandDone(row.id); done = true; } catch (bookErr: any) {
+        if (attempt === 3) log(`[bidboard-create] Command ${row.id} mapping reconciled but markDone failed after 3 tries (${bookErr?.message || bookErr}); resetting attempts for uncapped reclaim`, "sync");
+      }
     }
+    if (!done) { try { await resetCreateCommandForReclaim(row.id, `mapping reconciled + callback sent; markDone pending reclaim`); } catch { /* best-effort */ } }
     return "reconciled";
   }
   if (outcome === "owned_by_other") {
@@ -776,7 +795,8 @@ async function runMappingReconcile(
   // __recoveredProposalId). If it silently failed, the row would drop to bare 'processing' with no marker — then the
   // stale-reclaim would route it to perform (not reconcile) and could DUPLICATE the created project. Retry so a
   // transient blip can't drop it.
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  let parked = false;
+  for (let attempt = 1; attempt <= 3 && !parked; attempt++) {
     try {
       if (exhausted) {
         if (attempt === 1) log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} but mapping is UNRECOVERABLE after ${row.attempt_count} attempts; escalating to 'needs_manual'`, "sync");
@@ -784,9 +804,29 @@ async function runMappingReconcile(
       } else {
         await markReclaiming(row.id, error.bidboardProjectId, proposalId, `created but mapping missing after retries: ${error.message}`);
       }
-      break;
+      parked = true;
     } catch (parkErr: any) {
-      if (attempt === 3) log(`[bidboard-create] Command ${row.id} could not park recovery row after 3 tries (${parkErr?.message || parkErr}); left 'processing' — sibling guard degraded until stale-reclaim re-parks`, "sync");
+      if (attempt === 3) log(`[bidboard-create] Command ${row.id} could not park recovery row after 3 tries (${parkErr?.message || parkErr}); attempting status-only fallback`, "sync");
+    }
+  }
+  if (!parked) {
+    // finding: the marker write (with jsonb_set) still failed. As a LAST RESORT do a status-only write to
+    // 'needs_manual' — no jsonb, so it's the simplest possible UPDATE (likeliest to land if anything can), and it
+    // takes the row OUT of the auto-reclaim (needs_manual is never claimed). That prevents the worse failure mode:
+    // a bare-'processing' row being stale-reclaimed into a full perform re-run that DUPLICATES the created project.
+    // The project id is preserved in last_error for the operator. (If even this can't land, the DB is fully down and
+    // the worker makes no progress at all, so no reclaim/create happens either.)
+    try {
+      const db = await getDb();
+      await db.execute(sql`
+        UPDATE bidboard_create_outbox
+           SET status = 'needs_manual', processed_at = NOW(),
+               last_error = ${`created project ${error.bidboardProjectId} but recovery marker unpersistable; needs manual resolution (project id ${error.bidboardProjectId})`}
+         WHERE id = ${row.id}
+      `);
+      log(`[bidboard-create] Command ${row.id} parked 'needs_manual' via status-only fallback (marker not persisted); project ${error.bidboardProjectId} needs manual mapping`, "sync");
+    } catch (finalErr: any) {
+      log(`[bidboard-create] Command ${row.id} could not park even status-only (${finalErr?.message || finalErr}); left 'processing' — DB appears down so the worker will not reclaim/create until it recovers`, "sync");
     }
   }
   return "blocked";
@@ -940,8 +980,17 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
           continue;
         }
         // The failed callback is delivered — mark terminal RESILIENTLY so a bookkeeping blip can't leave the row
-        // create-capable for a reclaim (finding).
-        await markCreateCommandFailedResilient(row.id, message);
+        // create-capable for a reclaim (finding). finding: do NOT ignore a false return — if all 3 status writes
+        // fail (an extended DB outage right after the callback insert), the row stays 'processing' and a later
+        // stale-reclaim could re-run perform and create a project even though the CRM was already told 'failed'.
+        // Log it CRITICALLY so it's visible. (A total DB outage stalls the whole worker — claimNext can't UPDATE to
+        // 'processing' either — so the reclaim-after-failed needs an intermittent blip that clears before the next
+        // tick; the 3-retry covers transient blips. A fully atomic callback+status transition would close the
+        // residual but requires threading a tx through enqueueFailedCallback — deferred for this narrow tail.)
+        const failedMarked = await markCreateCommandFailedResilient(row.id, message);
+        if (!failedMarked) {
+          log(`[bidboard-create] CRITICAL: Command ${row.id} delivered a 'failed' callback but could NOT mark the row terminal after retries; it may be stale-reclaimed and re-run — manual check needed for deal ${input.sourceDealId}`, "sync");
+        }
         processed += 1;
         continue;
       }

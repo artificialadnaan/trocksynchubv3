@@ -61,8 +61,12 @@ describe("performCreateFromRfpVote (create logic)", () => {
     // A successful create PERSISTS the source-deal mapping (as the real createBidBoardProjectFromDeal does via
     // storage.createSyncMapping) — simulate that so perform's post-create mapping check (finding) passes.
     createBidBoardMock.mockReset();
-    createBidBoardMock.mockImplementation(async () => {
-      getDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" } as any);
+    createBidBoardMock.mockImplementation(async (args: any) => {
+      // A successful create PERSISTS the mapping for the CREATED project id, owned by THIS deal — the post-create
+      // check now verifies by project id + owner (not by source deal), so set getSyncMappingByBidboardProjectId too.
+      const mapping = { bidboardProjectId: "999", procoreProjectNumber: "TR-1001", sourceSystem: args?.sourceSystem ?? "trock_crm", sourceDealId: args?.sourceDealId ?? "crm-deal-1" };
+      getDealMappingMock.mockResolvedValue(mapping as any);
+      getMappingByBidIdMock.mockResolvedValue(mapping as any);
       return { success: true, projectId: "999" } as any;
     });
     enqueueBidboardCallbackMock.mockReset(); enqueueBidboardCallbackMock.mockResolvedValue({ id: 1 } as any);
@@ -168,6 +172,20 @@ describe("performCreateFromRfpVote (create logic)", () => {
     createBidBoardMock.mockResolvedValue({ success: false, error: "Could not confirm project creation" } as any);
     await expect(performCreateFromRfpVote(input())).rejects.toBeInstanceOf(UnconfirmedCreateError);
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no callback for an indeterminate outcome
+  });
+
+  it("[I4] the post-create check verifies by the CREATED project id + owner, not any source-deal mapping row", async () => {
+    createBidBoardMock.mockReset();
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any); // create OK
+    getDealMappingMock.mockResolvedValue(undefined); // no mapping-first adopt
+    // (a) project 999's mapping was NOT persisted -> must stay recoverable, NOT falsely report created
+    getMappingByBidIdMock.mockResolvedValue(undefined);
+    await expect(performCreateFromRfpVote(input())).rejects.toBeInstanceOf(CreatedMappingMissingError);
+    // (b) project 999 got mapped to ANOTHER deal -> also not accepted as ours (routes to owner-mismatch recovery)
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any);
+    getMappingByBidIdMock.mockResolvedValue({ bidboardProjectId: "999", sourceSystem: "trock_crm", sourceDealId: "someone-else" } as any);
+    await expect(performCreateFromRfpVote(input())).rejects.toBeInstanceOf(CreatedMappingMissingError);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // never a 'created' for an unverified/other-owned project
   });
 
   it("[P2-A/P2-C] REFUSES to create when a SIBLING outbox row for the same deal is in recovery (blocks a duplicate)", async () => {
@@ -711,13 +729,16 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // NO 'created' callback misattributing another deal's project
   });
 
-  it("[H3] claimNext does NOT jump to a later same-deal row while a FRESH lower-id 'processing' row is in flight (but a DIFFERENT deal is free)", async () => {
-    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p1", sourceDealId: "d-block" }));
-    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p2", sourceDealId: "d-block" }));
-    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-other", sourceDealId: "d-free" }));
+  it("[H3/I1] claimNext does NOT jump past a FRESH lower-id 'processing' row for the same deal OR project number (a truly-unrelated deal is free)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p1", sourceDealId: "d-block", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p2", sourceDealId: "d-block", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    // A different deal that SHARES the in-flight project number must ALSO be blocked (I1: same-number defense).
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-samenum", sourceDealId: "d-samenum", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    // A truly-unrelated deal (different deal AND different number) is free to drain.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-other", sourceDealId: "d-free", deal: { name: "d", projectNumber: "TR-9999", projectType: "9", workflowRoute: "normal" } }));
     // round 1 (lowest id) is mid-create (fresh processing); its maybe-created project is invisible to the guards.
     await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW() WHERE source_event_id='e-p1'`);
-    // claimNext skips the same-deal round 2 (blocked behind the in-flight round 1) and takes the DIFFERENT deal instead.
+    // claimNext skips round 2 (same deal) AND e-samenum (same number), taking only the unrelated deal/number.
     expect((await claimNextBidboardCreateCommand())?.source_event_id).toBe("e-other");
     // once round 1 goes stale (crashed), it (the lower id) is reclaimed first — NOT round 2.
     await pg.query(`UPDATE bidboard_create_outbox SET last_attempt_at=NOW() - interval '11 minutes' WHERE source_event_id='e-p1'`);
