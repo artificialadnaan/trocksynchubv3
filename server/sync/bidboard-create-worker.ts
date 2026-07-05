@@ -327,11 +327,20 @@ async function markCreateCommandFailedResilient(id: number, error: string): Prom
 // than max_attempts reclaims would never deliver the 'created' callback without a manual same-sourceEventId re-post,
 // leaving the accepted vote with a BidBoard project but no CRM notification. The row stays 'processing' with its
 // claim-time last_attempt_at, so it reclaims on the next stale window.
-async function resetCreateCommandForReclaim(id: number, note: string): Promise<void> {
+// finding (Macroscope): RESILIENT — retry the reset. If it were single-attempt best-effort and threw on the row's
+// FINAL claim (attempt_count == max_attempts), the row would strand 'processing' forever (claimNext needs
+// attempt_count < max_attempts; enqueue won't refresh a 'processing' row). Retrying clears a transient blip so the
+// row reliably lands reclaimable. Returns false only if every attempt fails (an extended DB outage, during which
+// claimNext can't reclaim either); callers escalate that (e.g. to needs_manual) rather than strand silently.
+async function resetCreateCommandForReclaim(id: number, note: string): Promise<boolean> {
   const db = await getDb();
-  await db.execute(sql`
-    UPDATE bidboard_create_outbox SET attempt_count = 0, last_error = ${note} WHERE id = ${id}
-  `);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await db.execute(sql`UPDATE bidboard_create_outbox SET attempt_count = 0, last_error = ${note} WHERE id = ${id}`);
+      return true;
+    } catch { /* retry a transient blip */ }
+  }
+  return false;
 }
 
 // finding (block later commands until recovery resolves, WITHOUT being supersede-killable): a command that created
@@ -1181,7 +1190,20 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
           await deliverFailedCallbackAndMarkTerminal(input, message, callbackAt, row.id);
         } catch (deliverErr: any) {
           log(`[bidboard-create] Command ${row.id} failed; atomic failed-callback+terminal did not land (${deliverErr?.message || deliverErr}); leaving 'processing' for reclaim`, "sync");
-          try { await resetCreateCommandForReclaim(row.id, `create failed; failed callback + terminal pending reclaim: ${message}`); } catch { /* best-effort */ }
+          // finding (Macroscope): the reset is now RESILIENT (retries internally). If it STILL can't land (extended DB
+          // outage) the row would strand 'processing' at max_attempts (no terminal, no callback — claimNext needs
+          // attempt < max, enqueue won't refresh a processing row). As a last resort SURFACE it as 'needs_manual' for
+          // an operator (the CRM wasn't auto-notified of the failure), rather than silently stranding it. CRITICAL-log
+          // if even that can't write (DB fully down — claimNext can't reclaim either, so nothing re-runs until it heals).
+          const reset = await resetCreateCommandForReclaim(row.id, `create failed; failed callback + terminal pending reclaim: ${message}`);
+          if (!reset) {
+            let surfaced = false;
+            for (let attempt = 1; attempt <= 3 && !surfaced; attempt++) {
+              try { await markNeedsManual(row.id, `create failed but neither the failed-callback+terminal delivery nor the reclaim reset could land; needs manual resolution: ${message}`); surfaced = true; }
+              catch { /* retry a transient blip */ }
+            }
+            if (!surfaced) log(`[bidboard-create] CRITICAL: Command ${row.id} failed but could NOT deliver a terminal callback, reset for reclaim, OR surface needs_manual — DB appears down; manual check needed for deal ${input.sourceDealId}`, "sync");
+          }
           processed += 1;
           continue;
         }

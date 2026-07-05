@@ -688,6 +688,28 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows[0].attempt_count).toBe(0);
   });
 
+  it("[finding Macroscope] a genuine failure whose deliver AND reclaim-reset both fail is SURFACED as needs_manual (not silently stranded)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-strand", sourceDealId: "d-strand" }));
+    const realDb = dbHolder.db;
+    // deliverFailedCallbackAndMarkTerminal's tx throws (nothing lands) AND the reclaim-reset write throws all retries;
+    // markNeedsManual (status='needs_manual') delegates to the real db and succeeds -> the row is surfaced, not stranded.
+    dbHolder.db = {
+      transaction: async (_fn: any) => { throw new Error("tx blip"); },
+      execute: async (q: any) => {
+        if (/SET attempt_count = 0/.test(JSON.stringify(q))) throw new Error("reset blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => { throw new Error("genuine boom"); }); // genuine failure, no project created
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const row = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows[0] as any;
+    expect(row.status).toBe("needs_manual"); // last-resort surfaced for an operator, NOT silently stranded 'processing'
+  });
+
   it("[finding J] a perform() that RETURNS 'failed' (pre-create refusal) marks the command 'failed', not 'done'", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-refuse", sourceDealId: "d-refuse" }));
     // perform took a pre-create terminal branch (ineligible / conflict / ownership) — it already sent a 'failed'
