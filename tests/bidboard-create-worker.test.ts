@@ -763,27 +763,48 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback while indeterminate
   });
 
-  it("[F1/F5/F15] a created-but-UNMAPPED result that STAYS unmapped STOPS the drain + parks 'reclaiming' (blocks later, keeps project id)", async () => {
-    // The first (lower-id) command's project 999 is created but its mapping write keeps failing. A later command
-    // must NOT drain while 999 is unmapped — it could adopt the unlinked project for the wrong deal (F1). Reconcile
-    // is DIRECT (no perform re-run); on exhaustion the row is RECOVERABLE — never a 'failed' callback (the project
-    // exists, F5) — and is parked at status 'reclaiming' (NOT 'pending', so a newer same-deal round can't supersede
-    // it), carrying the created project id in its payload so the next tick reconciles by id (F15).
-    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unmapped", sourceDealId: "d-unmapped" }));
-    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-after", sourceDealId: "d-after" }));
+  it("[F1/F5/F15 + Macroscope] a created-but-UNMAPPED result parks 'reclaiming' + keeps the project id; the drain CONTINUES to an unrelated command (no starvation)", async () => {
+    // The first (lower-id) command's project 999 is created but its mapping write keeps failing. Reconcile is DIRECT
+    // (no perform re-run); the row is RECOVERABLE — never a 'failed' callback since the project exists (F5) — and is
+    // parked 'reclaiming' (NOT 'pending', so a newer same-deal round can't supersede it), carrying the project id for
+    // cross-tick reconcile (F15). finding (Macroscope): the drain must NOT stop here — an UNRELATED later command
+    // (different deal AND number) drains in the SAME pass. (A same-deal/same-number command would instead be refused
+    // by perform's sibling-recovery guard — covered by the G3/P2 tests — so an unreconciled row can't duplicate.)
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unmapped", sourceDealId: "d-unmapped", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-after", sourceDealId: "d-after", deal: { name: "d", projectNumber: "TR-9999", projectType: "9", workflowRoute: "normal" } }));
     createSyncMappingMock.mockRejectedValue(new Error("mapping write blip")); // the direct reconcile can't land
     const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-unmapped", bidboardProjectId: "999" } as any);
-    const perform = vi.fn(async () => { throw err; });
+    const perform = vi.fn(async (inp: any) => {
+      if (inp.sourceDealId === "d-unmapped") throw err; // first row: created-but-unmapped
+      return "created" as const; // the unrelated later row drains successfully
+    });
     await processBidboardCreateOutbox({ performImpl: perform as any });
     const rows = (await pg.query(`SELECT source_event_id, status, payload FROM bidboard_create_outbox`)).rows as any[];
     const unmapped = rows.find((r) => r.source_event_id === "e-unmapped");
     const after = rows.find((r) => r.source_event_id === "e-after");
-    expect(unmapped.status).toBe("reclaiming"); // distinct, non-supersedable, id-ordered-blocking status
+    expect(unmapped.status).toBe("reclaiming"); // parked, non-supersedable, retried across ticks (backoff)
     expect(unmapped.payload.__recoveredProjectId).toBe("999"); // project id persisted so it reconciles across ticks
-    expect(after.status).toBe("pending"); // F1: drain STOPPED — the later command was NOT run while unmapped
+    expect(after.status).toBe("done"); // finding: the UNRELATED later command DRAINED (not starved behind the reclaiming row)
     expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no 'failed' callback for a project that exists (F5)
-    expect(perform).toHaveBeenCalledTimes(1); // only the first row ran; reconcile is DIRECT, not a perform re-run
+    expect(perform).toHaveBeenCalledTimes(2); // both rows ran perform once; the reclaim is DIRECT (no perform re-run)
     expect(createSyncMappingMock).toHaveBeenCalled(); // proves the direct mapping reconcile was attempted
+  });
+
+  it("[finding Macroscope] a stuck 'reclaiming' row (reconcile still failing) does NOT starve a later unrelated command", async () => {
+    // A row parked 'reclaiming' from a prior tick whose reconcile keeps failing, plus an unrelated later command. The
+    // drain reconcile-attempts the reclaiming row (by its stored id, no perform), then CONTINUES to the unrelated
+    // command (id-ASC claim order would otherwise re-serve the stuck low-id row every tick and starve everything).
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-stuck", sourceDealId: "d-stuck", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='reclaiming', next_attempt_at=NOW() - interval '1 minute', payload = jsonb_set(payload, '{__recoveredProjectId}', to_jsonb('999'::text)) WHERE source_event_id='e-stuck'`);
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fresh", sourceDealId: "d-fresh", deal: { name: "d", projectNumber: "TR-9999", projectType: "9", workflowRoute: "normal" } }));
+    getMappingByBidIdMock.mockResolvedValue(undefined); // 999 still unmapped
+    createSyncMappingMock.mockRejectedValue(new Error("mapping still failing")); // the reconcile can't land
+    const perform = vi.fn(async () => "created" as const); // the unrelated fresh command creates
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-stuck").status).toBe("reclaiming"); // still parked (retry backoff)
+    expect(rows.find((r) => r.source_event_id === "e-fresh").status).toBe("done"); // drained past the stuck row
+    expect(perform).toHaveBeenCalledTimes(1); // only the fresh command ran perform; the reclaiming row reconciled directly
   });
 
   it("[P2-A] a newer same-deal round does NOT supersede a 'reclaiming' recovery row (no orphan/duplicate)", async () => {
@@ -863,6 +884,25 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
     const outcome = await performCreateFromRfpVote(input({ sourceDealId: "deal-B", sourceEventId: "e-B", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
     expect(outcome).toBe("failed"); // refused: a sibling recovery row owns TR-1001
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+  });
+
+  it("[finding Macroscope] the sibling-recovery guard matches a CROSS-SYSTEM row reusing the same project number (system-agnostic number branch)", async () => {
+    // A prior HUBSPOT round is 'reclaiming' with project_number TR-1001. A trock_crm create reusing TR-1001 must be
+    // refused — a procore project_number is global, so the number branch must NOT be scoped to the caller's system
+    // (mirrors claimNextBidboardCreateCommand's system-agnostic number exclusion). Before the fix the source_system
+    // filter scoped the whole predicate, so the cross-system sibling was missed and a duplicate could be created.
+    await pg.query(`INSERT INTO bidboard_create_outbox (source_system, source_deal_id, source_event_id, project_number, payload, status) VALUES ('hubspot','hs-deal','e-hs','TR-1001','{}'::jsonb,'reclaiming')`);
+    dbHolder.db = drizzle(pg as any) as any; // real db so findSiblingRecoveryRow queries the outbox
+    createBidBoardMock.mockReset();
+    getBidboardDealMappingMock.mockResolvedValue(undefined);
+    getMappingMock.mockResolvedValue(undefined);
+    getRfpByNumMock.mockResolvedValue(undefined); getRfpBySourceMock.mockResolvedValue(undefined);
+    checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
+    getAutomationConfigMock.mockResolvedValue({ value: { companyId: "42" } } as any);
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
+    const outcome = await performCreateFromRfpVote(input({ sourceSystem: "trock_crm", sourceDealId: "crm-deal", sourceEventId: "e-crm", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    expect(outcome).toBe("failed"); // refused: a CROSS-SYSTEM sibling recovery row owns TR-1001
     expect(createBidBoardMock).not.toHaveBeenCalled();
   });
 

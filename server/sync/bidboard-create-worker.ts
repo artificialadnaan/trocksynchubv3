@@ -210,6 +210,13 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
 // 202-accepted vote would sit with no project/callback — so a processing row untouched for >10m (well past any
 // real create) is picked back up, bounded by attempt_count < max_attempts.
 const STALE_PROCESSING_INTERVAL = "10 minutes";
+// Backoff before a parked 'reclaiming' row is re-claimed for another mapping-reconcile attempt. finding (Macroscope):
+// the drain now CONTINUES past an unreconciled row (see the drain loop) instead of breaking, so the reclaiming row
+// must NOT be immediately re-claimable within the SAME drain pass — otherwise it would be re-claimed each loop
+// iteration and burn through all max_attempts in one tick (rapid escalation to needs_manual on a transient blip).
+// A short backoff (> the drain's wall-clock) spaces retries across ticks (transient-friendly) while letting the drain
+// serve later unrelated commands in the same pass.
+const RECLAIM_RETRY_BACKOFF = "30 seconds";
 export async function claimNextBidboardCreateCommand(): Promise<any | null> {
   const db = await getDb();
   const result = await db.execute(sql`
@@ -320,9 +327,12 @@ async function resetCreateCommandForReclaim(id: number, note: string): Promise<v
 // newer same-deal round (which would orphan the real project + let the newer round create a duplicate). Park it at a
 // DISTINCT status 'reclaiming' — NOT 'pending' — so the enqueue supersede (scoped to status='pending') can never
 // touch it, and persist the created project id INTO THE PAYLOAD so it survives across ticks (the drain reconciles by
-// that id rather than re-running the Playwright create). claimNext also claims 'reclaiming' (by ascending id), so
-// this low-id row is re-claimed before any later same-number command until the mapping reconciles. attempt_count is
-// NOT reset — bounded by max_attempts, then it sits 'reclaiming' for manual resolution rather than wedging forever.
+// that id rather than re-running the Playwright create). claimNext also claims 'reclaiming' (by ascending id) so the
+// mapping keeps getting reconciled across ticks; later same-deal/same-number commands are blocked from creating a
+// duplicate by the sibling-recovery guard in performCreateFromRfpVote (NOT by starving the drain). attempt_count is
+// NOT reset — bounded by max_attempts, then it escalates to 'needs_manual' rather than wedging forever. next_attempt_at
+// gets a RECLAIM_RETRY_BACKOFF so the drain that just parked it can CONTINUE to later commands without immediately
+// re-claiming this same row (finding Macroscope) — retries are spaced across ticks, not burned in one pass.
 // finding: also persist the RFP proposalId alongside the project id. The cross-tick reclaim rebuilds the mapping via
 // buildBidboardMappingPayload(input, recoveredProjectId, ...); without the stored proposalId that reconstruction
 // drops metadata.proposalId, which downstream portfolio automation reads to build BidBoard detail URLs. Stamp both
@@ -336,7 +346,8 @@ async function markReclaiming(id: number, bidboardProjectId: string, proposalId:
     : sql`jsonb_set(payload, '{__recoveredProjectId}', to_jsonb(${bidboardProjectId}::text))`;
   await db.execute(sql`
     UPDATE bidboard_create_outbox
-       SET status = 'reclaiming', next_attempt_at = NOW(), last_error = ${note}, payload = ${payloadExpr}
+       SET status = 'reclaiming', next_attempt_at = NOW() + interval '${sql.raw(RECLAIM_RETRY_BACKOFF)}',
+           last_error = ${note}, payload = ${payloadExpr}
      WHERE id = ${id}
   `);
 }
@@ -369,21 +380,23 @@ async function markNeedsManual(id: number, note: string, bidboardProjectId?: str
 // maybe-created project), other than this command itself, that would collide with a fresh create. Match on EITHER
 // the same source deal OR the same project_number: an unmapped recovery project is invisible to the sync-mapping
 // ownership guard, so a later create for the same deal (revised number) OR any command reusing that project_number
-// would DUPLICATE / mis-adopt it. (Cross-deal number collisions should be precluded by the DFW/ATL numbering, but
-// guarding by number too is cheap defense-in-depth against a reused/legacy number.) Used by the sibling-recovery
-// guard in performCreateFromRfpVote to refuse the create until the prior round is resolved — independent of drain
-// order / attempt_count.
+// would DUPLICATE / mis-adopt it. finding: the same-DEAL branch is scoped to the same source_system (a source_deal_id
+// is only meaningful within its system), but the same-NUMBER branch is SYSTEM-AGNOSTIC — a procore project_number is
+// global, and this MUST mirror claimNextBidboardCreateCommand's exclusion (which gates any-system same-number rows) or
+// a cross-system row reusing that number would slip past this guard and duplicate the project. (Cross-deal/-system
+// number collisions should be precluded by the DFW/ATL numbering, but guarding by number is cheap defense-in-depth
+// against a reused/legacy number.) Used by the sibling-recovery guard in performCreateFromRfpVote to refuse the create
+// until the prior round is resolved — independent of drain order / attempt_count.
 async function findSiblingRecoveryRow(input: CreateFromRfpInput): Promise<{ status: string; recovered_project_id: string | null } | null> {
   const db = await getDb();
   const projectNumber = input.deal.projectNumber ?? null;
   const res: any = await db.execute(sql`
     SELECT status, payload->>'__recoveredProjectId' AS recovered_project_id
       FROM bidboard_create_outbox
-     WHERE source_system = ${input.sourceSystem}
-       AND source_event_id <> ${input.sourceEventId}
+     WHERE source_event_id <> ${input.sourceEventId}
        AND status IN ('reclaiming', 'needs_manual')
        AND (
-         source_deal_id = ${input.sourceDealId}
+         (source_system = ${input.sourceSystem} AND source_deal_id = ${input.sourceDealId})
          OR (${projectNumber}::text IS NOT NULL AND project_number = ${projectNumber})
        )
      LIMIT 1
@@ -1005,7 +1018,8 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       // finding: a re-claimed 'reclaiming' row already created a Procore project (id persisted in the payload) whose
       // mapping wasn't yet written. Reconcile that mapping DIRECTLY by the stored id — NEVER re-run perform, which
       // could create a SECOND project when the exact-number lookup is inconclusive. On persistent failure it stays
-      // 'reclaiming' (re-claimed first by id order, blocking later same-number commands) until it resolves.
+      // 'reclaiming' (retried across ticks after a backoff); later same-deal/same-number commands are blocked from
+      // duplicating it by the sibling-recovery guard in perform, so the drain can CONTINUE past it (finding Macroscope).
       const recoveredProjectId = (row.payload as any)?.__recoveredProjectId as string | undefined;
       if (recoveredProjectId) {
         // Carry the proposalId stamped by markReclaiming so the rebuilt mapping keeps metadata.proposalId (downstream
@@ -1019,8 +1033,12 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         log(`[bidboard-create] Command ${row.id} re-claimed 'reclaiming' project ${recoveredProjectId}; reconciling its mapping (no re-create)`, "sync");
         const result = await runMappingReconcile(row, recoveryErr, input, callbackAt);
         processed += 1;
-        if (result === "reconciled") continue;
-        break; // still unmapped — stop so no later same-number command runs while it is unmapped
+        // finding (Macroscope): CONTINUE rather than break — the row is parked ('reclaiming' with a retry backoff, or
+        // escalated 'needs_manual'), and any later same-deal/same-number command is refused by perform's
+        // sibling-recovery guard, so an unreconciled row can't duplicate the project. Breaking here would let this
+        // low-id row (re-claimed first every tick) starve ALL later commands — including unrelated deals — until it
+        // is manually resolved. Continue so unrelated commands drain.
+        continue;
       }
 
       // finding AA1: keep the CREATE and the DONE bookkeeping in SEPARATE try/catches. A create failure (perform
@@ -1048,8 +1066,11 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
           log(`[bidboard-create] Command ${row.id} created project ${error.bidboardProjectId} but the mapping wasn't persisted (${message}); reconciling the mapping directly`, "sync");
           const result = await runMappingReconcile(row, error, input, callbackAt);
           processed += 1;
-          if (result === "reconciled") continue;
-          break; // still unmapped — STOP the drain so no later same-number command runs while it is unmapped
+          // finding (Macroscope): CONTINUE, don't break — the row is parked ('reclaiming' w/ backoff, or
+          // 'needs_manual'), and the sibling-recovery guard in perform refuses any later same-deal/same-number create,
+          // so continuing can't duplicate the unmapped project. Breaking would starve every later command (incl.
+          // unrelated deals) behind this low-id row until it's manually resolved.
+          continue;
         }
         // finding: an INDETERMINATE create ("Could not confirm project creation") — a project MAY exist but its id is
         // UNKNOWN. This is NOT a genuine failure: do NOT emit a 'failed' callback (the CRM would be told the vote
