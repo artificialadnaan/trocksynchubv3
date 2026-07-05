@@ -1008,6 +1008,31 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(await claimNextBidboardCreateCommand()).toMatchObject({ source_event_id: "e-unc2" });
   });
 
+  it("[finding Macroscope] an UNCONFIRMED create whose needs_manual park keeps failing is PINNED unclaimable so a stale-reclaim can't re-run perform (no duplicate)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unc-stuck", sourceDealId: "d-unc-stuck" }));
+    const realDb = dbHolder.db;
+    // Make EVERY needs_manual status write fail; the pin (attempt_count = max_attempts) write delegates to the real db.
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/status = 'needs_manual'/.test(JSON.stringify(q))) throw new Error("needs_manual write blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => { throw new UnconfirmedCreateError("Could not confirm project creation"); });
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const row = (await pg.query(`SELECT status, attempt_count, max_attempts FROM bidboard_create_outbox`)).rows[0] as any;
+    expect(row.status).toBe("processing"); // couldn't reach needs_manual...
+    expect(row.attempt_count).toBe(row.max_attempts); // ...but PINNED unclaimable (attempt_count = max_attempts)
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // NO 'failed' callback — a project may exist
+    // Even once the 10-min stale window passes, claimNext must NOT reclaim it (attempt_count >= max) -> no perform re-run.
+    await pg.query(`UPDATE bidboard_create_outbox SET last_attempt_at = NOW() - interval '11 minutes'`);
+    expect(await claimNextBidboardCreateCommand()).toBeNull(); // pinned -> never re-claimed -> perform never re-runs
+  });
+
   it("[F12] claimNext drains by immutable id, not refreshed created_at (preserves arrival order)", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ord1", sourceDealId: "d-ord1" }));
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ord2", sourceDealId: "d-ord2" }));

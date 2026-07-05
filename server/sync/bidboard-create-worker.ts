@@ -389,6 +389,24 @@ async function markNeedsManual(id: number, note: string, bidboardProjectId?: str
   `);
 }
 
+// finding (Macroscope): last-resort protection when a needs_manual park write keeps failing for an UnconfirmedCreate.
+// Pin the row UNCLAIMABLE by setting attempt_count = max_attempts so claimNextBidboardCreateCommand's
+// `attempt_count < max_attempts` gate skips it — the row can then never be stale-reclaimed into a full perform re-run,
+// which for an unconfirmed create could DUPLICATE the maybe-created project (the sibling-recovery guard doesn't cover a
+// 'processing' row). It's a MINIMAL UPDATE (likeliest to land if anything can); the row sits 'processing' at
+// max_attempts for an operator. Returns true iff it landed. (If even this can't write, the DB is down — claimNext
+// can't reclaim either, so no re-run happens until it recovers.)
+async function markCommandUnclaimable(id: number, note: string): Promise<boolean> {
+  const db = await getDb();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await db.execute(sql`UPDATE bidboard_create_outbox SET attempt_count = max_attempts, last_error = ${note} WHERE id = ${id}`);
+      return true;
+    } catch { /* retry a transient blip */ }
+  }
+  return false;
+}
+
 // A sibling outbox row in a recovery state ('reclaiming' = created-but-unmapped project; 'needs_manual' = unconfirmed
 // maybe-created project), other than this command itself, that would collide with a fresh create. Match on EITHER
 // the same source deal OR the same project_number: an unmapped recovery project is invisible to the sync-mapping
@@ -1105,11 +1123,19 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
           let parked = false;
           for (let attempt = 1; attempt <= 3 && !parked; attempt++) {
             try { await markNeedsManual(row.id, `create unconfirmed, may exist; needs manual resolution: ${message}`); parked = true; }
-            catch (parkErr: any) { if (attempt === 3) log(`[bidboard-create] Command ${row.id} could not park 'needs_manual' after 3 tries (${parkErr?.message || parkErr}); STOPPING the drain`, "sync"); }
+            catch (parkErr: any) { if (attempt === 3) log(`[bidboard-create] Command ${row.id} could not park 'needs_manual' after 3 tries (${parkErr?.message || parkErr}); pinning unclaimable`, "sync"); }
           }
           processed += 1;
           if (parked) continue;
-          break; // unguarded — stop so no later command runs before this is safely parked
+          // finding (Macroscope): markNeedsManual failed, so the row is still 'processing' — a stale-reclaim would
+          // re-run perform and could DUPLICATE the maybe-created project (sibling-recovery doesn't cover 'processing').
+          // As a last resort PIN it unclaimable (attempt_count = max_attempts) so claimNext can NEVER reclaim it into a
+          // perform re-run; it sits 'processing' at max for an operator. (needs_manual would also block later
+          // same-number commands via sibling-recovery — the pin only prevents THIS row's re-run — but that broader
+          // guard needs the status write that just failed; the pin closes the flagged own-re-run duplicate.)
+          const pinned = await markCommandUnclaimable(row.id, `unconfirmed create; needs_manual park failed — pinned unclaimable for manual resolution: ${message}`);
+          if (!pinned) log(`[bidboard-create] CRITICAL: Command ${row.id} unconfirmed create could NOT be parked or pinned unclaimable; a stale-reclaim may re-run it — manual check needed for deal ${input.sourceDealId}`, "sync");
+          break; // unguarded — stop so no later command runs before this row is safely parked/pinned
         }
         // finding: if the project was ALREADY created (a mapping exists for this source deal) but a LATER step
         // threw — the 'created' callback persist, or a transient DB error — this is NOT a create failure. Emitting a
