@@ -1008,7 +1008,7 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
   // skips. Holding one connection in a background worker (not a request thread) is fine — no request-pool
   // exhaustion. NOTE: pool.connect is dynamically imported so the test's ../db mock (drizzle-only) isn't required
   // to expose a pool — when absent, we fall back to non-cross-instance draining.
-  let lockClient: { query: (text: string, params?: any[]) => Promise<any>; release: () => void } | null = null;
+  let lockClient: { query: (text: string, params?: any[]) => Promise<any>; release: (err?: any) => void } | null = null;
   let locked = false;
   try {
     const dbModule: any = await import("../db");
@@ -1211,10 +1211,24 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
     return { processed };
   } finally {
     if (lockClient) {
+      let unlockErr: any = null;
       if (locked) {
-        try { await lockClient.query(`SELECT pg_advisory_unlock(hashtext($1))`, [CREATE_WORKER_LOCK_KEY]); } catch { /* connection may be gone */ }
+        try {
+          await lockClient.query(`SELECT pg_advisory_unlock(hashtext($1))`, [CREATE_WORKER_LOCK_KEY]);
+        } catch (e: any) {
+          // finding (Macroscope): a swallowed unlock failure must NOT return the connection to the pool. This is a
+          // SESSION-level advisory lock (pg_try_advisory_lock, not xact-scoped), and pg's release() does not close the
+          // session — so if the connection is still alive but the unlock query failed, the lock stays HELD on that
+          // idle pooled connection. A later reused connection would keep the lock, and every subsequent drain's
+          // pg_try_advisory_lock would see it held and skip indefinitely. Pass the error to release() below so the pool
+          // DESTROYS this connection (terminating its session + dropping the stuck lock) instead of reusing it.
+          unlockErr = e;
+          log(`[bidboard-create] advisory unlock failed (${e?.message || e}); destroying the pooled connection so its session lock can't wedge later drains`, "sync");
+        }
       }
-      lockClient.release();
+      // release(err) destroys the client (pool discards it) when err is truthy; release()/release(undefined) returns
+      // it to the pool normally on a clean unlock.
+      lockClient.release(unlockErr ?? undefined);
     }
     createWorkerRunning = false;
   }

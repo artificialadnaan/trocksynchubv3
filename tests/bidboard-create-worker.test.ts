@@ -18,11 +18,14 @@ const getAutomationConfigMock = vi.hoisted(() => vi.fn(async (_k: string) => ({ 
 const dbHolder = vi.hoisted(() => ({ db: null as any }));
 // Configurable callback target URL (X5 tests set it null).
 const urlHolder = vi.hoisted(() => ({ url: "https://crm.example.com/api/internal/bid-board-created" as string | null }));
+// Configurable pool: undefined by default so the drain skips the advisory-lock path; a test can set a mock pool to
+// exercise the lock acquire/unlock/release cleanup.
+const poolHolder = vi.hoisted(() => ({ pool: undefined as any }));
 
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
-// pool is undefined here so processBidboardCreateOutbox skips the cross-instance advisory lock (X2) and drains
+// pool is undefined by default so processBidboardCreateOutbox skips the cross-instance advisory lock (X2) and drains
 // directly — the lock path needs a real pg Pool, which PGlite isn't. The serial-drain behaviour is still tested.
-vi.mock("../server/db.ts", () => ({ pool: undefined, get db() { return dbHolder.db; } }));
+vi.mock("../server/db.ts", () => ({ get pool() { return poolHolder.pool; }, get db() { return dbHolder.db; } }));
 vi.mock("../server/playwright/bidboard.ts", () => ({ createBidBoardProjectFromDeal: createBidBoardMock }));
 vi.mock("../server/rfp-approval.ts", () => ({ checkRfpApprovalSourceEligibility: checkEligibilityMock }));
 vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
@@ -1028,6 +1031,51 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
 
   it("claimNextBidboardCreateCommand returns null when nothing is pending", async () => {
     expect(await claimNextBidboardCreateCommand()).toBeNull();
+  });
+
+  it("[finding Macroscope] DESTROYS the pooled lock connection (release(err)) when pg_advisory_unlock fails, so its session lock can't wedge later drains", async () => {
+    // Exercise the advisory-lock path with a mock pool. The unlock query throws; the connection must be released WITH
+    // the error so the pool destroys it (terminating its session + dropping the still-held session-level lock) rather
+    // than returning it to the pool with the lock stuck.
+    const unlockErr = new Error("unlock boom");
+    const releaseMock = vi.fn();
+    const mockClient = {
+      query: vi.fn(async (text: string) => {
+        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ locked: true }] };
+        if (/pg_advisory_unlock/.test(text)) throw unlockErr;
+        return { rows: [] };
+      }),
+      release: releaseMock,
+    };
+    poolHolder.pool = { connect: vi.fn(async () => mockClient) };
+    try {
+      // Empty queue -> the drain acquires the lock, finds no rows, then runs the finally (unlock -> throw -> release(err)).
+      await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => "created")) as any });
+      expect(mockClient.query).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_unlock/), expect.anything());
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock.mock.calls[0][0]).toBe(unlockErr); // released WITH the error -> pool destroys the connection
+    } finally {
+      poolHolder.pool = undefined;
+    }
+  });
+
+  it("[finding Macroscope] a CLEAN unlock returns the lock connection to the pool normally (release with no error)", async () => {
+    const releaseMock = vi.fn();
+    const mockClient = {
+      query: vi.fn(async (text: string) => {
+        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ locked: true }] };
+        return { rows: [] }; // unlock succeeds
+      }),
+      release: releaseMock,
+    };
+    poolHolder.pool = { connect: vi.fn(async () => mockClient) };
+    try {
+      await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => "created")) as any });
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock.mock.calls[0][0]).toBeUndefined(); // clean unlock -> returned to the pool (no destroy)
+    } finally {
+      poolHolder.pool = undefined;
+    }
   });
 
   it("[X3] re-claims a STALE 'processing' row (worker crashed after claim) but not a fresh one", async () => {
