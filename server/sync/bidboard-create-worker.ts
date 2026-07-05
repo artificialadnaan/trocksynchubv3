@@ -210,15 +210,22 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
 // 202-accepted vote would sit with no project/callback — so a processing row untouched for >10m (well past any
 // real create) is picked back up, bounded by attempt_count < max_attempts.
 const STALE_PROCESSING_INTERVAL = "10 minutes";
-// Backoff before a parked 'reclaiming' row is re-claimed for another mapping-reconcile attempt. finding (Macroscope):
-// the drain now CONTINUES past an unreconciled row (see the drain loop) instead of breaking, so the reclaiming row
-// must NOT be immediately re-claimable within the SAME drain pass — otherwise it would be re-claimed each loop
-// iteration and burn through all max_attempts in one tick (rapid escalation to needs_manual on a transient blip).
-// A short backoff (> the drain's wall-clock) spaces retries across ticks (transient-friendly) while letting the drain
-// serve later unrelated commands in the same pass.
-const RECLAIM_RETRY_BACKOFF = "30 seconds";
-export async function claimNextBidboardCreateCommand(): Promise<any | null> {
+// SAME-PASS guard (finding Macroscope): the drain now CONTINUES past an unreconciled 'reclaiming' row (see the drain
+// loop) instead of breaking, so that row must NOT be re-claimed within the SAME drain pass — otherwise, once the pass
+// outlasts any fixed backoff (a long pass full of slow Playwright creates), claimNext would re-claim it and burn all
+// max_attempts in one pass (premature escalation to needs_manual on a transient blip). A TIME-based backoff can't be
+// "longer than the worst-case drain," so the drain passes the set of ids it already claimed THIS pass and claimNext
+// excludes them — duration-INDEPENDENT.
+// CROSS-PASS cadence: markReclaiming ALSO stamps a small durable next_attempt_at floor (RECLAIM_RETRY_FLOOR) so retry
+// spacing survives even if passes are driven back-to-back (a manual "drain now", a shortened interval) rather than
+// relying solely on the 15s worker tick. The floor is NOT the same-pass guard (the set is) — so it needn't exceed the
+// drain wall-clock; it only paces retries across passes.
+const RECLAIM_RETRY_FLOOR = "5 seconds";
+export async function claimNextBidboardCreateCommand(excludeIds: Iterable<number> = []): Promise<any | null> {
   const db = await getDb();
+  // ids come from row.id (DB serial) — coerce to finite integers, so raw interpolation carries no injection risk.
+  const excluded = Array.from(excludeIds, Number).filter((n) => Number.isInteger(n));
+  const excludeClause = excluded.length > 0 ? sql`AND id NOT IN (${sql.raw(excluded.join(","))})` : sql``;
   const result = await db.execute(sql`
     UPDATE bidboard_create_outbox
        SET status = 'processing', last_attempt_at = NOW(), attempt_count = attempt_count + 1
@@ -254,6 +261,11 @@ export async function claimNextBidboardCreateCommand(): Promise<any | null> {
                  OR (bidboard_create_outbox.project_number IS NOT NULL AND p.project_number = bidboard_create_outbox.project_number)
                )
           )
+          -- finding (Macroscope): exclude rows already claimed EARLIER in this same drain pass. A 'reclaiming' row the
+          -- drain just parked (and continued past) must not be re-claimed later in the SAME pass, no matter how long
+          -- the pass runs — otherwise a long pass burns all its max_attempts in one go. This is duration-independent
+          -- (unlike a time-based backoff); the row is re-claimable on the NEXT tick's pass (fresh exclusion set).
+          ${excludeClause}
         -- finding: drain by the immutable serial id (arrival order), NOT created_at. created_at is REFRESHED to
         -- NOW() when a still-pending/failed command is re-queued (Y4), which would reorder the FIFO drain and let a
         -- later-arrived same-project-number command create/link the project first while the corrected original then
@@ -330,9 +342,10 @@ async function resetCreateCommandForReclaim(id: number, note: string): Promise<v
 // that id rather than re-running the Playwright create). claimNext also claims 'reclaiming' (by ascending id) so the
 // mapping keeps getting reconciled across ticks; later same-deal/same-number commands are blocked from creating a
 // duplicate by the sibling-recovery guard in performCreateFromRfpVote (NOT by starving the drain). attempt_count is
-// NOT reset — bounded by max_attempts, then it escalates to 'needs_manual' rather than wedging forever. next_attempt_at
-// gets a RECLAIM_RETRY_BACKOFF so the drain that just parked it can CONTINUE to later commands without immediately
-// re-claiming this same row (finding Macroscope) — retries are spaced across ticks, not burned in one pass.
+// NOT reset — bounded by max_attempts, then it escalates to 'needs_manual' rather than wedging forever. The drain that
+// parks it CONTINUES to later commands and does NOT re-claim it this pass (claimNext's claimed-this-pass exclusion,
+// finding Macroscope); next_attempt_at gets a SMALL durable RECLAIM_RETRY_FLOOR so retries stay spaced across passes
+// (< the 15s tick, so it never delays normal cadence — it only floors back-to-back-driven reclaims).
 // finding: also persist the RFP proposalId alongside the project id. The cross-tick reclaim rebuilds the mapping via
 // buildBidboardMappingPayload(input, recoveredProjectId, ...); without the stored proposalId that reconstruction
 // drops metadata.proposalId, which downstream portfolio automation reads to build BidBoard detail URLs. Stamp both
@@ -346,7 +359,7 @@ async function markReclaiming(id: number, bidboardProjectId: string, proposalId:
     : sql`jsonb_set(payload, '{__recoveredProjectId}', to_jsonb(${bidboardProjectId}::text))`;
   await db.execute(sql`
     UPDATE bidboard_create_outbox
-       SET status = 'reclaiming', next_attempt_at = NOW() + interval '${sql.raw(RECLAIM_RETRY_BACKOFF)}',
+       SET status = 'reclaiming', next_attempt_at = NOW() + interval '${sql.raw(RECLAIM_RETRY_FLOOR)}',
            last_error = ${note}, payload = ${payloadExpr}
      WHERE id = ${id}
   `);
@@ -1007,10 +1020,14 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       if (!locked) return { processed: 0 }; // another instance is draining
     }
 
-    // Drain the queue one command at a time (serial).
+    // Drain the queue one command at a time (serial). Track the ids claimed in THIS pass so claimNext never re-serves
+    // a row we already handled here — in particular a 'reclaiming' row we parked + continued past (finding Macroscope:
+    // prevents burning all max_attempts on it within one long pass, independent of pass duration).
+    const claimedThisPass = new Set<number>();
     for (;;) {
-      const row = await claimNextBidboardCreateCommand();
+      const row = await claimNextBidboardCreateCommand(claimedThisPass);
       if (!row) break;
+      claimedThisPass.add(Number(row.id));
       const input = (row.payload ?? {}) as CreateFromRfpInput;
       // The command's receipt time (≈ CRM vote time) stamps every callback (finding AA3).
       const callbackAt = row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString();

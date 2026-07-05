@@ -802,9 +802,31 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     const perform = vi.fn(async () => "created" as const); // the unrelated fresh command creates
     await processBidboardCreateOutbox({ performImpl: perform as any });
     const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
-    expect(rows.find((r) => r.source_event_id === "e-stuck").status).toBe("reclaiming"); // still parked (retry backoff)
+    expect(rows.find((r) => r.source_event_id === "e-stuck").status).toBe("reclaiming"); // still parked, retried next pass
     expect(rows.find((r) => r.source_event_id === "e-fresh").status).toBe("done"); // drained past the stuck row
     expect(perform).toHaveBeenCalledTimes(1); // only the fresh command ran perform; the reclaiming row reconciled directly
+  });
+
+  it("[finding Macroscope] a parked 'reclaiming' row is claimed at most ONCE per pass, no matter how many later commands drain (attempt_count not burned)", async () => {
+    // First row -> created-but-unmapped -> parked 'reclaiming' (attempt 1). Three unrelated later commands then drain
+    // in the SAME pass. The claimed-this-pass exclusion must keep the reclaiming row from being re-claimed within the
+    // pass (a time-based backoff would elapse during a long pass and burn all max_attempts -> premature needs_manual).
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-rc", sourceDealId: "d-rc", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-l1", sourceDealId: "d-l1", deal: { name: "d", projectNumber: "TR-9001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-l2", sourceDealId: "d-l2", deal: { name: "d", projectNumber: "TR-9002", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-l3", sourceDealId: "d-l3", deal: { name: "d", projectNumber: "TR-9003", projectType: "9", workflowRoute: "normal" } }));
+    createSyncMappingMock.mockRejectedValue(new Error("mapping write blip"));
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-rc", bidboardProjectId: "999" } as any);
+    const perform = vi.fn(async (inp: any) => {
+      if (inp.sourceDealId === "d-rc") throw err; // first row: created-but-unmapped
+      return "created" as const; // the 3 unrelated later commands drain
+    });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT source_event_id, status, attempt_count FROM bidboard_create_outbox ORDER BY id`)).rows as any[];
+    const rc = rows.find((r) => r.source_event_id === "e-rc");
+    expect(rc.status).toBe("reclaiming"); // still recoverable — NOT escalated to needs_manual
+    expect(rc.attempt_count).toBe(1); // claimed ONCE this pass despite 3 later commands draining after it
+    expect(rows.filter((r) => r.source_event_id.startsWith("e-l")).every((r) => r.status === "done")).toBe(true); // all later drained
   });
 
   it("[P2-A] a newer same-deal round does NOT supersede a 'reclaiming' recovery row (no orphan/duplicate)", async () => {
