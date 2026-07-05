@@ -560,6 +560,21 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(new Date(rows[0].created_at).getTime()).toBe(new Date(before.created_at).getTime()); // receipt NOT bumped
   });
 
+  it("[finding] does NOT refresh even a STALE 'processing' row (a created-but-unmapped project under the old number would be duplicated by a revised-number reclaim)", async () => {
+    const mkDeal = (n: string) => ({ name: "d", projectNumber: n, projectType: "9", amount: 1, workflowRoute: "normal" });
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-1001") }));
+    // A crashed worker's abandoned claim: 'processing' with last_attempt_at PAST the 10-min stale window. It may hold
+    // a created-but-unmapped project under TR-1001. A corrected re-post with a REVISED number must NOT refresh it —
+    // else the stale-reclaim would run TR-2002, miss the TR-1001 project in both adopt guards, and create a duplicate.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW() - interval '11 minutes'`);
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-2002") })); // corrected re-post during the stale window
+    const rows = (await pg.query(`SELECT status, project_number, payload FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("processing"); // left for its ORIGINAL-payload reclaim (which safely adopts)
+    expect(rows[0].project_number).toBe("TR-1001"); // NOT refreshed to the revised number
+    expect(rows[0].payload.deal.projectNumber).toBe("TR-1001");
+  });
+
   it("[finding] the supersede DELETE spares a NEWER round's pending callback, removing only OLDER ones", async () => {
     // A NEWER round's still-pending callback (createdAt AFTER the one we're about to enqueue) — must survive.
     await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T15:00:00.000Z"}'::jsonb, 'http://crm/cb', 'pending')`);
@@ -584,16 +599,70 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows.map((r) => r.status)).toEqual(["done", "done"]);
   });
 
-  it("marks a command FAILED (and enqueues a failed callback) when perform throws", async () => {
+  it("[finding] a markDone failure on the FINAL allowed claim RESETS attempt_count so the row isn't stuck 'processing' forever", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-md", sourceDealId: "d-md" }));
+    // Simulate the row being on its last allowed claim (claimNext will bump attempt_count to max_attempts).
+    await pg.query(`UPDATE bidboard_create_outbox SET attempt_count = 4 WHERE source_event_id = 'e-md'`); // max_attempts default 5 -> becomes 5 on claim
+    const realDb = dbHolder.db;
+    // Make markCreateCommandDone (status='done') throw so the success path's catch runs; delegate everything else.
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/SET status = 'done'/.test(JSON.stringify(q))) throw new Error("markDone blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => "created" as const); // create succeeded + 'created' callback enqueued
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // not flipped to a failure — the project exists
+    expect(rows[0].attempt_count).toBe(0); // RESET so the stale-reclaim (attempt_count < max) can recover a lost callback
+  });
+
+  it("marks a command FAILED and enqueues the failed callback ATOMICALLY (one tx) when perform throws", async () => {
     await enqueueBidboardCreateCommand(input({ sourceEventId: "e9", sourceDealId: "d9" }));
     const perform = vi.fn(async () => { throw new Error("playwright boom"); });
     await processBidboardCreateOutbox({ performImpl: perform as any });
     const rows = (await pg.query(`SELECT status, last_error FROM bidboard_create_outbox`)).rows as any[];
     expect(rows[0].status).toBe("failed");
     expect(rows[0].last_error).toContain("playwright boom");
-    // best-effort failed callback so the CRM isn't left waiting
-    expect(lastCallback().status).toBe("failed");
-    expect(lastCallback().error).toContain("playwright boom");
+    // The failed callback + terminal status commit together (a RAW insert in the same tx, not the storage mock) —
+    // read the real callback_outbox table.
+    const cbs = (await pg.query(`SELECT payload FROM bidboard_callback_outbox`)).rows as any[];
+    expect(cbs).toHaveLength(1);
+    expect(cbs[0].payload.status).toBe("failed");
+    expect(cbs[0].payload.error).toContain("playwright boom");
+  });
+
+  it("[finding] the failed callback + terminal mark are ATOMIC: if the terminal UPDATE fails, the callback rolls back too", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-atomic", sourceDealId: "d-atomic" }));
+    const realDb = dbHolder.db;
+    // Make the create_outbox terminal UPDATE inside the tx throw, so the WHOLE tx (incl. the callback insert) rolls back.
+    dbHolder.db = {
+      transaction: (fn: any) => realDb.transaction(async (tx: any) => {
+        const wrapped = { execute: (q: any) => {
+          if (/UPDATE bidboard_create_outbox SET status = 'failed'/.test(JSON.stringify(q))) throw new Error("terminal write blip");
+          return tx.execute(q);
+        } };
+        return fn(wrapped);
+      }),
+      execute: (q: any) => realDb.execute(q),
+    } as any;
+    try {
+      const perform = vi.fn(async () => { throw new Error("playwright boom"); });
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    // Rolled back: NO stranded 'failed' callback, and the row is NOT terminal — left 'processing' + reset for a clean
+    // reclaim that re-delivers + re-marks together. A 'created' can never follow a delivered 'failed' for this command.
+    expect((await pg.query(`SELECT * FROM bidboard_callback_outbox`)).rows).toHaveLength(0);
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing");
+    expect(rows[0].attempt_count).toBe(0);
   });
 
   it("[finding J] a perform() that RETURNS 'failed' (pre-create refusal) marks the command 'failed', not 'done'", async () => {

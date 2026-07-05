@@ -98,9 +98,18 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       -- large attachment sync), so rewriting it back to 'pending' while a worker is mid-create would let that worker
       -- finalize the refreshed row (markCreateCommandDone) and silently drop the corrected payload. The in-flight
       -- attempt OWNS its row; a crashed worker's stuck 'processing' row is recovered by the stale-reclaim in
-      -- claimNextBidboardCreateCommand (which re-runs the row's payload), and a corrected re-post lands once the
-      -- attempt reaches a terminal state. (This deliberately supersedes the earlier AA2 refresh-processing behavior,
-      -- trading a rare corrected-re-post-during-create staleness for not corrupting a live long-running create.)
+      -- claimNextBidboardCreateCommand (which re-runs the row's ORIGINAL payload), and a corrected re-post lands once
+      -- the attempt reaches a terminal state. (This deliberately supersedes the earlier AA2 refresh-processing
+      -- behavior, trading a rare corrected-re-post-during-create staleness for not corrupting a live long-running
+      -- create.)
+      -- DELIBERATELY NOT refreshed even when STALE (do not "accept corrected retries for stale processing rows"): a
+      -- bare-'processing' row can hold a CREATED-BUT-UNMAPPED project under its ORIGINAL number — a hard crash in the
+      -- create→park window, or a DB outage during park (the reconcile's own fallback logs "left 'processing'"), can
+      -- leave one. Re-running its ORIGINAL payload safely ADOPTS that project (SyncHub number-map adopt OR Procore
+      -- exact-number adopt, both keyed on the original number). Refreshing the payload to a REVISED number would
+      -- defeat BOTH adopts (they look up the old number, miss the created project) and CREATE A SECOND project — a
+      -- duplicate for one accepted vote. So a stale 'processing' row is left for its ORIGINAL-payload reclaim; the
+      -- rep's revised-number correction lands after that reclaim reaches a terminal state.
       -- Also re-queue a 'done' row for CALLBACK RECOVERY (finding): 'done' only means the created callback was
       -- ENQUEUED, not delivered. If that callback later went 'dead' (exhausted its retries) or was lost while the
       -- CRM stayed unaware, a same-sourceEventId retry would otherwise 202-no-op and leave the deal permanently
@@ -452,6 +461,68 @@ async function enqueueFailedCallback(input: CreateFromRfpInput, error: string, c
     procoreCompanyId,
     error,
     createdAt: callbackAt ?? new Date().toISOString(),
+  });
+}
+
+// finding (make a delivered 'failed' result TERMINAL, not just logged): for a GENUINE create failure (perform threw,
+// NO project created) deliver the failed callback AND mark the command terminal ('failed') in ONE transaction, so
+// they can never diverge. The old sequence — enqueue the callback, THEN markCreateCommandFailedResilient — left a
+// residual: if the callback enqueued but all 3 status writes then failed (a blip right after the insert), the row
+// stayed 'processing' and a later stale-reclaim could re-run perform and CREATE a project the CRM was already told
+// 'failed'. As one tx it's all-or-nothing: either the callback is queued for durable delivery AND the row is terminal
+// (never reclaimed → never re-created), or the tx rolls back and NOTHING landed (no callback, row still 'processing')
+// so the caller resets it for a clean reclaim that re-delivers + re-marks together. The callback DELIVERY stays
+// async/durable (the bidboard_callback_outbox worker); only its ENQUEUE (insert) is made atomic with the status flip.
+//
+// The insert is a RAW insert (not storage.enqueueBidboardCallback) so it can run inside this tx's connection — for a
+// voting row (NULL rfp_approval_request_id) storage's method is a plain insert anyway (its onConflictDoNothing keys
+// on rfp_approval_request_id, which never conflicts for NULLs), so this is equivalent. The scoped supersede DELETE
+// mirrors enqueueCreateFromRfpCallback. Throws (for the caller to reset+reclaim) if the callback URL is missing or
+// the tx fails to commit.
+async function deliverFailedCallbackAndMarkTerminal(
+  input: CreateFromRfpInput,
+  message: string,
+  callbackAt: string | undefined,
+  rowId: number,
+): Promise<void> {
+  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
+  if (!targetUrl) {
+    // Same contract as enqueueCreateFromRfpCallback: a missing base URL is RETRYABLE (throw so the caller resets +
+    // reclaims once TROCK_CRM_BASE_URL is configured), never a silent drop that would strand the vote.
+    throw new Error("TROCK_CRM_BASE_URL not configured; cannot enqueue create-from-rfp failed callback");
+  }
+  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+  const payload = {
+    status: "failed" as const,
+    sourceDealId: input.sourceDealId,
+    projectNumber: input.deal.projectNumber,
+    procoreCompanyId,
+    error: message,
+    createdAt: callbackAt ?? new Date().toISOString(),
+  };
+  const supersedeBefore = typeof payload.createdAt === "string" ? payload.createdAt : null;
+  const db = await getDb();
+  await db.transaction(async (tx: any) => {
+    // Supersede older pending request-less callbacks (same scoped DELETE as enqueueCreateFromRfpCallback), inside the
+    // tx so it commits atomically with the new callback + terminal status.
+    if (supersedeBefore) {
+      await tx.execute(sql`
+        DELETE FROM bidboard_callback_outbox
+         WHERE source_system = ${input.sourceSystem}
+           AND source_deal_id = ${input.sourceDealId}
+           AND rfp_approval_request_id IS NULL
+           AND status = 'pending'
+           AND payload->>'createdAt' IS NOT NULL
+           AND (payload->>'createdAt')::timestamptz < ${supersedeBefore}::timestamptz
+      `);
+    }
+    await tx.execute(sql`
+      INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+      VALUES (${input.sourceSystem}, ${input.sourceDealId}, NULL, ${JSON.stringify(payload)}::jsonb, ${targetUrl}, 'pending')
+    `);
+    await tx.execute(sql`
+      UPDATE bidboard_create_outbox SET status = 'failed', processed_at = NOW(), last_error = ${message} WHERE id = ${rowId}
+    `);
   });
 }
 
@@ -1017,32 +1088,24 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
           processed += 1;
           continue;
         }
-        // Genuine create failure (NO project created). Deliver the failure callback to the CRM BEFORE marking the
-        // command terminal (finding): claimNextBidboardCreateCommand never re-picks a 'failed' row, so if we marked
-        // it failed first and the failure callback couldn't be enqueued (e.g. TROCK_CRM_BASE_URL unset, or the
-        // outbox insert throws), the accepted vote would strand with neither a project nor a failure callback. On a
-        // callback-enqueue failure, leave the row 'processing' + reset attempt_count so reclaim re-runs and
-        // re-attempts (the create may then succeed, or the failure callback finally enqueues once config is fixed).
+        // Genuine create failure (NO project created). Deliver the failure callback AND mark the command terminal
+        // ('failed') ATOMICALLY (finding): the two must land together or not at all. If they could diverge — callback
+        // delivered but the status write then failed — the row would stay 'processing' and a later stale-reclaim
+        // could re-run perform and CREATE a project the CRM was already told 'failed' (the old resilient-mark +
+        // CRITICAL-log left exactly this residual). deliverFailedCallbackAndMarkTerminal does both in ONE transaction:
+        // on commit the callback is durably queued AND the row is terminal (never reclaimed → never re-created); on
+        // ANY failure (missing callback URL, or the tx rolls back) NOTHING landed — leave the row 'processing' +
+        // reset attempt_count so a clean reclaim re-runs and re-attempts BOTH together (the create may then succeed,
+        // or the failed callback + terminal mark finally land once the transient condition clears). A 'created' can
+        // therefore never follow a delivered 'failed' for the same command.
         log(`[bidboard-create] Command ${row.id} create for deal ${input.sourceDealId} failed: ${message}`, "sync");
         try {
-          await enqueueFailedCallback(input, message, callbackAt);
-        } catch (cbErr: any) {
-          log(`[bidboard-create] Command ${row.id} failed AND its failure callback could not be enqueued (${cbErr?.message || cbErr}); leaving 'processing' for reclaim`, "sync");
-          try { await resetCreateCommandForReclaim(row.id, `create failed; failure callback pending reclaim: ${message}`); } catch { /* best-effort */ }
+          await deliverFailedCallbackAndMarkTerminal(input, message, callbackAt, row.id);
+        } catch (deliverErr: any) {
+          log(`[bidboard-create] Command ${row.id} failed; atomic failed-callback+terminal did not land (${deliverErr?.message || deliverErr}); leaving 'processing' for reclaim`, "sync");
+          try { await resetCreateCommandForReclaim(row.id, `create failed; failed callback + terminal pending reclaim: ${message}`); } catch { /* best-effort */ }
           processed += 1;
           continue;
-        }
-        // The failed callback is delivered — mark terminal RESILIENTLY so a bookkeeping blip can't leave the row
-        // create-capable for a reclaim (finding). finding: do NOT ignore a false return — if all 3 status writes
-        // fail (an extended DB outage right after the callback insert), the row stays 'processing' and a later
-        // stale-reclaim could re-run perform and create a project even though the CRM was already told 'failed'.
-        // Log it CRITICALLY so it's visible. (A total DB outage stalls the whole worker — claimNext can't UPDATE to
-        // 'processing' either — so the reclaim-after-failed needs an intermittent blip that clears before the next
-        // tick; the 3-retry covers transient blips. A fully atomic callback+status transition would close the
-        // residual but requires threading a tx through enqueueFailedCallback — deferred for this narrow tail.)
-        const failedMarked = await markCreateCommandFailedResilient(row.id, message);
-        if (!failedMarked) {
-          log(`[bidboard-create] CRITICAL: Command ${row.id} delivered a 'failed' callback but could NOT mark the row terminal after retries; it may be stale-reclaimed and re-run — manual check needed for deal ${input.sourceDealId}`, "sync");
         }
         processed += 1;
         continue;
@@ -1066,7 +1129,14 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       } catch (bookErr: any) {
         // Create + 'created' callback already happened; a failed markDone must NOT flip this to a failure. Leave it
         // 'processing' for the stale-reclaim to finish (re-running adopts idempotently via perform's mapping-first).
-        log(`[bidboard-create] Command ${row.id} created OK but markDone failed (will re-reconcile): ${bookErr?.message || bookErr}`, "sync");
+        // finding: RESET attempt_count so the stale-reclaim is NOT capped. If this create/adopt landed on the row's
+        // FINAL allowed claim (attempt_count == max_attempts) and markDone then failed, the row would sit
+        // 'processing' with attempt_count >= max_attempts forever — claimNextBidboardCreateCommand only reclaims
+        // attempt_count < max_attempts, and a same-sourceEventId retry skips a 'processing' row — so a later
+        // lost/dead 'created' callback could never be recovered even though the project exists. Resetting lets the
+        // reclaim re-run perform's mapping-first adopt (idempotent, no duplicate) to re-send the callback + mark done.
+        log(`[bidboard-create] Command ${row.id} created OK but markDone failed (will re-reconcile, uncapped): ${bookErr?.message || bookErr}`, "sync");
+        try { await resetCreateCommandForReclaim(row.id, `created but markDone failed; pending reclaim: ${bookErr?.message || bookErr}`); } catch { /* best-effort */ }
       }
       processed += 1;
     }
