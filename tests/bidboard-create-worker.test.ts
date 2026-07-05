@@ -259,9 +259,20 @@ describe("performCreateFromRfpVote (create logic)", () => {
   it("[F3] REFUSES a service RFP (projectType '4') -> failed callback, no create in the non-service stage", async () => {
     await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "TR-1001", projectType: "4", amount: 1, workflowRoute: "service" } }));
     expect(createBidBoardMock).not.toHaveBeenCalled(); // never reaches the hard-coded "Estimate in Progress" create
-    expect(getBidboardDealMappingMock).not.toHaveBeenCalled(); // rejected BEFORE the mapping-first adopt
+    expect(getBidboardDealMappingMock).toHaveBeenCalled(); // adopt lookup runs FIRST now; service refusal is AFTER it (no mapping -> refuse)
     expect(lastCallback().status).toBe("failed");
     expect(lastCallback().error).toContain("service RFP");
+  });
+
+  it("[finding Macroscope] a service-typed deal that ALREADY has a project ADOPTS it (re-sends 'created'), not a false 'failed'", async () => {
+    // A project already exists for this deal (same number). The service-RFP refusal must NOT flip it to a false
+    // 'failed' — the mapping-first adopt runs first and re-sends the 'created' callback idempotently.
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "777", procoreProjectNumber: "TR-1001" } as any);
+    const outcome = await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "TR-1001", projectType: "4", amount: 1, workflowRoute: "service" } }));
+    expect(outcome).toBe("adopted");
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // adopts the existing project, never creates
+    expect(lastCallback().status).toBe("created"); // NOT a false 'failed'
+    expect(lastCallback().bidboardProjectId).toBe("777");
   });
 
   it("[F3] a NON-service RFP (projectType '9') is NOT rejected by the service guard (proceeds to create)", async () => {
@@ -575,17 +586,26 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     expect(rows[0].payload.deal.projectNumber).toBe("TR-1001");
   });
 
-  it("[finding] the supersede DELETE spares a NEWER round's pending callback, removing only OLDER ones", async () => {
+  it("[finding] the supersede DELETE spares a NEWER round's pending callback, removes OLDER + EQUAL-timestamp stale ones", async () => {
     // A NEWER round's still-pending callback (createdAt AFTER the one we're about to enqueue) — must survive.
     await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T15:00:00.000Z"}'::jsonb, 'http://crm/cb', 'pending')`);
     // An OLDER stale pending callback that SHOULD be superseded.
     await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T08:00:00.000Z"}'::jsonb, 'http://crm/cb', 'pending')`);
+    // finding (Macroscope, M3): a stale 'failed' from an earlier attempt of THIS command carries the SAME receipt
+    // time (10:00) as the 'created' about to be enqueued. A strict `<` would leave it pending alongside the 'created'
+    // (same freshness timestamp -> ambiguous). `<=` must delete it.
+    await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T10:00:00.000Z","status":"failed"}'::jsonb, 'http://crm/cb', 'pending')`);
     getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" }); // adopt path
-    // Enqueue a 'created' callback stamped 10:00 -> supersede only rows strictly OLDER than 10:00.
+    // Enqueue a 'created' callback stamped 10:00 -> the supersede DELETE (real table) removes rows OLDER-OR-EQUAL to
+    // 10:00; the 'created' insert itself goes through storage.enqueueBidboardCallback (the mock here), captured below.
     await performCreateFromRfpVote(input(), "2026-07-03T10:00:00.000Z");
     const times = ((await pg.query(`SELECT payload->>'createdAt' AS c FROM bidboard_callback_outbox`)).rows as any[]).map((r) => r.c);
-    expect(times).toContain("2026-07-03T15:00:00.000Z"); // newer round's callback NOT deleted
+    expect(times).toContain("2026-07-03T15:00:00.000Z"); // newer round's callback NOT deleted (strictly greater)
     expect(times).not.toContain("2026-07-03T08:00:00.000Z"); // older stale one superseded
+    expect(times).not.toContain("2026-07-03T10:00:00.000Z"); // M3: the EQUAL-timestamp stale 'failed' is deleted by <=
+    // the freshly-enqueued 'created' carries the same 10:00 receipt time (delivered via the durable outbox / mock)
+    expect(lastCallback().status).toBe("created");
+    expect(lastCallback().createdAt).toBe("2026-07-03T10:00:00.000Z");
   });
 
   it("processBidboardCreateOutbox claims + drains pending commands serially and marks them done", async () => {
@@ -695,6 +715,27 @@ describe("bidboard_create_outbox lifecycle (real SQL)", () => {
     } finally {
       dbHolder.db = realDb;
     }
+  });
+
+  it("[finding Macroscope] a refused command whose terminal mark keeps failing is RESET for reclaim (status flip not silently lost)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-refuse-stuck", sourceDealId: "d-refuse-stuck" }));
+    const realDb = dbHolder.db;
+    // Make EVERY status='failed' UPDATE throw (all 3 resilient retries fail); other writes (incl. the reset) delegate.
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/status = 'failed'/.test(JSON.stringify(q))) throw new Error("persistent bookkeeping blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => "failed" as const);
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // could not mark 'failed'...
+    expect(rows[0].attempt_count).toBe(0); // ...but RESET for reclaim so the terminal mark is retried, not lost
   });
 
   it("a POST-create failure (mapping exists) is NOT marked failed and emits NO failed callback — left for reclaim", async () => {

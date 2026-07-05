@@ -414,11 +414,17 @@ async function enqueueCreateFromRfpCallback(input: CreateFromRfpInput, payload: 
   // 'failed' (from a create that failed while CRM delivery was down) is keyed by NULL rfpApprovalRequestId, so it
   // isn't deduped by the request-id unique index; without this it could be delivered AFTER a later successful
   // 'created', leaving the CRM with a stale failed terminal result. Only the LATEST callback for the deal wins.
-  // finding: scope the supersede to callbacks STRICTLY OLDER than the one being enqueued (by payload createdAt =
-  // the command's receipt time). Deleting EVERY pending request-less callback would let an OLDER reclaimed command
-  // (A, still 'processing' with a lagging createdAt) erase a NEWER round's still-pending callback (B) and replace
-  // it with A's older createdAt, which the CRM's freshness check then ignores — permanently unlinking B's round.
-  // A callback with no createdAt (legacy/pre-AA3) is left alone rather than risking deleting a newer one.
+  // finding: scope the supersede to callbacks OLDER-OR-EQUAL to the one being enqueued (by payload createdAt = the
+  // command's receipt time). Deleting EVERY pending request-less callback would let an OLDER reclaimed command
+  // (A, with a lagging createdAt) erase a NEWER round's still-pending callback (B); B's createdAt is STRICTLY
+  // greater, so the `<=` bound never touches it — that protection is preserved. finding (Macroscope): the EQUAL case
+  // matters — a command that delivered a 'failed' on one attempt and a 'created' on a reclaim stamps BOTH with the
+  // SAME receipt time (row.created_at), so a strict `<` would leave the stale 'failed' pending alongside the
+  // 'created'; with the same freshness timestamp the CRM can't tell which is newer and delivery order could flip the
+  // deal to the wrong terminal state. `<=` deletes the equal-timestamp stale row so only the latest callback for the
+  // deal survives. (Two DISTINCT rounds sharing an exact-millisecond created_at isn't reachable here — the
+  // create-outbox supersede retires the older same-deal round before both could enqueue callbacks.) A callback with
+  // no createdAt (legacy/pre-AA3) is left alone rather than risking deleting a newer one.
   // Residual race (accepted): if the callback worker has ALREADY claimed a stale 'failed' row (still status
   // 'pending' while its HTTP is in flight), this DELETE removes the row but can't recall the in-flight request, so
   // a stale 'failed' could still reach the CRM after this 'created'. That is covered RECEIVER-SIDE, which is the
@@ -436,7 +442,7 @@ async function enqueueCreateFromRfpCallback(input: CreateFromRfpInput, payload: 
          AND rfp_approval_request_id IS NULL
          AND status = 'pending'
          AND payload->>'createdAt' IS NOT NULL
-         AND (payload->>'createdAt')::timestamptz < ${supersedeBefore}::timestamptz
+         AND (payload->>'createdAt')::timestamptz <= ${supersedeBefore}::timestamptz
     `);
   }
   await storage.enqueueBidboardCallback({
@@ -513,7 +519,7 @@ async function deliverFailedCallbackAndMarkTerminal(
            AND rfp_approval_request_id IS NULL
            AND status = 'pending'
            AND payload->>'createdAt' IS NOT NULL
-           AND (payload->>'createdAt')::timestamptz < ${supersedeBefore}::timestamptz
+           AND (payload->>'createdAt')::timestamptz <= ${supersedeBefore}::timestamptz
       `);
     }
     await tx.execute(sql`
@@ -561,20 +567,11 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   const projectNumber = input.deal.projectNumber;
 
   // finding: create-from-rfp is a NON-service voting path — it hard-codes the non-service "Estimate in Progress"
-  // stage below. A service RFP is created by its OWN service flow ("Service – Estimating" tab + Colby), never
-  // through the CRM vote outbox. Derive the EFFECTIVE type the way the rest of the RFP flow does: the project
-  // NUMBER's type digit is canonical (e.g. DFW-4-… is service even when a stale project_types says otherwise),
-  // falling back to the payload projectType. Refuse a service RFP (type "4") with a 'failed' callback rather than
-  // mis-creating it in the wrong stage.
+  // stage below. Derive the EFFECTIVE type the way the rest of the RFP flow does: the project NUMBER's type digit is
+  // canonical (e.g. DFW-4-… is service even when a stale project_types says otherwise), falling back to the payload
+  // projectType. The service-RFP REFUSAL (type "4") is applied AFTER the mapping-first adopt block below (finding
+  // Macroscope), NOT here — an already-created project must be adopted idempotently, never flipped to a false 'failed'.
   const effectiveProjectType = parseProjectTypeFromNumber(input.deal.projectNumber ?? "") ?? input.deal.projectType?.trim();
-  if (effectiveProjectType === "4") {
-    await enqueueFailedCallback(
-      input,
-      `Deal ${input.sourceDealId} is a service RFP (project type 4); create-from-rfp is a non-service path and will not create it in the non-service "Estimate in Progress" stage`,
-      callbackAt,
-    );
-    return "failed";
-  }
 
   // [Idempotent adopt / reclaim-after-create] If a BidBoard project ALREADY exists for THIS source deal — a prior
   // attempt created it + wrote the mapping, but a LATER step failed (the 'created' callback persist, or
@@ -608,6 +605,23 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
     }
     await enqueueCreatedCallback(input, existingMapping.bidboardProjectId, callbackAt);
     return "adopted";
+  }
+
+  // finding (Macroscope — service-RFP refusal AFTER the mapping-first adopt): create-from-rfp creates only in the
+  // hard-coded non-service "Estimate in Progress" stage, so a service RFP (type "4" by the canonical project-number
+  // digit) must NOT be created here — its own service flow ("Service – Estimating" + Colby) owns it. But this refusal
+  // has to run AFTER the adopt block: if a project ALREADY exists for this deal (reclaim-after-create, or a
+  // service-flow-created project), adopting it (re-sending the 'created' callback) is idempotent and correct, whereas
+  // refusing here would flip an existing project to a FALSE 'failed' and leave the CRM/SyncHub inconsistent. By this
+  // point no bid-board mapping exists for the deal, so a type-4 RFP is a genuine would-be create in the wrong stage —
+  // refuse it. (A revised-number conflict on an existing project is already handled by the Y2 refusal above.)
+  if (effectiveProjectType === "4") {
+    await enqueueFailedCallback(
+      input,
+      `Deal ${input.sourceDealId} is a service RFP (project type 4); create-from-rfp is a non-service path and will not create it in the non-service "Estimate in Progress" stage`,
+      callbackAt,
+    );
+    return "failed";
   }
 
   // Eligibility recheck IMMEDIATELY before the create (findings T3 + V4): by now the command may have waited in
@@ -1119,7 +1133,23 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // Mark terminal RESILIENTLY (finding): a bookkeeping throw must not leave a REFUSED command 'processing',
         // where a reclaim re-runs the create path and could create a project after the CRM already got 'failed'
         // (once the eligibility/conflict condition changes).
-        await markCreateCommandFailedResilient(row.id, "create refused before project creation (ineligible / conflict / ownership / revised-number)");
+        // finding (Macroscope): do NOT ignore the false return. If all 3 retries fail the row stays 'processing' at
+        // (possibly) max_attempts — the status flip is silently lost and the vote is stranded. RESET it for reclaim so
+        // the reclaim re-attempts the terminal mark. A DETERMINISTIC refusal (service/conflict/ownership/
+        // revised-number/sibling) re-refuses on reclaim and self-heals to 'failed'. A TIME-VARYING one (eligibility
+        // flipped back) may instead CREATE on reclaim — the desired outcome for an approved vote whose deal briefly
+        // left Opportunity. That create's 'created' callback (same receipt-time createdAt) supersedes the earlier
+        // 'failed' ONLY while it is still pending (the <= supersede, M3); if the 'failed' was already DELIVERED
+        // ('sent') before the >=10-min reclaim — the common case — correctness then rests on the CRM's receiver-side
+        // handling of a later equal-createdAt 'created' after a delivered 'failed' (the same accepted receiver-side
+        // ordering residual documented on the supersede DELETE). No duplicate/orphan risk (the reclaim's create stays
+        // gated by mapping-first adopt + ownership + sibling-recovery) — the residual is at worst a stale 'failed' UI
+        // terminal for a project that exists, cleared by a manual re-trigger.
+        const marked = await markCreateCommandFailedResilient(row.id, "create refused before project creation (ineligible / conflict / ownership / revised-number)");
+        if (!marked) {
+          log(`[bidboard-create] Command ${row.id} refused but could NOT mark terminal after retries; resetting for reclaim so the status flip isn't silently lost`, "sync");
+          try { await resetCreateCommandForReclaim(row.id, "refused; terminal mark pending reclaim"); } catch { /* best-effort */ }
+        }
         processed += 1;
         continue;
       }
