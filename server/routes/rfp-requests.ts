@@ -52,6 +52,14 @@ export const rfpRequestBodySchema = z.object({
 
 export type RfpRequestBody = z.infer<typeof rfpRequestBodySchema>;
 
+// Body for POST /api/bid-board/create-from-rfp: the CRM's normalized RFP body plus an explicit
+// decision guard. The CRM only calls this on a 2/3-approve vote (or override-approve), so decision
+// must be exactly "approved".
+export const createFromRfpBodySchema = rfpRequestBodySchema.extend({
+  decision: z.literal("approved"),
+});
+export type CreateFromRfpInput = z.infer<typeof createFromRfpBodySchema>;
+
 export function signRfpRequestPayload(body: Buffer | string, secret: string): string {
   return `sha256=${crypto.createHmac("sha256", secret).update(body).digest("hex")}`;
 }
@@ -300,6 +308,73 @@ export function registerRfpRequestRoutes(app: Express): void {
       } catch (err: any) {
         console.error(`[rfp-requests] Override approval error for request ${id}:`, err?.message || err);
       }
+    });
+  }));
+
+  // Create-on-command from a CRM RFP VOTE (2/3-approve or override-approve). The CRM already decided, so
+  // this creates the BidBoard project immediately (no email, no rfp_approval_requests row, no vote storage
+  // here) and posts the existing bid-board-created callback keyed by sourceDealId. HMAC-secured; 202 + async.
+  // NOTE: this endpoint NEVER returns 409 — duplicate creates are absorbed by the syncMappings adopt-guard
+  // inside createBidBoardProjectFromDeal (returns success), so the CRM's fire-and-forget delivery job needs
+  // no 409 handling.
+  app.post("/api/bid-board/create-from-rfp", jsonWithRawBody, asyncHandler(async (req, res) => {
+    const signature = verifyRfpRequestSignature(req);
+    if (!signature.ok) {
+      const body = signature.status === 401
+        ? { success: false, error: "Unauthorized", message: signature.message }
+        : { success: false, error: "Internal Server Error", message: signature.message };
+      return res.status(signature.status).json(body);
+    }
+
+    const parsed = createFromRfpBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(422).json({
+        success: false,
+        error: "Unprocessable Entity",
+        message: "create-from-rfp validation failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const input = parsed.data;
+
+    // create-from-rfp is a trock_crm VOTING command only (the CRM's 2/3-approve / override-approve
+    // vote). Reject any other source before the 202 — a hubspot-shaped payload reaching here would
+    // otherwise mint a trock_crm BidBoard project + callback for a deal this endpoint doesn't own.
+    // finding: return 422 (not 409) — this endpoint's contract with the CRM delivery job is 401/500/422/202, so a
+    // 409 reads as an unhandled conflict. An unsupported sourceSystem is a payload-validation failure -> 422.
+    if (input.sourceSystem !== "trock_crm") {
+      return res.status(422).json({
+        success: false,
+        error: "Unprocessable Entity",
+        message: "create-from-rfp is only supported for trock_crm voting requests",
+      });
+    }
+
+    // Persist the create command BEFORE acknowledging (finding V3): a crash after this 202 still resumes,
+    // because the durable command row exists and the serial bidboard-create worker will pick it up. The worker
+    // does the eligibility recheck + guards + Playwright create + durable callback (findings V1/V2/V4). Idempotent
+    // on sourceEventId — a duplicate delivery is a no-op; a previously-failed command is re-queued.
+    try {
+      // finding: lazy-load the create worker so it's only imported when a create-from-rfp actually arrives. A
+      // top-level import pulls in bidboard-create-worker -> ../index -> server/db.ts for EVERY rfp-requests route
+      // (override-approve, etc.), which throws at import time in environments where DATABASE_URL is intentionally
+      // unset — stranding unrelated routes. The dynamic import keeps that cost on this handler only.
+      const { enqueueBidboardCreateCommand } = await import("../sync/bidboard-create-worker");
+      await enqueueBidboardCreateCommand(input);
+    } catch (err: any) {
+      console.error(`[rfp-requests] failed to enqueue create-from-rfp command for deal ${input.sourceDealId}:`, err?.message || err);
+      return res.status(500).json({
+        success: false,
+        error: "Internal Server Error",
+        message: "Failed to enqueue create-from-rfp command",
+      });
+    }
+
+    return res.status(202).json({
+      success: true,
+      queued: true,
+      sourceDealId: input.sourceDealId,
+      projectNumber: input.deal.projectNumber,
     });
   }));
 }

@@ -1,0 +1,1138 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+
+// ---- shared mocks for the create logic (performCreateFromRfpVote) ----
+const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "999" })));
+const enqueueBidboardCallbackMock = vi.hoisted(() => vi.fn(async () => ({ id: 1 })));
+const checkEligibilityMock = vi.hoisted(() => vi.fn(async () => ({ eligible: true }) as any));
+const getRfpByNumMock = vi.hoisted(() => vi.fn(async (_p: string, _s: string) => undefined as any));
+const getRfpBySourceMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string, _s: string) => undefined as any));
+const getMappingMock = vi.hoisted(() => vi.fn(async (_p: string) => undefined as any));
+const getDealMappingMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string) => undefined as any));
+const getBidboardDealMappingMock = vi.hoisted(() => vi.fn(async (_ss: string, _sd: string) => undefined as any));
+const getMappingByBidIdMock = vi.hoisted(() => vi.fn(async (_id: string) => undefined as any));
+const createSyncMappingMock = vi.hoisted(() => vi.fn(async (_m: any) => ({ id: 1 }) as any));
+const getAutomationConfigMock = vi.hoisted(() => vi.fn(async (_k: string) => ({ value: { companyId: "42" } }) as any));
+// A PGlite-backed db for the outbox lifecycle (enqueue/claim/mark). Set in beforeAll.
+const dbHolder = vi.hoisted(() => ({ db: null as any }));
+// Configurable callback target URL (X5 tests set it null).
+const urlHolder = vi.hoisted(() => ({ url: "https://crm.example.com/api/internal/bid-board-created" as string | null }));
+// Configurable pool: undefined by default so the drain skips the advisory-lock path; a test can set a mock pool to
+// exercise the lock acquire/unlock/release cleanup.
+const poolHolder = vi.hoisted(() => ({ pool: undefined as any }));
+
+vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
+// pool is undefined by default so processBidboardCreateOutbox skips the cross-instance advisory lock (X2) and drains
+// directly — the lock path needs a real pg Pool, which PGlite isn't. The serial-drain behaviour is still tested.
+vi.mock("../server/db.ts", () => ({ get pool() { return poolHolder.pool; }, get db() { return dbHolder.db; } }));
+vi.mock("../server/playwright/bidboard.ts", () => ({ createBidBoardProjectFromDeal: createBidBoardMock }));
+vi.mock("../server/rfp-approval.ts", () => ({ checkRfpApprovalSourceEligibility: checkEligibilityMock }));
+vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
+  buildBidBoardCreatedCallbackTargetUrl: () => urlHolder.url,
+}));
+vi.mock("../server/storage.ts", () => ({
+  storage: {
+    getAutomationConfig: getAutomationConfigMock,
+    getRfpApprovalRequestByProjectNumberAndStatus: getRfpByNumMock,
+    getRfpApprovalRequestBySourceDealAndStatus: getRfpBySourceMock,
+    getBidboardMappingByProcoreProjectNumber: getMappingMock,
+    getSyncMappingBySourceDealId: getDealMappingMock,
+    getBidboardMappingBySourceDealId: getBidboardDealMappingMock,
+    getSyncMappingByBidboardProjectId: getMappingByBidIdMock,
+    createSyncMapping: createSyncMappingMock,
+    enqueueBidboardCallback: enqueueBidboardCallbackMock,
+  },
+}));
+
+const { performCreateFromRfpVote, enqueueBidboardCreateCommand, claimNextBidboardCreateCommand, processBidboardCreateOutbox, CreatedMappingMissingError, UnconfirmedCreateError } =
+  await import("../server/sync/bidboard-create-worker.ts");
+
+function input(overrides: Record<string, any> = {}) {
+  return {
+    sourceSystem: "trock_crm", sourceDealId: "crm-deal-1", sourceEventId: "crm:rfp-vote:approved:round-1", decision: "approved",
+    deal: { name: "d", projectNumber: "TR-1001", projectType: "9", amount: 1, estimator: null, companyName: null, contactName: null, clientEmail: null, clientPhone: null, address: null, description: null, dueDate: null, workflowRoute: "normal" },
+    attachments: [],
+    ...overrides,
+  } as any;
+}
+const lastCallback = () => (enqueueBidboardCallbackMock.mock.calls.at(-1)?.[0] as any)?.payload;
+
+describe("performCreateFromRfpVote (create logic)", () => {
+  beforeEach(() => {
+    // enqueueCreateFromRfpCallback now DELETEs stale pending callbacks via getDb() (finding X4); stub it.
+    dbHolder.db = { execute: vi.fn(async () => ({ rows: [] })) } as any;
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
+    // A successful create PERSISTS the source-deal mapping (as the real createBidBoardProjectFromDeal does via
+    // storage.createSyncMapping) — simulate that so perform's post-create mapping check (finding) passes.
+    createBidBoardMock.mockReset();
+    createBidBoardMock.mockImplementation(async (args: any) => {
+      // A successful create PERSISTS the mapping for the CREATED project id, owned by THIS deal — the post-create
+      // check now verifies by project id + owner (not by source deal), so set getSyncMappingByBidboardProjectId too.
+      const mapping = { bidboardProjectId: "999", procoreProjectNumber: "TR-1001", sourceSystem: args?.sourceSystem ?? "trock_crm", sourceDealId: args?.sourceDealId ?? "crm-deal-1" };
+      getDealMappingMock.mockResolvedValue(mapping as any);
+      getBidboardDealMappingMock.mockResolvedValue(mapping as any);
+      getMappingByBidIdMock.mockResolvedValue(mapping as any);
+      return { success: true, projectId: "999" } as any;
+    });
+    enqueueBidboardCallbackMock.mockReset(); enqueueBidboardCallbackMock.mockResolvedValue({ id: 1 } as any);
+    checkEligibilityMock.mockReset(); checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
+    getRfpByNumMock.mockReset(); getRfpByNumMock.mockResolvedValue(undefined);
+    getRfpBySourceMock.mockReset(); getRfpBySourceMock.mockResolvedValue(undefined);
+    getMappingMock.mockReset(); getMappingMock.mockResolvedValue(undefined);
+    getDealMappingMock.mockReset(); getDealMappingMock.mockResolvedValue(undefined);
+    getBidboardDealMappingMock.mockReset(); getBidboardDealMappingMock.mockResolvedValue(undefined);
+    getMappingByBidIdMock.mockReset(); getMappingByBidIdMock.mockResolvedValue(undefined);
+    createSyncMappingMock.mockReset(); createSyncMappingMock.mockResolvedValue({ id: 1 } as any);
+    getAutomationConfigMock.mockReset(); getAutomationConfigMock.mockResolvedValue({ value: { companyId: "42" } } as any);
+    delete process.env.PROCORE_COMPANY_ID;
+  });
+
+  it("happy: creates + enqueues a durable 'created' callback (NULL rfpApprovalRequestId, keyed by sourceDealId)", async () => {
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    const enq = enqueueBidboardCallbackMock.mock.calls[0][0] as any;
+    expect(enq.rfpApprovalRequestId).toBeNull();
+    expect(enq.sourceDealId).toBe("crm-deal-1");
+    expect(enq.payload.status).toBe("created");
+    expect(enq.payload.bidboardProjectId).toBe("999");
+  });
+
+  it("[AA3] stamps the callback createdAt with the command receipt time, not now", async () => {
+    const commandAt = "2026-07-03T14:00:00.000Z";
+    await performCreateFromRfpVote(input(), commandAt);
+    expect(enqueueBidboardCallbackMock.mock.calls[0][0].payload.createdAt).toBe(commandAt);
+  });
+
+  it("[T3/V4] rechecks eligibility immediately before the create: ineligible -> failed callback, no create", async () => {
+    checkEligibilityMock.mockResolvedValueOnce({ eligible: false, reason: "no longer in Opportunity" } as any);
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("no longer in Opportunity");
+  });
+
+  it("[S3] a conflicting APPROVED approval by project NUMBER -> failed callback, no create", async () => {
+    getRfpByNumMock.mockImplementation(async (_p: string, s: string) => (s === "approved" ? { id: 7, status: "approved" } : undefined));
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("conflicting RFP approval");
+  });
+
+  it("[S4] a conflicting PENDING approval by SOURCE DEAL (not by number) -> failed callback, no create", async () => {
+    // Exercise the getRfpBySourceMock arm of the guard's ?? chain, distinct from the by-number (S3) arm above.
+    getRfpBySourceMock.mockImplementation(async (_ss: string, _sd: string, s: string) => (s === "pending" ? { id: 11, status: "pending" } : undefined));
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("conflicting RFP approval");
+    expect(getRfpBySourceMock).toHaveBeenCalledWith("trock_crm", "crm-deal-1", "pending");
+  });
+
+  it("[finding K] a create with NO Procore company id THROWS before enqueuing an unusable 'created' callback", async () => {
+    getAutomationConfigMock.mockResolvedValue({ value: {} } as any); // no companyId
+    delete process.env.PROCORE_COMPANY_ID; // and none from env
+    // createBidBoardMock returns success (default) -> the project is created, but the 'created' callback enqueue
+    // must throw (the CRM 422s a created with no procore_company_id). The throw keeps the command retryable.
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/company id/i);
+    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled();
+  });
+
+  it("[finding] a create whose sync mapping was NOT persisted THROWS (recoverable), sends no unguarded 'created'", async () => {
+    // Simulate createBidBoardProjectFromDeal returning success while storage.createSyncMapping failed silently:
+    // the project exists but no source-deal mapping was written.
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any); // does NOT persist the mapping
+    getBidboardDealMappingMock.mockResolvedValue(undefined); // mapping-first adopt sees none (verify-by-id also none via beforeEach)
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/mapping was not persisted/i);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // the guards can't protect an unmapped project
+  });
+
+  it("[V1] refuses when the project number is owned by another deal -> failed callback, no create", async () => {
+    getMappingMock.mockResolvedValue({ sourceSystem: "trock_crm", sourceDealId: "other-deal", bidboardProjectId: "777" });
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("other-deal");
+  });
+
+  it("[X6] refuses when the SAME source deal already has an APPROVED RFP (revised project number) -> failed, no create", async () => {
+    getRfpBySourceMock.mockImplementation(async (_ss: string, _sd: string, s: string) => (s === "approved" ? { id: 9, status: "approved" } : undefined));
+    await performCreateFromRfpVote(input());
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(getRfpBySourceMock).toHaveBeenCalledWith("trock_crm", "crm-deal-1", "approved");
+  });
+
+  it("[Y1] THROWS when createBidBoardProjectFromDeal returns success:false (so the command stays retryable, not done)", async () => {
+    createBidBoardMock.mockResolvedValueOnce({ success: false, error: "playwright UI failure" } as any);
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/playwright UI failure/);
+    expect(lastCallback()).toBeUndefined(); // perform itself sends no callback on a genuine failure; the drain does
+  });
+
+  it("[F14] an UNCONFIRMED create ('Could not confirm project creation') throws UnconfirmedCreateError, not a generic failure", async () => {
+    // The UI click may have created a project but confirmation failed -> indeterminate, NOT a genuine no-project
+    // failure. perform must throw the recoverable sentinel (the drain then parks it 'needs_manual' + sends NO
+    // 'failed' callback) instead of a generic Error that would route to the terminal failed-callback path.
+    createBidBoardMock.mockReset();
+    createBidBoardMock.mockResolvedValue({ success: false, error: "Could not confirm project creation" } as any);
+    await expect(performCreateFromRfpVote(input())).rejects.toBeInstanceOf(UnconfirmedCreateError);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no callback for an indeterminate outcome
+  });
+
+  it("[I4] the post-create check verifies by the CREATED project id + owner, not any source-deal mapping row", async () => {
+    createBidBoardMock.mockReset();
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any); // create OK
+    getBidboardDealMappingMock.mockResolvedValue(undefined); // no mapping-first adopt
+    // (a) project 999's mapping was NOT persisted -> must stay recoverable, NOT falsely report created
+    getMappingByBidIdMock.mockResolvedValue(undefined);
+    await expect(performCreateFromRfpVote(input())).rejects.toBeInstanceOf(CreatedMappingMissingError);
+    // (b) project 999 got mapped to ANOTHER deal -> also not accepted as ours (routes to owner-mismatch recovery)
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any);
+    getMappingByBidIdMock.mockResolvedValue({ bidboardProjectId: "999", sourceSystem: "trock_crm", sourceDealId: "someone-else" } as any);
+    await expect(performCreateFromRfpVote(input())).rejects.toBeInstanceOf(CreatedMappingMissingError);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // never a 'created' for an unverified/other-owned project
+  });
+
+  it("[finding] a post-create VERIFY-lookup error routes to created-but-unmapped recovery, not a generic failure", async () => {
+    // The project WAS created (999) but the verify-by-project-id lookup itself throws (transient DB). This must be
+    // treated as created-but-unmapped (recoverable) — NOT propagate as a plain error, which the drain's generic
+    // catch could turn into a false 'failed' for a project that exists.
+    createBidBoardMock.mockReset();
+    createBidBoardMock.mockResolvedValue({ success: true, projectId: "999" } as any);
+    getMappingByBidIdMock.mockRejectedValue(new Error("verify lookup db blip"));
+    await expect(performCreateFromRfpVote(input())).rejects.toBeInstanceOf(CreatedMappingMissingError);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no 'created' and no 'failed' — stays recoverable
+  });
+
+  it("[finding] the adopt guard uses the bid-board-linked source-deal lookup, so a duplicate partial row can't hide an existing project", async () => {
+    // A legacy partial mapping row (null bidboard id) could shadow the real linked row in the plain by-sourceDealId
+    // read, letting a revised-number vote create a SECOND project. The bid-board-linked lookup returns the REAL
+    // linked project (999 under TR-1001), so a revised-number vote (TR-2002) is refused and no create is attempted.
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" } as any);
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    expect(getBidboardDealMappingMock).toHaveBeenCalled(); // the adopt guard consulted the robust lookup
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // never created a duplicate
+    expect(lastCallback().status).toBe("failed"); // revised number vs the linked project's number -> refused
+    expect(lastCallback().error).toContain("without a verified match");
+  });
+
+  it("[P2-A/P2-C] REFUSES to create when a SIBLING outbox row for the same deal is in recovery (blocks a duplicate)", async () => {
+    // A prior round for this deal created a project we can't yet see (its sibling row is 'reclaiming'/'needs_manual').
+    // Creating now would DUPLICATE it, so the sibling-recovery guard refuses BEFORE createBidBoardProjectFromDeal —
+    // independent of drain order / attempt_count.
+    dbHolder.db = { execute: vi.fn(async (q: any) => {
+      if (/status IN \('reclaiming', 'needs_manual'\)/.test(JSON.stringify(q))) return { rows: [{ status: "reclaiming", recovered_project_id: "999" }] };
+      return { rows: [] };
+    }) } as any;
+    const outcome = await performCreateFromRfpVote(input());
+    expect(outcome).toBe("failed");
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // never reached the create — no duplicate
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("unresolved prior create round");
+  });
+
+  it("[Y2] refuses when this deal already has a BidBoard project under a DIFFERENT number -> failed callback, no create", async () => {
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "555", procoreProjectNumber: "TR-9999" });
+    await performCreateFromRfpVote(input()); // input's number is TR-1001, mapping's is TR-9999
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("without a verified match");
+  });
+
+  it("[Y2] idempotent same-number retry ADOPTS the existing project (re-sends 'created', no Playwright re-run)", async () => {
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
+    await performCreateFromRfpVote(input()); // input number TR-1001 == mapping number -> adopt
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // mapping-first short-circuits; no re-create
+    expect(lastCallback().status).toBe("created");
+    expect(lastCallback().bidboardProjectId).toBe("999"); // adopts the EXISTING project id
+  });
+
+  it("[F2] refuses to adopt when the existing mapping has NO recorded number but a number is requested (ambiguous)", async () => {
+    // A legacy/partial or cross-path mapping with a null procoreProjectNumber: we can't confirm the existing project
+    // is the one the CRM asked to create, so we must NOT silently adopt it under the requested number.
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "555", procoreProjectNumber: null });
+    await performCreateFromRfpVote(input()); // input requests number TR-1001; stored number is null -> ambiguous
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("without a verified match");
+  });
+
+  it("[F3] REFUSES a service RFP (projectType '4') -> failed callback, no create in the non-service stage", async () => {
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "TR-1001", projectType: "4", amount: 1, workflowRoute: "service" } }));
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // never reaches the hard-coded "Estimate in Progress" create
+    expect(getBidboardDealMappingMock).toHaveBeenCalled(); // adopt lookup runs FIRST now; service refusal is AFTER it (no mapping -> refuse)
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("service RFP");
+  });
+
+  it("[finding Macroscope] a service-typed deal that ALREADY has a project ADOPTS it (re-sends 'created'), not a false 'failed'", async () => {
+    // A project already exists for this deal (same number). The service-RFP refusal must NOT flip it to a false
+    // 'failed' — the mapping-first adopt runs first and re-sends the 'created' callback idempotently.
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "777", procoreProjectNumber: "TR-1001" } as any);
+    const outcome = await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "TR-1001", projectType: "4", amount: 1, workflowRoute: "service" } }));
+    expect(outcome).toBe("adopted");
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // adopts the existing project, never creates
+    expect(lastCallback().status).toBe("created"); // NOT a false 'failed'
+    expect(lastCallback().bidboardProjectId).toBe("777");
+  });
+
+  it("[F3] a NON-service RFP (projectType '9') is NOT rejected by the service guard (proceeds to create)", async () => {
+    await performCreateFromRfpVote(input()); // projectType '9', number TR-1001 (no DFW type digit)
+    expect(createBidBoardMock).toHaveBeenCalled();
+    expect(lastCallback().status).toBe("created");
+  });
+
+  it("[F10] REFUSES a service RFP identified by the project NUMBER digit even when projectType is stale/non-4", async () => {
+    // The project number's type digit is canonical: DFW-4-… is service even though project_types says '9'.
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "DFW-4-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("service RFP");
+  });
+
+  it("[F10] a NON-service project NUMBER digit (DFW-9-…) proceeds to create", async () => {
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "DFW-9-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
+    expect(createBidBoardMock).toHaveBeenCalled();
+    expect(lastCallback().status).toBe("created");
+  });
+
+  it("[G4] forwards the CANONICAL project type (from the number digit) to the create, not the stale projectType", async () => {
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "DFW-2-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
+    expect(createBidBoardMock).toHaveBeenCalled();
+    const arg = (createBidBoardMock.mock.calls.at(-1) as any)[0];
+    expect(arg.normalizedDealData.project_types).toBe("2"); // canonical digit from DFW-2-…, NOT the stale "9"
+  });
+
+  it("[H1] recognizes a NON-DFW (ATL-4-…) service number and refuses it, even with a stale projectType", async () => {
+    await performCreateFromRfpVote(input({ deal: { name: "d", projectNumber: "ATL-4-25001-aa", projectType: "9", amount: 1, workflowRoute: "normal" } }));
+    expect(createBidBoardMock).not.toHaveBeenCalled(); // ATL-4 parsed as service -> refused (was mis-routed when DFW-only)
+    expect(lastCallback().status).toBe("failed");
+    expect(lastCallback().error).toContain("service RFP");
+  });
+
+  it("[finding] mapping-first adopt beats an ineligible recheck: a reclaim-after-create never reports a false failure", async () => {
+    // A prior attempt created the project (mapping exists); markCreateCommandDone then failed and the command was
+    // reclaimed. On the re-run the deal has since left Opportunity (ineligible) — but because the project already
+    // exists, we must ADOPT (re-send 'created'), NOT emit a 'failed' callback.
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
+    checkEligibilityMock.mockResolvedValue({ eligible: false, reason: "Deal left Opportunity" } as any);
+    await performCreateFromRfpVote(input());
+    expect(checkEligibilityMock).not.toHaveBeenCalled(); // mapping-first returns before the eligibility recheck
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(lastCallback().status).toBe("created");
+    expect(lastCallback().bidboardProjectId).toBe("999");
+  });
+
+  it("[X4] supersedes prior PENDING voting callbacks with a SCOPED DELETE before enqueuing a new one", async () => {
+    await performCreateFromRfpVote(input());
+    const deleteSql = (dbHolder.db.execute as any).mock.calls
+      .map((c: any[]) => JSON.stringify(c[0]))
+      .find((s: string) => /DELETE FROM bidboard_callback_outbox/i.test(s));
+    expect(deleteSql).toBeTruthy();
+    // finding: the DELETE must be SCOPED — not an unscoped table wipe. Assert the row-selection criteria are present
+    // (source_deal_id filter, NULL request id for voting rows, and status='pending'), not just the table name.
+    expect(deleteSql).toMatch(/source_deal_id/i);
+    expect(deleteSql).toMatch(/rfp_approval_request_id IS NULL/i);
+    expect(deleteSql).toMatch(/status = 'pending'/i);
+    expect(enqueueBidboardCallbackMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("[X5] THROWS (so the command stays retryable, not 'done') when the callback URL is missing", async () => {
+    urlHolder.url = null;
+    await expect(performCreateFromRfpVote(input())).rejects.toThrow(/TROCK_CRM_BASE_URL/);
+    // the project was created but the callback couldn't be enqueued -> throw -> command marked failed upstream
+    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---- outbox lifecycle (V3 durability + idempotency) on PGlite ----
+describe("bidboard_create_outbox lifecycle (real SQL)", () => {
+  let pg: PGlite;
+  beforeAll(async () => {
+    pg = new PGlite();
+    await pg.exec(`
+      CREATE TABLE bidboard_create_outbox (
+        id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL,
+        source_event_id text NOT NULL UNIQUE, project_number text, payload jsonb NOT NULL,
+        status text NOT NULL DEFAULT 'pending', attempt_count int NOT NULL DEFAULT 0, max_attempts int NOT NULL DEFAULT 5,
+        last_error text, last_attempt_at timestamptz, next_attempt_at timestamptz NOT NULL DEFAULT now(),
+        created_at timestamptz NOT NULL DEFAULT now(), processed_at timestamptz
+      );
+      -- enqueueCreateFromRfpCallback DELETEs stale pending rows here (X4) before enqueuing.
+      CREATE TABLE bidboard_callback_outbox (
+        id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL,
+        rfp_approval_request_id integer, payload jsonb NOT NULL, target_url text NOT NULL,
+        status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now()
+      );
+    `);
+    dbHolder.db = drizzle(pg);
+  });
+  afterAll(async () => { await pg?.close?.(); });
+  beforeEach(async () => {
+    await pg.exec(`DELETE FROM bidboard_create_outbox; DELETE FROM bidboard_callback_outbox;`);
+    enqueueBidboardCallbackMock.mockReset();
+    // The drain catch now probes getBidboardMappingBySourceDealId (a post-create failure must not emit a 'failed'
+    // callback) — reset both source-deal lookups to "no mapping" so the create-logic tests' mapping value can't leak.
+    getDealMappingMock.mockReset(); getDealMappingMock.mockResolvedValue(undefined);
+    getBidboardDealMappingMock.mockReset(); getBidboardDealMappingMock.mockResolvedValue(undefined);
+    getMappingByBidIdMock.mockReset(); getMappingByBidIdMock.mockResolvedValue(undefined);
+    createSyncMappingMock.mockReset(); createSyncMappingMock.mockResolvedValue({ id: 1 } as any);
+    getAutomationConfigMock.mockReset(); getAutomationConfigMock.mockResolvedValue({ value: { companyId: "42" } } as any);
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
+  });
+
+  it("[V3] enqueue persists a pending command; a duplicate sourceEventId is idempotent (no second row)", async () => {
+    await enqueueBidboardCreateCommand(input());
+    await enqueueBidboardCreateCommand(input()); // same sourceEventId
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("pending");
+  });
+
+  it("re-queues a FAILED command on a re-delivery (the CRM's rep-retry re-POSTs the same sourceEventId)", async () => {
+    await enqueueBidboardCreateCommand(input());
+    await pg.query(`UPDATE bidboard_create_outbox SET status='failed', last_error='boom'`);
+    await enqueueBidboardCreateCommand(input()); // re-delivery of the same event
+    const rows = (await pg.query(`SELECT status, last_error, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("pending"); // re-queued
+    expect(rows[0].last_error).toBeNull();
+  });
+
+  it("does NOT disturb a DONE command on a re-delivery when its callback was DELIVERED (idempotent, no re-create)", async () => {
+    await enqueueBidboardCreateCommand(input());
+    await pg.query(`UPDATE bidboard_create_outbox SET status='done'`);
+    // The created callback was delivered ('sent') — a duplicate delivery must stay a no-op.
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', 'crm-deal-1', NULL, '{"status":"created"}'::jsonb, 'http://crm/cb', 'sent')`
+    );
+    await enqueueBidboardCreateCommand(input());
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("done");
+  });
+
+  it("[finding] re-queues a DONE command whose created callback went DEAD/lost so the retry re-adopts + re-sends", async () => {
+    await enqueueBidboardCreateCommand(input());
+    await pg.query(`UPDATE bidboard_create_outbox SET status='done'`);
+    // The created callback exhausted its retries -> 'dead' (no live pending/sent callback for the deal). A
+    // same-sourceEventId retry must re-queue so the worker re-runs mapping-first adopt + enqueues a fresh callback.
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', 'crm-deal-1', NULL, '{"status":"created"}'::jsonb, 'http://crm/cb', 'dead')`
+    );
+    await enqueueBidboardCreateCommand(input());
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("pending"); // re-queued for callback recovery
+  });
+
+  it("[finding] a newer FAILED round does NOT block a DONE command's callback-recovery re-queue (the failed round linked nothing)", async () => {
+    // Round 1 created the project + mapping ('done') but its 'created' callback died. A NEWER round 2 (revised number)
+    // then FAILED (mapping-first adopt refused it). The failed round 2 created/linked NOTHING, so round 1's project is
+    // still the deal's actual mapping — its lost callback MUST stay recoverable. The per-branch guard means a newer
+    // 'failed' round blocks a re-queue-TO-PENDING (drain) but NOT the callback-recovery re-queue of a 'done' row.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-dr1", sourceDealId: "d-dr", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='done' WHERE source_event_id='e-dr1'`);
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-dr2", sourceDealId: "d-dr", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='failed' WHERE source_event_id='e-dr2'`); // newer round refused
+    // Round 1's 'created' callback died (no live created callback for the deal):
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', 'd-dr', NULL, '{"status":"created"}'::jsonb, 'http://crm/cb', 'dead')`
+    );
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-dr1", sourceDealId: "d-dr", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-dr1").status).toBe("pending"); // callback recovery NOT blocked by the failed newer round
+    expect(rows.find((r) => r.source_event_id === "e-dr2").status).toBe("failed"); // the newer failed round is untouched
+  });
+
+  it("[finding] a 'sent' FAILED callback does NOT block re-queue of a DONE command whose CREATED callback was lost", async () => {
+    await enqueueBidboardCreateCommand(input());
+    await pg.query(`UPDATE bidboard_create_outbox SET status='done'`);
+    // An earlier attempt's 'failed' callback was delivered ('sent'); the later successful create's 'created'
+    // callback was then lost. The live-callback check must look for CREATED callbacks only, so this sent FAILED
+    // one must NOT block recovery — the retry re-queues to re-adopt + re-send the 'created' callback.
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', 'crm-deal-1', NULL, '{"status":"failed"}'::jsonb, 'http://crm/cb', 'sent')`
+    );
+    await enqueueBidboardCreateCommand(input());
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("pending"); // re-queued despite the sent FAILED callback
+  });
+
+  it("refreshes a still-PENDING command on a corrected re-delivery (payload + project_number + created_at receipt)", async () => {
+    const mkDeal = (n: string) => ({ name: "d", projectNumber: n, projectType: "9", amount: 1, workflowRoute: "normal" });
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-1001") }));
+    // Age the receipt so a refresh is observable, then a corrected re-post (same sourceEventId, revised number)
+    // arrives BEFORE the worker claimed the pending row.
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour'`);
+    const before = (await pg.query(`SELECT created_at FROM bidboard_create_outbox`)).rows[0] as any;
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-2002") }));
+    const rows = (await pg.query(`SELECT status, project_number, created_at, payload FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("pending");
+    expect(rows[0].project_number).toBe("TR-2002"); // refreshed, not the stale first payload
+    expect(rows[0].payload.deal.projectNumber).toBe("TR-2002");
+    expect(new Date(rows[0].created_at).getTime()).toBeGreaterThan(new Date(before.created_at).getTime()); // receipt refreshed
+  });
+
+  it("[F4] supersedes an OLDER pending command for the SAME deal when a newer round is enqueued", async () => {
+    // Round 1 for this deal is still pending (the worker hasn't claimed it). Round 2 (a new sourceEventId, revised
+    // number) arrives -> the earlier pending command must be 'superseded' so the FIFO drain doesn't create round
+    // 1's obsolete project first and then refuse round 2 on the same-deal revised-number guard.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-super-1", sourceDealId: "d-super", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour' WHERE source_event_id='e-super-1'`); // an earlier round
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-super-2", sourceDealId: "d-super", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-super-1").status).toBe("superseded"); // earlier round retired
+    expect(rows.find((r) => r.source_event_id === "e-super-2").status).toBe("pending"); // only the latest remains
+    // and a superseded row is NOT claimed by the drain — only the latest round runs.
+    const perform = vi.fn(async () => {});
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    expect(perform).toHaveBeenCalledTimes(1);
+  });
+
+  it("[F9] a LATE duplicate of an OLDER event does NOT supersede the newer pending round", async () => {
+    // Round 1 pending, then round 2 arrives (supersedes round 1). A late duplicate delivery of round 1 then lands:
+    // its ON CONFLICT is a no-op (row already 'superseded'), so it must NOT retire round 2 (the latest approved
+    // vote) — else the deal strands with no pending command to create its project.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r1", sourceDealId: "d-late", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() - interval '1 hour' WHERE source_event_id='e-r1'`);
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r2", sourceDealId: "d-late", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox WHERE source_event_id='e-r1'`)).rows[0]).toMatchObject({ status: "superseded" });
+    // The late duplicate of round 1 (already 'superseded') re-arrives:
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r1", sourceDealId: "d-late", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-r1").status).toBe("superseded"); // stays retired (no-op re-queue)
+    expect(rows.find((r) => r.source_event_id === "e-r2").status).toBe("pending"); // the newer round SURVIVES
+  });
+
+  it("[F9/H2] re-queuing a FAILED older round is BLOCKED while a newer same-deal round is pending", async () => {
+    // The subtle case: round 1 was 'processing' (so round 2's enqueue could not supersede it), then FAILED, while
+    // round 2 stayed pending. A rep re-post of the OLDER round 1 must NOT flip it back to pending (it would drain
+    // first by id order and create round 1's obsolete number, then round 2 gets Y2-refused). The enqueue's ON
+    // CONFLICT skips the re-queue because a newer (higher-id) active same-deal round exists — round 1 stays 'failed'
+    // and round 2 remains the one that drains.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq1", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing' WHERE source_event_id='e-fq1'`); // claimed before round 2
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq2", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='failed' WHERE source_event_id='e-fq1'`); // round 1's create fails
+    // Rep re-posts round 1 (older sourceEventId):
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fq1", sourceDealId: "d-fq", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-fq1").status).toBe("failed"); // re-queue BLOCKED — stays failed
+    expect(rows.find((r) => r.source_event_id === "e-fq2").status).toBe("pending"); // the newer round remains the one that drains
+  });
+
+  it("[finding] re-queuing an older FAILED round is BLOCKED when a newer same-deal round ALSO failed (latest vote keeps its own retry)", async () => {
+    // Both rounds failed: round 1 was 'processing' when round 2 enqueued (so round 2's supersede couldn't retire it),
+    // then round 1 failed, then round 2 also failed (a transient error under its revised number). A late retry of the
+    // OLDER round 1 must NOT re-queue ahead of round 2 — it would create round 1's obsolete project, then round 2's
+    // retry would be revised-number-refused. A newer 'failed' round is the latest reviewed vote awaiting its OWN
+    // retry, so it blocks the older round's revival.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ff1", sourceDealId: "d-ff", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing' WHERE source_event_id='e-ff1'`); // claimed before round 2
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ff2", sourceDealId: "d-ff", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='failed' WHERE source_event_id IN ('e-ff1','e-ff2')`); // BOTH rounds failed
+    // Rep re-posts the OLDER round 1:
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ff1", sourceDealId: "d-ff", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    let rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-ff1").status).toBe("failed"); // re-queue BLOCKED by the newer failed round
+    expect(rows.find((r) => r.source_event_id === "e-ff2").status).toBe("failed"); // untouched; its OWN retry is what should run
+    // And the NEWEST round's own retry is NOT blocked (nothing has a higher id than it):
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ff2", sourceDealId: "d-ff", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-ff2").status).toBe("pending"); // round 2 re-queues (its retry runs)
+    expect(rows.find((r) => r.source_event_id === "e-ff1").status).toBe("failed"); // round 1 still parked failed
+  });
+
+  it("[F4] leaves an in-flight 'processing' same-deal command alone (can't cancel a live create)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-live-1", sourceDealId: "d-live" }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing' WHERE source_event_id='e-live-1'`);
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-live-2", sourceDealId: "d-live" }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-live-1").status).toBe("processing"); // NOT superseded — owns it
+    expect(rows.find((r) => r.source_event_id === "e-live-2").status).toBe("pending");
+  });
+
+  it("[finding] does NOT refresh a 'processing' row on a re-delivery (a live create owns it — never rewrite it)", async () => {
+    const mkDeal = (n: string) => ({ name: "d", projectNumber: n, projectType: "9", amount: 1, workflowRoute: "normal" });
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-1001") }));
+    // The worker claimed it (processing) and is mid-create — even a recent last_attempt_at is left alone now.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW(), created_at=NOW() - interval '1 hour'`);
+    const before = (await pg.query(`SELECT created_at FROM bidboard_create_outbox`)).rows[0] as any;
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-2002") })); // a corrected re-post arrives
+    const rows = (await pg.query(`SELECT status, project_number, created_at, payload FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("processing"); // unchanged — the in-flight attempt owns it
+    expect(rows[0].project_number).toBe("TR-1001"); // NOT refreshed to the corrected payload
+    expect(rows[0].payload.deal.projectNumber).toBe("TR-1001");
+    expect(new Date(rows[0].created_at).getTime()).toBe(new Date(before.created_at).getTime()); // receipt NOT bumped
+  });
+
+  it("[finding] does NOT refresh even a STALE 'processing' row (a created-but-unmapped project under the old number would be duplicated by a revised-number reclaim)", async () => {
+    const mkDeal = (n: string) => ({ name: "d", projectNumber: n, projectType: "9", amount: 1, workflowRoute: "normal" });
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-1001") }));
+    // A crashed worker's abandoned claim: 'processing' with last_attempt_at PAST the 10-min stale window. It may hold
+    // a created-but-unmapped project under TR-1001. A corrected re-post with a REVISED number must NOT refresh it —
+    // else the stale-reclaim would run TR-2002, miss the TR-1001 project in both adopt guards, and create a duplicate.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW() - interval '11 minutes'`);
+    await enqueueBidboardCreateCommand(input({ deal: mkDeal("TR-2002") })); // corrected re-post during the stale window
+    const rows = (await pg.query(`SELECT status, project_number, payload FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("processing"); // left for its ORIGINAL-payload reclaim (which safely adopts)
+    expect(rows[0].project_number).toBe("TR-1001"); // NOT refreshed to the revised number
+    expect(rows[0].payload.deal.projectNumber).toBe("TR-1001");
+  });
+
+  it("[finding] the supersede DELETE spares a NEWER round's pending callback, removes OLDER + EQUAL-timestamp stale ones", async () => {
+    // A NEWER round's still-pending callback (createdAt AFTER the one we're about to enqueue) — must survive.
+    await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T15:00:00.000Z"}'::jsonb, 'http://crm/cb', 'pending')`);
+    // An OLDER stale pending callback that SHOULD be superseded.
+    await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T08:00:00.000Z"}'::jsonb, 'http://crm/cb', 'pending')`);
+    // finding (Macroscope, M3): a stale 'failed' from an earlier attempt of THIS command carries the SAME receipt
+    // time (10:00) as the 'created' about to be enqueued. A strict `<` would leave it pending alongside the 'created'
+    // (same freshness timestamp -> ambiguous). `<=` must delete it.
+    await pg.query(`INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status) VALUES ('trock_crm', 'crm-deal-1', NULL, '{"createdAt":"2026-07-03T10:00:00.000Z","status":"failed"}'::jsonb, 'http://crm/cb', 'pending')`);
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" }); // adopt path
+    // Enqueue a 'created' callback stamped 10:00 -> the supersede DELETE (real table) removes rows OLDER-OR-EQUAL to
+    // 10:00; the 'created' insert itself goes through storage.enqueueBidboardCallback (the mock here), captured below.
+    await performCreateFromRfpVote(input(), "2026-07-03T10:00:00.000Z");
+    const times = ((await pg.query(`SELECT payload->>'createdAt' AS c FROM bidboard_callback_outbox`)).rows as any[]).map((r) => r.c);
+    expect(times).toContain("2026-07-03T15:00:00.000Z"); // newer round's callback NOT deleted (strictly greater)
+    expect(times).not.toContain("2026-07-03T08:00:00.000Z"); // older stale one superseded
+    expect(times).not.toContain("2026-07-03T10:00:00.000Z"); // M3: the EQUAL-timestamp stale 'failed' is deleted by <=
+    // the freshly-enqueued 'created' carries the same 10:00 receipt time (delivered via the durable outbox / mock)
+    expect(lastCallback().status).toBe("created");
+    expect(lastCallback().createdAt).toBe("2026-07-03T10:00:00.000Z");
+  });
+
+  it("processBidboardCreateOutbox claims + drains pending commands serially and marks them done", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e1", sourceDealId: "d1" }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e2", sourceDealId: "d2" }));
+    const perform = vi.fn(async () => {});
+    const { processed } = await processBidboardCreateOutbox({ performImpl: perform as any });
+    expect(processed).toBe(2);
+    expect(perform).toHaveBeenCalledTimes(2);
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox ORDER BY id`)).rows as any[];
+    expect(rows.map((r) => r.status)).toEqual(["done", "done"]);
+  });
+
+  it("[finding] a markDone failure on the FINAL allowed claim RESETS attempt_count so the row isn't stuck 'processing' forever", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-md", sourceDealId: "d-md" }));
+    // Simulate the row being on its last allowed claim (claimNext will bump attempt_count to max_attempts).
+    await pg.query(`UPDATE bidboard_create_outbox SET attempt_count = 4 WHERE source_event_id = 'e-md'`); // max_attempts default 5 -> becomes 5 on claim
+    const realDb = dbHolder.db;
+    // Make markCreateCommandDone (status='done') throw so the success path's catch runs; delegate everything else.
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/SET status = 'done'/.test(JSON.stringify(q))) throw new Error("markDone blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => "created" as const); // create succeeded + 'created' callback enqueued
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // not flipped to a failure — the project exists
+    expect(rows[0].attempt_count).toBe(0); // RESET so the stale-reclaim (attempt_count < max) can recover a lost callback
+  });
+
+  it("marks a command FAILED and enqueues the failed callback ATOMICALLY (one tx) when perform throws", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e9", sourceDealId: "d9" }));
+    const perform = vi.fn(async () => { throw new Error("playwright boom"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status, last_error FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("failed");
+    expect(rows[0].last_error).toContain("playwright boom");
+    // The failed callback + terminal status commit together (a RAW insert in the same tx, not the storage mock) —
+    // read the real callback_outbox table.
+    const cbs = (await pg.query(`SELECT payload FROM bidboard_callback_outbox`)).rows as any[];
+    expect(cbs).toHaveLength(1);
+    expect(cbs[0].payload.status).toBe("failed");
+    expect(cbs[0].payload.error).toContain("playwright boom");
+  });
+
+  it("[finding] the failed callback + terminal mark are ATOMIC: if the terminal UPDATE fails, the callback rolls back too", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-atomic", sourceDealId: "d-atomic" }));
+    const realDb = dbHolder.db;
+    // Make the create_outbox terminal UPDATE inside the tx throw, so the WHOLE tx (incl. the callback insert) rolls back.
+    dbHolder.db = {
+      transaction: (fn: any) => realDb.transaction(async (tx: any) => {
+        const wrapped = { execute: (q: any) => {
+          if (/UPDATE bidboard_create_outbox SET status = 'failed'/.test(JSON.stringify(q))) throw new Error("terminal write blip");
+          return tx.execute(q);
+        } };
+        return fn(wrapped);
+      }),
+      execute: (q: any) => realDb.execute(q),
+    } as any;
+    try {
+      const perform = vi.fn(async () => { throw new Error("playwright boom"); });
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    // Rolled back: NO stranded 'failed' callback, and the row is NOT terminal — left 'processing' + reset for a clean
+    // reclaim that re-delivers + re-marks together. A 'created' can never follow a delivered 'failed' for this command.
+    expect((await pg.query(`SELECT * FROM bidboard_callback_outbox`)).rows).toHaveLength(0);
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing");
+    expect(rows[0].attempt_count).toBe(0);
+  });
+
+  it("[finding Macroscope] a genuine failure whose deliver AND reclaim-reset both fail is SURFACED as needs_manual (not silently stranded)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-strand", sourceDealId: "d-strand" }));
+    const realDb = dbHolder.db;
+    // deliverFailedCallbackAndMarkTerminal's tx throws (nothing lands) AND the reclaim-reset write throws all retries;
+    // markNeedsManual (status='needs_manual') delegates to the real db and succeeds -> the row is surfaced, not stranded.
+    dbHolder.db = {
+      transaction: async (_fn: any) => { throw new Error("tx blip"); },
+      execute: async (q: any) => {
+        if (/SET attempt_count = 0/.test(JSON.stringify(q))) throw new Error("reset blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => { throw new Error("genuine boom"); }); // genuine failure, no project created
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const row = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows[0] as any;
+    expect(row.status).toBe("needs_manual"); // last-resort surfaced for an operator, NOT silently stranded 'processing'
+  });
+
+  it("[finding J] a perform() that RETURNS 'failed' (pre-create refusal) marks the command 'failed', not 'done'", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-refuse", sourceDealId: "d-refuse" }));
+    // perform took a pre-create terminal branch (ineligible / conflict / ownership) — it already sent a 'failed'
+    // callback and created NO project, so the command must be marked terminal 'failed', never 'done'.
+    const perform = vi.fn(async () => "failed" as const);
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("failed");
+  });
+
+  it("[finding] the terminal 'failed' bookkeeping RETRIES a transient error so a refused command lands 'failed' (never left create-capable)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-retry", sourceDealId: "d-retry" }));
+    // Make the FIRST status='failed' UPDATE throw (transient DB blip), then delegate to the real PGlite db.
+    const realDb = dbHolder.db;
+    let failMarkThrows = 0;
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/status = 'failed'/.test(JSON.stringify(q)) && failMarkThrows++ === 0) throw new Error("transient bookkeeping blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => "failed" as const);
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+      const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+      expect(rows[0].status).toBe("failed"); // retried past the blip -> terminal, not left 'processing'
+      expect(failMarkThrows).toBeGreaterThan(1); // proves the mark was retried
+    } finally {
+      dbHolder.db = realDb;
+    }
+  });
+
+  it("[finding Macroscope] a refused command whose terminal mark keeps failing is RESET for reclaim (status flip not silently lost)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-refuse-stuck", sourceDealId: "d-refuse-stuck" }));
+    const realDb = dbHolder.db;
+    // Make EVERY status='failed' UPDATE throw (all 3 resilient retries fail); other writes (incl. the reset) delegate.
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/status = 'failed'/.test(JSON.stringify(q))) throw new Error("persistent bookkeeping blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => "failed" as const);
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // could not mark 'failed'...
+    expect(rows[0].attempt_count).toBe(0); // ...but RESET for reclaim so the terminal mark is retried, not lost
+  });
+
+  it("a POST-create failure (mapping exists) is NOT marked failed and emits NO failed callback — left for reclaim", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-pc", sourceDealId: "d-pc" }));
+    // The project was already created (a mapping exists), but perform then threw (e.g. the 'created' callback
+    // persist failed). This must NOT flip the command to a false 'failed' result.
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "999", procoreProjectNumber: "TR-1001" });
+    const perform = vi.fn(async () => { throw new Error("created-callback persist failed"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // left for the stale-reclaim, not 'failed'
+    expect(rows[0].attempt_count).toBe(0); // finding: reset so callback-delivery recovery isn't capped by max_attempts
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback
+  });
+
+  it("[finding] a mapping-LOOKUP error (indeterminate) is recoverable, not a false create failure", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-lookup", sourceDealId: "d-lookup" }));
+    // perform threw, and the post-create mapping lookup ALSO errors -> we can't prove no project exists.
+    getBidboardDealMappingMock.mockRejectedValue(new Error("mapping lookup db blip"));
+    const perform = vi.fn(async () => { throw new Error("perform blew up"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // recoverable, not 'failed'
+    expect(rows[0].attempt_count).toBe(0);
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no false 'failed' callback while indeterminate
+  });
+
+  it("[F1/F5/F15 + Macroscope] a created-but-UNMAPPED result parks 'reclaiming' + keeps the project id; the drain CONTINUES to an unrelated command (no starvation)", async () => {
+    // The first (lower-id) command's project 999 is created but its mapping write keeps failing. Reconcile is DIRECT
+    // (no perform re-run); the row is RECOVERABLE — never a 'failed' callback since the project exists (F5) — and is
+    // parked 'reclaiming' (NOT 'pending', so a newer same-deal round can't supersede it), carrying the project id for
+    // cross-tick reconcile (F15). finding (Macroscope): the drain must NOT stop here — an UNRELATED later command
+    // (different deal AND number) drains in the SAME pass. (A same-deal/same-number command would instead be refused
+    // by perform's sibling-recovery guard — covered by the G3/P2 tests — so an unreconciled row can't duplicate.)
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unmapped", sourceDealId: "d-unmapped", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-after", sourceDealId: "d-after", deal: { name: "d", projectNumber: "TR-9999", projectType: "9", workflowRoute: "normal" } }));
+    createSyncMappingMock.mockRejectedValue(new Error("mapping write blip")); // the direct reconcile can't land
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-unmapped", bidboardProjectId: "999" } as any);
+    const perform = vi.fn(async (inp: any) => {
+      if (inp.sourceDealId === "d-unmapped") throw err; // first row: created-but-unmapped
+      return "created" as const; // the unrelated later row drains successfully
+    });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT source_event_id, status, payload FROM bidboard_create_outbox`)).rows as any[];
+    const unmapped = rows.find((r) => r.source_event_id === "e-unmapped");
+    const after = rows.find((r) => r.source_event_id === "e-after");
+    expect(unmapped.status).toBe("reclaiming"); // parked, non-supersedable, retried across ticks (backoff)
+    expect(unmapped.payload.__recoveredProjectId).toBe("999"); // project id persisted so it reconciles across ticks
+    expect(after.status).toBe("done"); // finding: the UNRELATED later command DRAINED (not starved behind the reclaiming row)
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // no 'failed' callback for a project that exists (F5)
+    expect(perform).toHaveBeenCalledTimes(2); // both rows ran perform once; the reclaim is DIRECT (no perform re-run)
+    expect(createSyncMappingMock).toHaveBeenCalled(); // proves the direct mapping reconcile was attempted
+  });
+
+  it("[finding Macroscope] a stuck 'reclaiming' row (reconcile still failing) does NOT starve a later unrelated command", async () => {
+    // A row parked 'reclaiming' from a prior tick whose reconcile keeps failing, plus an unrelated later command. The
+    // drain reconcile-attempts the reclaiming row (by its stored id, no perform), then CONTINUES to the unrelated
+    // command (id-ASC claim order would otherwise re-serve the stuck low-id row every tick and starve everything).
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-stuck", sourceDealId: "d-stuck", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='reclaiming', next_attempt_at=NOW() - interval '1 minute', payload = jsonb_set(payload, '{__recoveredProjectId}', to_jsonb('999'::text)) WHERE source_event_id='e-stuck'`);
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-fresh", sourceDealId: "d-fresh", deal: { name: "d", projectNumber: "TR-9999", projectType: "9", workflowRoute: "normal" } }));
+    getMappingByBidIdMock.mockResolvedValue(undefined); // 999 still unmapped
+    createSyncMappingMock.mockRejectedValue(new Error("mapping still failing")); // the reconcile can't land
+    const perform = vi.fn(async () => "created" as const); // the unrelated fresh command creates
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-stuck").status).toBe("reclaiming"); // still parked, retried next pass
+    expect(rows.find((r) => r.source_event_id === "e-fresh").status).toBe("done"); // drained past the stuck row
+    expect(perform).toHaveBeenCalledTimes(1); // only the fresh command ran perform; the reclaiming row reconciled directly
+  });
+
+  it("[finding Macroscope] a parked 'reclaiming' row is claimed at most ONCE per pass, no matter how many later commands drain (attempt_count not burned)", async () => {
+    // First row -> created-but-unmapped -> parked 'reclaiming' (attempt 1). Three unrelated later commands then drain
+    // in the SAME pass. The claimed-this-pass exclusion must keep the reclaiming row from being re-claimed within the
+    // pass (a time-based backoff would elapse during a long pass and burn all max_attempts -> premature needs_manual).
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-rc", sourceDealId: "d-rc", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-l1", sourceDealId: "d-l1", deal: { name: "d", projectNumber: "TR-9001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-l2", sourceDealId: "d-l2", deal: { name: "d", projectNumber: "TR-9002", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-l3", sourceDealId: "d-l3", deal: { name: "d", projectNumber: "TR-9003", projectType: "9", workflowRoute: "normal" } }));
+    createSyncMappingMock.mockRejectedValue(new Error("mapping write blip"));
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-rc", bidboardProjectId: "999" } as any);
+    const perform = vi.fn(async (inp: any) => {
+      if (inp.sourceDealId === "d-rc") throw err; // first row: created-but-unmapped
+      return "created" as const; // the 3 unrelated later commands drain
+    });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT source_event_id, status, attempt_count FROM bidboard_create_outbox ORDER BY id`)).rows as any[];
+    const rc = rows.find((r) => r.source_event_id === "e-rc");
+    expect(rc.status).toBe("reclaiming"); // still recoverable — NOT escalated to needs_manual
+    expect(rc.attempt_count).toBe(1); // claimed ONCE this pass despite 3 later commands draining after it
+    expect(rows.filter((r) => r.source_event_id.startsWith("e-l")).every((r) => r.status === "done")).toBe(true); // all later drained
+  });
+
+  it("[P2-A] a newer same-deal round does NOT supersede a 'reclaiming' recovery row (no orphan/duplicate)", async () => {
+    // Round 1 created project 999 but can't map it -> parked 'reclaiming'. The rep re-reviews the SAME deal and
+    // approves round 2 (revised number). The supersede must NOT retire the reclaiming row (that would orphan 999 and
+    // let round 2 create a duplicate); it stays 'reclaiming' and round 2 queues behind it.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r1", sourceDealId: "d-sup", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    createSyncMappingMock.mockRejectedValue(new Error("mapping write blip"));
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-sup", bidboardProjectId: "999" } as any);
+    await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => { throw err; })) as any });
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox WHERE source_event_id='e-r1'`)).rows[0].status).toBe("reclaiming");
+    // Now round 2 for the SAME deal arrives (revised number):
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-r2", sourceDealId: "d-sup", deal: { name: "d", projectNumber: "TR-2002", projectType: "9", workflowRoute: "normal" } }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-r1").status).toBe("reclaiming"); // NOT superseded — project 999 preserved
+    expect(rows.find((r) => r.source_event_id === "e-r2").status).toBe("pending"); // round 2 queues behind it
+  });
+
+  it("[F15] a 'reclaiming' row is re-claimed and RECONCILED by its persisted project id on the next tick (no re-perform)", async () => {
+    // Simulate a row parked 'reclaiming' from a prior tick (project 999 created, mapping missing). The next drain
+    // must reconcile by the persisted id WITHOUT calling perform (which could double-create), then mark it done.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-reclaim", sourceDealId: "d-reclaim" }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='reclaiming', payload = jsonb_set(payload, '{__recoveredProjectId}', to_jsonb('999'::text)) WHERE source_event_id='e-reclaim'`);
+    getMappingByBidIdMock.mockResolvedValue(undefined); // 999 still unmapped
+    createSyncMappingMock.mockResolvedValue({ id: 5 } as any); // this tick the write lands
+    const perform = vi.fn(async () => { throw new Error("perform must NOT be called for a reclaiming row"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    expect(perform).not.toHaveBeenCalled(); // reconciled by stored id, never re-performed
+    expect(getMappingByBidIdMock).toHaveBeenCalledWith("999");
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows[0].status).toBe("done");
+    expect(lastCallback().bidboardProjectId).toBe("999");
+  });
+
+  it("[fix-a] a 'reclaiming' row whose reconcile keeps failing ESCALATES to 'needs_manual' on its last attempt (surfaced)", async () => {
+    // A reclaiming row one claim short of max_attempts: this claim reconciles-fails, and because it can no longer be
+    // re-claimed (attempt_count would hit max), it escalates to 'needs_manual' instead of sitting 'reclaiming'
+    // silently. (The sibling-recovery guard keeps blocking a fresh same-deal create either way.)
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-exh", sourceDealId: "d-exh" }));
+    await pg.query(`UPDATE bidboard_create_outbox SET status='reclaiming', attempt_count=4, max_attempts=5, payload = jsonb_set(payload, '{__recoveredProjectId}', to_jsonb('999'::text)) WHERE source_event_id='e-exh'`);
+    getMappingByBidIdMock.mockResolvedValue(undefined);
+    createSyncMappingMock.mockRejectedValue(new Error("mapping write still failing"));
+    await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => { throw new Error("perform must not run"); })) as any });
+    const row = (await pg.query(`SELECT status, payload FROM bidboard_create_outbox`)).rows[0] as any;
+    expect(row.status).toBe("needs_manual"); // escalated (was 'reclaiming', attempts exhausted)
+    expect(row.payload.__recoveredProjectId).toBe("999"); // project id preserved for the operator
+  });
+
+  it("[G2] mapping persisted but the 'created' callback can't enqueue -> UNCAPPED 'processing' reclaim, NOT capped needs_manual", async () => {
+    // The mapping write SUCCEEDS (project is now guarded), but enqueueCreatedCallback throws (no procore company id).
+    // That must NOT be treated as a mapping-reconcile failure that caps at max_attempts -> needs_manual; route it to
+    // the uncapped post-create callback-delivery reclaim ('processing', attempt_count reset) so a config fix later
+    // still delivers the 'created' callback.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-cbp", sourceDealId: "d-cbp" }));
+    getMappingByBidIdMock.mockResolvedValue(undefined); // mapping not yet present -> reconcile writes it
+    createSyncMappingMock.mockResolvedValue({ id: 3 } as any); // mapping write SUCCEEDS
+    getAutomationConfigMock.mockResolvedValue({ value: {} } as any); // no companyId -> enqueueCreatedCallback throws
+    delete process.env.PROCORE_COMPANY_ID;
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-cbp", bidboardProjectId: "999" } as any);
+    await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => { throw err; })) as any });
+    const row = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows[0] as any;
+    expect(row.status).toBe("processing"); // uncapped callback-delivery reclaim, NOT 'reclaiming'/'needs_manual'
+    expect(Number(row.attempt_count)).toBe(0); // reset so callback delivery isn't capped by max_attempts
+    expect(createSyncMappingMock).toHaveBeenCalled(); // the mapping WAS persisted (project guarded)
+  });
+
+  it("[G3] the sibling-recovery guard also matches a DIFFERENT deal with the SAME project number (defense-in-depth)", async () => {
+    // A prior round for deal A is 'needs_manual' with project_number TR-1001. A fresh create for deal B reusing
+    // TR-1001 must be refused (the unmapped project is invisible to the mapping ownership guard).
+    await pg.query(`INSERT INTO bidboard_create_outbox (source_system, source_deal_id, source_event_id, project_number, payload, status) VALUES ('trock_crm','deal-A','e-A','TR-1001','{}'::jsonb,'needs_manual')`);
+    dbHolder.db = drizzle(pg as any) as any; // real db so findSiblingRecoveryRow queries the outbox
+    createBidBoardMock.mockReset(); // isolate: only assert THIS test's create calls (lifecycle beforeEach doesn't reset it)
+    getBidboardDealMappingMock.mockResolvedValue(undefined);
+    getMappingMock.mockResolvedValue(undefined);
+    getRfpByNumMock.mockResolvedValue(undefined); getRfpBySourceMock.mockResolvedValue(undefined);
+    checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
+    getAutomationConfigMock.mockResolvedValue({ value: { companyId: "42" } } as any);
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
+    const outcome = await performCreateFromRfpVote(input({ sourceDealId: "deal-B", sourceEventId: "e-B", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    expect(outcome).toBe("failed"); // refused: a sibling recovery row owns TR-1001
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+  });
+
+  it("[finding Macroscope] the sibling-recovery guard matches a CROSS-SYSTEM row reusing the same project number (system-agnostic number branch)", async () => {
+    // A prior HUBSPOT round is 'reclaiming' with project_number TR-1001. A trock_crm create reusing TR-1001 must be
+    // refused — a procore project_number is global, so the number branch must NOT be scoped to the caller's system
+    // (mirrors claimNextBidboardCreateCommand's system-agnostic number exclusion). Before the fix the source_system
+    // filter scoped the whole predicate, so the cross-system sibling was missed and a duplicate could be created.
+    await pg.query(`INSERT INTO bidboard_create_outbox (source_system, source_deal_id, source_event_id, project_number, payload, status) VALUES ('hubspot','hs-deal','e-hs','TR-1001','{}'::jsonb,'reclaiming')`);
+    dbHolder.db = drizzle(pg as any) as any; // real db so findSiblingRecoveryRow queries the outbox
+    createBidBoardMock.mockReset();
+    getBidboardDealMappingMock.mockResolvedValue(undefined);
+    getMappingMock.mockResolvedValue(undefined);
+    getRfpByNumMock.mockResolvedValue(undefined); getRfpBySourceMock.mockResolvedValue(undefined);
+    checkEligibilityMock.mockResolvedValue({ eligible: true } as any);
+    getAutomationConfigMock.mockResolvedValue({ value: { companyId: "42" } } as any);
+    urlHolder.url = "https://crm.example.com/api/internal/bid-board-created";
+    const outcome = await performCreateFromRfpVote(input({ sourceSystem: "trock_crm", sourceDealId: "crm-deal", sourceEventId: "e-crm", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    expect(outcome).toBe("failed"); // refused: a CROSS-SYSTEM sibling recovery row owns TR-1001
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+  });
+
+  it("[F6] a created-but-UNMAPPED result RECONCILES the mapping DIRECTLY (no perform re-run) -> 'done' + 'created' callback", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-recover", sourceDealId: "d-recover" }));
+    // The project exists (id 999) but its mapping wasn't persisted. Recovery writes the mapping DIRECTLY from the
+    // payload carried on the error — it must NOT re-run perform (which could create a SECOND project if the
+    // exact-number lookup transiently errored). Then it sends the 'created' callback and marks the command 'done'.
+    createSyncMappingMock.mockResolvedValue({ id: 7 } as any);
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-recover", bidboardProjectId: "999", procoreProjectNumber: "TR-1001" } as any);
+    const perform = vi.fn(async () => { throw err; });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("done");
+    expect(perform).toHaveBeenCalledTimes(1); // reconciled directly, NOT via a second perform (no double-create)
+    expect(createSyncMappingMock).toHaveBeenCalledTimes(1); // the mapping was persisted directly
+    expect(lastCallback().status).toBe("created"); // the 'created' callback was enqueued from recovery
+  });
+
+  it("[F11] recovery keys on the created project id, not sourceDealId (survives a legacy duplicate mapping row)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-dup", sourceDealId: "d-dup" }));
+    // Legacy duplicate: a by-sourceDealId read returns a DIFFERENT row that LACKS the created project's id. Keying
+    // recovery on that would either strand the drain or callback the wrong project. The by-bidboardProjectId read is
+    // authoritative: here project 999's mapping does NOT yet exist, so recovery writes it and reports 999.
+    getBidboardDealMappingMock.mockResolvedValue({ bidboardProjectId: "555", procoreProjectNumber: "OTHER" } as any); // wrong dup
+    getMappingByBidIdMock.mockResolvedValue(undefined); // project 999 not yet mapped
+    createSyncMappingMock.mockResolvedValue({ id: 9 } as any);
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-dup", bidboardProjectId: "999", procoreProjectNumber: "TR-1001" } as any);
+    const perform = vi.fn(async () => { throw err; });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    expect(getMappingByBidIdMock).toHaveBeenCalledWith("999"); // looked up by the CREATED project id
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows[0].status).toBe("done");
+    expect(lastCallback().bidboardProjectId).toBe("999"); // callback reports the project WE created, not the dup 555
+  });
+
+  it("[H4] recovery where the created project is now mapped to ANOTHER deal -> 'needs_manual', no wrong 'created' callback", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-taken", sourceDealId: "d-mine" }));
+    // The project 999 was manually re-linked / adopted by a DIFFERENT deal while this row was in recovery.
+    getMappingByBidIdMock.mockResolvedValue({ bidboardProjectId: "999", sourceSystem: "trock_crm", sourceDealId: "d-other" } as any);
+    const err = new CreatedMappingMissingError("mapping not persisted", "999", { sourceSystem: "trock_crm", sourceDealId: "d-mine", bidboardProjectId: "999" } as any);
+    await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => { throw err; })) as any });
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox`)).rows[0].status).toBe("needs_manual");
+    expect(createSyncMappingMock).not.toHaveBeenCalled(); // did NOT overwrite the other deal's mapping
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // NO 'created' callback misattributing another deal's project
+  });
+
+  it("[H3/I1] claimNext does NOT jump past a FRESH lower-id 'processing' row for the same deal OR project number (a truly-unrelated deal is free)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p1", sourceDealId: "d-block", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-p2", sourceDealId: "d-block", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    // A different deal that SHARES the in-flight project number must ALSO be blocked (I1: same-number defense).
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-samenum", sourceDealId: "d-samenum", deal: { name: "d", projectNumber: "TR-1001", projectType: "9", workflowRoute: "normal" } }));
+    // A truly-unrelated deal (different deal AND different number) is free to drain.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-other", sourceDealId: "d-free", deal: { name: "d", projectNumber: "TR-9999", projectType: "9", workflowRoute: "normal" } }));
+    // round 1 (lowest id) is mid-create (fresh processing); its maybe-created project is invisible to the guards.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW() WHERE source_event_id='e-p1'`);
+    // claimNext skips round 2 (same deal) AND e-samenum (same number), taking only the unrelated deal/number.
+    expect((await claimNextBidboardCreateCommand())?.source_event_id).toBe("e-other");
+    // once round 1 goes stale (crashed), it (the lower id) is reclaimed first — NOT round 2.
+    await pg.query(`UPDATE bidboard_create_outbox SET last_attempt_at=NOW() - interval '11 minutes' WHERE source_event_id='e-p1'`);
+    expect((await claimNextBidboardCreateCommand())?.source_event_id).toBe("e-p1");
+  });
+
+  it("[F14/P2-C] an UNCONFIRMED create is parked 'needs_manual' (NO auto re-drain -> no duplicate), NO 'failed' callback", async () => {
+    // A project MAY exist but its id is unknown. Auto re-draining would call createBidBoardProjectFromDeal again,
+    // which CREATES on an inconclusive number lookup -> DUPLICATE. So park it 'needs_manual' (not auto-claimed, not
+    // supersedable, no callback) for human resolution — do NOT leave it auto-re-drainable 'pending'.
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unc1", sourceDealId: "d-unc" }));
+    const perform = vi.fn(async () => { throw new UnconfirmedCreateError("Could not confirm project creation"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    expect((await pg.query(`SELECT status FROM bidboard_create_outbox WHERE source_event_id='e-unc1'`)).rows[0].status).toBe("needs_manual");
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // NO 'failed' callback — a project may exist
+    // A newer same-deal round must NOT supersede the needs_manual row (it isn't 'pending'):
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unc2", sourceDealId: "d-unc" }));
+    const rows = (await pg.query(`SELECT source_event_id, status FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows.find((r) => r.source_event_id === "e-unc1").status).toBe("needs_manual"); // untouched by supersede
+    expect(rows.find((r) => r.source_event_id === "e-unc2").status).toBe("pending");
+    // And claimNext never auto-claims a needs_manual row (so perform is never re-run for it):
+    expect(await claimNextBidboardCreateCommand()).toMatchObject({ source_event_id: "e-unc2" });
+  });
+
+  it("[finding Macroscope] an UNCONFIRMED create whose needs_manual park keeps failing is PINNED unclaimable so a stale-reclaim can't re-run perform (no duplicate)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-unc-stuck", sourceDealId: "d-unc-stuck" }));
+    const realDb = dbHolder.db;
+    // Make EVERY needs_manual status write fail; the pin (attempt_count = max_attempts) write delegates to the real db.
+    dbHolder.db = {
+      execute: async (q: any) => {
+        if (/status = 'needs_manual'/.test(JSON.stringify(q))) throw new Error("needs_manual write blip");
+        return realDb.execute(q);
+      },
+    } as any;
+    try {
+      const perform = vi.fn(async () => { throw new UnconfirmedCreateError("Could not confirm project creation"); });
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      dbHolder.db = realDb;
+    }
+    const row = (await pg.query(`SELECT status, attempt_count, max_attempts FROM bidboard_create_outbox`)).rows[0] as any;
+    expect(row.status).toBe("processing"); // couldn't reach needs_manual...
+    expect(row.attempt_count).toBe(row.max_attempts); // ...but PINNED unclaimable (attempt_count = max_attempts)
+    expect(enqueueBidboardCallbackMock).not.toHaveBeenCalled(); // NO 'failed' callback — a project may exist
+    // Even once the 10-min stale window passes, claimNext must NOT reclaim it (attempt_count >= max) -> no perform re-run.
+    await pg.query(`UPDATE bidboard_create_outbox SET last_attempt_at = NOW() - interval '11 minutes'`);
+    expect(await claimNextBidboardCreateCommand()).toBeNull(); // pinned -> never re-claimed -> perform never re-runs
+  });
+
+  it("[F12] claimNext drains by immutable id, not refreshed created_at (preserves arrival order)", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ord1", sourceDealId: "d-ord1" }));
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-ord2", sourceDealId: "d-ord2" }));
+    // Row 1 (lower id) gets a re-queue that bumps its created_at AHEAD of row 2. Draining by created_at would claim
+    // row 2 first; draining by id must still claim row 1 first (its arrival order is immutable).
+    await pg.query(`UPDATE bidboard_create_outbox SET created_at = NOW() + interval '1 hour' WHERE source_event_id='e-ord1'`);
+    const first = await claimNextBidboardCreateCommand();
+    expect(first.source_event_id).toBe("e-ord1"); // claimed first by id despite its newer created_at
+  });
+
+  it("a create failure whose FAILURE callback can't be enqueued stays retryable (processing), not terminal 'failed'", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-cbfail", sourceDealId: "d-cbfail" }));
+    getBidboardDealMappingMock.mockResolvedValue(undefined); // genuine create failure — no project created
+    urlHolder.url = null; // TROCK_CRM_BASE_URL unset -> enqueueFailedCallback throws (buildBidBoardCreatedCallbackTargetUrl null)
+    const perform = vi.fn(async () => { throw new Error("playwright create failed"); });
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    const rows = (await pg.query(`SELECT status, attempt_count FROM bidboard_create_outbox`)).rows as any[];
+    expect(rows[0].status).toBe("processing"); // NOT 'failed' — claimNext would never re-pick a 'failed' row
+    expect(rows[0].attempt_count).toBe(0); // reset so reclaim keeps re-attempting until the callback can be delivered
+  });
+
+  it("claimNextBidboardCreateCommand returns null when nothing is pending", async () => {
+    expect(await claimNextBidboardCreateCommand()).toBeNull();
+  });
+
+  it("[finding Macroscope] DESTROYS the pooled lock connection (release(err)) when pg_advisory_unlock fails, so its session lock can't wedge later drains", async () => {
+    // Exercise the advisory-lock path with a mock pool. The unlock query throws; the connection must be released WITH
+    // the error so the pool destroys it (terminating its session + dropping the still-held session-level lock) rather
+    // than returning it to the pool with the lock stuck.
+    const unlockErr = new Error("unlock boom");
+    const releaseMock = vi.fn();
+    const mockClient = {
+      query: vi.fn(async (text: string) => {
+        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ locked: true }] };
+        if (/pg_advisory_unlock/.test(text)) throw unlockErr;
+        return { rows: [] };
+      }),
+      release: releaseMock,
+    };
+    poolHolder.pool = { connect: vi.fn(async () => mockClient) };
+    try {
+      // Empty queue -> the drain acquires the lock, finds no rows, then runs the finally (unlock -> throw -> release(err)).
+      await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => "created")) as any });
+      expect(mockClient.query).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_unlock/), expect.anything());
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock.mock.calls[0][0]).toBe(unlockErr); // released WITH the error -> pool destroys the connection
+    } finally {
+      poolHolder.pool = undefined;
+    }
+  });
+
+  it("[finding Macroscope] a CLEAN unlock returns the lock connection to the pool normally (release with no error)", async () => {
+    const releaseMock = vi.fn();
+    const mockClient = {
+      query: vi.fn(async (text: string) => {
+        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ locked: true }] };
+        return { rows: [] }; // unlock succeeds
+      }),
+      release: releaseMock,
+    };
+    poolHolder.pool = { connect: vi.fn(async () => mockClient) };
+    try {
+      await processBidboardCreateOutbox({ performImpl: (vi.fn(async () => "created")) as any });
+      expect(releaseMock).toHaveBeenCalledTimes(1);
+      expect(releaseMock.mock.calls[0][0]).toBeUndefined(); // clean unlock -> returned to the pool (no destroy)
+    } finally {
+      poolHolder.pool = undefined;
+    }
+  });
+
+  it("[X3] re-claims a STALE 'processing' row (worker crashed after claim) but not a fresh one", async () => {
+    await enqueueBidboardCreateCommand(input({ sourceEventId: "e-stale", sourceDealId: "d-stale" }));
+    // Fresh processing (just claimed) — must NOT be re-claimed.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW()`);
+    expect(await claimNextBidboardCreateCommand()).toBeNull();
+    // Stale processing (claimed >10m ago, crashed before done/failed) — re-claimed.
+    await pg.query(`UPDATE bidboard_create_outbox SET status='processing', last_attempt_at=NOW() - interval '20 minutes'`);
+    const reclaimed = await claimNextBidboardCreateCommand();
+    expect(reclaimed?.source_event_id).toBe("e-stale");
+  });
+});

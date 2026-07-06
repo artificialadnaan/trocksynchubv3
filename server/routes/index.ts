@@ -48,6 +48,7 @@ import { startCleanupScheduler } from "../cron/cleanupScheduler";
 import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
 import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
+import { startBidboardCreateWorker } from "../sync/bidboard-create-worker";
 import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
 import { startPendingRfpDigestScheduler } from "../cron/pendingRfpDigestScheduler";
 
@@ -119,6 +120,7 @@ export async function registerRoutes(
   startWebhookRetryScheduler();
   startAlertScheduler();
   startBidBoardCallbackWorker();
+  startBidboardCreateWorker();
   startTrockCrmRelayScheduler();
   startPendingRfpDigestScheduler();
 

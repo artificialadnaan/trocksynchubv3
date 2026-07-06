@@ -1054,8 +1054,12 @@ export const bidboardCallbackOutbox = pgTable("bidboard_callback_outbox", {
   id: serial("id").primaryKey(),
   sourceSystem: text("source_system").notNull(),
   sourceDealId: text("source_deal_id").notNull(),
+  // NULLABLE (finding S2): the voting create-from-rfp path mints no rfp_approval_requests row, so its
+  // callbacks carry no request id and are routed through this durable outbox keyed by sourceDealId instead of
+  // best-effort in-memory retries. The unique index below only dedupes the request-backed (email/override)
+  // path; NULLs are distinct, so voting rows aren't collapsed by it (the create-side advisory lock prevents
+  // duplicate voting creates → duplicate rows).
   rfpApprovalRequestId: integer("rfp_approval_request_id")
-    .notNull()
     .references(() => rfpApprovalRequests.id, { onDelete: "cascade" }),
   payload: jsonb("payload").notNull(),
   targetUrl: text("target_url").notNull(),
@@ -1074,6 +1078,35 @@ export const bidboardCallbackOutbox = pgTable("bidboard_callback_outbox", {
 export const insertBidboardCallbackOutboxSchema = createInsertSchema(bidboardCallbackOutbox).omit({ id: true, createdAt: true, sentAt: true });
 export type InsertBidboardCallbackOutbox = z.infer<typeof insertBidboardCallbackOutboxSchema>;
 export type BidboardCallbackOutbox = typeof bidboardCallbackOutbox.$inferSelect;
+
+// Durable command outbox for create-from-rfp (findings V1-V4). The endpoint PERSISTS a command row before the
+// 202 (so a crash after ACK still resumes — V3), and a serial worker (one create at a time, matching the global
+// browser lock) does the eligibility recheck + guards + Playwright create + callback enqueue — without holding a
+// request-thread pool client across the long create (V2). Serial processing means a second command sharing a
+// project number is handled AFTER the first wrote its sync_mapping (V1). Idempotent on source_event_id: a
+// duplicate delivery is a no-op; a failed command is re-queued (the CRM's rep-retry re-POSTs the same event id).
+export const bidboardCreateOutbox = pgTable("bidboard_create_outbox", {
+  id: serial("id").primaryKey(),
+  sourceSystem: text("source_system").notNull(),
+  sourceDealId: text("source_deal_id").notNull(),
+  sourceEventId: text("source_event_id").notNull(),
+  projectNumber: text("project_number"),
+  payload: jsonb("payload").notNull(),
+  status: text("status").notNull().default("pending"), // pending | processing | done | failed
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
+  lastError: text("last_error"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  processedAt: timestamp("processed_at"),
+}, (table) => [
+  uniqueIndex("idx_bidboard_create_outbox_source_event").on(table.sourceEventId),
+  index("idx_bidboard_create_outbox_pending").on(table.status, table.nextAttemptAt).where(sql`status = 'pending'`),
+]);
+export const insertBidboardCreateOutboxSchema = createInsertSchema(bidboardCreateOutbox).omit({ id: true, createdAt: true, processedAt: true });
+export type InsertBidboardCreateOutbox = z.infer<typeof insertBidboardCreateOutboxSchema>;
+export type BidboardCreateOutbox = typeof bidboardCreateOutbox.$inferSelect;
 
 // RFP Reporting & Scheduled Email
 export const rfpChangeLog = pgTable("rfp_change_log", {
