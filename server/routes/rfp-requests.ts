@@ -4,6 +4,7 @@ import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
 import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval, checkRfpApprovalSourceEligibility } from "../rfp-approval";
 import { storage } from "../storage";
+import { sanitizeEstimatorList } from "../../shared/estimators";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 
 const SIGNATURE_HEADER = "x-rfp-request-signature";
@@ -71,7 +72,10 @@ function getRawBody(req: Request): Buffer | undefined {
   return undefined;
 }
 
-function verifyRfpRequestSignature(req: Request): { ok: true } | { ok: false; status: 401 | 500; message: string } {
+function verifyRfpRequestSignature(
+  req: Request,
+  payload?: Buffer,
+): { ok: true } | { ok: false; status: 401 | 500; message: string } {
   const secret = process.env.RFP_REQUEST_SYNC_SECRET;
   if (!secret) {
     return { ok: false, status: 500, message: SECRET_MISSING_MESSAGE };
@@ -82,12 +86,14 @@ function verifyRfpRequestSignature(req: Request): { ok: true } | { ok: false; st
     return { ok: false, status: 401, message: "Invalid RFP request signature" };
   }
 
-  const rawBody = getRawBody(req);
-  if (!rawBody) {
+  // Body routes verify against the captured raw body; a bodyless GET (e.g. /api/rfp/estimators) passes an explicit
+  // empty payload so every signature comparison stays centralized in this one helper.
+  const body = payload ?? getRawBody(req);
+  if (!body) {
     return { ok: false, status: 401, message: "Invalid RFP request signature" };
   }
 
-  const expected = signRfpRequestPayload(rawBody, secret);
+  const expected = signRfpRequestPayload(body, secret);
   const providedBuffer = Buffer.from(provided);
   const expectedBuffer = Buffer.from(expected);
   if (providedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(providedBuffer, expectedBuffer)) {
@@ -152,6 +158,27 @@ export function registerRfpRequestRoutes(app: Express): void {
       (req as any).rfpRawBody = Buffer.from(buf);
     },
   });
+
+  // GET /api/rfp/estimators — expose the SAME curated estimator list the SyncHub Settings page + /rfp-review
+  // dropdown use (automation_config['estimator_list']) so the CRM's RFP vote form can mirror it (and reflect edits
+  // made here). HMAC-authed with an EMPTY-body signature — a GET has no body, so the caller signs "" — meaning only
+  // a caller sharing RFP_REQUEST_SYNC_SECRET (the CRM) can read it; distinct from the session-authed
+  // /api/settings/estimators the SyncHub UI uses.
+  app.get("/api/rfp/estimators", asyncHandler(async (req, res) => {
+    // A GET has no body, so verify the signature over the empty string (only a caller sharing the secret can read).
+    const signature = verifyRfpRequestSignature(req, Buffer.from(""));
+    if (!signature.ok) {
+      const body = signature.status === 401
+        ? { success: false, error: "Unauthorized", message: signature.message }
+        : { success: false, error: "Internal Server Error", message: signature.message };
+      return res.status(signature.status).json(body);
+    }
+    const config = await storage.getAutomationConfig("estimator_list");
+    const estimators = sanitizeEstimatorList(
+      ((config?.value as any)?.estimators || []) as Array<{ name: string; email: string }>,
+    );
+    res.json({ estimators });
+  }));
 
   app.post("/api/rfp-requests", jsonWithRawBody, asyncHandler(async (req, res) => {
     const signature = verifyRfpRequestSignature(req);
