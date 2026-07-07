@@ -170,6 +170,48 @@ async function postRfpRequest(baseUrl: string, body: any, signature?: string | n
   return { status: response.status, body: await response.json() };
 }
 
+describe("GET /api/rfp/estimators", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.RFP_REQUEST_SYNC_SECRET = "test-secret";
+  });
+  afterEach(() => {
+    delete process.env.RFP_REQUEST_SYNC_SECRET;
+  });
+
+  it("401s a request with no signature or a wrong signature", async () => {
+    await withServer(async (baseUrl) => {
+      const noSig = await fetch(`${baseUrl}/api/rfp/estimators`);
+      expect(noSig.status).toBe(401);
+      const badSig = await fetch(`${baseUrl}/api/rfp/estimators`, {
+        headers: { "x-rfp-request-signature": "sha256=deadbeef" },
+      });
+      expect(badSig.status).toBe(401);
+    });
+  });
+
+  it("returns the estimator list for a valid empty-body signature", async () => {
+    await withServer(async (baseUrl, sign) => {
+      const res = await fetch(`${baseUrl}/api/rfp/estimators`, {
+        headers: { "x-rfp-request-signature": sign("") },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.estimators)).toBe(true);
+    });
+  });
+
+  it("500s when RFP_REQUEST_SYNC_SECRET is missing", async () => {
+    delete process.env.RFP_REQUEST_SYNC_SECRET;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/rfp/estimators`, {
+        headers: { "x-rfp-request-signature": "sha256=x" },
+      });
+      expect(res.status).toBe(500);
+    });
+  });
+});
+
 describe("POST /api/rfp-requests", () => {
   beforeEach(() => {
     vi.resetModules();

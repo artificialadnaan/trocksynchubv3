@@ -4,6 +4,7 @@ import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
 import { createRfpApprovalRequestFromNormalizedInput, processRfpApproval, checkRfpApprovalSourceEligibility } from "../rfp-approval";
 import { storage } from "../storage";
+import { sanitizeEstimatorList } from "../../shared/estimators";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 
 const SIGNATURE_HEADER = "x-rfp-request-signature";
@@ -152,6 +153,33 @@ export function registerRfpRequestRoutes(app: Express): void {
       (req as any).rfpRawBody = Buffer.from(buf);
     },
   });
+
+  // GET /api/rfp/estimators — expose the SAME curated estimator list the SyncHub Settings page + /rfp-review
+  // dropdown use (automation_config['estimator_list']) so the CRM's RFP vote form can mirror it (and reflect edits
+  // made here). HMAC-authed with an EMPTY-body signature — a GET has no body, so the caller signs "" — meaning only
+  // a caller sharing RFP_REQUEST_SYNC_SECRET (the CRM) can read it; distinct from the session-authed
+  // /api/settings/estimators the SyncHub UI uses.
+  app.get("/api/rfp/estimators", asyncHandler(async (req, res) => {
+    const secret = process.env.RFP_REQUEST_SYNC_SECRET;
+    if (!secret) {
+      return res.status(500).json({ success: false, error: "Internal Server Error", message: SECRET_MISSING_MESSAGE });
+    }
+    const provided = req.header(SIGNATURE_HEADER);
+    const expectedBuffer = Buffer.from(signRfpRequestPayload(Buffer.from(""), secret));
+    const providedBuffer = provided ? Buffer.from(provided) : Buffer.alloc(0);
+    if (
+      !provided ||
+      providedBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(providedBuffer, expectedBuffer)
+    ) {
+      return res.status(401).json({ success: false, error: "Unauthorized", message: "Invalid RFP request signature" });
+    }
+    const config = await storage.getAutomationConfig("estimator_list");
+    const estimators = sanitizeEstimatorList(
+      ((config?.value as any)?.estimators || []) as Array<{ name: string; email: string }>,
+    );
+    res.json({ estimators });
+  }));
 
   app.post("/api/rfp-requests", jsonWithRawBody, asyncHandler(async (req, res) => {
     const signature = verifyRfpRequestSignature(req);
