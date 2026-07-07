@@ -190,14 +190,26 @@ describe("GET /api/rfp/estimators", () => {
     });
   });
 
-  it("returns the estimator list for a valid empty-body signature", async () => {
+  it("returns the SANITIZED estimator list (trimmed name, lowercased email) for a valid empty-body signature", async () => {
+    const { storage } = await import("../server/storage.ts");
+    (storage.getAutomationConfig as any).mockResolvedValueOnce({
+      value: {
+        estimators: [
+          { name: "  Colby Burling  ", email: "CBurling@TROCKGC.com" },
+          { name: "Tim Mitchell", email: "tmitchell@trockgc.com" },
+        ],
+      },
+    });
     await withServer(async (baseUrl, sign) => {
       const res = await fetch(`${baseUrl}/api/rfp/estimators`, {
         headers: { "x-rfp-request-signature": sign("") },
       });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(Array.isArray(body.estimators)).toBe(true);
+      expect(body.estimators).toEqual([
+        { name: "Colby Burling", email: "cburling@trockgc.com" },
+        { name: "Tim Mitchell", email: "tmitchell@trockgc.com" },
+      ]);
     });
   });
 

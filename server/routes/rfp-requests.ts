@@ -72,7 +72,10 @@ function getRawBody(req: Request): Buffer | undefined {
   return undefined;
 }
 
-function verifyRfpRequestSignature(req: Request): { ok: true } | { ok: false; status: 401 | 500; message: string } {
+function verifyRfpRequestSignature(
+  req: Request,
+  payload?: Buffer,
+): { ok: true } | { ok: false; status: 401 | 500; message: string } {
   const secret = process.env.RFP_REQUEST_SYNC_SECRET;
   if (!secret) {
     return { ok: false, status: 500, message: SECRET_MISSING_MESSAGE };
@@ -83,12 +86,14 @@ function verifyRfpRequestSignature(req: Request): { ok: true } | { ok: false; st
     return { ok: false, status: 401, message: "Invalid RFP request signature" };
   }
 
-  const rawBody = getRawBody(req);
-  if (!rawBody) {
+  // Body routes verify against the captured raw body; a bodyless GET (e.g. /api/rfp/estimators) passes an explicit
+  // empty payload so every signature comparison stays centralized in this one helper.
+  const body = payload ?? getRawBody(req);
+  if (!body) {
     return { ok: false, status: 401, message: "Invalid RFP request signature" };
   }
 
-  const expected = signRfpRequestPayload(rawBody, secret);
+  const expected = signRfpRequestPayload(body, secret);
   const providedBuffer = Buffer.from(provided);
   const expectedBuffer = Buffer.from(expected);
   if (providedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(providedBuffer, expectedBuffer)) {
@@ -160,19 +165,13 @@ export function registerRfpRequestRoutes(app: Express): void {
   // a caller sharing RFP_REQUEST_SYNC_SECRET (the CRM) can read it; distinct from the session-authed
   // /api/settings/estimators the SyncHub UI uses.
   app.get("/api/rfp/estimators", asyncHandler(async (req, res) => {
-    const secret = process.env.RFP_REQUEST_SYNC_SECRET;
-    if (!secret) {
-      return res.status(500).json({ success: false, error: "Internal Server Error", message: SECRET_MISSING_MESSAGE });
-    }
-    const provided = req.header(SIGNATURE_HEADER);
-    const expectedBuffer = Buffer.from(signRfpRequestPayload(Buffer.from(""), secret));
-    const providedBuffer = provided ? Buffer.from(provided) : Buffer.alloc(0);
-    if (
-      !provided ||
-      providedBuffer.length !== expectedBuffer.length ||
-      !crypto.timingSafeEqual(providedBuffer, expectedBuffer)
-    ) {
-      return res.status(401).json({ success: false, error: "Unauthorized", message: "Invalid RFP request signature" });
+    // A GET has no body, so verify the signature over the empty string (only a caller sharing the secret can read).
+    const signature = verifyRfpRequestSignature(req, Buffer.from(""));
+    if (!signature.ok) {
+      const body = signature.status === 401
+        ? { success: false, error: "Unauthorized", message: signature.message }
+        : { success: false, error: "Internal Server Error", message: signature.message };
+      return res.status(signature.status).json(body);
     }
     const config = await storage.getAutomationConfig("estimator_list");
     const estimators = sanitizeEstimatorList(
