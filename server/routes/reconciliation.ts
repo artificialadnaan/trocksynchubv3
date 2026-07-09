@@ -3,7 +3,8 @@
  */
 
 import { Router } from "express";
-import { db } from "../db";
+import { db, pool } from "../db";
+import { runSyncMappingsReconcile, defaultReconcilerDeps } from "../sync-mappings-reconciler";
 import { eq, and, desc, sql, count, like, or, isNull } from "drizzle-orm";
 import {
   reconciliationProjects,
@@ -745,6 +746,18 @@ router.post("/audit-log/:id/rollback", async (req, res) => {
     res.json({ success: true, writebackFailed });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/reconciliation/sync-mappings-integrity — on-demand sync_mappings integrity scan (#3).
+// ?commit=true writes alerts (audit_logs + manual_review_queue); default is a read-only dry-run report.
+router.post("/sync-mappings-integrity", async (req, res) => {
+  try {
+    const commit = req.query.commit === "true" || req.body?.commit === true;
+    const report = await runSyncMappingsReconcile(defaultReconcilerDeps(pool, storage), { commit });
+    res.json({ ok: true, ...report });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message ?? String(e) });
   }
 });
 

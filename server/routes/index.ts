@@ -44,6 +44,7 @@ import { registerArchiveRoutes } from "../archive-routes";
 // Schedulers
 import { startRfpReportScheduler } from "../cron/reportScheduler";
 import { startReconciliationScheduler } from "../cron/reconciliationScheduler";
+import { startSyncMappingsReconcileScheduler } from "../cron/syncMappingsReconcileScheduler";
 import { startCleanupScheduler } from "../cron/cleanupScheduler";
 import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
@@ -116,6 +117,7 @@ export async function registerRoutes(
   // Start schedulers
   startRfpReportScheduler();
   startReconciliationScheduler();
+  startSyncMappingsReconcileScheduler();
   startCleanupScheduler();
   startWebhookRetryScheduler();
   startAlertScheduler();
