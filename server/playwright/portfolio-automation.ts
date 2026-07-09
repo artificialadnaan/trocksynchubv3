@@ -22,6 +22,7 @@ import { ensureLoggedIn } from "./auth";
 import { randomDelay, takeScreenshot } from "./browser";
 import { log } from "../index";
 import { storage } from "../storage";
+import { handlePortfolioCreateGate, defaultResolverDeps } from "../portfolio-existence-resolver";
 import * as path from "path";
 import * as fs from "fs/promises";
 
@@ -1010,8 +1011,98 @@ export async function runPhase1BidBoardActions(
     }
   }
 
-  const alreadyInPortfolio = await isProjectAlreadyInPortfolio(page);
-  const shouldSkipAddToPortfolio = skipAddToPortfolio || alreadyInPortfolio;
+  // ── Authoritative existence gate (keystone): before touching "Add to Portfolio", ask whether a Procore
+  //    portfolio already exists for this deal. skip → don't create (self-healed); create → proceed;
+  //    abort → fail closed (do NOT create when we can't confirm — avoids a duplicate).
+  //  The gate runs ONLY when we're actually about to create AND we have a project number to check:
+  //   - if a prior attempt already completed add-to-portfolio (skipAddToPortfolio), re-gating is pointless and
+  //     an abort would strand exports/uploads after the create already happened — skip the gate;
+  //   - a direct manual trigger can carry an unmapped Bid Board id with no procore_project_number; we can't run
+  //     the authoritative check, so fall back to the prior UI-check behavior rather than fail closed forever.
+  const gateBidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1] ?? result.bidboardProjectId;
+  let gateMapping: Awaited<ReturnType<typeof storage.getSyncMappingByBidboardProjectId>> | undefined;
+  let mappingLookupFailed = false;
+  if (!skipAddToPortfolio) {
+    try {
+      gateMapping = await storage.getSyncMappingByBidboardProjectId(gateBidId);
+    } catch (mErr) {
+      // A lookup ERROR is indeterminate (unlike a genuinely-absent mapping) — the number that would gate this
+      // create might exist. Fail closed rather than silently degrading to the UI-only check.
+      mappingLookupFailed = true;
+      log(`[portfolio-auto] Sync-mapping lookup failed for bidboard ${gateBidId}: ${mErr instanceof Error ? mErr.message : String(mErr)}`, "playwright");
+    }
+  }
+
+  // Best-effort alert so the 15-min failure digest (alertScheduler scans audit_logs status='error') sees a
+  // row when the gate blocks a create. (The existence-indeterminate abort writes its own audit inside
+  // handlePortfolioCreateGate, so it is not re-written here.)
+  const writeGateAbortAudit = async (reason: string, message: string) => {
+    await storage.createAuditLog({
+      action: "portfolio_existence_gate_blocked",
+      entityType: "bidboard_project",
+      entityId: gateBidId,
+      source: "portfolio_automation",
+      status: "error",
+      category: "sync",
+      errorMessage: message,
+      details: { bidboardProjectId: gateBidId, procoreProjectNumber: gateMapping?.procoreProjectNumber ?? null, reason },
+    } as any).catch(() => {});
+  };
+
+  if (mappingLookupFailed) {
+    const msg = `Sync-mapping lookup failed for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`;
+    await logStep(page, result, "portfolio_existence_gate", "failed", 0, { error: msg, metadata: { reason: "mapping_lookup_failed" } });
+    await writeGateAbortAudit("mapping_lookup_failed", msg);
+    result.success = false;
+    result.error = msg;
+    return { estimateExcelPath, proposalPdfPath };
+  }
+
+  // Prefer the trigger's CURRENT project number (threaded via identityContext) over the mapping's stored one,
+  // which can be stale if the Bid Board number changed after the mapping was written. Fall back to the mapping
+  // when the trigger carried no number (e.g. a direct manual trigger).
+  const gateNumber =
+    (retryOptions?.identityContext?.projectNumber ?? "").trim() || (gateMapping?.procoreProjectNumber ?? "").trim();
+  let gateSaysSkip = false;
+
+  if (!skipAddToPortfolio) {
+    if (gateMapping && !gateNumber) {
+      // Mapped Bid Board row but a blank procore_project_number — anomalous; we can't run the authoritative
+      // check, so fail closed + alert rather than silently degrading to the UI-only check. (A genuinely
+      // UNMAPPED manual trigger has no mapping at all and legitimately falls back to the UI check below.)
+      const msg = `Mapped bidboard ${gateBidId} has no procore_project_number — failing closed (not creating) to avoid a duplicate.`;
+      await logStep(page, result, "portfolio_existence_gate", "failed", 0, { error: msg, metadata: { reason: "mapped_blank_project_number" } });
+      await writeGateAbortAudit("mapped_blank_project_number", msg);
+      result.success = false;
+      result.error = msg;
+      return { estimateExcelPath, proposalPdfPath };
+    }
+
+    if (gateNumber) {
+      const gateCompanyId = bidboardProjectUrl.match(/\/companies\/(\d+)/)?.[1] ?? "";
+      const gate = await handlePortfolioCreateGate(
+        { companyId: gateCompanyId, procoreProjectNumber: gateNumber, bidboardProjectId: gateBidId },
+        defaultResolverDeps()
+      );
+
+      if (gate.action === "abort") {
+        const msg = `Portfolio existence check indeterminate for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`;
+        await logStep(page, result, "portfolio_existence_gate", "failed", 0, { error: msg, metadata: { reason: "existence_indeterminate", procoreProjectNumber: gateNumber } });
+        result.success = false;
+        result.error = msg;
+        return { estimateExcelPath, proposalPdfPath };
+      }
+
+      if (gate.action === "skip" && gate.portfolioProjectId) {
+        result.portfolioProjectId = result.portfolioProjectId ?? gate.portfolioProjectId;
+      }
+      gateSaysSkip = gate.action === "skip";
+    }
+    // else: no mapping at all (unmapped manual trigger) → degrade to the UI check below.
+  }
+
+  const shouldSkipAddToPortfolio =
+    skipAddToPortfolio || gateSaysSkip || (await isProjectAlreadyInPortfolio(page));
 
   if (shouldSkipAddToPortfolio) {
     log(

@@ -63,6 +63,13 @@ export async function runPhase1WithRetry(
     const output = await runPhase1(bidboardProjectUrl, bidboardProjectId, {
       completedStepNames,
       previousOutput,
+      // Carry the trigger's CURRENT identity (esp. projectNumber) so the existence gate checks the current Bid
+      // Board number rather than a possibly-stale sync_mappings.procore_project_number.
+      identityContext: {
+        projectName: context.projectName,
+        projectNumber: context.projectNumber,
+        customerName: context.customerName,
+      },
     });
     lastOutput = output;
     const { result } = output;
@@ -137,6 +144,13 @@ export async function runPhase1WithRetry(
             bidboardProjectUrl,
             proposalPdfPath: output.proposalPdfPath ?? null,
             customerName: context.customerName,
+            // Carry the trigger's CURRENT identity so Phase 2's identity validation uses the current Bid Board
+            // number, consistent with the Phase 1 gate (not a possibly-stale sync_mappings value).
+            identityContext: {
+              projectName: context.projectName,
+              projectNumber: context.projectNumber,
+              customerName: context.customerName,
+            },
           });
           // Merge Phase 2 (and Phase 3) steps into result
           phase2Result.steps.forEach((s) => result.steps.push(s));
