@@ -49,14 +49,15 @@ uniqueIndex("idx_sync_mappings_portfolio_project_id").on(table.portfolioProjectI
 ```
 The `btrim(...) <> ''` clause matches the dedup filter and the getters' blank-as-absent treatment exactly, so a blank-string id is unconstrained (never triggers a `db:push --force` truncate). Applied in prod by `CI=1 npm run db:push` **after** the dedup script (established ordering). Not created on merge — deploy does not auto-push.
 
-### 3. Idempotent insert — `storage.createSyncMapping`
-Switch the plain `insert` to `onConflictDoUpdate`, arbiter = the partial `procore_project_id` unique index (`target: procoreProjectId`, `targetWhere` = the **exact** index predicate `procore_project_id IS NOT NULL AND btrim(procore_project_id) <> ''`). A conflict means the same Procore project is re-synced by a path that didn't pre-check (a safety net, not the authoritative update path), so the `SET` is additive: it refreshes only the sync telemetry (`last_sync_*`) and is **FILL-ONLY** for the procore descriptive columns (`procore_project_name`/`number`/`company_id`) + `metadata` — `COALESCE(existing, excluded)` keeps an existing non-null value and only populates a gap, so a re-sync can never overwrite data (critically, never wipes a load-bearing `metadata.proposalId`). It deliberately omits the lineage keys (`bidboard_`/`portfolio_project_id`), the source identity, AND the `hubspot_*`/`companycam` identity columns (those are owned by the explicit `updateSyncMapping` path, not a procore re-sync).
+### 3. Read-then-write upsert — `storage.upsertSyncMappingByProcoreProject`
+`createSyncMapping` stays a **plain insert** (a conflict on any unique index — the new procore/portfolio indexes AND the `bidboard_project_id` ownership guard — throws, preserving `/api/bidboard/link-deal` semantics). The re-sync writers (CompanyCam matcher × 5, procore-hubspot-sync × 5) instead call the new **read-then-write** helper, because their best-effort 200-row preload can miss an older mapping and would otherwise throw on the new index:
 
-- Rows with `procore_project_id IS NULL` (e.g. fresh bidboard rows) fall outside the partial index → insert unchanged, so the `bidboard_project_id` ownership-guard throw at `bidboard.ts:2148` is **preserved**.
-- **Order-independence (no-babysit safety):** if the arbiter index does not yet exist, Postgres raises `42P10`. `createSyncMapping` catches `42P10` **once** and falls back to a plain insert (prior behaviour). So the PR is safe to merge before `db:push` runs — idempotency simply activates the moment the index exists.
+- **Authoritative lookup** via `getSyncMappingByProcoreProjectId` (matches the id in `procore_`/`portfolio_`/`bidboard_project_id`), so it also **collapses the cross-column case** (an id already stamped as `portfolio_project_id`) onto the existing row instead of inserting a second one.
+- **Additive fill-only patch** (`buildLinkUpsertPatch`): fills descriptive/companycam/hubspot columns only where blank; refreshes telemetry (`last_sync_*`) only when the caller actually supplies it (a link-only write never downgrades a synced row); migrates `(source_system, source_deal_id)` onto the row when its source is a junk self-reference to any of its own project ids (so a CompanyCam op that carries a HubSpot deal becomes reachable via `getSyncMappingByHubspotDealId`); never overwrites a load-bearing `metadata.proposalId`.
+- **Race-safe:** on `23505` it re-reads and patches instead of throwing. Works whether or not the index exists yet (no `ON CONFLICT`, so no `42P10`), so the PR is safe to merge before `db:push`.
 
-### 4. Deterministic getters — `storage.ts`
-Add a canonical `ORDER BY` to `getSyncMappingByProcoreProjectId`, `getSyncMappingByProcoreProjectNumber`, `getSyncMappingBySourceDealId` (and the bidboard-filtered number getter): prefer a row bearing `portfolio_project_id`, then `bidboard_project_id`, then most-recent `last_sync_at`, then lowest `id`. Deterministic even during the pre-dedup window and for the permanently-non-unique number key.
+### 4. Deterministic, bidboard-first getters — `storage.ts`
+Add a canonical `ORDER BY` to `getSyncMappingByProcoreProjectId`, `getSyncMappingByProcoreProjectNumber`, `getSyncMappingBySourceDealId` preferring a **`bidboard_project_id`-bearing** row, then `portfolio_project_id`, then most-recent `last_sync_at`, then lowest `id`. Bidboard-first because the dominant consumers are trigger/creation GUARDS ("does this deal/project already have a BidBoard project?" — hubspot-bidboard-trigger, portfolio-automation), which a portfolio-only duplicate row must never shadow (that would let them create a second BidBoard project). Guards that strictly need the bidboard row use the `getBidboard*` getters (hubspot-bidboard-trigger and the webhook portfolio self-heal do).
 
 ## Rollout (single PR + a 2-step manual migration)
 
@@ -67,18 +68,19 @@ Add a canonical `ORDER BY` to `getSyncMappingByProcoreProjectId`, `getSyncMappin
 Merge order and step order are both non-fatal by construction (fallback + `IF NOT EXISTS` + idempotent dedup).
 
 ## Error handling & safety
-- Dedup: transactional, dry-run default, `--commit` gate, `.audit/` snapshot, idempotent, fail-loud if a cluster's survivor is ambiguous.
-- Insert: `42P10` fallback; never clobbers lineage ids.
+- Dedup: transactional, dry-run default, `--commit` gate, `.audit/` snapshot, idempotent; fail-CLOSED (skip + report + non-zero exit in `--commit`) on an ambiguous cluster (>1 distinct bidboard/portfolio id, >1 distinct real `(source_system, source_deal_id)`, or an uncohabited bidboard+portfolio pair).
+- Upsert: additive fill-only patch; refreshes telemetry only when supplied; race-safe on `23505`; never clobbers lineage/identity/metadata.
 - Constraint: `db:push` is manual and preceded by dedup, so it can never truncate live data.
 
 ## Testing (vitest + PGlite, mirrors existing suite)
-- Dedup: survivor selection (lineage row wins, else lowest id); COALESCE merge never overwrites a survivor non-null; idempotent second run = 0 changes; dry-run writes nothing.
-- Constraint: a second non-null `procore_project_id` insert is rejected; null `procore_project_id` rows are unaffected.
-- Insert: upserts on conflict (merges sync fields, preserves bb/pf); `42P10` → plain-insert fallback.
-- Getters: deterministic ordering with multiple candidate rows.
+- Dedup: survivor selection (lineage → real-source → lowest id); COALESCE merge never overwrites a survivor non-null; ambiguity guards (lineage, cross-lineage, source, cross-system); idempotent second run = 0 changes; dry-run writes nothing.
+- Constraint: a second non-blank `procore_project_id` insert is rejected; null/blank rows unaffected.
+- `createSyncMapping` plain insert throws on a dup procore id (ownership); `upsertSyncMappingByProcoreProject` links/fills (companycam, telemetry-preserve, source-migration incl. cross-column, no-index, race).
+- Getters: deterministic bidboard-first ordering with multiple candidate rows.
 - Regression: full suite shows no NEW failures vs the established baseline.
 
 ## Out of scope (deliberate)
 - `procore_project_number` uniqueness (legitimately shared by bb + pf rows).
 - Retiring the dead `project_phase` column (unrelated churn).
+- **DB-level cross-column uniqueness** (same id in `procore_project_id` on one row and `portfolio_project_id` on another). The write paths now check both columns (the upsert lookup), which covers the CompanyCam/procore-sync writers; a residual path — `transitionToPortfolio()` stamping a portfolio id that duplicates a pre-existing procore-only row — is a cross-row reconciliation concern for **#3** (a generated-column unique index would risk false collisions on legitimately transitioned rows that carry the id in both columns).
 - The reconciler (#3) and the 2-deal backfill (#4).

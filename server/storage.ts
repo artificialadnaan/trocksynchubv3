@@ -128,17 +128,18 @@ function normalizeSyncMappingSource(mapping: LegacyCompatibleInsertSyncMapping):
   };
 }
 
-// Canonical-row ordering for the by-key sync_mapping getters: a deterministic REPRESENTATIVE row —
-// lineage-bearing first (portfolio, then bidboard), then freshest sync, then lowest id. It converges to
-// the dedup survivor once dedup runs (post-dedup a non-null procore_project_id has exactly one row); in
-// the pre-dedup window it favours the freshest lineage row, which can differ from the dedup survivor's
-// lowest-id rule — both are deterministic, which is all the getters need. Also serves the
-// permanently-non-unique procore_project_number key. Blank ids are treated as absent (a '' bidboard id
-// must not rank as lineage-bearing — mirrors the getBidboard* helpers' length(trim(...)) guard).
+// Canonical-row ordering for the by-key sync_mapping getters: a deterministic REPRESENTATIVE row.
+// Prefers the BID-BOARD-bearing row first (then portfolio, then freshest sync, then lowest id) — because
+// this getter's dominant consumers are trigger/creation GUARDS ("does this deal/project already have a
+// BidBoard project?", e.g. hubspot-bidboard-trigger, portfolio-automation URL build), which must not be
+// shadowed by a portfolio-only duplicate row (a portfolio-first order would let them create a second
+// BidBoard project). Post-dedup a non-null procore_project_id has exactly one row so ordering is moot;
+// this only disambiguates the pre-dedup window and the permanently-non-unique procore_project_number key.
+// Blank ids are treated as absent (mirrors the getBidboard* helpers' length(trim(...)) guard).
 function canonicalMappingOrderBy() {
   return [
-    sql`(${syncMappings.portfolioProjectId} IS NOT NULL AND btrim(${syncMappings.portfolioProjectId}) <> '') DESC`,
     sql`(${syncMappings.bidboardProjectId} IS NOT NULL AND btrim(${syncMappings.bidboardProjectId}) <> '') DESC`,
+    sql`(${syncMappings.portfolioProjectId} IS NOT NULL AND btrim(${syncMappings.portfolioProjectId}) <> '') DESC`,
     sql`${syncMappings.lastSyncAt} DESC NULLS LAST`,
     sql`${syncMappings.id} ASC`,
   ];
@@ -187,12 +188,16 @@ function buildLinkUpsertPatch(
   if (values.lastSyncAt != null) patch.lastSyncAt = values.lastSyncAt;
   if (!isBlankValue(values.lastSyncDirection)) patch.lastSyncDirection = values.lastSyncDirection;
 
-  const existingSourceIsJunk =
-    !isBlankValue(existing.sourceDealId) && existing.sourceDealId === existing.procoreProjectId;
+  // A "junk" source is a self-reference to ANY of the row's own project-id columns — the row may have been
+  // found via portfolio_/bidboard_project_id (cross-column) and normalized its source to THAT id, so
+  // checking procore_project_id alone would miss it and leave the link invisible to source-deal guards.
+  const selfRefIds = [existing.procoreProjectId, existing.portfolioProjectId, existing.bidboardProjectId]
+    .filter((v) => !isBlankValue(v)) as string[];
+  const existingSourceIsJunk = !isBlankValue(existing.sourceDealId) && selfRefIds.includes(existing.sourceDealId as string);
   if (
     existingSourceIsJunk &&
     !isBlankValue(values.sourceDealId) &&
-    values.sourceDealId !== existing.procoreProjectId
+    !selfRefIds.includes(values.sourceDealId as string)
   ) {
     patch.sourceSystem = values.sourceSystem;
     patch.sourceDealId = values.sourceDealId;
@@ -550,17 +555,11 @@ export class DatabaseStorage implements IStorage {
     if (!projectNumber?.trim()) return undefined;
     // A project number is legitimately shared by a bidboard row + its portfolio row, so this key stays
     // non-unique. This getter's callers (trockcrm-relay, bidboard stage-sync, portfolio-automation URL
-    // build) want the BID-BOARD-bearing row, so the ordering prefers it (then portfolio, then freshest,
-    // then id) — deterministic and never shadowed by a portfolio-only row. Callers that STRICTLY need the
-    // bidboard row should use getBidboardMappingByProcoreProjectNumber.
+    // build) want the BID-BOARD-bearing row, which canonicalMappingOrderBy prefers. Callers that STRICTLY
+    // need the bidboard row should use getBidboardMappingByProcoreProjectNumber.
     const [mapping] = await db.select().from(syncMappings).where(
       eq(syncMappings.procoreProjectNumber, projectNumber.trim())
-    ).orderBy(
-      sql`(${syncMappings.bidboardProjectId} IS NOT NULL AND btrim(${syncMappings.bidboardProjectId}) <> '') DESC`,
-      sql`(${syncMappings.portfolioProjectId} IS NOT NULL AND btrim(${syncMappings.portfolioProjectId}) <> '') DESC`,
-      sql`${syncMappings.lastSyncAt} DESC NULLS LAST`,
-      sql`${syncMappings.id} ASC`,
-    ).limit(1);
+    ).orderBy(...canonicalMappingOrderBy()).limit(1);
     return mapping;
   }
 

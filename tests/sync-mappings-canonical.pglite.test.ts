@@ -201,6 +201,17 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       expect(await count(pg2)).toBe(1);
       expect(result.companyCamProjectId).toBe("CC-1");
     });
+
+    it("migrates source identity when the existing row was found via a CROSS-COLUMN self-reference", async () => {
+      // Portfolio-only row whose source was normalized to the PORTFOLIO id (junk self-ref); procore is NULL.
+      await storage.createSyncMapping({ portfolioProjectId: "PROJ-Y" } as any); // sourceDealId derives to "PROJ-Y"
+      await storage.upsertSyncMappingByProcoreProject(
+        { procoreProjectId: "PROJ-Y", hubspotDealId: "H-Y" } as any, // found via portfolio col; source must migrate to H-Y
+      );
+      expect(await count(pg)).toBe(1);
+      const found = await storage.getSyncMappingByHubspotDealId("H-Y");
+      expect(found?.portfolioProjectId).toBe("PROJ-Y"); // now reachable by the real HubSpot deal
+    });
   });
 
   describe("deterministic getters over duplicate rows (pre-dedup window)", () => {
@@ -210,13 +221,13 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       pg = await freshDb({ withCanonicalIndexes: false });
     });
 
-    it("getSyncMappingByProcoreProjectId prefers the portfolio-bearing row", async () => {
+    it("getSyncMappingByProcoreProjectId prefers the BIDBOARD-bearing row (trigger/creation guards need it)", async () => {
       await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", last_sync_at: "2026-01-01" });
-      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", bidboard_project_id: "BB-1", last_sync_at: "2026-02-01" });
-      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", portfolio_project_id: "PF-1", last_sync_at: "2025-01-01" });
+      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", portfolio_project_id: "PF-1", last_sync_at: "2026-02-01" });
+      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", bidboard_project_id: "BB-1", last_sync_at: "2025-01-01" });
 
       const row = await storage.getSyncMappingByProcoreProjectId("PJ-1");
-      expect(row?.portfolioProjectId).toBe("PF-1"); // portfolio beats bidboard beats plain, even though it's the oldest sync
+      expect(row?.bidboardProjectId).toBe("BB-1"); // bidboard beats portfolio beats plain, even when it's the oldest sync
     });
 
     it("getSyncMappingByProcoreProjectNumber returns a lineage-bearing row for a shared number", async () => {

@@ -106,8 +106,9 @@ export async function processDealStageChange(
     return { triggered: false, reason: "stage_not_configured_for_trigger" };
   }
 
-  // Check if this deal already has a BidBoard project
-  const existingMapping = await storage.getSyncMappingByHubspotDealId(dealId);
+  // Check if this deal already has a BidBoard project. Use the BID-BOARD-specific source-deal getter so a
+  // duplicate portfolio-only row can never shadow the bidboard row and let us create a 2nd project.
+  const existingMapping = await storage.getBidboardMappingBySourceDealId("hubspot", dealId);
   if (existingMapping?.bidboardProjectId) {
     console.log(`[hubspot-bidboard] Deal ${dealId} already has BidBoard project ${existingMapping.bidboardProjectId}`);
     return { triggered: false, reason: "bidboard_project_already_exists" };

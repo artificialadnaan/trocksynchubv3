@@ -474,6 +474,16 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
         for (const item of pendingHubspotCreates) {
           const project = item.project;
           try {
+            // Authoritative re-check before creating an external deal: the "unmatched" decision used a
+            // 200-row preload that can miss an older mapping. If this Procore project is already mapped,
+            // do NOT create a second HubSpot deal — the read-then-write upsert would find the existing row
+            // (owned by another deal) and leave the just-created deal orphaned while reporting success.
+            const alreadyMapped = await storage.getSyncMappingByProcoreProjectId(project.procoreId);
+            if (alreadyMapped) {
+              console.log(`[procore-hubspot-sync] Skipping HubSpot create for already-mapped Procore project ${project.procoreId}`);
+              matched++;
+              continue;
+            }
             // Resolve stage label to actual HubSpot stage ID before creating deal
             const stageLabel = item.properties.dealstage;
             const resolvedStage = await resolveHubspotStageId(stageLabel);

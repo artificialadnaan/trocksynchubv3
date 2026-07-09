@@ -141,6 +141,15 @@ describe("planClusterDedupe", () => {
     ).toThrow(AmbiguousClusterError);
   });
 
+  it("treats the SAME source_deal_id under different source_system as distinct (hubspot:123 vs trock_crm:123)", () => {
+    expect(() =>
+      planClusterDedupe([
+        row({ id: 1, sourceSystem: "hubspot", sourceDealId: "123" }),
+        row({ id: 2, sourceSystem: "trock_crm", sourceDealId: "123" }),
+      ]),
+    ).toThrow(AmbiguousClusterError);
+  });
+
   it("prefers a real-source-bearing row as survivor over a lower-id junk row (keeps it reachable)", () => {
     const plan = planClusterDedupe([
       row({ id: 1, sourceDealId: "PJ-1", hubspotDealId: null }), // junk self-reference (source == procore id)
