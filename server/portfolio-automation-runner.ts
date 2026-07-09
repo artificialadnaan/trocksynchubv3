@@ -63,6 +63,13 @@ export async function runPhase1WithRetry(
     const output = await runPhase1(bidboardProjectUrl, bidboardProjectId, {
       completedStepNames,
       previousOutput,
+      // Carry the trigger's CURRENT identity (esp. projectNumber) so the existence gate checks the current Bid
+      // Board number rather than a possibly-stale sync_mappings.procore_project_number.
+      identityContext: {
+        projectName: context.projectName,
+        projectNumber: context.projectNumber,
+        customerName: context.customerName,
+      },
     });
     lastOutput = output;
     const { result } = output;

@@ -1058,7 +1058,11 @@ export async function runPhase1BidBoardActions(
     return { estimateExcelPath, proposalPdfPath };
   }
 
-  const gateNumber = (gateMapping?.procoreProjectNumber ?? "").trim();
+  // Prefer the trigger's CURRENT project number (threaded via identityContext) over the mapping's stored one,
+  // which can be stale if the Bid Board number changed after the mapping was written. Fall back to the mapping
+  // when the trigger carried no number (e.g. a direct manual trigger).
+  const gateNumber =
+    (retryOptions?.identityContext?.projectNumber ?? "").trim() || (gateMapping?.procoreProjectNumber ?? "").trim();
   let gateSaysSkip = false;
 
   if (!skipAddToPortfolio) {

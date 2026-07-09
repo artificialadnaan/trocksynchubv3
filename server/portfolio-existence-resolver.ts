@@ -81,24 +81,32 @@ export function matchLiveProjects(
  * keeps only exact matches and fails closed when the page is at the cap. Any error → { exists: "unknown" } so
  * the caller fails closed. Never throws.
  */
+const LIVE_CONFIRM_TIMEOUT_MS = 15000;
+
 export async function liveConfirmByNumber(
   companyId: string,
   projectNumber: string,
   excludeId: string = ""
 ): Promise<PortfolioExistenceResult> {
+  // Bound the request: this runs while Phase 1 holds the global browser lock, so a stalled Procore/network
+  // call must convert to a fail-closed "unknown" (via the catch) rather than hang the whole automation.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LIVE_CONFIRM_TIMEOUT_MS);
   try {
     const { getAccessToken, getProcoreApiBaseUrl } = await import("./procore");
     const { fetchWithRateLimitRetry } = await import("./lib/rate-limit-tracker");
     const [accessToken, baseUrl] = await Promise.all([getAccessToken(), getProcoreApiBaseUrl()]);
     const resp = await fetchWithRateLimitRetry(
       `${baseUrl}/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}`,
-      { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } },
+      { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId }, signal: controller.signal },
       "procore"
     );
     if (!resp.ok) return { exists: "unknown", reason: `procore ${resp.status}` };
     return matchLiveProjects(await resp.json(), projectNumber, excludeId);
   } catch (err) {
     return { exists: "unknown", reason: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
