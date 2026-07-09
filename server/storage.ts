@@ -299,6 +299,8 @@ export interface IStorage {
 
   upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
   getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
+  /** Find a Procore project by exact project number within a company (portfolio existence check). */
+  getProcoreProjectByNumber(companyId: string, projectNumber: string): Promise<ProcoreProject | undefined>;
   getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }>;
   updateProcoreProjectLastRoleCheck(procoreId: string): Promise<void>;
 
@@ -1072,6 +1074,17 @@ export class DatabaseStorage implements IStorage {
 
   async getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined> {
     const [result] = await db.select().from(procoreProjects).where(eq(procoreProjects.procoreId, procoreId));
+    return result;
+  }
+
+  async getProcoreProjectByNumber(companyId: string, projectNumber: string): Promise<ProcoreProject | undefined> {
+    const [result] = await db
+      .select()
+      .from(procoreProjects)
+      .where(and(eq(procoreProjects.companyId, companyId), eq(procoreProjects.projectNumber, projectNumber)))
+      // A portfolio project may be active or archived; either means "exists". Prefer active, newest first.
+      .orderBy(desc(procoreProjects.active), desc(procoreProjects.lastSyncedAt))
+      .limit(1);
     return result;
   }
 
