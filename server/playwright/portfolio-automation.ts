@@ -22,6 +22,7 @@ import { ensureLoggedIn } from "./auth";
 import { randomDelay, takeScreenshot } from "./browser";
 import { log } from "../index";
 import { storage } from "../storage";
+import { handlePortfolioCreateGate, defaultResolverDeps } from "../portfolio-existence-resolver";
 import * as path from "path";
 import * as fs from "fs/promises";
 
@@ -1010,8 +1011,37 @@ export async function runPhase1BidBoardActions(
     }
   }
 
-  const alreadyInPortfolio = await isProjectAlreadyInPortfolio(page);
-  const shouldSkipAddToPortfolio = skipAddToPortfolio || alreadyInPortfolio;
+  // ── Authoritative existence gate (keystone): before touching "Add to Portfolio", ask whether a Procore
+  //    portfolio already exists for this deal. skip → don't create (self-healed); create → proceed;
+  //    abort → fail closed (do NOT create when we can't confirm — avoids a duplicate).
+  const gateCompanyId = bidboardProjectUrl.match(/\/companies\/(\d+)/)?.[1] ?? "";
+  const gateBidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1] ?? result.bidboardProjectId;
+  const gateMapping = await storage.getSyncMappingByBidboardProjectId(gateBidId).catch(() => undefined);
+  const gate = await handlePortfolioCreateGate(
+    { companyId: gateCompanyId, procoreProjectNumber: gateMapping?.procoreProjectNumber ?? "", bidboardProjectId: gateBidId },
+    defaultResolverDeps()
+  );
+
+  if (gate.action === "abort") {
+    await logStep(page, result, "portfolio_existence_gate", "failed", 0, {
+      error: `Portfolio existence check indeterminate for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`,
+      metadata: {
+        reason: "existence_indeterminate",
+        procoreProjectNumber: gateMapping?.procoreProjectNumber ?? null,
+      },
+    });
+    result.success = false;
+    result.error =
+      `Portfolio existence check indeterminate for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`;
+    return { estimateExcelPath, proposalPdfPath };
+  }
+
+  if (gate.action === "skip" && gate.portfolioProjectId) {
+    result.portfolioProjectId = result.portfolioProjectId ?? gate.portfolioProjectId;
+  }
+
+  const shouldSkipAddToPortfolio =
+    skipAddToPortfolio || gate.action === "skip" || (await isProjectAlreadyInPortfolio(page));
 
   if (shouldSkipAddToPortfolio) {
     log(
