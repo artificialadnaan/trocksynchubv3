@@ -128,6 +128,77 @@ function normalizeSyncMappingSource(mapping: LegacyCompatibleInsertSyncMapping):
   };
 }
 
+// Deterministic (but lineage-NEUTRAL) ordering for the generic by-key getters. It only makes the pre-dedup
+// duplicate window return a STABLE row (the lowest id) — it deliberately does NOT prefer bidboard- or
+// portfolio-bearing rows, because these getters serve consumers with conflicting needs (trigger guards
+// want the bidboard row, phase/status readers want the portfolio row). Each such consumer must use a
+// SPECIFIC getter: getBidboardMappingBySourceDealId / getBidboardMappingByProcoreProjectNumber for
+// bidboard guards, getPortfolioMappingBySourceDealId for phase reads. Post-dedup there is one row per key
+// so ordering is moot.
+function canonicalMappingOrderBy() {
+  return [sql`${syncMappings.id} ASC`];
+}
+
+function isBlankValue(v: unknown): boolean {
+  return v === null || v === undefined || (typeof v === "string" && v.trim() === "");
+}
+
+/** True when a write failed on any unique-constraint violation (Postgres 23505). */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as any)?.code ?? (err as any)?.cause?.code;
+  return code === "23505";
+}
+
+/**
+ * Build the UPDATE patch for upsertSyncMappingByProcoreProject when an existing row is found (#2). The
+ * update is deliberately ADDITIVE so a re-sync / CompanyCam re-match can never destroy data:
+ *   - descriptive + companycam + hubspot identity: FILL-ONLY (write only if the existing value is blank),
+ *   - metadata: FILL-ONLY (never wipes a load-bearing proposalId),
+ *   - telemetry (last_sync_*): refreshed ONLY when the caller actually supplies it (so a link-only
+ *     CompanyCam write doesn't downgrade a previously-synced row to NULL/pending),
+ *   - source identity: migrated ONLY when the existing row's source_deal_id is the junk self-reference
+ *     (== its procore id) and the caller carries a real external key — so the row becomes reachable by
+ *     getSyncMappingBy(Hubspot)SourceDealId without ever clobbering a real source.
+ */
+function buildLinkUpsertPatch(
+  existing: SyncMapping,
+  values: InsertSyncMapping,
+): Partial<InsertSyncMapping> {
+  const patch: Record<string, unknown> = {};
+  const fillOnly: (keyof InsertSyncMapping)[] = [
+    "hubspotDealId",
+    "hubspotDealName",
+    "hubspotCompanyId",
+    "companyCamProjectId",
+    "procoreProjectName",
+    "procoreProjectNumber",
+    "procoreCompanyId",
+  ];
+  for (const f of fillOnly) {
+    if (isBlankValue((existing as any)[f]) && !isBlankValue((values as any)[f])) patch[f] = (values as any)[f];
+  }
+  if (existing.metadata == null && values.metadata != null) patch.metadata = values.metadata;
+  if (!isBlankValue(values.lastSyncStatus)) patch.lastSyncStatus = values.lastSyncStatus;
+  if (values.lastSyncAt != null) patch.lastSyncAt = values.lastSyncAt;
+  if (!isBlankValue(values.lastSyncDirection)) patch.lastSyncDirection = values.lastSyncDirection;
+
+  // A "junk" source is a self-reference to ANY of the row's own project-id columns — the row may have been
+  // found via portfolio_/bidboard_project_id (cross-column) and normalized its source to THAT id, so
+  // checking procore_project_id alone would miss it and leave the link invisible to source-deal guards.
+  const selfRefIds = [existing.procoreProjectId, existing.portfolioProjectId, existing.bidboardProjectId]
+    .filter((v) => !isBlankValue(v)) as string[];
+  const existingSourceIsJunk = !isBlankValue(existing.sourceDealId) && selfRefIds.includes(existing.sourceDealId as string);
+  if (
+    existingSourceIsJunk &&
+    !isBlankValue(values.sourceDealId) &&
+    !selfRefIds.includes(values.sourceDealId as string)
+  ) {
+    patch.sourceSystem = values.sourceSystem;
+    patch.sourceDealId = values.sourceDealId;
+  }
+  return patch as Partial<InsertSyncMapping>;
+}
+
 function normalizeRfpApprovalRequestSource(data: LegacyCompatibleInsertRfpApprovalRequest): InsertRfpApprovalRequest {
   const sourceSystem = data.sourceSystem ?? "hubspot";
   const sourceDealId = data.sourceDealId ?? data.hubspotDealId;
@@ -217,8 +288,10 @@ export interface IStorage {
   getBidboardMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined>;
   /** Find the BID-BOARD-linked mapping for a source deal, skipping partial/portfolio duplicate rows */
   getBidboardMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined>;
+  getPortfolioMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined>;
   /** Create a new sync mapping linking entities */
   createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
+  upsertSyncMappingByProcoreProject(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
   /** Update an existing sync mapping */
   updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined>;
   /** Search mappings by deal name, project name, or project number */
@@ -448,7 +521,7 @@ export class DatabaseStorage implements IStorage {
         eq(syncMappings.sourceSystem, sourceSystem),
         eq(syncMappings.sourceDealId, sourceDealId)
       )
-    );
+    ).orderBy(...canonicalMappingOrderBy()).limit(1);
     return mapping;
   }
 
@@ -459,7 +532,7 @@ export class DatabaseStorage implements IStorage {
         eq(syncMappings.portfolioProjectId, projectId),
         eq(syncMappings.bidboardProjectId, projectId)
       )
-    );
+    ).orderBy(...canonicalMappingOrderBy()).limit(1);
     return mapping;
   }
 
@@ -475,9 +548,18 @@ export class DatabaseStorage implements IStorage {
 
   async getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined> {
     if (!projectNumber?.trim()) return undefined;
+    // A project number is legitimately shared by a bidboard row + its portfolio row, so this key stays
+    // non-unique. This getter's callers (trockcrm-relay, bidboard stage-sync, portfolio-automation URL
+    // build) uniformly want the BID-BOARD-bearing row, so the ordering prefers it (then portfolio, then
+    // freshest, then id). Callers that STRICTLY need it should use getBidboardMappingByProcoreProjectNumber.
     const [mapping] = await db.select().from(syncMappings).where(
       eq(syncMappings.procoreProjectNumber, projectNumber.trim())
-    );
+    ).orderBy(
+      sql`(${syncMappings.bidboardProjectId} IS NOT NULL AND btrim(${syncMappings.bidboardProjectId}) <> '') DESC`,
+      sql`(${syncMappings.portfolioProjectId} IS NOT NULL AND btrim(${syncMappings.portfolioProjectId}) <> '') DESC`,
+      sql`${syncMappings.lastSyncAt} DESC NULLS LAST`,
+      sql`${syncMappings.id} ASC`,
+    ).limit(1);
     return mapping;
   }
 
@@ -494,7 +576,7 @@ export class DatabaseStorage implements IStorage {
         // helper's `!mapping.bidboardProjectId` check would then reject as no_bidboard_mapping.
         sql`length(trim(${syncMappings.bidboardProjectId})) > 0`,
       )
-    );
+    ).orderBy(sql`${syncMappings.lastSyncAt} DESC NULLS LAST`, sql`${syncMappings.id} DESC`).limit(1);
     return mapping;
   }
 
@@ -520,9 +602,63 @@ export class DatabaseStorage implements IStorage {
     return mapping;
   }
 
+  // The PORTFOLIO-bearing row for a source deal (mirrors getBidboardMappingBySourceDealId). Phase/status
+  // consumers (e.g. GET /api/deals/:dealId/project-phase) want the transitioned row and must not be
+  // shadowed by a bidboard-only duplicate that the generic getSyncMappingBySourceDealId might return.
+  async getPortfolioMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined> {
+    const [mapping] = await db.select().from(syncMappings).where(
+      and(
+        eq(syncMappings.sourceSystem, sourceSystem),
+        eq(syncMappings.sourceDealId, sourceDealId),
+        isNotNull(syncMappings.portfolioProjectId),
+        sql`length(trim(${syncMappings.portfolioProjectId})) > 0`,
+      )
+    ).orderBy(sql`${syncMappings.lastSyncAt} DESC NULLS LAST`, desc(syncMappings.id));
+    return mapping;
+  }
+
+  // Plain insert — a conflict on ANY unique index (the new procore/portfolio indexes AND the
+  // bidboard_project_id ownership guard) THROWS, preserving every caller's pre-existing semantics (e.g.
+  // /api/bidboard/link-deal must still reject a bidboard already owned by another deal). A caller that
+  // legitimately RE-SYNCS the same Procore project should use upsertSyncMappingByProcoreProject instead.
   async createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping> {
     const [result] = await db.insert(syncMappings).values(normalizeSyncMappingSource(mapping)).returning();
     return result;
+  }
+
+  /**
+   * Read-then-write upsert keyed on the Procore project (#2). Used by the re-sync writers whose
+   * best-effort pre-checks (a 200-row preload) can miss an older mapping — without this, that miss would
+   * hit the new procore_project_id unique index and throw. The lookup is authoritative and matches the id
+   * in procore_project_id / portfolio_project_id / bidboard_project_id, so it also collapses the
+   * cross-column case (an id already stamped as portfolio_project_id) onto the existing row rather than
+   * inserting a second one. On a found row it applies an additive fill-only patch (see
+   * buildLinkUpsertPatch); otherwise it inserts, and if a concurrent writer wins the race (23505) it
+   * re-reads and patches instead of throwing.
+   */
+  async upsertSyncMappingByProcoreProject(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping> {
+    const values = normalizeSyncMappingSource(mapping);
+    const procoreId = values.procoreProjectId?.trim();
+    if (!procoreId) return this.createSyncMapping(mapping); // nothing to key an upsert on
+
+    const patchExisting = async (existing: SyncMapping): Promise<SyncMapping> => {
+      const patch = buildLinkUpsertPatch(existing, values);
+      if (Object.keys(patch).length === 0) return existing;
+      return (await this.updateSyncMapping(existing.id, patch)) ?? existing;
+    };
+
+    const existing = await this.getSyncMappingByProcoreProjectId(procoreId);
+    if (existing) return patchExisting(existing);
+
+    try {
+      return await this.createSyncMapping(mapping);
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        const raced = await this.getSyncMappingByProcoreProjectId(procoreId);
+        if (raced) return patchExisting(raced);
+      }
+      throw err;
+    }
   }
 
   async updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined> {

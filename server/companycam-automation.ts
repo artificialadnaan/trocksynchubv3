@@ -259,7 +259,7 @@ export async function findOrCreateCompanyCamProject(
             companyCamProjectId: matched.companycamId,
           });
         } else if (options.hubspotDealId) {
-          await storage.createSyncMapping({
+          await storage.upsertSyncMappingByProcoreProject({
             hubspotDealId: options.hubspotDealId,
             procoreProjectId: options.procoreProjectId || null,
             companyCamProjectId: matched.companycamId,
@@ -287,7 +287,7 @@ export async function findOrCreateCompanyCamProject(
             companyCamProjectId: createResult.companycamId,
           });
         } else if (options.hubspotDealId) {
-          await storage.createSyncMapping({
+          await storage.upsertSyncMappingByProcoreProject({
             hubspotDealId: options.hubspotDealId,
             procoreProjectId: options.procoreProjectId || null,
             companyCamProjectId: createResult.companycamId,
@@ -354,7 +354,7 @@ export async function linkCompanyCamProject(
         hubspotDealId: options.hubspotDealId || existingByProcore.hubspotDealId,
       });
     } else {
-      await storage.createSyncMapping({
+      await storage.upsertSyncMappingByProcoreProject({
         hubspotDealId: options.hubspotDealId || null,
         procoreProjectId: options.procoreProjectId || null,
         companyCamProjectId: companycamId,
@@ -737,7 +737,7 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
               companyCamProjectId: ccProject.companycamId,
             });
           } else {
-            await storage.createSyncMapping({
+            await storage.upsertSyncMappingByProcoreProject({
               procoreProjectId: directProcoreId,
               procoreProjectName: procoreProject?.name || null,
               procoreProjectNumber: procoreProject?.projectNumber || null,
@@ -851,7 +851,7 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
               companyCamProjectId: ccProject.companycamId,
             });
           } else {
-            await storage.createSyncMapping({
+            await storage.upsertSyncMappingByProcoreProject({
               procoreProjectId: bestMatch.project.procoreId,
               procoreProjectName: bestMatch.project.name,
               procoreProjectNumber: bestMatch.project.projectNumber,

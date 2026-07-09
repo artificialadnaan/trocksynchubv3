@@ -234,6 +234,16 @@ export const syncMappings = pgTable("sync_mappings", {
 }, (table) => [
   index("idx_sync_mappings_source_deal").on(table.sourceSystem, table.sourceDealId),
   uniqueIndex("idx_sync_mappings_bidboard_project_id").on(table.bidboardProjectId).where(sql`bidboard_project_id IS NOT NULL`),
+  // Canonical-truth invariants (#2). A Procore project / Portfolio maps to at most ONE sync_mappings
+  // row. Partial (NULL/blank-excluding) to leave bid-board-only rows — which legitimately share neither
+  // key — unconstrained. The `btrim(...) <> ''` clause MUST match the dedup detection filter
+  // (sync-mappings-dedupe.ts) and createSyncMapping's onConflict targetWhere EXACTLY: a blank-string id
+  // is treated as absent everywhere (like the getBidboard* helpers), so a `''`-dup can never survive
+  // dedup and then break this index under `db:push --force`. Applied by `db:push` AFTER
+  // `db:migrate-sync-mappings-dedupe`; createSyncMapping upserts on the procore_project_id index
+  // (falling back to a plain insert until it exists).
+  uniqueIndex("idx_sync_mappings_procore_project_id").on(table.procoreProjectId).where(sql`procore_project_id IS NOT NULL AND btrim(procore_project_id) <> ''`),
+  uniqueIndex("idx_sync_mappings_portfolio_project_id").on(table.portfolioProjectId).where(sql`portfolio_project_id IS NOT NULL AND btrim(portfolio_project_id) <> ''`),
 ]);
 
 export const insertSyncMappingSchema = createInsertSchema(syncMappings).omit({

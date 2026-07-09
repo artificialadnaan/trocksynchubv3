@@ -557,7 +557,10 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                   const projectName = project?.name || project?.display_name;
                   console.log(`[webhook] Portfolio project ${resourceId} details: number=${projectNumber || 'none'}, name=${projectName || 'none'}`);
                   if (projectNumber) {
-                    const mapping = await storage.getSyncMappingByProcoreProjectNumber(projectNumber);
+                    // The bidboard-specific getter: this self-heal stamps the portfolio id onto the
+                    // BIDBOARD row, so it must not be shadowed by a portfolio-bearing row that shares the
+                    // number (getSyncMappingByProcoreProjectNumber now prefers portfolio-bearing rows).
+                    const mapping = await storage.getBidboardMappingByProcoreProjectNumber(projectNumber);
                     if (mapping?.bidboardProjectId && !mapping.portfolioProjectId) {
                       await storage.updateSyncMapping(mapping.id, { portfolioProjectId: resourceId });
                       console.log(`[webhook] Stored portfolio project ${resourceId} in sync mapping for bidboard ${mapping.bidboardProjectId}`);

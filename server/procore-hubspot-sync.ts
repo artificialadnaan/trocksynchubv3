@@ -210,7 +210,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
   const { dryRun = false, skipHubspotWrites = true } = options;
   const start = Date.now();
   const details: SyncDetail[] = [];
-  let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0;
+  let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0, alreadyLinked = 0;
   
   // dryRun implies skipHubspotWrites - it's a full simulation with no writes anywhere
   const effectiveSkipHubspotWrites = dryRun || skipHubspotWrites;
@@ -398,7 +398,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
         updatedMappings++;
         logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
       } else {
-        await storage.createSyncMapping(mappingData);
+        await storage.upsertSyncMappingByProcoreProject(mappingData);
         newMappings++;
         logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
       }
@@ -474,6 +474,20 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
         for (const item of pendingHubspotCreates) {
           const project = item.project;
           try {
+            // Authoritative re-check before creating an external deal: the "unmatched" decision used a
+            // 200-row preload that can miss an older mapping. If this Procore project is already mapped,
+            // do NOT create a second HubSpot deal — the read-then-write upsert would find the existing row
+            // (owned by another deal) and leave the just-created deal orphaned while reporting success.
+            const alreadyMapped = await storage.getSyncMappingByProcoreProjectId(project.procoreId);
+            if (alreadyMapped) {
+              console.log(`[procore-hubspot-sync] Skipping HubSpot create for already-mapped Procore project ${project.procoreId}`);
+              // Keep the audit counters consistent: this project IS matched (to a pre-existing mapping), so
+              // it must not fall through to unmatchedProcore, and its deal must count as used-this-run.
+              matched++;
+              alreadyLinked++;
+              if (alreadyMapped.hubspotDealId) hubspotIdsUsedThisRun.add(alreadyMapped.hubspotDealId);
+              continue;
+            }
             // Resolve stage label to actual HubSpot stage ID before creating deal
             const stageLabel = item.properties.dealstage;
             const resolvedStage = await resolveHubspotStageId(stageLabel);
@@ -496,7 +510,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
               hubspotCreated++;
               matched++;
 
-              await storage.createSyncMapping({
+              await storage.upsertSyncMappingByProcoreProject({
                 hubspotDealId: created.id,
                 hubspotDealName: created.properties?.dealname || project.name,
                 procoreProjectId: project.procoreId,
@@ -551,7 +565,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
                   hubspotCreated++;
                   matched++;
 
-                await storage.createSyncMapping({
+                await storage.upsertSyncMappingByProcoreProject({
                   hubspotDealId: created.id,
                   hubspotDealName: created.properties?.dealname || project.name,
                   procoreProjectId: project.procoreId,
@@ -611,7 +625,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
   }
 
   const unmatchedHubspot = allHubspot.filter(d => !hubspotIdsUsedThisRun.has(d.hubspotId)).length;
-  const unmatchedProcore = pendingHubspotCreates.length - hubspotCreated;
+  const unmatchedProcore = pendingHubspotCreates.length - hubspotCreated - alreadyLinked;
 
   const duration = Date.now() - start;
 
@@ -720,7 +734,7 @@ export async function createManualMapping(
     }
   }
 
-  const mapping = await storage.createSyncMapping({
+  const mapping = await storage.upsertSyncMappingByProcoreProject({
     hubspotDealId,
     hubspotDealName: deal[0].dealName,
     procoreProjectId,
@@ -791,7 +805,7 @@ export async function findOrCreateMappingByProjectNumber(params: {
   const deal = await storage.getHubspotDealByProjectNumber(projectNumber.trim());
   if (!deal?.hubspotId) return null;
 
-  const mapping = await storage.createSyncMapping({
+  const mapping = await storage.upsertSyncMappingByProcoreProject({
     hubspotDealId: deal.hubspotId,
     hubspotDealName: deal.dealName,
     procoreProjectId,

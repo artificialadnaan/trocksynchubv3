@@ -66,5 +66,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8080/_health || exit 1
 
-# Run migrations separately: railway run sh -c "CI=1 npm run db:migrate-reconciliation && npm run db:migrate-procore-role-dedupe && CI=1 npm run db:push && npm run db:migrate-approved-attachments && npm run db:migrate-audit-log-category && npm run db:migrate-rfp-reporting"
+# Run migrations separately: railway run sh -c "CI=1 npm run db:migrate-reconciliation && npm run db:migrate-procore-role-dedupe && npm run db:migrate-sync-mappings-dedupe -- --commit && CI=1 npm run db:push && npm run db:migrate-approved-attachments && npm run db:migrate-audit-log-category && npm run db:migrate-rfp-reporting"
 CMD ["npm", "run", "start"]

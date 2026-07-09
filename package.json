@@ -22,6 +22,7 @@
     "db:migrate-hubspot-owner-tables": "tsx scripts/migrate-hubspot-owner-tables.ts",
     "db:migrate-multi-source-rfp": "tsx scripts/migrate-multi-source-rfp.ts",
     "db:migrate-procore-role-dedupe": "tsx scripts/migrate-procore-role-dedupe.ts",
+    "db:migrate-sync-mappings-dedupe": "tsx scripts/dedupe-sync-mappings.ts",
     "import:owner-mappings": "tsx scripts/import-hubspot-owner-mappings.ts",
     "import:procore-users": "tsx scripts/import-procore-users.ts",
     "bidboard:stage-sync": "tsx scripts/run-bidboard-stage-sync.ts",
