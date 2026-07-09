@@ -14,7 +14,9 @@ export interface ResolverInput {
 }
 
 export interface ResolverDeps {
-  getProcoreProjectByNumber: (companyId: string, projectNumber: string) => Promise<{ procoreId: string } | undefined>;
+  // Plural: returns ALL cached matches so the resolver can detect a duplicate (>1 distinct id) and fail closed
+  // rather than arbitrarily picking one via limit(1).
+  getProcoreProjectsByNumber: (companyId: string, projectNumber: string) => Promise<Array<{ procoreId: string }>>;
   liveConfirmByNumber: (companyId: string, projectNumber: string) => Promise<PortfolioExistenceResult>;
   getSyncMappingByBidboardProjectId: (bidboardProjectId: string) => Promise<{ id: number; portfolioProjectId: string | null } | undefined>;
   updateSyncMapping: (id: number, patch: { portfolioProjectId: string }) => Promise<unknown>;
@@ -27,13 +29,15 @@ export interface ResolverDeps {
 /** Default deps wired to real storage + live Procore. Import at the call site; inject mocks in tests. */
 export function defaultResolverDeps(): ResolverDeps {
   return {
-    getProcoreProjectByNumber: (c, n) => storage.getProcoreProjectByNumber(c, n),
+    getProcoreProjectsByNumber: (c, n) => storage.getProcoreProjectsByNumber(c, n),
     liveConfirmByNumber: liveConfirmByNumber,
     getSyncMappingByBidboardProjectId: (id) => storage.getSyncMappingByBidboardProjectId(id),
     updateSyncMapping: (id, patch) => storage.updateSyncMapping(id, patch),
     createAuditLog: (row) => storage.createAuditLog(row as any),
   };
 }
+
+const LIVE_SEARCH_PER_PAGE = 20;
 
 /**
  * Pure matcher for the live-confirm response. Keeps only EXACT project-number matches, trimming BOTH sides
@@ -45,23 +49,34 @@ export function defaultResolverDeps(): ResolverDeps {
  *                                                            resolve the ambiguity by arbitrarily picking one)
  * A non-array response → "unknown".
  */
-export function matchLiveProjects(projects: unknown, projectNumber: string): PortfolioExistenceResult {
+export function matchLiveProjects(
+  projects: unknown,
+  projectNumber: string,
+  pageCap: number = LIVE_SEARCH_PER_PAGE
+): PortfolioExistenceResult {
   if (!Array.isArray(projects)) return { exists: "unknown", reason: "unexpected procore response" };
   const target = projectNumber.trim();
   const exact = projects.filter((p: any) => String(p?.project_number ?? p?.number ?? "").trim() === target);
   const distinctIds = Array.from(new Set(exact.map((p: any) => String(p.id))));
-  if (distinctIds.length === 0) return { exists: false };
   if (distinctIds.length > 1) {
     return { exists: "unknown", reason: `multiple (${distinctIds.length}) procore projects share number ${target}` };
   }
-  return { exists: true, portfolioProjectId: distinctIds[0], source: "live" };
+  if (distinctIds.length === 1) return { exists: true, portfolioProjectId: distinctIds[0], source: "live" };
+  // No exact match. If the search came back AT the page cap, the exact match could be on a later page —
+  // that is not an authoritative not-found, so fail closed rather than create a possible duplicate.
+  if (projects.length >= pageCap) {
+    return { exists: "unknown", reason: `search page at cap (${pageCap}); cannot confirm not-found` };
+  }
+  return { exists: false };
 }
 
 /**
  * One authoritative live Procore confirm (cache-miss path only). Uses Procore's KEYED search
- * (filters[search]=<number>) so it never depends on a project sitting on the first unfiltered page, and does
- * NOT filter by active — an archived Portfolio project still means "exists" (mirrors the cache). matchLiveProjects
- * then keeps only exact matches. Any error → { exists: "unknown" } so the caller fails closed. Never throws.
+ * (filters[search]=<number>) so it never depends on a project sitting on the first unfiltered page. It is a
+ * cache-MISS backstop for recently-created (necessarily active) portfolios; the archived-inclusive source is
+ * the upsert-only procore_projects cache (which retains rows after a project is archived). matchLiveProjects
+ * keeps only exact matches and fails closed when the page is at the cap. Any error → { exists: "unknown" } so
+ * the caller fails closed. Never throws.
  */
 export async function liveConfirmByNumber(companyId: string, projectNumber: string): Promise<PortfolioExistenceResult> {
   try {
@@ -69,7 +84,7 @@ export async function liveConfirmByNumber(companyId: string, projectNumber: stri
     const { fetchWithRateLimitRetry } = await import("./lib/rate-limit-tracker");
     const accessToken = await getAccessToken();
     const resp = await fetchWithRateLimitRetry(
-      `https://api.procore.com/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=20`,
+      `https://api.procore.com/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}`,
       { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } },
       "procore"
     );
@@ -88,8 +103,13 @@ export async function resolveExistingPortfolioProject(
   const number = (input.procoreProjectNumber ?? "").trim();
   if (!number) return { exists: "unknown", reason: "no project number" };
   try {
-    const cached = await deps.getProcoreProjectByNumber(input.companyId, number);
-    if (cached?.procoreId) return { exists: true, portfolioProjectId: String(cached.procoreId), source: "cache" };
+    const cached = await deps.getProcoreProjectsByNumber(input.companyId, number);
+    const ids = Array.from(new Set((cached ?? []).map((p) => String(p.procoreId)).filter(Boolean)));
+    if (ids.length > 1) {
+      // Duplicate portfolio state in the cache — mirror the live matcher: fail closed, don't pick one.
+      return { exists: "unknown", reason: `multiple (${ids.length}) cached procore projects share number ${number}` };
+    }
+    if (ids.length === 1) return { exists: true, portfolioProjectId: ids[0], source: "cache" };
   } catch (err) {
     // A cache read failure alone is not authoritative "not found" — fall through to the live confirm.
   }

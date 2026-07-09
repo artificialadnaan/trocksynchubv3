@@ -1020,9 +1020,29 @@ export async function runPhase1BidBoardActions(
   //   - a direct manual trigger can carry an unmapped Bid Board id with no procore_project_number; we can't run
   //     the authoritative check, so fall back to the prior UI-check behavior rather than fail closed forever.
   const gateBidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1] ?? result.bidboardProjectId;
-  const gateMapping = skipAddToPortfolio
-    ? undefined
-    : await storage.getSyncMappingByBidboardProjectId(gateBidId).catch(() => undefined);
+  let gateMapping: Awaited<ReturnType<typeof storage.getSyncMappingByBidboardProjectId>> | undefined;
+  let mappingLookupFailed = false;
+  if (!skipAddToPortfolio) {
+    try {
+      gateMapping = await storage.getSyncMappingByBidboardProjectId(gateBidId);
+    } catch (mErr) {
+      // A lookup ERROR is indeterminate (unlike a genuinely-absent mapping) — the number that would gate this
+      // create might exist. Fail closed rather than silently degrading to the UI-only check.
+      mappingLookupFailed = true;
+      log(`[portfolio-auto] Sync-mapping lookup failed for bidboard ${gateBidId}: ${mErr instanceof Error ? mErr.message : String(mErr)}`, "playwright");
+    }
+  }
+
+  if (mappingLookupFailed) {
+    await logStep(page, result, "portfolio_existence_gate", "failed", 0, {
+      error: `Sync-mapping lookup failed for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`,
+      metadata: { reason: "mapping_lookup_failed" },
+    });
+    result.success = false;
+    result.error = `Sync-mapping lookup failed for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`;
+    return { estimateExcelPath, proposalPdfPath };
+  }
+
   const gateNumber = (gateMapping?.procoreProjectNumber ?? "").trim();
   let gateSaysSkip = false;
 

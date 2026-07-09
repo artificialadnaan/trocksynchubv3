@@ -299,8 +299,9 @@ export interface IStorage {
 
   upsertProcoreProject(data: InsertProcoreProject): Promise<ProcoreProject>;
   getProcoreProjectByProcoreId(procoreId: string): Promise<ProcoreProject | undefined>;
-  /** Find a Procore project by exact project number within a company (portfolio existence check). */
-  getProcoreProjectByNumber(companyId: string, projectNumber: string): Promise<ProcoreProject | undefined>;
+  /** Find Procore projects by exact project number within a company (portfolio existence check). Returns ALL
+   *  (bounded) matches so a caller can detect a duplicate-number state and fail closed. */
+  getProcoreProjectsByNumber(companyId: string, projectNumber: string): Promise<ProcoreProject[]>;
   getProcoreProjects(filters: { search?: string; limit?: number; offset?: number }): Promise<{ data: ProcoreProject[]; total: number }>;
   updateProcoreProjectLastRoleCheck(procoreId: string): Promise<void>;
 
@@ -1077,8 +1078,8 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
-  async getProcoreProjectByNumber(companyId: string, projectNumber: string): Promise<ProcoreProject | undefined> {
-    const [result] = await db
+  async getProcoreProjectsByNumber(companyId: string, projectNumber: string): Promise<ProcoreProject[]> {
+    return db
       .select()
       .from(procoreProjects)
       // btrim both sides: synced Procore project numbers can be whitespace-padded (procore.ts stores them raw),
@@ -1089,8 +1090,7 @@ export class DatabaseStorage implements IStorage {
       ))
       // A portfolio project may be active or archived; either means "exists". Prefer active, newest first.
       .orderBy(desc(procoreProjects.active), desc(procoreProjects.lastSyncedAt))
-      .limit(1);
-    return result;
+      .limit(5); // bounded — the resolver only needs to know whether >1 DISTINCT id shares the number
   }
 
   async updateProcoreProjectLastRoleCheck(procoreId: string): Promise<void> {
