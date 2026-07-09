@@ -56,8 +56,12 @@ The `btrim(...) <> ''` clause matches the dedup filter and the getters' blank-as
 - **Additive fill-only patch** (`buildLinkUpsertPatch`): fills descriptive/companycam/hubspot columns only where blank; refreshes telemetry (`last_sync_*`) only when the caller actually supplies it (a link-only write never downgrades a synced row); migrates `(source_system, source_deal_id)` onto the row when its source is a junk self-reference to any of its own project ids (so a CompanyCam op that carries a HubSpot deal becomes reachable via `getSyncMappingByHubspotDealId`); never overwrites a load-bearing `metadata.proposalId`.
 - **Race-safe:** on `23505` it re-reads and patches instead of throwing. Works whether or not the index exists yet (no `ON CONFLICT`, so no `42P10`), so the PR is safe to merge before `db:push`.
 
-### 4. Deterministic, bidboard-first getters — `storage.ts`
-Add a canonical `ORDER BY` to `getSyncMappingByProcoreProjectId`, `getSyncMappingByProcoreProjectNumber`, `getSyncMappingBySourceDealId` preferring a **`bidboard_project_id`-bearing** row, then `portfolio_project_id`, then most-recent `last_sync_at`, then lowest `id`. Bidboard-first because the dominant consumers are trigger/creation GUARDS ("does this deal/project already have a BidBoard project?" — hubspot-bidboard-trigger, portfolio-automation), which a portfolio-only duplicate row must never shadow (that would let them create a second BidBoard project). Guards that strictly need the bidboard row use the `getBidboard*` getters (hubspot-bidboard-trigger and the webhook portfolio self-heal do).
+### 4. Deterministic getters — neutral generic + specific getters per need — `storage.ts`
+The generic by-key getters (`getSyncMappingByProcoreProjectId`, `getSyncMappingBySourceDealId`) order by `id` only — **lineage-NEUTRAL** but deterministic. They serve consumers with conflicting needs (trigger guards want the bidboard row; phase/status readers want the portfolio row), so neither bias is baked into the shared getter; each specialised consumer uses a **specific getter** instead:
+- **Bidboard guards** → `getBidboardMappingBySourceDealId` / `getBidboardMappingByProcoreProjectNumber` (hubspot-bidboard-trigger's "already has a BidBoard project?" guard and the webhook portfolio self-heal).
+- **Phase/status reads** → new `getPortfolioMappingBySourceDealId` (`GET /api/deals/:dealId/project-phase` prefers it, falling back to the generic getter for a not-yet-transitioned deal).
+- `getSyncMappingByProcoreProjectNumber` keeps a **bidboard-first** order because *its* callers (trockcrm-relay, bidboard stage-sync, portfolio-automation URL build) uniformly want the bidboard row.
+Post-dedup there is one row per key, so ordering is moot; this only stabilises the pre-dedup window.
 
 ## Rollout (single PR + a 2-step manual migration)
 

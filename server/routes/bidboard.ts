@@ -1031,8 +1031,12 @@ export function registerBidboardRoutes(app: Express, requireAuth: RequestHandler
   // ── Project phase ─────────────────────────────────────────────────────────
 
   app.get("/api/deals/:dealId/project-phase", requireAuth, asyncHandler(async (req, res) => {
-    const { dealId } = req.params;
-    const mapping = await storage.getSyncMappingByHubspotDealId(dealId);
+    const dealId = String(req.params.dealId);
+    // Prefer the PORTFOLIO-bearing row so a duplicate bidboard-only row can't report the deal as still
+    // in the bidboard phase; fall back to the generic mapping when the deal hasn't transitioned.
+    const mapping =
+      (await storage.getPortfolioMappingBySourceDealId("hubspot", dealId)) ??
+      (await storage.getSyncMappingByHubspotDealId(dealId));
 
     if (!mapping) {
       return res.json({

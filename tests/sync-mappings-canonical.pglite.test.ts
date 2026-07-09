@@ -221,13 +221,13 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       pg = await freshDb({ withCanonicalIndexes: false });
     });
 
-    it("getSyncMappingByProcoreProjectId prefers the BIDBOARD-bearing row (trigger/creation guards need it)", async () => {
-      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", last_sync_at: "2026-01-01" });
-      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", portfolio_project_id: "PF-1", last_sync_at: "2026-02-01" });
-      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", bidboard_project_id: "BB-1", last_sync_at: "2025-01-01" });
+    it("getSyncMappingByProcoreProjectId is lineage-NEUTRAL & deterministic (lowest id) among duplicates", async () => {
+      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", procore_project_name: "first" }); // lowest id
+      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", portfolio_project_id: "PF-1" });
+      await seed(pg, { source_deal_id: "d", procore_project_id: "PJ-1", bidboard_project_id: "BB-1" });
 
       const row = await storage.getSyncMappingByProcoreProjectId("PJ-1");
-      expect(row?.bidboardProjectId).toBe("BB-1"); // bidboard beats portfolio beats plain, even when it's the oldest sync
+      expect(row?.procoreProjectName).toBe("first"); // no lineage bias — guards/phase consumers use specific getters
     });
 
     it("getSyncMappingByProcoreProjectNumber returns a lineage-bearing row for a shared number", async () => {
@@ -238,12 +238,19 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       expect(row?.bidboardProjectId).toBe("BB-5");
     });
 
-    it("getSyncMappingBySourceDealId is deterministic (lineage/freshest) across a deal's rows", async () => {
-      await seed(pg, { source_deal_id: "deal-x", procore_project_id: "PJ-1", last_sync_at: "2026-01-01" });
-      await seed(pg, { source_deal_id: "deal-x", bidboard_project_id: "BB-1", last_sync_at: "2026-03-01" });
+    it("source-deal reads: generic is neutral (lowest id), specific getters return the bidboard vs portfolio row", async () => {
+      await seed(pg, { source_deal_id: "deal-x", procore_project_id: "PJ-1" }); // lowest id, no lineage
+      await seed(pg, { source_deal_id: "deal-x", bidboard_project_id: "BB-1" });
+      await seed(pg, { source_deal_id: "deal-x", portfolio_project_id: "PF-1" });
 
-      const row = await storage.getSyncMappingBySourceDealId("hubspot", "deal-x");
-      expect(row?.bidboardProjectId).toBe("BB-1");
+      const generic = await storage.getSyncMappingBySourceDealId("hubspot", "deal-x");
+      expect(generic?.procoreProjectId).toBe("PJ-1"); // neutral: lowest id, not lineage-biased
+
+      const bidboard = await storage.getBidboardMappingBySourceDealId("hubspot", "deal-x");
+      expect(bidboard?.bidboardProjectId).toBe("BB-1"); // trigger guards get the bidboard row
+
+      const portfolio = await storage.getPortfolioMappingBySourceDealId("hubspot", "deal-x");
+      expect(portfolio?.portfolioProjectId).toBe("PF-1"); // phase reads get the portfolio row
     });
 
     it("getBidboardMappingByProcoreProjectNumber returns the freshest real-bidboard row, ignoring blank/portfolio-only rows", async () => {

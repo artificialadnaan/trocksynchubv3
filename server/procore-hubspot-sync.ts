@@ -210,7 +210,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
   const { dryRun = false, skipHubspotWrites = true } = options;
   const start = Date.now();
   const details: SyncDetail[] = [];
-  let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0;
+  let matched = 0, newMappings = 0, updatedMappings = 0, hubspotUpdates = 0, hubspotCreated = 0, conflicts = 0, alreadyLinked = 0;
   
   // dryRun implies skipHubspotWrites - it's a full simulation with no writes anywhere
   const effectiveSkipHubspotWrites = dryRun || skipHubspotWrites;
@@ -481,7 +481,11 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
             const alreadyMapped = await storage.getSyncMappingByProcoreProjectId(project.procoreId);
             if (alreadyMapped) {
               console.log(`[procore-hubspot-sync] Skipping HubSpot create for already-mapped Procore project ${project.procoreId}`);
+              // Keep the audit counters consistent: this project IS matched (to a pre-existing mapping), so
+              // it must not fall through to unmatchedProcore, and its deal must count as used-this-run.
               matched++;
+              alreadyLinked++;
+              if (alreadyMapped.hubspotDealId) hubspotIdsUsedThisRun.add(alreadyMapped.hubspotDealId);
               continue;
             }
             // Resolve stage label to actual HubSpot stage ID before creating deal
@@ -621,7 +625,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
   }
 
   const unmatchedHubspot = allHubspot.filter(d => !hubspotIdsUsedThisRun.has(d.hubspotId)).length;
-  const unmatchedProcore = pendingHubspotCreates.length - hubspotCreated;
+  const unmatchedProcore = pendingHubspotCreates.length - hubspotCreated - alreadyLinked;
 
   const duration = Date.now() - start;
 
