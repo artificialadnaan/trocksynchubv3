@@ -29,15 +29,41 @@ export function defaultResolverDeps(): ResolverDeps {
   return {
     getProcoreProjectByNumber: (c, n) => storage.getProcoreProjectByNumber(c, n),
     liveConfirmByNumber: liveConfirmByNumber,
-    getSyncMappingByBidboardProjectId: (id) => storage.getSyncMappingByBidboardProjectId(id) as any,
+    getSyncMappingByBidboardProjectId: (id) => storage.getSyncMappingByBidboardProjectId(id),
     updateSyncMapping: (id, patch) => storage.updateSyncMapping(id, patch),
     createAuditLog: (row) => storage.createAuditLog(row as any),
   };
 }
 
+const PROCORE_PROJECTS_PER_PAGE = 500;
+
+/**
+ * Pure matcher for the live-confirm response. EXACT number match, trimming BOTH sides (Procore may pad
+ * `project_number`, e.g. " DFW-4-08226-aa "; the sibling matcher at bidboard.ts:2008 trims for the same
+ * reason). If there is no match AND the returned page is at the per_page cap, we cannot be sure a match
+ * doesn't sit beyond it, so we fail closed to "unknown" (abort) rather than "false" (create-a-duplicate).
+ */
+export function matchLiveProjects(
+  projects: unknown,
+  projectNumber: string,
+  perPageCap: number = PROCORE_PROJECTS_PER_PAGE
+): PortfolioExistenceResult {
+  if (!Array.isArray(projects)) return { exists: "unknown", reason: "unexpected procore response" };
+  const target = projectNumber.trim();
+  const match = projects.find(
+    (p: any) => String(p?.project_number ?? p?.number ?? "").trim() === target
+  );
+  if (match) return { exists: true, portfolioProjectId: String((match as any).id), source: "live" };
+  if (projects.length >= perPageCap) {
+    return { exists: "unknown", reason: `procore result page at cap (${perPageCap}); cannot confirm not-found` };
+  }
+  return { exists: false };
+}
+
 /**
  * One authoritative live Procore confirm (cache-miss path only). Fetches active company projects and matches
- * the EXACT project number. Any error → { exists: "unknown" } so the caller fails closed. Never throws.
+ * the EXACT project number via matchLiveProjects. Any error → { exists: "unknown" } so the caller fails
+ * closed. Never throws.
  */
 export async function liveConfirmByNumber(companyId: string, projectNumber: string): Promise<PortfolioExistenceResult> {
   try {
@@ -45,17 +71,12 @@ export async function liveConfirmByNumber(companyId: string, projectNumber: stri
     const { fetchWithRateLimitRetry } = await import("./lib/rate-limit-tracker");
     const accessToken = await getAccessToken();
     const resp = await fetchWithRateLimitRetry(
-      `https://api.procore.com/rest/v1.0/companies/${companyId}/projects?per_page=500&active=true`,
+      `https://api.procore.com/rest/v1.0/companies/${companyId}/projects?per_page=${PROCORE_PROJECTS_PER_PAGE}&active=true`,
       { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } },
       "procore"
     );
     if (!resp.ok) return { exists: "unknown", reason: `procore ${resp.status}` };
-    const projects = (await resp.json()) as Array<{ id: unknown; project_number?: unknown; number?: unknown }>;
-    if (!Array.isArray(projects)) return { exists: "unknown", reason: "unexpected procore response" };
-    const match = projects.find(
-      (p) => String(p.project_number ?? p.number ?? "") === projectNumber
-    );
-    return match ? { exists: true, portfolioProjectId: String(match.id), source: "live" } : { exists: false };
+    return matchLiveProjects(await resp.json(), projectNumber);
   } catch (err) {
     return { exists: "unknown", reason: err instanceof Error ? err.message : String(err) };
   }

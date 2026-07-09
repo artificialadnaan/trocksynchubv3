@@ -1081,7 +1081,12 @@ export class DatabaseStorage implements IStorage {
     const [result] = await db
       .select()
       .from(procoreProjects)
-      .where(and(eq(procoreProjects.companyId, companyId), eq(procoreProjects.projectNumber, projectNumber)))
+      // btrim both sides: synced Procore project numbers can be whitespace-padded (procore.ts stores them raw),
+      // so a plain eq would miss a real match and let a duplicate portfolio be created downstream.
+      .where(and(
+        eq(procoreProjects.companyId, companyId),
+        sql`btrim(${procoreProjects.projectNumber}) = btrim(${projectNumber})`,
+      ))
       // A portfolio project may be active or archived; either means "exists". Prefer active, newest first.
       .orderBy(desc(procoreProjects.active), desc(procoreProjects.lastSyncedAt))
       .limit(1);

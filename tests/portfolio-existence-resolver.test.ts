@@ -22,8 +22,41 @@ import {
   resolveExistingPortfolioProject,
   decidePortfolioCreateAction,
   handlePortfolioCreateGate,
+  matchLiveProjects,
   type PortfolioExistenceResult,
 } from "../server/portfolio-existence-resolver";
+
+describe("matchLiveProjects (live-confirm response matcher)", () => {
+  it("exact number match → exists:true (source live)", () => {
+    const r = matchLiveProjects([{ id: 42, project_number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", 500);
+    expect(r).toEqual({ exists: true, portfolioProjectId: "42", source: "live" });
+  });
+
+  it("trims BOTH sides — a whitespace-padded Procore project_number still matches", () => {
+    const r = matchLiveProjects([{ id: 7, project_number: "  DFW-4-08226-aa  " }], "DFW-4-08226-aa", 500);
+    expect(r).toMatchObject({ exists: true, portfolioProjectId: "7" });
+  });
+
+  it("no match AND page below the cap → exists:false", () => {
+    const r = matchLiveProjects([{ id: 1, project_number: "OTHER-1" }], "DFW-4-08226-aa", 500);
+    expect(r).toEqual({ exists: false });
+  });
+
+  it("no match but the page is AT the per_page cap → exists:unknown (fail-closed, may be beyond page 1)", () => {
+    const page = Array.from({ length: 3 }, (_, i) => ({ id: i, project_number: `X-${i}` }));
+    const r = matchLiveProjects(page, "DFW-4-08226-aa", 3);
+    expect(r.exists).toBe("unknown");
+  });
+
+  it("non-array response → exists:unknown", () => {
+    expect(matchLiveProjects({ error: "boom" } as unknown, "DFW-4-08226-aa", 500).exists).toBe("unknown");
+  });
+
+  it("falls back to the `number` field when `project_number` is absent", () => {
+    const r = matchLiveProjects([{ id: 9, number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", 500);
+    expect(r).toMatchObject({ exists: true, portfolioProjectId: "9" });
+  });
+});
 
 function makeDeps(over: Partial<{
   cacheRow: any;
