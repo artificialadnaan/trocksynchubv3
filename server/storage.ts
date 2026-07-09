@@ -1083,9 +1083,11 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(procoreProjects)
       // btrim both sides: synced Procore project numbers can be whitespace-padded (procore.ts stores them raw),
-      // so a plain eq would miss a real match and let a duplicate portfolio be created downstream.
+      // so a plain eq would miss a real match and let a duplicate portfolio be created downstream. Also include
+      // rows whose company_id is NULL (the sync writes null when a project response has no nested company.id) —
+      // excluding them would miss a real portfolio and let a duplicate through.
       .where(and(
-        eq(procoreProjects.companyId, companyId),
+        or(eq(procoreProjects.companyId, companyId), isNull(procoreProjects.companyId)),
         sql`btrim(${procoreProjects.projectNumber}) = btrim(${projectNumber})`,
       ))
       // A portfolio project may be active or archived; either means "exists". Prefer active, newest first.

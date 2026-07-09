@@ -144,6 +144,13 @@ export async function runPhase1WithRetry(
             bidboardProjectUrl,
             proposalPdfPath: output.proposalPdfPath ?? null,
             customerName: context.customerName,
+            // Carry the trigger's CURRENT identity so Phase 2's identity validation uses the current Bid Board
+            // number, consistent with the Phase 1 gate (not a possibly-stale sync_mappings value).
+            identityContext: {
+              projectName: context.projectName,
+              projectNumber: context.projectNumber,
+              customerName: context.customerName,
+            },
           });
           // Merge Phase 2 (and Phase 3) steps into result
           phase2Result.steps.forEach((s) => result.steps.push(s));
