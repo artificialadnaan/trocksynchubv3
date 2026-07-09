@@ -128,6 +128,50 @@ function normalizeSyncMappingSource(mapping: LegacyCompatibleInsertSyncMapping):
   };
 }
 
+// Canonical-row ordering for the by-key sync_mapping getters: the row a dedup would keep — a
+// lineage-bearing row first (portfolio, then bidboard), then the freshest sync, then the lowest id.
+// Makes the getters deterministic even while duplicate rows still exist (the pre-dedup window) and for
+// the permanently-non-unique procore_project_number key. Blank ids are treated as absent (a '' bidboard
+// id must not rank as lineage-bearing — mirrors the getBidboard* helpers' length(trim(...)) guard).
+function canonicalMappingOrderBy() {
+  return [
+    sql`(${syncMappings.portfolioProjectId} IS NOT NULL AND btrim(${syncMappings.portfolioProjectId}) <> '') DESC`,
+    sql`(${syncMappings.bidboardProjectId} IS NOT NULL AND btrim(${syncMappings.bidboardProjectId}) <> '') DESC`,
+    sql`${syncMappings.lastSyncAt} DESC NULLS LAST`,
+    sql`${syncMappings.id} ASC`,
+  ];
+}
+
+// SET clause for createSyncMapping's upsert on the procore_project_id unique index (#2). Refreshes the
+// sync telemetry on every re-sync, but only FILLS the descriptive/identity columns via COALESCE so an
+// incoming NULL can never wipe an existing value. Deliberately omits the lineage keys (bidboard_/
+// portfolio_project_id + names) and the source identity — those are authoritative on the surviving row
+// and must never be clobbered by a plain procore re-sync.
+const SYNC_MAPPING_CONFLICT_SET = {
+  lastSyncAt: sql`excluded.last_sync_at`,
+  lastSyncStatus: sql`excluded.last_sync_status`,
+  lastSyncDirection: sql`excluded.last_sync_direction`,
+  procoreProjectName: sql`COALESCE(excluded.procore_project_name, ${syncMappings.procoreProjectName})`,
+  procoreProjectNumber: sql`COALESCE(excluded.procore_project_number, ${syncMappings.procoreProjectNumber})`,
+  procoreCompanyId: sql`COALESCE(excluded.procore_company_id, ${syncMappings.procoreCompanyId})`,
+  hubspotDealId: sql`COALESCE(excluded.hubspot_deal_id, ${syncMappings.hubspotDealId})`,
+  hubspotDealName: sql`COALESCE(excluded.hubspot_deal_name, ${syncMappings.hubspotDealName})`,
+  hubspotCompanyId: sql`COALESCE(excluded.hubspot_company_id, ${syncMappings.hubspotCompanyId})`,
+  companyCamProjectId: sql`COALESCE(excluded.companycam_project_id, ${syncMappings.companyCamProjectId})`,
+  metadata: sql`COALESCE(excluded.metadata, ${syncMappings.metadata})`,
+  sentToPortfolioAt: sql`COALESCE(excluded.sent_to_portfolio_at, ${syncMappings.sentToPortfolioAt})`,
+} as const;
+
+// True when a query failed because the ON CONFLICT arbiter index does not exist yet (Postgres 42P10).
+// createSyncMapping catches this to fall back to a plain insert until `db:push` creates the
+// idx_sync_mappings_procore_project_id index — so the PR is safe to merge before the migration runs.
+function isMissingConflictTargetError(err: unknown): boolean {
+  const code = (err as any)?.code ?? (err as any)?.cause?.code;
+  if (code === "42P10") return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no unique or exclusion constraint matching the on conflict/i.test(msg);
+}
+
 function normalizeRfpApprovalRequestSource(data: LegacyCompatibleInsertRfpApprovalRequest): InsertRfpApprovalRequest {
   const sourceSystem = data.sourceSystem ?? "hubspot";
   const sourceDealId = data.sourceDealId ?? data.hubspotDealId;
@@ -448,7 +492,7 @@ export class DatabaseStorage implements IStorage {
         eq(syncMappings.sourceSystem, sourceSystem),
         eq(syncMappings.sourceDealId, sourceDealId)
       )
-    );
+    ).orderBy(...canonicalMappingOrderBy()).limit(1);
     return mapping;
   }
 
@@ -459,7 +503,7 @@ export class DatabaseStorage implements IStorage {
         eq(syncMappings.portfolioProjectId, projectId),
         eq(syncMappings.bidboardProjectId, projectId)
       )
-    );
+    ).orderBy(...canonicalMappingOrderBy()).limit(1);
     return mapping;
   }
 
@@ -475,9 +519,11 @@ export class DatabaseStorage implements IStorage {
 
   async getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined> {
     if (!projectNumber?.trim()) return undefined;
+    // A project number is legitimately shared by a bidboard row + its portfolio row, so this key stays
+    // non-unique. Deterministic pick: the lineage-bearing/freshest row (see canonicalMappingOrderBy).
     const [mapping] = await db.select().from(syncMappings).where(
       eq(syncMappings.procoreProjectNumber, projectNumber.trim())
-    );
+    ).orderBy(...canonicalMappingOrderBy()).limit(1);
     return mapping;
   }
 
@@ -494,7 +540,7 @@ export class DatabaseStorage implements IStorage {
         // helper's `!mapping.bidboardProjectId` check would then reject as no_bidboard_mapping.
         sql`length(trim(${syncMappings.bidboardProjectId})) > 0`,
       )
-    );
+    ).orderBy(sql`${syncMappings.lastSyncAt} DESC NULLS LAST`, sql`${syncMappings.id} DESC`).limit(1);
     return mapping;
   }
 
@@ -521,8 +567,32 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping> {
-    const [result] = await db.insert(syncMappings).values(normalizeSyncMappingSource(mapping)).returning();
-    return result;
+    const values = normalizeSyncMappingSource(mapping);
+    // Idempotent on the canonical procore_project_id key (#2): re-syncing the same Procore project
+    // refreshes the sync-owned fields instead of inserting a duplicate. Rows with a NULL
+    // procore_project_id fall outside the partial index → plain insert, so the bidboard_project_id
+    // ownership-guard throw (bidboard.ts) is preserved (a bidboard conflict is a DIFFERENT index and
+    // stays unhandled → throws).
+    try {
+      const [result] = await db
+        .insert(syncMappings)
+        .values(values)
+        .onConflictDoUpdate({
+          target: syncMappings.procoreProjectId,
+          targetWhere: sql`procore_project_id IS NOT NULL`,
+          set: SYNC_MAPPING_CONFLICT_SET,
+        })
+        .returning();
+      return result;
+    } catch (err) {
+      // The arbiter index isn't there yet (deploy shipped before `db:push` created it). Fall back to a
+      // plain insert so the PR is safe to merge before the dedup+index migration runs.
+      if (isMissingConflictTargetError(err)) {
+        const [result] = await db.insert(syncMappings).values(values).returning();
+        return result;
+      }
+      throw err;
+    }
   }
 
   async updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined> {
