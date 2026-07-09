@@ -32,6 +32,7 @@ vi.mock("../server/storage.ts", () => ({
     upsertBidboardSyncState: vi.fn(),
     createBidboardAutomationLog: vi.fn(),
     getManualReviewQueueEntry: vi.fn(),
+    getUnresolvedManualReviewQueueEntry: vi.fn(),
     createManualReviewQueueEntry: vi.fn(),
 
     // Mapping lookups
@@ -846,6 +847,338 @@ describe("Portfolio automation trigger", () => {
       "TP-PROD",
       "Zeta Corp",
       "hs-deal-prod"
+    );
+  });
+
+  // The core "make it loud" fix: when the trigger returns a no_bidboard_project_id skip (the mapping has no
+  // Bid Board id, so the automation can't run) it must NOT vanish silently — queue manual review AND write an
+  // alert-visible audit error (status='error', which the 15-min failure digest scans).
+  it("routes an unmapped portfolio trigger (no bidboard_project_id) to manual review + an alert-visible audit error", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "no_bidboard_project_id",
+      projectName: "Production Project",
+      projectNumber: "TP-PROD",
+      customerName: "Zeta Corp",
+      hubspotDealId: "hs-deal-prod",
+    } as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Sent to Production")]);
+
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectNumber: "TP-PROD",
+        currentStage: "Sent to Production",
+        reason: "portfolio_trigger_no_bidboard_project_id",
+      })
+    );
+    expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "portfolio_trigger_skipped_no_bidboard_project_id",
+        status: "error",
+        source: "bidboard_stage_sync",
+        details: expect.objectContaining({
+          hubspotDealId: "hs-deal-prod",
+          reason: "no_bidboard_project_id",
+          manualReviewQueued: true,
+        }),
+      })
+    );
+  });
+
+  it("does NOT queue manual review or write a skip alert when the portfolio trigger runs normally", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+
+    // A normal successful automation result (carries a bidboardProjectId, no `skipped` discriminant).
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      success: true,
+      bidboardProjectId: "562949955000000",
+      steps: [],
+      startedAt: new Date(),
+    } as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Sent to Production")]);
+
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createAuditLog)).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "portfolio_trigger_skipped_no_bidboard_project_id" })
+    );
+  });
+
+  // A missing Procore company id is a GLOBAL config outage (blocks every trigger). It must alert but must NOT
+  // queue per-deal manual review (that would flood the queue).
+  it("alerts (audit error) but does NOT queue manual review for a no_company_id skip", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "no_company_id",
+      projectName: "Production Project",
+      projectNumber: "TP-PROD",
+      customerName: "Zeta Corp",
+      hubspotDealId: "hs-deal-prod",
+    } as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Sent to Production")]);
+
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "portfolio_trigger_skipped_no_company_id",
+        status: "error",
+        source: "bidboard_stage_sync",
+      })
+    );
+  });
+
+  // The trock_crm-sourced path (no HubSpot deal, Bid Board id only) also routes through
+  // firePortfolioTriggerForChange, so a skip there must be handled the same way.
+  it("routes a no_bidboard_project_id skip on the no-HubSpot-deal path to manual review + alert", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "no_bidboard_project_id",
+      projectName: "Field Project",
+      projectNumber: "TP-FIELD",
+      customerName: "Iota Corp",
+      hubspotDealId: null,
+    } as any);
+
+    // A change with NO hubspotDealId (trock_crm-sourced) — routes through the no-HubSpot-deal branch.
+    await syncStagesToHubSpot([
+      {
+        projectName: "Field Project",
+        projectNumber: "TP-FIELD",
+        customerName: "Iota Corp",
+        previousStage: "Estimate in Progress",
+        newStage: "Sent to Production",
+        totalSales: 0,
+        synchubRecordId: "9",
+        bidboardProjectId: "bb-1",
+      } as any,
+    ]);
+
+    expect(vi.mocked(triggerPortfolioAutomationFromStageChange)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "portfolio_trigger_no_bidboard_project_id" })
+    );
+    expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "portfolio_trigger_skipped_no_bidboard_project_id", status: "error" })
+    );
+  });
+
+  // Error isolation: the skip is non-transient, so a failure to RECORD it must not turn into a cross-cycle
+  // retry. Even when createAuditLog throws, the cycle must not crash and the stage must still ADVANCE
+  // (upsertBidboardSyncState called with the new stage, not kept at the previous stage).
+  it("does not retry (advances the stage) when recording a portfolio-trigger skip throws", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    // The alert write fails — must be swallowed, NOT propagated into a retry.
+    vi.mocked(storage.createAuditLog).mockRejectedValue(new Error("db down"));
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "no_bidboard_project_id",
+      projectName: "Production Project",
+      projectNumber: "TP-PROD",
+      customerName: "Zeta Corp",
+      hubspotDealId: "hs-deal-prod",
+    } as any);
+
+    // Must not throw despite the audit write rejecting.
+    await expect(syncStagesToHubSpot([makeProductionChange("Sent to Production")])).resolves.toBeDefined();
+
+    // The manual-review write still ran (handler executed) ...
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalled();
+    // ... and the stage ADVANCED to the new stage (handled=true), NOT kept at the previous stage for retry.
+    expect(vi.mocked(storage.upsertBidboardSyncState)).toHaveBeenCalledWith(
+      expect.objectContaining({ currentStage: "Sent to Production" })
+    );
+  });
+
+  // The alert (audit error) is the loud signal — a manual-review-queue write failure must not swallow it.
+  it("still writes the alert (audit error) when manual-review queuing fails", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    // The manual-review queue write fails — the alert below must still be written.
+    vi.mocked(storage.createManualReviewQueueEntry).mockRejectedValue(new Error("queue down"));
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "no_bidboard_project_id",
+      projectName: "Production Project",
+      projectNumber: "TP-PROD",
+      customerName: "Zeta Corp",
+      hubspotDealId: "hs-deal-prod",
+    } as any);
+
+    await expect(syncStagesToHubSpot([makeProductionChange("Sent to Production")])).resolves.toBeDefined();
+
+    // The alert is still written AND it reports the queue failure (so operators aren't pointed at a queue row
+    // that was never created).
+    expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "portfolio_trigger_skipped_no_bidboard_project_id",
+        status: "error",
+        errorMessage: expect.stringContaining("did NOT create an active entry"),
+        details: expect.objectContaining({ manualReviewQueued: false }),
+      })
+    );
+  });
+
+  // Cross-cycle dedup: if the project already has an unresolved review row (e.g. a prior cycle's HubSpot write
+  // failed and re-processed under a new cycleId), don't create a duplicate queue row OR a duplicate alert.
+  it("skips a duplicate queue row + alert when an unresolved manual-review entry already exists", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+    // An unresolved review row already exists for this project.
+    vi.mocked(storage.getUnresolvedManualReviewQueueEntry).mockResolvedValue({ id: 1, resolvedAt: null } as any);
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "no_bidboard_project_id",
+      projectName: "Production Project",
+      projectNumber: "TP-PROD",
+      customerName: "Zeta Corp",
+      hubspotDealId: "hs-deal-prod",
+    } as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Sent to Production")]);
+
+    // No duplicate row, and no duplicate skip alert.
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createAuditLog)).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: "portfolio_trigger_skipped_no_bidboard_project_id" })
+    );
+  });
+
+  // The review ROW is what determines manualReviewQueued — a failure of the best-effort breadcrumb log after
+  // the row was created must NOT flip the alert to "not queued".
+  it("keeps manualReviewQueued=true when only the best-effort breadcrumb log fails after the row is created", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined);
+    // The review ROW is created successfully...
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+    // ...but the follow-up best-effort breadcrumb log write fails.
+    vi.mocked(storage.createBidboardAutomationLog).mockImplementation(async (arg: any) => {
+      if (arg?.action === "bidboard_stage_sync:manual_review_queued") throw new Error("breadcrumb down");
+      return {} as any;
+    });
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "no_bidboard_project_id",
+      projectName: "Production Project",
+      projectNumber: "TP-PROD",
+      customerName: "Zeta Corp",
+      hubspotDealId: "hs-deal-prod",
+    } as any);
+
+    await expect(syncStagesToHubSpot([makeProductionChange("Sent to Production")])).resolves.toBeDefined();
+
+    expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "portfolio_trigger_skipped_no_bidboard_project_id",
+        details: expect.objectContaining({ manualReviewQueued: true }),
+      })
     );
   });
 

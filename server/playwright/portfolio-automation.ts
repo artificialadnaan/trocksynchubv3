@@ -136,6 +136,27 @@ export interface PortfolioAutomationResult {
   error?: string;
 }
 
+/**
+ * Returned by triggerPortfolioAutomationFromStageChange when it CANNOT run the automation. Previously these
+ * paths returned a bare `null` and the trigger-stage deal silently vanished; the caller now routes the skip
+ * to an alert (and, for the per-deal case, manual review) instead of dropping it. Discriminated by `skipped`.
+ */
+export interface PortfolioTriggerSkip {
+  skipped: true;
+  /**
+   * Why the automation could not run:
+   *  - "no_bidboard_project_id": the resolved sync mapping has no Bid Board id (per-deal — routed to
+   *    manual review + an alert).
+   *  - "no_company_id": Procore company id is not configured (a GLOBAL config outage that blocks EVERY
+   *    trigger — alert only; per-deal manual review would flood the queue).
+   */
+  reason: "no_bidboard_project_id" | "no_company_id";
+  projectName: string;
+  projectNumber: string | null;
+  customerName: string;
+  hubspotDealId: string | null;
+}
+
 export interface PortfolioIdentityContext {
   projectName?: string;
   projectNumber?: string | null;
@@ -2938,7 +2959,7 @@ export async function triggerPortfolioAutomationFromStageChange(
   projectNumber: string | null,
   customerName: string,
   hubspotDealId?: string
-): Promise<PortfolioAutomationResult | null> {
+): Promise<PortfolioAutomationResult | PortfolioTriggerSkip> {
   let mapping = null;
 
   // Try by HubSpot deal ID first (most reliable — passed from stage sync)
@@ -3026,19 +3047,43 @@ export async function triggerPortfolioAutomationFromStageChange(
   // Only use bidboardProjectId — procoreProjectId is a portfolio project ID and cannot be used for BidBoard URLs
   const bidboardProjectId = mapping?.bidboardProjectId;
 
+  // Check the PER-DEAL signal FIRST. A mapping with no bidboard_project_id must reach manual review even
+  // during a global Procore-config outage (companyId, checked just below). If companyId were checked first, a
+  // missing company id would mask this per-deal skip → the unmapped deal advances as a handled global skip and
+  // is never queued, so once companyId is restored it is neither retried nor in the review queue.
+  if (!bidboardProjectId) {
+    // The mapping (if any) has no bidboard_project_id, so there is no Bid Board URL to drive. Do NOT
+    // silently drop this — return a discriminated skip so the stage-sync caller routes it to manual
+    // review + an alert. (Auto-creating the Bid Board project here is intentionally NOT done: the
+    // portfolio-trigger config sets allowUnmappedAutoCreate=false to avoid duplicate projects.)
+    log(
+      `[portfolio-auto] No bidboard project ID found for project (name: ${projectName}, #: ${projectNumber}, customer: ${customerName}) — routing to manual review instead of silently skipping`,
+      "playwright"
+    );
+    return {
+      skipped: true,
+      reason: "no_bidboard_project_id",
+      projectName,
+      projectNumber: projectNumber ?? null,
+      customerName,
+      hubspotDealId: hubspotDealId ?? null,
+    };
+  }
+
   const config = await storage.getAutomationConfig("procore_config");
   const companyId = (config?.value as { companyId?: string })?.companyId;
   if (!companyId) {
-    log("[portfolio-auto] Procore company ID not configured — skipping automation", "playwright");
-    return null;
-  }
-
-  if (!bidboardProjectId) {
-    log(
-      `[portfolio-auto] No bidboard project ID found for project (name: ${projectName}, #: ${projectNumber}, customer: ${customerName}) — skipping automation`,
-      "playwright"
-    );
-    return null;
+    // Global config outage (blocks EVERY portfolio trigger). Don't silently drop trigger-stage deals —
+    // return a discriminated skip so the caller raises an alert (see PortfolioTriggerSkip).
+    log("[portfolio-auto] Procore company ID not configured — routing to alert instead of silently skipping", "playwright");
+    return {
+      skipped: true,
+      reason: "no_company_id",
+      projectName,
+      projectNumber: projectNumber ?? null,
+      customerName,
+      hubspotDealId: hubspotDealId ?? null,
+    };
   }
 
   // Build URL with proposalId if available (Procore crashes without it)

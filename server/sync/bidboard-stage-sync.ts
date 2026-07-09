@@ -19,7 +19,10 @@ import { storage } from "../storage";
 import { updateHubSpotDeal, updateHubSpotDealStage } from "../hubspot";
 import { resolveHubspotStageId, getTerminalStageGuard } from "../procore-hubspot-sync";
 import { normalizeStageLabel, resolveBidBoardHubSpotStage, type StageMappingSource } from "./stage-mapping";
-import { triggerPortfolioAutomationFromStageChange } from "../playwright/portfolio-automation";
+import {
+  triggerPortfolioAutomationFromStageChange,
+  type PortfolioTriggerSkip,
+} from "../playwright/portfolio-automation";
 import { log } from "../index";
 
 // Excel columns from Bid Board export
@@ -267,9 +270,14 @@ interface ManualReviewQueueInput {
   reason: string;
   mappingSource: StageMappingSource;
   modeConfig: ResolvedBidBoardStageSyncModeConfig;
+  /** The HubSpot deal id, when the change carried one (the portfolio-trigger skip path can have one even
+   *  though the mapping lacks a bidboard_project_id). Recorded in the queue details for the reviewer. */
+  hubspotDealId?: string | null;
 }
 
-async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQueueInput): Promise<void> {
+/** Returns true if it created/refreshed an UNRESOLVED review row, false if it skipped because the row for
+ *  this (project, cycle) is already resolved (so no active queue entry was created). */
+async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQueueInput): Promise<boolean> {
   const details = {
     projectNumber: input.projectNumber,
     projectName: input.projectName,
@@ -281,7 +289,7 @@ async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQ
     mappingSource: input.mappingSource,
     mode: input.modeConfig.mode,
     ...(input.modeConfig.canaryRunId ? { canaryRunId: input.modeConfig.canaryRunId } : {}),
-    hubspotDealId: null,
+    hubspotDealId: input.hubspotDealId ?? null,
   };
 
   log(`[BidBoardStageSync] manual review queued ${JSON.stringify(details)}`, "sync");
@@ -294,14 +302,22 @@ async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQ
       resolvedBy: existing.resolvedBy,
     };
     log(`[BidBoardStageSync] manual review already resolved, skipping re-queue ${JSON.stringify(skipDetails)}`, "sync");
-    await storage.createBidboardAutomationLog({
-      projectId: input.projectId,
-      projectName: input.projectName,
-      action: "bidboard_stage_sync:manual_review_already_resolved_skip",
-      status: "skipped",
-      details: skipDetails,
-    });
-    return;
+    // Best-effort breadcrumb — isolate so it can't throw past the deterministic `return false`.
+    try {
+      await storage.createBidboardAutomationLog({
+        projectId: input.projectId,
+        projectName: input.projectName,
+        action: "bidboard_stage_sync:manual_review_already_resolved_skip",
+        status: "skipped",
+        details: skipDetails,
+      });
+    } catch (err) {
+      log(
+        `[BidBoardStageSync] already_resolved_skip breadcrumb log failed for ${input.projectNumber}: ${err instanceof Error ? err.message : String(err)}`,
+        "sync"
+      );
+    }
+    return false;
   }
 
   await storage.createManualReviewQueueEntry({
@@ -315,12 +331,141 @@ async function queueManualReviewForUnmappedPortfolioTrigger(input: ManualReviewQ
     details,
   });
 
-  await storage.createBidboardAutomationLog({
-    projectId: input.projectId,
-    projectName: input.projectName,
-    action: "bidboard_stage_sync:manual_review_queued",
-    status: "queued",
-    details,
+  // The review row now exists — that is what the `true` below reports. The automation-log breadcrumb is
+  // best-effort: a failure to write it must NOT make the caller think queuing failed (the row is inserted).
+  try {
+    await storage.createBidboardAutomationLog({
+      projectId: input.projectId,
+      projectName: input.projectName,
+      action: "bidboard_stage_sync:manual_review_queued",
+      status: "queued",
+      details,
+    });
+  } catch (err) {
+    log(
+      `[BidBoardStageSync] manual_review_queued breadcrumb log failed for ${input.projectNumber}: ${err instanceof Error ? err.message : String(err)}`,
+      "sync"
+    );
+  }
+  return true;
+}
+
+/** Narrow the portfolio-trigger outcome to the "no bidboard_project_id" skip variant. */
+function isPortfolioTriggerSkip(
+  outcome: Awaited<ReturnType<typeof triggerPortfolioAutomationFromStageChange>>
+): outcome is PortfolioTriggerSkip {
+  return (
+    !!outcome &&
+    typeof outcome === "object" &&
+    "skipped" in outcome &&
+    (outcome as PortfolioTriggerSkip).skipped === true
+  );
+}
+
+/**
+ * A change reached a portfolio-trigger stage but the automation could not run (returned a skip). Instead of
+ * the old silent `return null`, make it LOUD:
+ *   - "no_bidboard_project_id" (per-deal): queue a manual_review_queue row (deduped per project+cycle) AND
+ *     write an audit_logs error.
+ *   - "no_company_id" (GLOBAL config outage that blocks every trigger): write an audit_logs error only —
+ *     per-deal manual review would flood the queue while the whole integration is down.
+ * The audit_logs status='error' row is what the 15-minute failure digest (server/cron/alertScheduler.ts)
+ * scans. The CALLER runs this in its own isolated try/catch, so a failure here never turns a non-transient
+ * skip into a cross-cycle retry.
+ */
+async function handlePortfolioTriggerSkip(
+  change: StageChange,
+  opts: { mappingSource: StageMappingSource; modeConfig: ResolvedBidBoardStageSyncModeConfig },
+  skip: PortfolioTriggerSkip
+): Promise<void> {
+  const projectId = getProjectIdFromChange(change);
+  const projectNumber = change.projectNumber || projectId;
+
+  // Track whether an active (unresolved) manual-review row exists after this call. null = not applicable
+  // (no_company_id, a global config outage that we don't queue per-deal). The alert message + details below
+  // reflect this so an operator is never pointed at a queue row that was never created.
+  let manualReviewQueued: boolean | null = null;
+  if (skip.reason === "no_bidboard_project_id") {
+    // Cross-cycle dedup: if this project already has an UNRESOLVED review row (e.g. a prior cycle whose
+    // HubSpot write failed and re-detected the same transition under a fresh cycleId), don't create a
+    // duplicate row OR a duplicate alert — it is already flagged and awaiting attention.
+    let existingUnresolved = null;
+    try {
+      existingUnresolved = await storage.getUnresolvedManualReviewQueueEntry(projectNumber);
+    } catch (err) {
+      log(
+        `[sync] Could not check the manual-review queue for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
+        "sync"
+      );
+    }
+    if (existingUnresolved) {
+      log(
+        `[sync] ${change.projectName} already has an unresolved manual-review entry — skipping duplicate queue + alert`,
+        "sync"
+      );
+      return;
+    }
+
+    manualReviewQueued = false;
+    // Best-effort: a manual-review-queue failure must NOT prevent the audit-error alert below (the loud
+    // signal). Isolate it so the alert is always attempted even if this write throws. The helper returns
+    // false if it skipped because the (project, cycle) row is already resolved (no active entry created).
+    try {
+      manualReviewQueued = await queueManualReviewForUnmappedPortfolioTrigger({
+        projectId,
+        projectNumber,
+        projectName: change.projectName,
+        customerName: change.customerName,
+        currentStage: change.newStage,
+        previousStage: change.previousStage,
+        cycleId: opts.modeConfig.cycleId,
+        reason: "portfolio_trigger_no_bidboard_project_id",
+        mappingSource: opts.mappingSource,
+        modeConfig: opts.modeConfig,
+        hubspotDealId: change.hubspotDealId ?? null,
+      });
+    } catch (err) {
+      log(
+        `[sync] Failed to queue manual review for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
+        "sync"
+      );
+    }
+  }
+
+  const prefix = `Portfolio automation could not fire for "${change.projectName}" at stage "${change.newStage}": `;
+  const errorMessage =
+    skip.reason === "no_bidboard_project_id"
+      ? prefix +
+        `the sync mapping has no bidboard_project_id. ` +
+        // Reflect the ACTUAL queue outcome — the alert digest renders this errorMessage.
+        (manualReviewQueued
+          ? `Queued for manual review.`
+          : `Manual-review queuing did NOT create an active entry (the write failed or a prior review was already resolved) — verify this deal directly.`)
+      : prefix +
+        `Procore company id is not configured (procore_config). No portfolio triggers can run until it is set.`;
+
+  // Alert-visible: the failure-alert scheduler scans audit_logs for status='error' every 15 minutes.
+  await storage.createAuditLog({
+    action: `portfolio_trigger_skipped_${skip.reason}`,
+    entityType: "bidboard_project",
+    entityId: change.projectNumber || projectId,
+    source: "bidboard_stage_sync",
+    status: "error",
+    category: "sync",
+    errorMessage,
+    details: {
+      projectId,
+      projectNumber: change.projectNumber ?? null,
+      projectName: change.projectName,
+      customerName: change.customerName,
+      previousStage: change.previousStage,
+      newStage: change.newStage,
+      hubspotDealId: change.hubspotDealId ?? null,
+      reason: skip.reason,
+      manualReviewQueued,
+      cycleId: opts.modeConfig.cycleId,
+      mappingSource: opts.mappingSource,
+    },
   });
 }
 
@@ -613,19 +758,37 @@ async function firePortfolioTriggerForChange(
       });
     }
 
+    let outcome: Awaited<ReturnType<typeof triggerPortfolioAutomationFromStageChange>>;
     try {
-      await triggerPortfolioAutomationFromStageChange(
+      outcome = await triggerPortfolioAutomationFromStageChange(
         change.projectName,
         change.projectNumber,
         change.customerName,
         change.hubspotDealId
       );
     } catch (err) {
+      // A genuine trigger failure (it threw) → return false so advanceSyncStateAfterChange keeps the
+      // previous stage and retries next cycle.
       log(
         `[sync] Portfolio automation trigger failed for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
         "sync"
       );
       return false;
+    }
+
+    // The trigger returned a skip (it couldn't run: no bidboard_project_id, or no Procore company id). Route
+    // it loudly, but in an ISOLATED try/catch: the skip is non-transient, so a failure to RECORD it must NOT
+    // return false — that would trigger a wasteful cross-cycle retry AND re-queue manual review under a new
+    // cycleId (queue spam). We fall through to `return true` (handled → stage advances).
+    if (isPortfolioTriggerSkip(outcome)) {
+      try {
+        await handlePortfolioTriggerSkip(change, opts, outcome);
+      } catch (err) {
+        log(
+          `[sync] Failed to record skipped portfolio trigger for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
+          "sync"
+        );
+      }
     }
   } else if (opts.modeConfig.suppressPortfolioTriggers) {
     opts.result.suppressed++;

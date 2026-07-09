@@ -370,6 +370,8 @@ export interface IStorage {
   getPortfolioAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
   createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog>;
   getManualReviewQueueEntry(projectNumber: string, cycleId: string): Promise<ManualReviewQueue | undefined>;
+  /** Any UNRESOLVED review row for the project, regardless of cycleId — for cross-cycle dedup. */
+  getUnresolvedManualReviewQueueEntry(projectNumber: string): Promise<ManualReviewQueue | undefined>;
   createManualReviewQueueEntry(data: InsertManualReviewQueue): Promise<ManualReviewQueue>;
 
   createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey>;
@@ -1773,6 +1775,15 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(manualReviewQueue)
       .where(and(eq(manualReviewQueue.projectNumber, projectNumber), eq(manualReviewQueue.cycleId, cycleId)));
+    return result;
+  }
+
+  async getUnresolvedManualReviewQueueEntry(projectNumber: string): Promise<ManualReviewQueue | undefined> {
+    const [result] = await db
+      .select()
+      .from(manualReviewQueue)
+      .where(and(eq(manualReviewQueue.projectNumber, projectNumber), isNull(manualReviewQueue.resolvedAt)))
+      .limit(1);
     return result;
   }
 
