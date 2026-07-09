@@ -44,8 +44,8 @@ const DDL = `
   );
   CREATE UNIQUE INDEX idx_sync_mappings_bidboard_project_id ON sync_mappings(bidboard_project_id) WHERE bidboard_project_id IS NOT NULL;
 `;
-const IDX_PROCORE = `CREATE UNIQUE INDEX idx_sync_mappings_procore_project_id ON sync_mappings(procore_project_id) WHERE procore_project_id IS NOT NULL;`;
-const IDX_PORTFOLIO = `CREATE UNIQUE INDEX idx_sync_mappings_portfolio_project_id ON sync_mappings(portfolio_project_id) WHERE portfolio_project_id IS NOT NULL;`;
+const IDX_PROCORE = `CREATE UNIQUE INDEX idx_sync_mappings_procore_project_id ON sync_mappings(procore_project_id) WHERE procore_project_id IS NOT NULL AND btrim(procore_project_id) <> '';`;
+const IDX_PORTFOLIO = `CREATE UNIQUE INDEX idx_sync_mappings_portfolio_project_id ON sync_mappings(portfolio_project_id) WHERE portfolio_project_id IS NOT NULL AND btrim(portfolio_project_id) <> '';`;
 
 async function freshDb(opts: { withCanonicalIndexes?: boolean } = {}) {
   const pg = new PGlite();
@@ -61,10 +61,10 @@ async function freshDb(opts: { withCanonicalIndexes?: boolean } = {}) {
 
 async function seed(pg: PGlite, cols: Record<string, unknown>) {
   const keys = Object.keys(cols);
-  const placeholders = keys.map((_, i) => `$${i + 1}`);
+  const placeholders = keys.map((k, i) => (k === "metadata" ? `$${i + 1}::jsonb` : `$${i + 1}`));
   await pg.query(
     `INSERT INTO sync_mappings (${keys.join(", ")}) VALUES (${placeholders.join(", ")})`,
-    keys.map((k) => cols[k]),
+    keys.map((k) => (k === "metadata" && cols[k] != null ? JSON.stringify(cols[k]) : cols[k])),
   );
 }
 const count = async (pg: PGlite, where = "TRUE") =>
@@ -109,13 +109,15 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
         procoreProjectNumber: "DFW-9",
         bidboardProjectId: "BB-9",
         lastSyncStatus: "synced",
+        metadata: { proposalId: "P1" },
       } as any);
 
-      // A second sync arrives with a fresher status but a NULL name/number and NO bidboard id.
+      // A second sync arrives with a fresher status but a NULL name/number, NO bidboard id, and its own metadata.
       const result = await storage.createSyncMapping({
         sourceDealId: "deal-1",
         procoreProjectId: "PJ-9",
         lastSyncStatus: "re-synced",
+        metadata: { proposalId: "SHOULD-NOT-WIN" },
       } as any);
 
       expect(await count(pg)).toBe(1); // upsert, not a duplicate
@@ -123,6 +125,7 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       expect(result.bidboardProjectId).toBe("BB-9"); // lineage preserved
       expect(result.procoreProjectName).toBe("Original Name"); // COALESCE: NULL didn't wipe it
       expect(result.procoreProjectNumber).toBe("DFW-9");
+      expect(result.metadata).toEqual({ proposalId: "P1" }); // COALESCE keeps the existing non-null metadata
     });
 
     it("a bidboard row with NULL procore_project_id still throws on the bidboard ownership index (guard preserved)", async () => {
@@ -144,6 +147,9 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
         storage.createSyncMapping({ sourceDealId: "deal-2", procoreProjectId: "PJ-1", lastSyncStatus: "b" } as any),
       ).resolves.toBeTruthy();
       expect(await count(pg)).toBe(2);
+      // Fallback is a genuine plain insert — the first row is left untouched (no upsert merge).
+      const statuses = (await pg.query(`SELECT last_sync_status FROM sync_mappings ORDER BY id`)).rows.map((r: any) => r.last_sync_status);
+      expect(statuses).toEqual(["a", "b"]);
     });
   });
 
@@ -178,6 +184,16 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       const row = await storage.getSyncMappingBySourceDealId("hubspot", "deal-x");
       expect(row?.bidboardProjectId).toBe("BB-1");
     });
+
+    it("getBidboardMappingByProcoreProjectNumber returns the freshest real-bidboard row, ignoring blank/portfolio-only rows", async () => {
+      await seed(pg, { source_deal_id: "d1", procore_project_number: "DFW-7", portfolio_project_id: "PF-7" }); // no bidboard
+      await seed(pg, { source_deal_id: "d2", procore_project_number: "DFW-7", bidboard_project_id: "  " }); // blank → excluded
+      await seed(pg, { source_deal_id: "d3", procore_project_number: "DFW-7", bidboard_project_id: "BB-OLD", last_sync_at: "2026-01-01" });
+      await seed(pg, { source_deal_id: "d4", procore_project_number: "DFW-7", bidboard_project_id: "BB-NEW", last_sync_at: "2026-05-01" });
+
+      const row = await storage.getBidboardMappingByProcoreProjectNumber("DFW-7");
+      expect(row?.bidboardProjectId).toBe("BB-NEW");
+    });
   });
 
   describe("runSyncMappingsDedupe end-to-end", () => {
@@ -185,7 +201,7 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       const pg = await freshDb({ withCanonicalIndexes: false });
       // A 3-row junk cluster sharing PJ-DUP (mirrors the prod shape: no bidboard/portfolio).
       await seed(pg, { source_deal_id: "PJ-DUP", procore_project_id: "PJ-DUP", procore_project_name: null, procore_project_number: "DFW-DUP" });
-      await seed(pg, { source_deal_id: "PJ-DUP", procore_project_id: "PJ-DUP", procore_project_name: "Real Name", procore_project_number: null });
+      await seed(pg, { source_deal_id: "PJ-DUP", procore_project_id: "PJ-DUP", procore_project_name: "Real Name", procore_project_number: null, metadata: { proposalId: "PX" } });
       await seed(pg, { source_deal_id: "PJ-DUP", procore_project_id: "PJ-DUP", procore_project_name: null, procore_project_number: null });
       // An untouched control row on a different project.
       await seed(pg, { source_deal_id: "other", procore_project_id: "PJ-OK" });
@@ -199,6 +215,7 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
       const survivor = (await pg.query(`SELECT * FROM sync_mappings WHERE procore_project_id = 'PJ-DUP'`)).rows[0] as any;
       expect(survivor.procore_project_name).toBe("Real Name"); // merged from the deleted sibling
       expect(survivor.procore_project_number).toBe("DFW-DUP"); // survivor's own value kept
+      expect(survivor.metadata).toEqual({ proposalId: "PX" }); // jsonb sibling metadata merged via the ::jsonb UPDATE path
 
       // Now that dupes are gone, the unique index can be created — proving the migration ordering.
       await expect(pg.exec(IDX_PROCORE)).resolves.toBeTruthy();

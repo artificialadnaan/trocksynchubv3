@@ -34,22 +34,23 @@ Root cause of the dupes: `createSyncMapping` is a plain `INSERT` with no conflic
 ### 1. Dedup script — `scripts/dedupe-sync-mappings.ts`
 Follows the `scripts/migrate-procore-role-dedupe.ts` convention (raw `pg`, run via an npm `db:*` script), with an added **dry-run/`--commit`** gate (Adnaan runs all prod writes; dry-run is the default).
 
-- **Cluster key:** `procore_project_id` (non-null). Plus exact-duplicate clusters where `procore_project_id IS NULL` but every identity field is identical (defensive; expected count ~0).
+- **Cluster key:** a non-blank `procore_project_id` (`IS NOT NULL AND btrim(...) <> ''` — the **same predicate** as the unique index, so a blank-string id is unconstrained everywhere and can never survive dedup then break `db:push`). Rows with a NULL/blank `procore_project_id` are intentionally left in place — they fall outside the partial index, so there is no truncation risk, and the census shows no such duplicates.
 - **Survivor selection (per cluster):** the row bearing a `bidboard_project_id` or `portfolio_project_id` if any exists (there are none today, but the rule keeps the lineage row if a future cluster has one) → else the **lowest `id`**.
-- **Merge:** `COALESCE` every non-null scalar field from the deleted siblings **into** the survivor (never overwrite a survivor non-null with a sibling value), then delete the siblings.
+- **Ambiguity guard (fail-closed):** if a cluster's rows carry >1 distinct bidboard/portfolio id, OR a bidboard-only row and a portfolio-only row that don't co-reside on one row, the planner throws `AmbiguousClusterError` — those rows are **skipped** (never fused), surfaced in the report, and the CLI exits **non-zero** in `--commit` mode so the migration chain halts before `db:push`.
+- **Merge:** `COALESCE` every non-null scalar field from the deleted siblings **into** the survivor (never overwrite a survivor non-null with a sibling value; `metadata` serialised as `jsonb`), then delete the siblings.
 - **Safety:** whole run in one transaction; prints a full before/after census + per-cluster plan; writes a JSON snapshot to `.audit/`; `--commit` required to write; re-runnable (idempotent — a deduped table yields 0 changes).
 - Registered as `db:migrate-sync-mappings-dedupe` and inserted **before** `db:push` in the documented Dockerfile migration chain.
 
 ### 2. Partial unique indexes — `shared/schema.ts`
 Add to the `syncMappings` table definition, mirroring the existing `idx_sync_mappings_bidboard_project_id`:
 ```ts
-uniqueIndex("idx_sync_mappings_procore_project_id").on(table.procoreProjectId).where(sql`procore_project_id IS NOT NULL`),
-uniqueIndex("idx_sync_mappings_portfolio_project_id").on(table.portfolioProjectId).where(sql`portfolio_project_id IS NOT NULL`),
+uniqueIndex("idx_sync_mappings_procore_project_id").on(table.procoreProjectId).where(sql`procore_project_id IS NOT NULL AND btrim(procore_project_id) <> ''`),
+uniqueIndex("idx_sync_mappings_portfolio_project_id").on(table.portfolioProjectId).where(sql`portfolio_project_id IS NOT NULL AND btrim(portfolio_project_id) <> ''`),
 ```
-Applied in prod by `CI=1 npm run db:push` **after** the dedup script (established ordering). Not created on merge — deploy does not auto-push.
+The `btrim(...) <> ''` clause matches the dedup filter and the getters' blank-as-absent treatment exactly, so a blank-string id is unconstrained (never triggers a `db:push --force` truncate). Applied in prod by `CI=1 npm run db:push` **after** the dedup script (established ordering). Not created on merge — deploy does not auto-push.
 
 ### 3. Idempotent insert — `storage.createSyncMapping`
-Switch the plain `insert` to `onConflictDoUpdate`, arbiter = the partial `procore_project_id` unique index (`target: procoreProjectId`, `targetWhere: sql\`procore_project_id IS NOT NULL\``). The `SET` updates only the sync-owned fields (name, number, `procore_company_id`, `last_sync_*`, `metadata`); it never overwrites `bidboard_project_id` / `portfolio_project_id`.
+Switch the plain `insert` to `onConflictDoUpdate`, arbiter = the partial `procore_project_id` unique index (`target: procoreProjectId`, `targetWhere` = the **exact** index predicate `procore_project_id IS NOT NULL AND btrim(procore_project_id) <> ''`). A conflict means the same Procore project is re-synced by a path that didn't pre-check (a safety net, not the authoritative update path), so the `SET` is additive: it refreshes only the sync telemetry (`last_sync_*`) and is **FILL-ONLY** for the procore descriptive columns (`procore_project_name`/`number`/`company_id`) + `metadata` — `COALESCE(existing, excluded)` keeps an existing non-null value and only populates a gap, so a re-sync can never overwrite data (critically, never wipes a load-bearing `metadata.proposalId`). It deliberately omits the lineage keys (`bidboard_`/`portfolio_project_id`), the source identity, AND the `hubspot_*`/`companycam` identity columns (those are owned by the explicit `updateSyncMapping` path, not a procore re-sync).
 
 - Rows with `procore_project_id IS NULL` (e.g. fresh bidboard rows) fall outside the partial index → insert unchanged, so the `bidboard_project_id` ownership-guard throw at `bidboard.ts:2148` is **preserved**.
 - **Order-independence (no-babysit safety):** if the arbiter index does not yet exist, Postgres raises `42P10`. `createSyncMapping` catches `42P10` **once** and falls back to a plain insert (prior behaviour). So the PR is safe to merge before `db:push` runs — idempotency simply activates the moment the index exists.

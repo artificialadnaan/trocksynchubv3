@@ -128,11 +128,13 @@ function normalizeSyncMappingSource(mapping: LegacyCompatibleInsertSyncMapping):
   };
 }
 
-// Canonical-row ordering for the by-key sync_mapping getters: the row a dedup would keep — a
-// lineage-bearing row first (portfolio, then bidboard), then the freshest sync, then the lowest id.
-// Makes the getters deterministic even while duplicate rows still exist (the pre-dedup window) and for
-// the permanently-non-unique procore_project_number key. Blank ids are treated as absent (a '' bidboard
-// id must not rank as lineage-bearing — mirrors the getBidboard* helpers' length(trim(...)) guard).
+// Canonical-row ordering for the by-key sync_mapping getters: a deterministic REPRESENTATIVE row —
+// lineage-bearing first (portfolio, then bidboard), then freshest sync, then lowest id. It converges to
+// the dedup survivor once dedup runs (post-dedup a non-null procore_project_id has exactly one row); in
+// the pre-dedup window it favours the freshest lineage row, which can differ from the dedup survivor's
+// lowest-id rule — both are deterministic, which is all the getters need. Also serves the
+// permanently-non-unique procore_project_number key. Blank ids are treated as absent (a '' bidboard id
+// must not rank as lineage-bearing — mirrors the getBidboard* helpers' length(trim(...)) guard).
 function canonicalMappingOrderBy() {
   return [
     sql`(${syncMappings.portfolioProjectId} IS NOT NULL AND btrim(${syncMappings.portfolioProjectId}) <> '') DESC`,
@@ -142,24 +144,25 @@ function canonicalMappingOrderBy() {
   ];
 }
 
-// SET clause for createSyncMapping's upsert on the procore_project_id unique index (#2). Refreshes the
-// sync telemetry on every re-sync, but only FILLS the descriptive/identity columns via COALESCE so an
-// incoming NULL can never wipe an existing value. Deliberately omits the lineage keys (bidboard_/
-// portfolio_project_id + names) and the source identity — those are authoritative on the surviving row
-// and must never be clobbered by a plain procore re-sync.
+// SET clause for createSyncMapping's upsert on the procore_project_id unique index (#2). A conflict here
+// means the SAME Procore project is being re-synced by a path that did NOT pre-check — it's a safety net,
+// not the authoritative update path (that's procore-hubspot-sync's existing-mapping branch via
+// updateSyncMapping). So it is deliberately additive: refresh only the sync telemetry (last_sync_*), and
+// FILL-ONLY the procore descriptive columns + metadata — COALESCE(existing, excluded) keeps an existing
+// non-null value and only populates a gap, so a re-sync can never OVERWRITE data (critically, it can't
+// wipe a load-bearing metadata.proposalId). This mirrors the dedup driver's "never overwrite the
+// survivor" rule. Deliberately omits: the lineage keys (bidboard_/portfolio_project_id + names +
+// sent_to_portfolio_at), the source identity (source_system/source_deal_id), AND the hubspot_*/companycam
+// identity columns — those are owned by the explicit updateSyncMapping path, and mutating hubspot_deal_id
+// here could diverge it from the frozen source_deal_id that getSyncMappingByHubspotDealId relies on.
 const SYNC_MAPPING_CONFLICT_SET = {
   lastSyncAt: sql`excluded.last_sync_at`,
   lastSyncStatus: sql`excluded.last_sync_status`,
   lastSyncDirection: sql`excluded.last_sync_direction`,
-  procoreProjectName: sql`COALESCE(excluded.procore_project_name, ${syncMappings.procoreProjectName})`,
-  procoreProjectNumber: sql`COALESCE(excluded.procore_project_number, ${syncMappings.procoreProjectNumber})`,
-  procoreCompanyId: sql`COALESCE(excluded.procore_company_id, ${syncMappings.procoreCompanyId})`,
-  hubspotDealId: sql`COALESCE(excluded.hubspot_deal_id, ${syncMappings.hubspotDealId})`,
-  hubspotDealName: sql`COALESCE(excluded.hubspot_deal_name, ${syncMappings.hubspotDealName})`,
-  hubspotCompanyId: sql`COALESCE(excluded.hubspot_company_id, ${syncMappings.hubspotCompanyId})`,
-  companyCamProjectId: sql`COALESCE(excluded.companycam_project_id, ${syncMappings.companyCamProjectId})`,
-  metadata: sql`COALESCE(excluded.metadata, ${syncMappings.metadata})`,
-  sentToPortfolioAt: sql`COALESCE(excluded.sent_to_portfolio_at, ${syncMappings.sentToPortfolioAt})`,
+  procoreProjectName: sql`COALESCE(${syncMappings.procoreProjectName}, excluded.procore_project_name)`,
+  procoreProjectNumber: sql`COALESCE(${syncMappings.procoreProjectNumber}, excluded.procore_project_number)`,
+  procoreCompanyId: sql`COALESCE(${syncMappings.procoreCompanyId}, excluded.procore_company_id)`,
+  metadata: sql`COALESCE(${syncMappings.metadata}, excluded.metadata)`,
 } as const;
 
 // True when a query failed because the ON CONFLICT arbiter index does not exist yet (Postgres 42P10).
@@ -578,8 +581,10 @@ export class DatabaseStorage implements IStorage {
         .insert(syncMappings)
         .values(values)
         .onConflictDoUpdate({
+          // MUST match the idx_sync_mappings_procore_project_id predicate exactly, or Postgres won't
+          // recognise the arbiter (→ 42P10 → the plain-insert fallback below).
           target: syncMappings.procoreProjectId,
-          targetWhere: sql`procore_project_id IS NOT NULL`,
+          targetWhere: sql`procore_project_id IS NOT NULL AND btrim(procore_project_id) <> ''`,
           set: SYNC_MAPPING_CONFLICT_SET,
         })
         .returning();

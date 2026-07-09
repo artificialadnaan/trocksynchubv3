@@ -100,7 +100,17 @@ export function planClusterDedupe(rows: DedupeMappingRow[]): ClusterDedupePlan {
     Array.from(new Set(rows.map((r) => r[key]).filter((v) => !isBlank(v)) as string[]));
   const bidboardIds = distinct("bidboardProjectId");
   const portfolioIds = distinct("portfolioProjectId");
-  if (bidboardIds.length > 1 || portfolioIds.length > 1) {
+  // Fail-closed guard: never FUSE two distinct lineage identities into one survivor.
+  //  - >1 distinct bidboard or portfolio id → clearly ambiguous.
+  //  - exactly one of each but on SEPARATE rows (no single row carries BOTH) → a bidboard-only row and a
+  //    portfolio-only row would be fused; refuse. A legitimately transitioned row carries both keys, so a
+  //    co-resident row makes the merge safe.
+  const coResident = rows.some((r) => !isBlank(r.bidboardProjectId) && !isBlank(r.portfolioProjectId));
+  if (
+    bidboardIds.length > 1 ||
+    portfolioIds.length > 1 ||
+    (bidboardIds.length === 1 && portfolioIds.length === 1 && !coResident)
+  ) {
     throw new AmbiguousClusterError(rows[0].procoreProjectId, bidboardIds, portfolioIds);
   }
 
@@ -233,8 +243,14 @@ export async function runSyncMappingsDedupe(
       for (const c of perCluster) {
         const updateKeys = Object.keys(c.updates) as (keyof DedupeMappingRow)[];
         if (updateKeys.length > 0) {
-          const sets = updateKeys.map((k, i) => `${FIELD_TO_COLUMN[k]} = $${i + 1}`);
-          const values = updateKeys.map((k) => c.updates[k] ?? null);
+          const sets = updateKeys.map((k, i) =>
+            k === "metadata" ? `${FIELD_TO_COLUMN[k]} = $${i + 1}::jsonb` : `${FIELD_TO_COLUMN[k]} = $${i + 1}`,
+          );
+          const values = updateKeys.map((k) => {
+            const v = c.updates[k] ?? null;
+            // jsonb: serialise explicitly so a top-level array can't be coerced to a Postgres array literal.
+            return k === "metadata" && v != null ? JSON.stringify(v) : v;
+          });
           await client.query(
             `UPDATE sync_mappings SET ${sets.join(", ")} WHERE id = $${updateKeys.length + 1}`,
             [...values, c.survivorId],

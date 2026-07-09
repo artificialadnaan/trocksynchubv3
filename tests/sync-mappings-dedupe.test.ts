@@ -108,6 +108,21 @@ describe("planClusterDedupe", () => {
     ).toThrow(AmbiguousClusterError);
   });
 
+  it("throws AmbiguousClusterError when a bidboard-only row and a portfolio-only row would be fused", () => {
+    expect(() =>
+      planClusterDedupe([row({ id: 1, bidboardProjectId: "BB-1" }), row({ id: 2, portfolioProjectId: "PF-1" })]),
+    ).toThrow(AmbiguousClusterError);
+  });
+
+  it("does NOT flag a transitioned row carrying BOTH lineage keys (co-resident) — it survives, junk deleted", () => {
+    const plan = planClusterDedupe([
+      row({ id: 1, bidboardProjectId: "BB-1", portfolioProjectId: "PF-1" }),
+      row({ id: 2 }),
+    ]);
+    expect(plan.survivorId).toBe(1);
+    expect(plan.deleteIds).toEqual([2]);
+  });
+
   it("a single-row cluster is a no-op (defensive; the driver never feeds it one)", () => {
     const plan = planClusterDedupe([row({ id: 1 })]);
     expect(plan).toEqual({ survivorId: 1, updates: {}, deleteIds: [] });
@@ -174,5 +189,22 @@ describe("runSyncMappingsDedupe (driver)", () => {
     expect(report.clusters).toBe(0);
     expect(report.committed).toBe(false);
     expect(c.issued(/BEGIN/)).toHaveLength(0);
+  });
+
+  it("skips an ambiguous cluster (fail-closed) but still dedupes the clean one — and deletes ONLY the clean siblings", async () => {
+    const rows = [
+      { id: 1, procore_project_id: "PJ-CLEAN", procore_project_name: null },
+      { id: 2, procore_project_id: "PJ-CLEAN", procore_project_name: "Name" },
+      { id: 5, procore_project_id: "PJ-AMB", bidboard_project_id: "BB-A" },
+      { id: 6, procore_project_id: "PJ-AMB", bidboard_project_id: "BB-B" },
+    ];
+    const c = new FakeClient(rows, 100);
+    const report = await runSyncMappingsDedupe(c, { commit: true });
+    expect(report.ambiguous).toHaveLength(1);
+    expect(report.ambiguous[0].procoreProjectId).toBe("PJ-AMB");
+    expect(report.clusters).toBe(1); // only the clean cluster is planned
+    expect(report.rowsToDelete).toBe(1);
+    const deletes = c.issued(/DELETE FROM sync_mappings WHERE id = ANY/);
+    expect(deletes.flatMap((d) => d.params?.[0] as number[])).toEqual([2]); // never the ambiguous rows
   });
 });

@@ -24,8 +24,9 @@ async function main() {
   const commit = process.argv.includes("--commit");
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
   const client = await pool.connect();
+  let report;
   try {
-    const report = await runSyncMappingsDedupe(client, { commit });
+    report = await runSyncMappingsDedupe(client, { commit });
 
     console.log(`[dedupe] mode: ${commit ? "COMMIT" : "DRY-RUN"}`);
     console.log(`[dedupe] rows before: ${report.totalRowsBefore}`);
@@ -60,6 +61,15 @@ async function main() {
   } finally {
     client.release();
     await pool.end();
+  }
+  // Fail-closed: ambiguous clusters are left in place (their duplicate procore_project_id rows still
+  // exist), so exit non-zero in --commit mode. In the Dockerfile `&& ... && CI=1 npm run db:push` chain
+  // this HALTS before db:push builds the unique index on still-duplicated data.
+  if (commit && report.ambiguous.length > 0) {
+    console.error(
+      `[dedupe] ABORTING: ${report.ambiguous.length} ambiguous cluster(s) need manual review before db:push builds the unique index.`,
+    );
+    process.exit(1);
   }
   process.exit(0);
 }
