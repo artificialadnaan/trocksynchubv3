@@ -15,6 +15,7 @@ const mockStorage = {
   getSyncMappingByProcoreProjectId: vi.fn(),
   getSyncMappingByBidboardProjectId: vi.fn(),
   getSyncMappingByProcoreProjectNumber: vi.fn(),
+  getBidboardMappingByProcoreProjectNumber: vi.fn(),
   updateSyncMapping: vi.fn(),
   getSyncMappingByHubspotDealId: vi.fn(),
   getHubspotDealByHubspotId: vi.fn(),
@@ -203,7 +204,7 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
       hubspotDealId: "323528245957",
       hubspotDealName: "Canary Deal",
     });
-    mockStorage.getSyncMappingByProcoreProjectNumber.mockResolvedValue({
+    mockStorage.getBidboardMappingByProcoreProjectNumber.mockResolvedValue({
       id: 501,
       procoreProjectId: "598134326000001",
       procoreProjectNumber: "DFW-1-12126-ad",

@@ -144,35 +144,60 @@ function canonicalMappingOrderBy() {
   ];
 }
 
-// SET clause for the OPT-IN upsert (createSyncMapping's `onProcoreConflict: "update"`) on the
-// procore_project_id unique index (#2). A conflict means the SAME Procore project is re-synced. It is
-// deliberately ADDITIVE: refresh only the sync telemetry (last_sync_*), and FILL-ONLY the descriptive +
-// companycam + metadata columns — COALESCE(existing, excluded) keeps an existing non-null value and only
-// populates a gap, so a re-sync can never OVERWRITE data (critically, never wipes a load-bearing
-// metadata.proposalId). `companycam_project_id` is included fill-only so a CompanyCam re-match LINKS the
-// existing row (not a silent no-op) without clobbering a prior link. Deliberately omits: the lineage keys
-// (bidboard_/portfolio_project_id + names + sent_to_portfolio_at) and the source/hubspot identity — those
-// are owned by the explicit updateSyncMapping path, and mutating hubspot_deal_id here could diverge it
-// from the frozen source_deal_id that getSyncMappingByHubspotDealId relies on.
-const SYNC_MAPPING_CONFLICT_SET = {
-  lastSyncAt: sql`excluded.last_sync_at`,
-  lastSyncStatus: sql`excluded.last_sync_status`,
-  lastSyncDirection: sql`excluded.last_sync_direction`,
-  procoreProjectName: sql`COALESCE(${syncMappings.procoreProjectName}, excluded.procore_project_name)`,
-  procoreProjectNumber: sql`COALESCE(${syncMappings.procoreProjectNumber}, excluded.procore_project_number)`,
-  procoreCompanyId: sql`COALESCE(${syncMappings.procoreCompanyId}, excluded.procore_company_id)`,
-  companyCamProjectId: sql`COALESCE(${syncMappings.companyCamProjectId}, excluded.companycam_project_id)`,
-  metadata: sql`COALESCE(${syncMappings.metadata}, excluded.metadata)`,
-} as const;
+function isBlankValue(v: unknown): boolean {
+  return v === null || v === undefined || (typeof v === "string" && v.trim() === "");
+}
 
-// True when a query failed because the ON CONFLICT arbiter index does not exist yet (Postgres 42P10).
-// createSyncMapping catches this to fall back to a plain insert until `db:push` creates the
-// idx_sync_mappings_procore_project_id index — so the PR is safe to merge before the migration runs.
-function isMissingConflictTargetError(err: unknown): boolean {
+/** True when a write failed on any unique-constraint violation (Postgres 23505). */
+function isUniqueConstraintError(err: unknown): boolean {
   const code = (err as any)?.code ?? (err as any)?.cause?.code;
-  if (code === "42P10") return true;
-  const msg = err instanceof Error ? err.message : String(err);
-  return /no unique or exclusion constraint matching the on conflict/i.test(msg);
+  return code === "23505";
+}
+
+/**
+ * Build the UPDATE patch for upsertSyncMappingByProcoreProject when an existing row is found (#2). The
+ * update is deliberately ADDITIVE so a re-sync / CompanyCam re-match can never destroy data:
+ *   - descriptive + companycam + hubspot identity: FILL-ONLY (write only if the existing value is blank),
+ *   - metadata: FILL-ONLY (never wipes a load-bearing proposalId),
+ *   - telemetry (last_sync_*): refreshed ONLY when the caller actually supplies it (so a link-only
+ *     CompanyCam write doesn't downgrade a previously-synced row to NULL/pending),
+ *   - source identity: migrated ONLY when the existing row's source_deal_id is the junk self-reference
+ *     (== its procore id) and the caller carries a real external key — so the row becomes reachable by
+ *     getSyncMappingBy(Hubspot)SourceDealId without ever clobbering a real source.
+ */
+function buildLinkUpsertPatch(
+  existing: SyncMapping,
+  values: InsertSyncMapping,
+): Partial<InsertSyncMapping> {
+  const patch: Record<string, unknown> = {};
+  const fillOnly: (keyof InsertSyncMapping)[] = [
+    "hubspotDealId",
+    "hubspotDealName",
+    "hubspotCompanyId",
+    "companyCamProjectId",
+    "procoreProjectName",
+    "procoreProjectNumber",
+    "procoreCompanyId",
+  ];
+  for (const f of fillOnly) {
+    if (isBlankValue((existing as any)[f]) && !isBlankValue((values as any)[f])) patch[f] = (values as any)[f];
+  }
+  if (existing.metadata == null && values.metadata != null) patch.metadata = values.metadata;
+  if (!isBlankValue(values.lastSyncStatus)) patch.lastSyncStatus = values.lastSyncStatus;
+  if (values.lastSyncAt != null) patch.lastSyncAt = values.lastSyncAt;
+  if (!isBlankValue(values.lastSyncDirection)) patch.lastSyncDirection = values.lastSyncDirection;
+
+  const existingSourceIsJunk =
+    !isBlankValue(existing.sourceDealId) && existing.sourceDealId === existing.procoreProjectId;
+  if (
+    existingSourceIsJunk &&
+    !isBlankValue(values.sourceDealId) &&
+    values.sourceDealId !== existing.procoreProjectId
+  ) {
+    patch.sourceSystem = values.sourceSystem;
+    patch.sourceDealId = values.sourceDealId;
+  }
+  return patch as Partial<InsertSyncMapping>;
 }
 
 function normalizeRfpApprovalRequestSource(data: LegacyCompatibleInsertRfpApprovalRequest): InsertRfpApprovalRequest {
@@ -265,7 +290,8 @@ export interface IStorage {
   /** Find the BID-BOARD-linked mapping for a source deal, skipping partial/portfolio duplicate rows */
   getBidboardMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined>;
   /** Create a new sync mapping linking entities */
-  createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping, opts?: { onProcoreConflict?: "update" }): Promise<SyncMapping>;
+  createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
+  upsertSyncMappingByProcoreProject(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
   /** Update an existing sync mapping */
   updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined>;
   /** Search mappings by deal name, project name, or project number */
@@ -523,10 +549,18 @@ export class DatabaseStorage implements IStorage {
   async getSyncMappingByProcoreProjectNumber(projectNumber: string): Promise<SyncMapping | undefined> {
     if (!projectNumber?.trim()) return undefined;
     // A project number is legitimately shared by a bidboard row + its portfolio row, so this key stays
-    // non-unique. Deterministic pick: the lineage-bearing/freshest row (see canonicalMappingOrderBy).
+    // non-unique. This getter's callers (trockcrm-relay, bidboard stage-sync, portfolio-automation URL
+    // build) want the BID-BOARD-bearing row, so the ordering prefers it (then portfolio, then freshest,
+    // then id) — deterministic and never shadowed by a portfolio-only row. Callers that STRICTLY need the
+    // bidboard row should use getBidboardMappingByProcoreProjectNumber.
     const [mapping] = await db.select().from(syncMappings).where(
       eq(syncMappings.procoreProjectNumber, projectNumber.trim())
-    ).orderBy(...canonicalMappingOrderBy()).limit(1);
+    ).orderBy(
+      sql`(${syncMappings.bidboardProjectId} IS NOT NULL AND btrim(${syncMappings.bidboardProjectId}) <> '') DESC`,
+      sql`(${syncMappings.portfolioProjectId} IS NOT NULL AND btrim(${syncMappings.portfolioProjectId}) <> '') DESC`,
+      sql`${syncMappings.lastSyncAt} DESC NULLS LAST`,
+      sql`${syncMappings.id} ASC`,
+    ).limit(1);
     return mapping;
   }
 
@@ -569,38 +603,45 @@ export class DatabaseStorage implements IStorage {
     return mapping;
   }
 
-  async createSyncMapping(
-    mapping: LegacyCompatibleInsertSyncMapping,
-    opts?: { onProcoreConflict?: "update" },
-  ): Promise<SyncMapping> {
+  // Plain insert — a conflict on ANY unique index (the new procore/portfolio indexes AND the
+  // bidboard_project_id ownership guard) THROWS, preserving every caller's pre-existing semantics (e.g.
+  // /api/bidboard/link-deal must still reject a bidboard already owned by another deal). A caller that
+  // legitimately RE-SYNCS the same Procore project should use upsertSyncMappingByProcoreProject instead.
+  async createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping> {
+    const [result] = await db.insert(syncMappings).values(normalizeSyncMappingSource(mapping)).returning();
+    return result;
+  }
+
+  /**
+   * Read-then-write upsert keyed on the Procore project (#2). Used by the re-sync writers whose
+   * best-effort pre-checks (a 200-row preload) can miss an older mapping — without this, that miss would
+   * hit the new procore_project_id unique index and throw. The lookup is authoritative and matches the id
+   * in procore_project_id / portfolio_project_id / bidboard_project_id, so it also collapses the
+   * cross-column case (an id already stamped as portfolio_project_id) onto the existing row rather than
+   * inserting a second one. On a found row it applies an additive fill-only patch (see
+   * buildLinkUpsertPatch); otherwise it inserts, and if a concurrent writer wins the race (23505) it
+   * re-reads and patches instead of throwing.
+   */
+  async upsertSyncMappingByProcoreProject(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping> {
     const values = normalizeSyncMappingSource(mapping);
-    // DEFAULT: a plain insert. A conflict on ANY unique index — the new procore/portfolio indexes AND the
-    // bidboard_project_id ownership guard — THROWS, preserving every caller's pre-existing semantics
-    // (e.g. /api/bidboard/link-deal must still reject a bidboard already owned by another deal). Only a
-    // caller that legitimately RE-SYNCS the same Procore project opts into the idempotent upsert below.
-    if (opts?.onProcoreConflict !== "update") {
-      const [result] = await db.insert(syncMappings).values(values).returning();
-      return result;
-    }
+    const procoreId = values.procoreProjectId?.trim();
+    if (!procoreId) return this.createSyncMapping(mapping); // nothing to key an upsert on
+
+    const patchExisting = async (existing: SyncMapping): Promise<SyncMapping> => {
+      const patch = buildLinkUpsertPatch(existing, values);
+      if (Object.keys(patch).length === 0) return existing;
+      return (await this.updateSyncMapping(existing.id, patch)) ?? existing;
+    };
+
+    const existing = await this.getSyncMappingByProcoreProjectId(procoreId);
+    if (existing) return patchExisting(existing);
+
     try {
-      const [result] = await db
-        .insert(syncMappings)
-        .values(values)
-        .onConflictDoUpdate({
-          // MUST match the idx_sync_mappings_procore_project_id predicate exactly, or Postgres won't
-          // recognise the arbiter (→ 42P10 → the plain-insert fallback below).
-          target: syncMappings.procoreProjectId,
-          targetWhere: sql`procore_project_id IS NOT NULL AND btrim(procore_project_id) <> ''`,
-          set: SYNC_MAPPING_CONFLICT_SET,
-        })
-        .returning();
-      return result;
+      return await this.createSyncMapping(mapping);
     } catch (err) {
-      // The arbiter index isn't there yet (deploy shipped before `db:push` created it). Fall back to a
-      // plain insert so the PR is safe to merge before the dedup+index migration runs.
-      if (isMissingConflictTargetError(err)) {
-        const [result] = await db.insert(syncMappings).values(values).returning();
-        return result;
+      if (isUniqueConstraintError(err)) {
+        const raced = await this.getSyncMappingByProcoreProjectId(procoreId);
+        if (raced) return patchExisting(raced);
       }
       throw err;
     }

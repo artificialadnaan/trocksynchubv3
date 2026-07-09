@@ -95,14 +95,37 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
     });
   });
 
-  describe("createSyncMapping upsert", () => {
+  describe("createSyncMapping (plain insert — ownership preserved)", () => {
     let pg: PGlite;
     beforeEach(async () => {
       pg = await freshDb();
     });
 
-    it("re-syncing the same procore project UPDATES in place — refreshes sync fields, never clobbers lineage", async () => {
-      await storage.createSyncMapping({
+    it("a bidboard row with NULL procore_project_id still throws on the bidboard ownership index", async () => {
+      await storage.createSyncMapping({ sourceDealId: "deal-a", bidboardProjectId: "BB-OWN" } as any);
+      await expect(
+        storage.createSyncMapping({ sourceDealId: "deal-b", bidboardProjectId: "BB-OWN" } as any),
+      ).rejects.toThrow();
+    });
+
+    it("REJECTS a duplicate procore_project_id — /api/bidboard/link-deal ownership semantics preserved", async () => {
+      // link-deal sets procoreProjectId = bidboardProjectId and relies on the insert THROWING (not silently
+      // upserting the other deal's row).
+      await storage.createSyncMapping({ sourceDealId: "deal-a", procoreProjectId: "PJ-OWN" } as any);
+      await expect(
+        storage.createSyncMapping({ sourceDealId: "deal-b", procoreProjectId: "PJ-OWN" } as any),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe("upsertSyncMappingByProcoreProject (read-then-write)", () => {
+    let pg: PGlite;
+    beforeEach(async () => {
+      pg = await freshDb();
+    });
+
+    it("re-sync fills a gap + refreshes telemetry, never clobbers lineage/metadata (additive)", async () => {
+      await storage.upsertSyncMappingByProcoreProject({
         sourceDealId: "deal-1",
         procoreProjectId: "PJ-9",
         procoreProjectName: "Original Name",
@@ -110,65 +133,73 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
         bidboardProjectId: "BB-9",
         lastSyncStatus: "synced",
         metadata: { proposalId: "P1" },
-      } as any, { onProcoreConflict: "update" });
+      } as any);
 
-      // A second sync arrives with a fresher status but a NULL name/number, NO bidboard id, and its own metadata.
-      const result = await storage.createSyncMapping({
+      const result = await storage.upsertSyncMappingByProcoreProject({
         sourceDealId: "deal-1",
         procoreProjectId: "PJ-9",
         lastSyncStatus: "re-synced",
         metadata: { proposalId: "SHOULD-NOT-WIN" },
-      } as any, { onProcoreConflict: "update" });
+      } as any);
 
       expect(await count(pg)).toBe(1); // upsert, not a duplicate
-      expect(result.lastSyncStatus).toBe("re-synced"); // telemetry refreshed
+      expect(result.lastSyncStatus).toBe("re-synced"); // telemetry refreshed (caller supplied it)
       expect(result.bidboardProjectId).toBe("BB-9"); // lineage preserved
-      expect(result.procoreProjectName).toBe("Original Name"); // COALESCE: NULL didn't wipe it
+      expect(result.procoreProjectName).toBe("Original Name"); // fill-only: a NULL didn't wipe it
       expect(result.procoreProjectNumber).toBe("DFW-9");
-      expect(result.metadata).toEqual({ proposalId: "P1" }); // COALESCE keeps the existing non-null metadata
+      expect(result.metadata).toEqual({ proposalId: "P1" }); // fill-only keeps the load-bearing proposalId
     });
 
-    it("a bidboard row with NULL procore_project_id still throws on the bidboard ownership index (guard preserved)", async () => {
-      await storage.createSyncMapping({ sourceDealId: "deal-a", bidboardProjectId: "BB-OWN" } as any);
-      // Same bidboard id, different deal, no procore id → outside the procore ON CONFLICT arbiter →
-      // must still collide on the bidboard unique index.
-      await expect(
-        storage.createSyncMapping({ sourceDealId: "deal-b", bidboardProjectId: "BB-OWN" } as any),
-      ).rejects.toThrow();
-    });
-
-    it("DEFAULT (no opts) REJECTS a duplicate procore_project_id — ownership/bidboard-link semantics preserved", async () => {
-      // /api/bidboard/link-deal etc. rely on the insert THROWING (not silently upserting the other deal's row).
-      await storage.createSyncMapping({ sourceDealId: "deal-a", procoreProjectId: "PJ-OWN" } as any);
-      await expect(
-        storage.createSyncMapping({ sourceDealId: "deal-b", procoreProjectId: "PJ-OWN" } as any),
-      ).rejects.toThrow();
-    });
-
-    it("opt-in upsert FILLS a supplied companyCamProjectId on conflict (link, not a silent no-op)", async () => {
-      await storage.createSyncMapping({ sourceDealId: "deal-1", procoreProjectId: "PJ-CC", procoreProjectName: "P" } as any, { onProcoreConflict: "update" });
-      // A later CompanyCam match for the same Procore project (its older mapping missed the 200-row preload).
-      const result = await storage.createSyncMapping(
+    it("FILLS a supplied companyCamProjectId onto the existing row (link, not a silent no-op / dup)", async () => {
+      await storage.createSyncMapping({ sourceDealId: "deal-1", procoreProjectId: "PJ-CC", procoreProjectName: "P" } as any);
+      const result = await storage.upsertSyncMappingByProcoreProject(
         { sourceDealId: "deal-1", procoreProjectId: "PJ-CC", companyCamProjectId: "CC-77" } as any,
-        { onProcoreConflict: "update" },
       );
-      expect(await count(pg)).toBe(1); // no duplicate
-      expect(result.companyCamProjectId).toBe("CC-77"); // the supplied link is written, not swallowed
+      expect(await count(pg)).toBe(1);
+      expect(result.companyCamProjectId).toBe("CC-77");
     });
-  });
 
-  describe("42P10 fallback when the arbiter index does not exist yet", () => {
-    it("createSyncMapping falls back to a plain insert (PR is safe to merge before db:push)", async () => {
-      const pg = await freshDb({ withCanonicalIndexes: false });
-      await storage.createSyncMapping({ sourceDealId: "deal-1", procoreProjectId: "PJ-1", lastSyncStatus: "a" } as any, { onProcoreConflict: "update" });
-      // opt-in upsert, but NO procore unique index → ON CONFLICT raises 42P10 → fallback inserts a second row instead of throwing.
-      await expect(
-        storage.createSyncMapping({ sourceDealId: "deal-2", procoreProjectId: "PJ-1", lastSyncStatus: "b" } as any, { onProcoreConflict: "update" }),
-      ).resolves.toBeTruthy();
-      expect(await count(pg)).toBe(2);
-      // Fallback is a genuine plain insert — the first row is left untouched (no upsert merge).
-      const statuses = (await pg.query(`SELECT last_sync_status FROM sync_mappings ORDER BY id`)).rows.map((r: any) => r.last_sync_status);
-      expect(statuses).toEqual(["a", "b"]);
+    it("does NOT downgrade telemetry on a link-only upsert (no telemetry supplied)", async () => {
+      await storage.createSyncMapping({
+        sourceDealId: "deal-1", procoreProjectId: "PJ-T", lastSyncStatus: "synced", lastSyncAt: new Date("2026-05-01"),
+      } as any);
+      const result = await storage.upsertSyncMappingByProcoreProject(
+        { sourceDealId: "deal-1", procoreProjectId: "PJ-T", companyCamProjectId: "CC-1" } as any,
+      );
+      expect(result.lastSyncStatus).toBe("synced"); // preserved, not wiped to NULL/pending
+      expect(result.lastSyncAt).not.toBeNull();
+    });
+
+    it("collapses the cross-column case — an id already stamped as portfolio_project_id is linked, not duplicated", async () => {
+      // A transitioned mapping carries the id in portfolio_project_id; a later CompanyCam match keys on it as procore.
+      await storage.createSyncMapping({ sourceDealId: "deal-1", bidboardProjectId: "BB-1", portfolioProjectId: "PROJ-X" } as any);
+      const result = await storage.upsertSyncMappingByProcoreProject(
+        { sourceDealId: "deal-1", procoreProjectId: "PROJ-X", companyCamProjectId: "CC-9" } as any,
+      );
+      expect(await count(pg)).toBe(1); // no second row for the same project
+      expect(result.portfolioProjectId).toBe("PROJ-X");
+      expect(result.companyCamProjectId).toBe("CC-9");
+    });
+
+    it("migrates the source identity onto a junk-sourced existing row so it becomes reachable by the real deal", async () => {
+      // Existing procore-only row whose source_deal_id is the junk self-reference (== procore id).
+      await storage.createSyncMapping({ procoreProjectId: "PJ-M" } as any); // sourceDealId derives to "PJ-M"
+      await storage.upsertSyncMappingByProcoreProject(
+        { procoreProjectId: "PJ-M", hubspotDealId: "H-REAL" } as any, // sourceDealId derives to "H-REAL"
+      );
+      expect(await count(pg)).toBe(1);
+      const found = await storage.getSyncMappingByHubspotDealId("H-REAL");
+      expect(found?.procoreProjectId).toBe("PJ-M"); // now reachable via the real HubSpot deal
+    });
+
+    it("works with NO unique index yet (read-then-write) — finds + links the existing row, no dup", async () => {
+      const pg2 = await freshDb({ withCanonicalIndexes: false });
+      await storage.createSyncMapping({ sourceDealId: "deal-1", procoreProjectId: "PJ-1", procoreProjectName: "P" } as any);
+      const result = await storage.upsertSyncMappingByProcoreProject(
+        { sourceDealId: "deal-1", procoreProjectId: "PJ-1", companyCamProjectId: "CC-1" } as any,
+      );
+      expect(await count(pg2)).toBe(1);
+      expect(result.companyCamProjectId).toBe("CC-1");
     });
   });
 

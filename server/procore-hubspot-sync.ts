@@ -398,7 +398,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
         updatedMappings++;
         logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
       } else {
-        await storage.createSyncMapping(mappingData);
+        await storage.upsertSyncMappingByProcoreProject(mappingData);
         newMappings++;
         logProjectNumberValidation(mappingData.procoreProjectNumber ?? null);
       }
@@ -496,7 +496,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
               hubspotCreated++;
               matched++;
 
-              await storage.createSyncMapping({
+              await storage.upsertSyncMappingByProcoreProject({
                 hubspotDealId: created.id,
                 hubspotDealName: created.properties?.dealname || project.name,
                 procoreProjectId: project.procoreId,
@@ -551,7 +551,7 @@ export async function syncProcoreToHubspot(options: { dryRun?: boolean; skipHubs
                   hubspotCreated++;
                   matched++;
 
-                await storage.createSyncMapping({
+                await storage.upsertSyncMappingByProcoreProject({
                   hubspotDealId: created.id,
                   hubspotDealName: created.properties?.dealname || project.name,
                   procoreProjectId: project.procoreId,
@@ -720,7 +720,7 @@ export async function createManualMapping(
     }
   }
 
-  const mapping = await storage.createSyncMapping({
+  const mapping = await storage.upsertSyncMappingByProcoreProject({
     hubspotDealId,
     hubspotDealName: deal[0].dealName,
     procoreProjectId,
@@ -791,7 +791,7 @@ export async function findOrCreateMappingByProjectNumber(params: {
   const deal = await storage.getHubspotDealByProjectNumber(projectNumber.trim());
   if (!deal?.hubspotId) return null;
 
-  const mapping = await storage.createSyncMapping({
+  const mapping = await storage.upsertSyncMappingByProcoreProject({
     hubspotDealId: deal.hubspotId,
     hubspotDealName: deal.dealName,
     procoreProjectId,

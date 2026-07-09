@@ -123,16 +123,28 @@ describe("planClusterDedupe", () => {
     expect(plan.deleteIds).toEqual([2]);
   });
 
-  it("throws AmbiguousClusterError when rows carry two distinct HubSpot deals", () => {
+  it("throws AmbiguousClusterError when rows carry two distinct real source deals (HubSpot)", () => {
     expect(() =>
-      planClusterDedupe([row({ id: 1, hubspotDealId: "H1" }), row({ id: 2, hubspotDealId: "H2" })]),
+      planClusterDedupe([
+        row({ id: 1, sourceDealId: "H1", hubspotDealId: "H1" }),
+        row({ id: 2, sourceDealId: "H2", hubspotDealId: "H2" }),
+      ]),
     ).toThrow(AmbiguousClusterError);
   });
 
-  it("prefers a HubSpot-deal-bearing row as survivor over a lower-id junk row (keeps it reachable)", () => {
+  it("throws on divergent source_deal_id even WITHOUT a hubspot_deal_id (0015 made source authoritative)", () => {
+    expect(() =>
+      planClusterDedupe([
+        row({ id: 1, sourceDealId: "S1", hubspotDealId: null }),
+        row({ id: 2, sourceDealId: "S2", hubspotDealId: null }),
+      ]),
+    ).toThrow(AmbiguousClusterError);
+  });
+
+  it("prefers a real-source-bearing row as survivor over a lower-id junk row (keeps it reachable)", () => {
     const plan = planClusterDedupe([
       row({ id: 1, sourceDealId: "PJ-1", hubspotDealId: null }), // junk self-reference (source == procore id)
-      row({ id: 2, sourceDealId: "H-9", hubspotDealId: "H-9" }), // real HubSpot deal
+      row({ id: 2, sourceDealId: "H-9", hubspotDealId: "H-9" }), // real deal
     ]);
     expect(plan.survivorId).toBe(2);
     expect(plan.deleteIds).toEqual([1]);

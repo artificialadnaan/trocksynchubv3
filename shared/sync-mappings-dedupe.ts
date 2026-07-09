@@ -48,12 +48,12 @@ export class AmbiguousClusterError extends Error {
     public readonly procoreProjectId: string | null,
     public readonly bidboardIds: string[],
     public readonly portfolioIds: string[],
-    public readonly hubspotIds: string[] = [],
+    public readonly sourceDealIds: string[] = [],
   ) {
     super(
       `Ambiguous sync_mappings cluster for procore_project_id=${procoreProjectId}: ` +
         `distinct bidboard ids=[${bidboardIds.join(", ")}], portfolio ids=[${portfolioIds.join(", ")}], ` +
-        `hubspot ids=[${hubspotIds.join(", ")}]`,
+        `source deal ids=[${sourceDealIds.join(", ")}]`,
     );
     this.name = "AmbiguousClusterError";
   }
@@ -99,31 +99,38 @@ function isBlank(v: unknown): boolean {
 export function planClusterDedupe(rows: DedupeMappingRow[]): ClusterDedupePlan {
   if (rows.length === 0) throw new Error("planClusterDedupe: empty cluster");
 
+  const procoreId = rows[0].procoreProjectId;
   const distinct = (key: keyof DedupeMappingRow): string[] =>
     Array.from(new Set(rows.map((r) => r[key]).filter((v) => !isBlank(v)) as string[]));
   const bidboardIds = distinct("bidboardProjectId");
   const portfolioIds = distinct("portfolioProjectId");
-  const hubspotIds = distinct("hubspotDealId");
+  // "Real" source identities = source_deal_id values that are NOT the junk self-reference (== the procore
+  // id). migration 0015 made (source_system, source_deal_id) authoritative even without a hubspot_deal_id,
+  // so a divergent source_deal_id — not just a divergent hubspot_deal_id — makes the cluster ambiguous.
+  const realSourceIds = Array.from(
+    new Set(rows.map((r) => r.sourceDealId).filter((v) => !isBlank(v) && v !== procoreId) as string[]),
+  );
   // Fail-closed guard: never FUSE two distinct identities into one survivor.
-  //  - >1 distinct bidboard/portfolio/hubspot id → two real projects/deals share this procore id; refuse.
+  //  - >1 distinct bidboard/portfolio id OR >1 distinct real source_deal_id → two real projects/deals
+  //    share this procore id; refuse.
   //  - one bidboard + one portfolio on SEPARATE rows (no single row carries BOTH) → a bidboard-only row
   //    and a portfolio-only row would be fused; refuse. A legitimately transitioned row carries both keys.
   const coResident = rows.some((r) => !isBlank(r.bidboardProjectId) && !isBlank(r.portfolioProjectId));
   if (
     bidboardIds.length > 1 ||
     portfolioIds.length > 1 ||
-    hubspotIds.length > 1 ||
+    realSourceIds.length > 1 ||
     (bidboardIds.length === 1 && portfolioIds.length === 1 && !coResident)
   ) {
-    throw new AmbiguousClusterError(rows[0].procoreProjectId, bidboardIds, portfolioIds, hubspotIds);
+    throw new AmbiguousClusterError(procoreId, bidboardIds, portfolioIds, realSourceIds);
   }
 
   const sorted = [...rows].sort((a, b) => a.id - b.id);
-  // Prefer a lineage-bearing row, then a row carrying a real HubSpot deal (so the survivor stays
-  // reachable by getSyncMappingByHubspotDealId), then the lowest id.
+  // Prefer a lineage-bearing row, then a row carrying a real (non-junk) source identity — so the survivor
+  // stays reachable by getSyncMappingBySourceDealId / getSyncMappingByHubspotDealId — then the lowest id.
   const survivor =
     sorted.find((r) => !isBlank(r.bidboardProjectId) || !isBlank(r.portfolioProjectId)) ??
-    sorted.find((r) => !isBlank(r.hubspotDealId)) ??
+    sorted.find((r) => !isBlank(r.sourceDealId) && r.sourceDealId !== procoreId) ??
     sorted[0];
   const siblings = sorted.filter((r) => r.id !== survivor.id);
 
@@ -137,7 +144,6 @@ export function planClusterDedupe(rows: DedupeMappingRow[]): ClusterDedupePlan {
   // Migrate the source identity when the survivor's is a junk self-reference (source_deal_id ==
   // procore_project_id, the legacy no-HubSpot marker) but a sibling carries a real external deal key —
   // otherwise deleting that sibling leaves the mapping unreachable by (source_system, source_deal_id).
-  const procoreId = survivor.procoreProjectId;
   const survivorSourceIsJunk = !isBlank(survivor.sourceDealId) && survivor.sourceDealId === procoreId;
   if (survivorSourceIsJunk) {
     const donor = siblings.find((r) => !isBlank(r.sourceDealId) && r.sourceDealId !== procoreId);
@@ -206,7 +212,7 @@ export interface DedupeReport {
   survivorsToUpdate: number;
   committed: boolean;
   perCluster: ClusterOutcome[];
-  ambiguous: Array<{ procoreProjectId: string | null; bidboardIds: string[]; portfolioIds: string[]; hubspotIds: string[] }>;
+  ambiguous: Array<{ procoreProjectId: string | null; bidboardIds: string[]; portfolioIds: string[]; sourceDealIds: string[] }>;
 }
 
 /**
@@ -248,7 +254,7 @@ export async function runSyncMappingsDedupe(
       perCluster.push({ procoreProjectId, survivorId: plan.survivorId, deletedIds: plan.deleteIds, updates: plan.updates });
     } catch (err) {
       if (err instanceof AmbiguousClusterError) {
-        ambiguous.push({ procoreProjectId: err.procoreProjectId, bidboardIds: err.bidboardIds, portfolioIds: err.portfolioIds, hubspotIds: err.hubspotIds });
+        ambiguous.push({ procoreProjectId: err.procoreProjectId, bidboardIds: err.bidboardIds, portfolioIds: err.portfolioIds, sourceDealIds: err.sourceDealIds });
       } else {
         throw err;
       }

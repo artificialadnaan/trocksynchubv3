@@ -38,7 +38,7 @@ async function main() {
       console.log(`[dedupe] ⚠ ${report.ambiguous.length} AMBIGUOUS cluster(s) SKIPPED — manual review:`);
       for (const a of report.ambiguous) {
         console.log(
-          `   procore_project_id=${a.procoreProjectId} bidboard=[${a.bidboardIds.join(", ")}] portfolio=[${a.portfolioIds.join(", ")}]`,
+          `   procore_project_id=${a.procoreProjectId} bidboard=[${a.bidboardIds.join(", ")}] portfolio=[${a.portfolioIds.join(", ")}] source=[${a.sourceDealIds.join(", ")}]`,
         );
       }
     }
