@@ -27,33 +27,46 @@ import {
 } from "../server/portfolio-existence-resolver";
 
 describe("matchLiveProjects (live-confirm response matcher)", () => {
-  it("exact number match → exists:true (source live)", () => {
-    const r = matchLiveProjects([{ id: 42, project_number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", 500);
+  it("exactly one exact number match → exists:true (source live), ignoring fuzzy non-matches", () => {
+    const r = matchLiveProjects(
+      [{ id: 42, project_number: "DFW-4-08226-aa" }, { id: 43, project_number: "DFW-4-08226-aa-2" }],
+      "DFW-4-08226-aa"
+    );
     expect(r).toEqual({ exists: true, portfolioProjectId: "42", source: "live" });
   });
 
   it("trims BOTH sides — a whitespace-padded Procore project_number still matches", () => {
-    const r = matchLiveProjects([{ id: 7, project_number: "  DFW-4-08226-aa  " }], "DFW-4-08226-aa", 500);
+    const r = matchLiveProjects([{ id: 7, project_number: "  DFW-4-08226-aa  " }], "DFW-4-08226-aa");
     expect(r).toMatchObject({ exists: true, portfolioProjectId: "7" });
   });
 
-  it("no match AND page below the cap → exists:false", () => {
-    const r = matchLiveProjects([{ id: 1, project_number: "OTHER-1" }], "DFW-4-08226-aa", 500);
+  it("no exact match → exists:false", () => {
+    const r = matchLiveProjects([{ id: 1, project_number: "OTHER-1" }], "DFW-4-08226-aa");
     expect(r).toEqual({ exists: false });
   });
 
-  it("no match but the page is AT the per_page cap → exists:unknown (fail-closed, may be beyond page 1)", () => {
-    const page = Array.from({ length: 3 }, (_, i) => ({ id: i, project_number: `X-${i}` }));
-    const r = matchLiveProjects(page, "DFW-4-08226-aa", 3);
+  it("multiple DISTINCT projects share the exact number → exists:unknown (ambiguous, fail-closed)", () => {
+    const r = matchLiveProjects(
+      [{ id: 1, project_number: "DFW-4-08226-aa" }, { id: 2, project_number: "DFW-4-08226-aa" }],
+      "DFW-4-08226-aa"
+    );
     expect(r.exists).toBe("unknown");
   });
 
+  it("the same id repeated for the number is NOT ambiguous → exists:true", () => {
+    const r = matchLiveProjects(
+      [{ id: 5, project_number: "DFW-4-08226-aa" }, { id: 5, project_number: "DFW-4-08226-aa" }],
+      "DFW-4-08226-aa"
+    );
+    expect(r).toMatchObject({ exists: true, portfolioProjectId: "5" });
+  });
+
   it("non-array response → exists:unknown", () => {
-    expect(matchLiveProjects({ error: "boom" } as unknown, "DFW-4-08226-aa", 500).exists).toBe("unknown");
+    expect(matchLiveProjects({ error: "boom" } as unknown, "DFW-4-08226-aa").exists).toBe("unknown");
   });
 
   it("falls back to the `number` field when `project_number` is absent", () => {
-    const r = matchLiveProjects([{ id: 9, number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", 500);
+    const r = matchLiveProjects([{ id: 9, number: "DFW-4-08226-aa" }], "DFW-4-08226-aa");
     expect(r).toMatchObject({ exists: true, portfolioProjectId: "9" });
   });
 });

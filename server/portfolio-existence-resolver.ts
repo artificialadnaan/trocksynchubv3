@@ -35,35 +35,33 @@ export function defaultResolverDeps(): ResolverDeps {
   };
 }
 
-const PROCORE_PROJECTS_PER_PAGE = 500;
-
 /**
- * Pure matcher for the live-confirm response. EXACT number match, trimming BOTH sides (Procore may pad
- * `project_number`, e.g. " DFW-4-08226-aa "; the sibling matcher at bidboard.ts:2008 trims for the same
- * reason). If there is no match AND the returned page is at the per_page cap, we cannot be sure a match
- * doesn't sit beyond it, so we fail closed to "unknown" (abort) rather than "false" (create-a-duplicate).
+ * Pure matcher for the live-confirm response. Keeps only EXACT project-number matches, trimming BOTH sides
+ * (Procore may pad `project_number`, e.g. " DFW-4-08226-aa "; the sibling matcher at bidboard.ts:1863 relies
+ * on the same field). Outcomes:
+ *   - 0 exact matches            → { exists: false }        (safe to create)
+ *   - exactly 1 distinct id      → { exists: true, ... }    (portfolio exists → skip + self-heal)
+ *   - >1 DISTINCT matching ids   → { exists: "unknown" }    (ambiguous duplicate state → fail closed, don't
+ *                                                            resolve the ambiguity by arbitrarily picking one)
+ * A non-array response → "unknown".
  */
-export function matchLiveProjects(
-  projects: unknown,
-  projectNumber: string,
-  perPageCap: number = PROCORE_PROJECTS_PER_PAGE
-): PortfolioExistenceResult {
+export function matchLiveProjects(projects: unknown, projectNumber: string): PortfolioExistenceResult {
   if (!Array.isArray(projects)) return { exists: "unknown", reason: "unexpected procore response" };
   const target = projectNumber.trim();
-  const match = projects.find(
-    (p: any) => String(p?.project_number ?? p?.number ?? "").trim() === target
-  );
-  if (match) return { exists: true, portfolioProjectId: String((match as any).id), source: "live" };
-  if (projects.length >= perPageCap) {
-    return { exists: "unknown", reason: `procore result page at cap (${perPageCap}); cannot confirm not-found` };
+  const exact = projects.filter((p: any) => String(p?.project_number ?? p?.number ?? "").trim() === target);
+  const distinctIds = Array.from(new Set(exact.map((p: any) => String(p.id))));
+  if (distinctIds.length === 0) return { exists: false };
+  if (distinctIds.length > 1) {
+    return { exists: "unknown", reason: `multiple (${distinctIds.length}) procore projects share number ${target}` };
   }
-  return { exists: false };
+  return { exists: true, portfolioProjectId: distinctIds[0], source: "live" };
 }
 
 /**
- * One authoritative live Procore confirm (cache-miss path only). Fetches active company projects and matches
- * the EXACT project number via matchLiveProjects. Any error → { exists: "unknown" } so the caller fails
- * closed. Never throws.
+ * One authoritative live Procore confirm (cache-miss path only). Uses Procore's KEYED search
+ * (filters[search]=<number>) so it never depends on a project sitting on the first unfiltered page, and does
+ * NOT filter by active — an archived Portfolio project still means "exists" (mirrors the cache). matchLiveProjects
+ * then keeps only exact matches. Any error → { exists: "unknown" } so the caller fails closed. Never throws.
  */
 export async function liveConfirmByNumber(companyId: string, projectNumber: string): Promise<PortfolioExistenceResult> {
   try {
@@ -71,7 +69,7 @@ export async function liveConfirmByNumber(companyId: string, projectNumber: stri
     const { fetchWithRateLimitRetry } = await import("./lib/rate-limit-tracker");
     const accessToken = await getAccessToken();
     const resp = await fetchWithRateLimitRetry(
-      `https://api.procore.com/rest/v1.0/companies/${companyId}/projects?per_page=${PROCORE_PROJECTS_PER_PAGE}&active=true`,
+      `https://api.procore.com/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=20`,
       { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } },
       "procore"
     );

@@ -1014,34 +1014,44 @@ export async function runPhase1BidBoardActions(
   // ── Authoritative existence gate (keystone): before touching "Add to Portfolio", ask whether a Procore
   //    portfolio already exists for this deal. skip → don't create (self-healed); create → proceed;
   //    abort → fail closed (do NOT create when we can't confirm — avoids a duplicate).
-  const gateCompanyId = bidboardProjectUrl.match(/\/companies\/(\d+)/)?.[1] ?? "";
+  //  The gate runs ONLY when we're actually about to create AND we have a project number to check:
+  //   - if a prior attempt already completed add-to-portfolio (skipAddToPortfolio), re-gating is pointless and
+  //     an abort would strand exports/uploads after the create already happened — skip the gate;
+  //   - a direct manual trigger can carry an unmapped Bid Board id with no procore_project_number; we can't run
+  //     the authoritative check, so fall back to the prior UI-check behavior rather than fail closed forever.
   const gateBidId = bidboardProjectUrl.match(/\/project\/(\d+)/)?.[1] ?? result.bidboardProjectId;
-  const gateMapping = await storage.getSyncMappingByBidboardProjectId(gateBidId).catch(() => undefined);
-  const gate = await handlePortfolioCreateGate(
-    { companyId: gateCompanyId, procoreProjectNumber: gateMapping?.procoreProjectNumber ?? "", bidboardProjectId: gateBidId },
-    defaultResolverDeps()
-  );
+  const gateMapping = skipAddToPortfolio
+    ? undefined
+    : await storage.getSyncMappingByBidboardProjectId(gateBidId).catch(() => undefined);
+  const gateNumber = (gateMapping?.procoreProjectNumber ?? "").trim();
+  let gateSaysSkip = false;
 
-  if (gate.action === "abort") {
-    await logStep(page, result, "portfolio_existence_gate", "failed", 0, {
-      error: `Portfolio existence check indeterminate for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`,
-      metadata: {
-        reason: "existence_indeterminate",
-        procoreProjectNumber: gateMapping?.procoreProjectNumber ?? null,
-      },
-    });
-    result.success = false;
-    result.error =
-      `Portfolio existence check indeterminate for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`;
-    return { estimateExcelPath, proposalPdfPath };
-  }
+  if (!skipAddToPortfolio && gateNumber) {
+    const gateCompanyId = bidboardProjectUrl.match(/\/companies\/(\d+)/)?.[1] ?? "";
+    const gate = await handlePortfolioCreateGate(
+      { companyId: gateCompanyId, procoreProjectNumber: gateNumber, bidboardProjectId: gateBidId },
+      defaultResolverDeps()
+    );
 
-  if (gate.action === "skip" && gate.portfolioProjectId) {
-    result.portfolioProjectId = result.portfolioProjectId ?? gate.portfolioProjectId;
+    if (gate.action === "abort") {
+      await logStep(page, result, "portfolio_existence_gate", "failed", 0, {
+        error: `Portfolio existence check indeterminate for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`,
+        metadata: { reason: "existence_indeterminate", procoreProjectNumber: gateNumber },
+      });
+      result.success = false;
+      result.error =
+        `Portfolio existence check indeterminate for bidboard ${gateBidId} — failing closed (not creating) to avoid a duplicate.`;
+      return { estimateExcelPath, proposalPdfPath };
+    }
+
+    if (gate.action === "skip" && gate.portfolioProjectId) {
+      result.portfolioProjectId = result.portfolioProjectId ?? gate.portfolioProjectId;
+    }
+    gateSaysSkip = gate.action === "skip";
   }
 
   const shouldSkipAddToPortfolio =
-    skipAddToPortfolio || gate.action === "skip" || (await isProjectAlreadyInPortfolio(page));
+    skipAddToPortfolio || gateSaysSkip || (await isProjectAlreadyInPortfolio(page));
 
   if (shouldSkipAddToPortfolio) {
     log(
