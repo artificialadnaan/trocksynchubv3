@@ -41,14 +41,32 @@ describe("matchLiveProjects (live-confirm response matcher)", () => {
   });
 
   it("no exact match, page BELOW the cap → exists:false", () => {
-    const r = matchLiveProjects([{ id: 1, project_number: "OTHER-1" }], "DFW-4-08226-aa", 20);
+    const r = matchLiveProjects([{ id: 1, project_number: "OTHER-1" }], "DFW-4-08226-aa", "", 20);
     expect(r).toEqual({ exists: false });
   });
 
   it("no exact match but the search page is AT the cap → exists:unknown (match may be beyond page 1)", () => {
     const page = Array.from({ length: 3 }, (_, i) => ({ id: i, project_number: `FUZZY-${i}` }));
-    const r = matchLiveProjects(page, "DFW-4-08226-aa", 3);
+    const r = matchLiveProjects(page, "DFW-4-08226-aa", "", 3);
     expect(r.exists).toBe("unknown");
+  });
+
+  it("ONE match but the page is AT the cap → exists:unknown (a duplicate could be beyond page 1)", () => {
+    const r = matchLiveProjects([{ id: 5, project_number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", "", 1);
+    expect(r.exists).toBe("unknown");
+  });
+
+  it("excludes the source Bid Board id — a same-number match on it is NOT the Portfolio project", () => {
+    // Only match is the bidboard project itself → excluded → no portfolio → false.
+    const only = matchLiveProjects([{ id: "562949955660910", project_number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", "562949955660910");
+    expect(only).toEqual({ exists: false });
+    // A DISTINCT portfolio alongside the excluded bidboard id → that portfolio is the match.
+    const both = matchLiveProjects(
+      [{ id: "562949955660910", project_number: "DFW-4-08226-aa" }, { id: "598134326497075", project_number: "DFW-4-08226-aa" }],
+      "DFW-4-08226-aa",
+      "562949955660910"
+    );
+    expect(both).toEqual({ exists: true, portfolioProjectId: "598134326497075", source: "live" });
   });
 
   it("multiple DISTINCT projects share the exact number → exists:unknown (ambiguous, fail-closed)", () => {
@@ -80,12 +98,16 @@ describe("matchLiveProjects (live-confirm response matcher)", () => {
 function makeDeps(over: Partial<{
   cacheRow: any;       // a single cached row (undefined = cache miss)
   cacheRows: any[];    // OR an explicit array of rows (for the duplicate-number test)
+  cacheThrows: boolean; // make the cache read reject (fail-closed test)
   liveResult: PortfolioExistenceResult | Error;
   mapping: any;
 }> = {}) {
   const calls: any = { updateSyncMapping: [], createAuditLog: [] };
   const deps = {
-    getProcoreProjectsByNumber: vi.fn(async () => over.cacheRows ?? (over.cacheRow ? [over.cacheRow] : [])),
+    getProcoreProjectsByNumber: vi.fn(async () => {
+      if (over.cacheThrows) throw new Error("cache down");
+      return over.cacheRows ?? (over.cacheRow ? [over.cacheRow] : []);
+    }),
     liveConfirmByNumber: vi.fn(async () => {
       if (over.liveResult instanceof Error) throw over.liveResult;
       return over.liveResult ?? ({ exists: false } as PortfolioExistenceResult);
@@ -117,6 +139,20 @@ describe("resolveExistingPortfolioProject", () => {
   it("cache has the SAME id twice (not a duplicate) → exists:true", async () => {
     const { deps } = makeDeps({ cacheRows: [{ procoreId: "999" }, { procoreId: "999" }] });
     expect(await resolveExistingPortfolioProject(BASE, deps)).toEqual({ exists: true, portfolioProjectId: "999", source: "cache" });
+  });
+
+  it("cache read FAILS → exists:unknown (fail-closed; does NOT fall through to the active-only live path)", async () => {
+    const { deps } = makeDeps({ cacheThrows: true });
+    const r = await resolveExistingPortfolioProject(BASE, deps);
+    expect(r.exists).toBe("unknown");
+    expect(deps.liveConfirmByNumber).not.toHaveBeenCalled();
+  });
+
+  it("cache match that IS the source bidboard id is excluded → falls through to live", async () => {
+    const { deps } = makeDeps({ cacheRows: [{ procoreId: BASE.bidboardProjectId }], liveResult: { exists: false } });
+    const r = await resolveExistingPortfolioProject(BASE, deps);
+    expect(r).toEqual({ exists: false });
+    expect(deps.liveConfirmByNumber).toHaveBeenCalled();
   });
 
   it("cache miss → live hit → exists:true (source live)", async () => {

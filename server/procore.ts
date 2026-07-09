@@ -65,6 +65,12 @@ function getBaseUrl(environment: string): string {
   return environment === "sandbox" ? "https://sandbox.procore.com" : "https://api.procore.com";
 }
 
+/** The environment-aware Procore REST API base URL (production vs sandbox). Use instead of hardcoding. */
+export async function getProcoreApiBaseUrl(): Promise<string> {
+  const config = await getProcoreConfig();
+  return getBaseUrl(config.environment);
+}
+
 function getLoginUrl(environment: string): string {
   return environment === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
 }

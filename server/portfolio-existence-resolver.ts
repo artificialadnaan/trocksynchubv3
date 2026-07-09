@@ -17,7 +17,8 @@ export interface ResolverDeps {
   // Plural: returns ALL cached matches so the resolver can detect a duplicate (>1 distinct id) and fail closed
   // rather than arbitrarily picking one via limit(1).
   getProcoreProjectsByNumber: (companyId: string, projectNumber: string) => Promise<Array<{ procoreId: string }>>;
-  liveConfirmByNumber: (companyId: string, projectNumber: string) => Promise<PortfolioExistenceResult>;
+  // excludeId = the source Bid Board project id; a same-number match on it is NOT the Portfolio project.
+  liveConfirmByNumber: (companyId: string, projectNumber: string, excludeId: string) => Promise<PortfolioExistenceResult>;
   getSyncMappingByBidboardProjectId: (bidboardProjectId: string) => Promise<{ id: number; portfolioProjectId: string | null } | undefined>;
   updateSyncMapping: (id: number, patch: { portfolioProjectId: string }) => Promise<unknown>;
   createAuditLog: (row: {
@@ -30,7 +31,7 @@ export interface ResolverDeps {
 export function defaultResolverDeps(): ResolverDeps {
   return {
     getProcoreProjectsByNumber: (c, n) => storage.getProcoreProjectsByNumber(c, n),
-    liveConfirmByNumber: liveConfirmByNumber,
+    liveConfirmByNumber: (c, n, x) => liveConfirmByNumber(c, n, x),
     getSyncMappingByBidboardProjectId: (id) => storage.getSyncMappingByBidboardProjectId(id),
     updateSyncMapping: (id, patch) => storage.updateSyncMapping(id, patch),
     createAuditLog: (row) => storage.createAuditLog(row as any),
@@ -52,21 +53,23 @@ const LIVE_SEARCH_PER_PAGE = 20;
 export function matchLiveProjects(
   projects: unknown,
   projectNumber: string,
+  excludeId: string = "",
   pageCap: number = LIVE_SEARCH_PER_PAGE
 ): PortfolioExistenceResult {
   if (!Array.isArray(projects)) return { exists: "unknown", reason: "unexpected procore response" };
   const target = projectNumber.trim();
   const exact = projects.filter((p: any) => String(p?.project_number ?? p?.number ?? "").trim() === target);
-  const distinctIds = Array.from(new Set(exact.map((p: any) => String(p.id))));
+  // Exclude the source Bid Board project id: it can share the project number but is NOT the Portfolio project.
+  const distinctIds = Array.from(new Set(exact.map((p: any) => String(p.id)))).filter((id) => id && id !== excludeId);
   if (distinctIds.length > 1) {
     return { exists: "unknown", reason: `multiple (${distinctIds.length}) procore projects share number ${target}` };
   }
-  if (distinctIds.length === 1) return { exists: true, portfolioProjectId: distinctIds[0], source: "live" };
-  // No exact match. If the search came back AT the page cap, the exact match could be on a later page —
-  // that is not an authoritative not-found, so fail closed rather than create a possible duplicate.
+  // A full page (at the cap) is not authoritative — a duplicate match (or the only match) could be on a later
+  // page — so fail closed even when this page shows exactly one match.
   if (projects.length >= pageCap) {
-    return { exists: "unknown", reason: `search page at cap (${pageCap}); cannot confirm not-found` };
+    return { exists: "unknown", reason: `search page at cap (${pageCap}); cannot confirm existence/uniqueness` };
   }
+  if (distinctIds.length === 1) return { exists: true, portfolioProjectId: distinctIds[0], source: "live" };
   return { exists: false };
 }
 
@@ -78,18 +81,22 @@ export function matchLiveProjects(
  * keeps only exact matches and fails closed when the page is at the cap. Any error → { exists: "unknown" } so
  * the caller fails closed. Never throws.
  */
-export async function liveConfirmByNumber(companyId: string, projectNumber: string): Promise<PortfolioExistenceResult> {
+export async function liveConfirmByNumber(
+  companyId: string,
+  projectNumber: string,
+  excludeId: string = ""
+): Promise<PortfolioExistenceResult> {
   try {
-    const { getAccessToken } = await import("./procore");
+    const { getAccessToken, getProcoreApiBaseUrl } = await import("./procore");
     const { fetchWithRateLimitRetry } = await import("./lib/rate-limit-tracker");
-    const accessToken = await getAccessToken();
+    const [accessToken, baseUrl] = await Promise.all([getAccessToken(), getProcoreApiBaseUrl()]);
     const resp = await fetchWithRateLimitRetry(
-      `https://api.procore.com/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}`,
+      `${baseUrl}/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}`,
       { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId } },
       "procore"
     );
     if (!resp.ok) return { exists: "unknown", reason: `procore ${resp.status}` };
-    return matchLiveProjects(await resp.json(), projectNumber);
+    return matchLiveProjects(await resp.json(), projectNumber, excludeId);
   } catch (err) {
     return { exists: "unknown", reason: err instanceof Error ? err.message : String(err) };
   }
@@ -104,17 +111,22 @@ export async function resolveExistingPortfolioProject(
   if (!number) return { exists: "unknown", reason: "no project number" };
   try {
     const cached = await deps.getProcoreProjectsByNumber(input.companyId, number);
-    const ids = Array.from(new Set((cached ?? []).map((p) => String(p.procoreId)).filter(Boolean)));
+    // Exclude the source Bid Board project id (a same-number match on it is not the Portfolio project).
+    const ids = Array.from(new Set((cached ?? []).map((p) => String(p.procoreId)).filter(Boolean)))
+      .filter((id) => id !== input.bidboardProjectId);
     if (ids.length > 1) {
       // Duplicate portfolio state in the cache — mirror the live matcher: fail closed, don't pick one.
       return { exists: "unknown", reason: `multiple (${ids.length}) cached procore projects share number ${number}` };
     }
     if (ids.length === 1) return { exists: true, portfolioProjectId: ids[0], source: "cache" };
   } catch (err) {
-    // A cache read failure alone is not authoritative "not found" — fall through to the live confirm.
+    // The cache is the archived-inclusive source (upsert-only, retains archived rows). If it FAILS we lose
+    // archived coverage, and the live confirm is active-only — so fail closed rather than risk an
+    // archived-portfolio duplicate.
+    return { exists: "unknown", reason: `cache read failed: ${err instanceof Error ? err.message : String(err)}` };
   }
   try {
-    return await deps.liveConfirmByNumber(input.companyId, number);
+    return await deps.liveConfirmByNumber(input.companyId, number, input.bidboardProjectId);
   } catch (err) {
     return { exists: "unknown", reason: err instanceof Error ? err.message : String(err) };
   }
