@@ -264,7 +264,7 @@ export async function findOrCreateCompanyCamProject(
             procoreProjectId: options.procoreProjectId || null,
             companyCamProjectId: matched.companycamId,
             hubspotDealName: projectData.name,
-          });
+          }, { onProcoreConflict: "update" });
         }
       }
       
@@ -292,7 +292,7 @@ export async function findOrCreateCompanyCamProject(
             procoreProjectId: options.procoreProjectId || null,
             companyCamProjectId: createResult.companycamId,
             hubspotDealName: projectData.name,
-          });
+          }, { onProcoreConflict: "update" });
         }
       }
       
@@ -358,7 +358,7 @@ export async function linkCompanyCamProject(
         hubspotDealId: options.hubspotDealId || null,
         procoreProjectId: options.procoreProjectId || null,
         companyCamProjectId: companycamId,
-      });
+      }, { onProcoreConflict: "update" });
     }
     
     console.log(`[CompanyCam] Linked project ${companycamId} to HubSpot: ${options.hubspotDealId}, Procore: ${options.procoreProjectId}`);
@@ -743,7 +743,7 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
               procoreProjectNumber: procoreProject?.projectNumber || null,
               companyCamProjectId: ccProject.companycamId,
               hubspotDealId: directHubspotId,
-            });
+            }, { onProcoreConflict: "update" });
           }
           
           results.matched++;
@@ -857,7 +857,7 @@ export async function bulkMatchCompanyCamToProcore(): Promise<{
               procoreProjectNumber: bestMatch.project.projectNumber,
               companyCamProjectId: ccProject.companycamId,
               hubspotDealId: null,
-            });
+            }, { onProcoreConflict: "update" });
           }
           
           results.matched++;

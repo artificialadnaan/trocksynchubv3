@@ -42,16 +42,18 @@ export interface ClusterDedupePlan {
   deleteIds: number[];
 }
 
-/** A cluster whose rows disagree on a lineage id — never auto-merged; surfaced for manual review. */
+/** A cluster whose rows disagree on a lineage/deal identity — never auto-merged; surfaced for review. */
 export class AmbiguousClusterError extends Error {
   constructor(
     public readonly procoreProjectId: string | null,
     public readonly bidboardIds: string[],
     public readonly portfolioIds: string[],
+    public readonly hubspotIds: string[] = [],
   ) {
     super(
       `Ambiguous sync_mappings cluster for procore_project_id=${procoreProjectId}: ` +
-        `distinct bidboard ids=[${bidboardIds.join(", ")}], portfolio ids=[${portfolioIds.join(", ")}]`,
+        `distinct bidboard ids=[${bidboardIds.join(", ")}], portfolio ids=[${portfolioIds.join(", ")}], ` +
+        `hubspot ids=[${hubspotIds.join(", ")}]`,
     );
     this.name = "AmbiguousClusterError";
   }
@@ -89,9 +91,10 @@ function isBlank(v: unknown): boolean {
  * Pure planner for ONE cluster (all rows share a procore_project_id). Returns the survivor, the
  * non-null fields to merge onto it, and the sibling ids to delete. Never mutates its input.
  *
- * Survivor = the row bearing a lineage id (bidboard/portfolio) if any, else the lowest id.
- * Throws AmbiguousClusterError if rows disagree on a lineage id (would risk merging two real
- * projects — the 2026-07 census shows zero such clusters, so this is a fail-closed guard).
+ * Survivor = the row bearing a lineage id (bidboard/portfolio) if any, else a row carrying a real
+ * HubSpot deal identity, else the lowest id. Throws AmbiguousClusterError if rows disagree on a lineage
+ * id OR carry two distinct HubSpot deals (would risk merging two real deals/projects — the 2026-07
+ * census shows zero such clusters, so this is a fail-closed guard).
  */
 export function planClusterDedupe(rows: DedupeMappingRow[]): ClusterDedupePlan {
   if (rows.length === 0) throw new Error("planClusterDedupe: empty cluster");
@@ -100,23 +103,28 @@ export function planClusterDedupe(rows: DedupeMappingRow[]): ClusterDedupePlan {
     Array.from(new Set(rows.map((r) => r[key]).filter((v) => !isBlank(v)) as string[]));
   const bidboardIds = distinct("bidboardProjectId");
   const portfolioIds = distinct("portfolioProjectId");
-  // Fail-closed guard: never FUSE two distinct lineage identities into one survivor.
-  //  - >1 distinct bidboard or portfolio id → clearly ambiguous.
-  //  - exactly one of each but on SEPARATE rows (no single row carries BOTH) → a bidboard-only row and a
-  //    portfolio-only row would be fused; refuse. A legitimately transitioned row carries both keys, so a
-  //    co-resident row makes the merge safe.
+  const hubspotIds = distinct("hubspotDealId");
+  // Fail-closed guard: never FUSE two distinct identities into one survivor.
+  //  - >1 distinct bidboard/portfolio/hubspot id → two real projects/deals share this procore id; refuse.
+  //  - one bidboard + one portfolio on SEPARATE rows (no single row carries BOTH) → a bidboard-only row
+  //    and a portfolio-only row would be fused; refuse. A legitimately transitioned row carries both keys.
   const coResident = rows.some((r) => !isBlank(r.bidboardProjectId) && !isBlank(r.portfolioProjectId));
   if (
     bidboardIds.length > 1 ||
     portfolioIds.length > 1 ||
+    hubspotIds.length > 1 ||
     (bidboardIds.length === 1 && portfolioIds.length === 1 && !coResident)
   ) {
-    throw new AmbiguousClusterError(rows[0].procoreProjectId, bidboardIds, portfolioIds);
+    throw new AmbiguousClusterError(rows[0].procoreProjectId, bidboardIds, portfolioIds, hubspotIds);
   }
 
   const sorted = [...rows].sort((a, b) => a.id - b.id);
+  // Prefer a lineage-bearing row, then a row carrying a real HubSpot deal (so the survivor stays
+  // reachable by getSyncMappingByHubspotDealId), then the lowest id.
   const survivor =
-    sorted.find((r) => !isBlank(r.bidboardProjectId) || !isBlank(r.portfolioProjectId)) ?? sorted[0];
+    sorted.find((r) => !isBlank(r.bidboardProjectId) || !isBlank(r.portfolioProjectId)) ??
+    sorted.find((r) => !isBlank(r.hubspotDealId)) ??
+    sorted[0];
   const siblings = sorted.filter((r) => r.id !== survivor.id);
 
   const updates: Partial<Record<keyof DedupeMappingRow, unknown>> = {};
@@ -124,6 +132,19 @@ export function planClusterDedupe(rows: DedupeMappingRow[]): ClusterDedupePlan {
     if (!isBlank(survivor[field])) continue;
     const donor = siblings.find((r) => !isBlank(r[field]));
     if (donor) updates[field] = donor[field];
+  }
+
+  // Migrate the source identity when the survivor's is a junk self-reference (source_deal_id ==
+  // procore_project_id, the legacy no-HubSpot marker) but a sibling carries a real external deal key —
+  // otherwise deleting that sibling leaves the mapping unreachable by (source_system, source_deal_id).
+  const procoreId = survivor.procoreProjectId;
+  const survivorSourceIsJunk = !isBlank(survivor.sourceDealId) && survivor.sourceDealId === procoreId;
+  if (survivorSourceIsJunk) {
+    const donor = siblings.find((r) => !isBlank(r.sourceDealId) && r.sourceDealId !== procoreId);
+    if (donor) {
+      updates.sourceSystem = donor.sourceSystem;
+      updates.sourceDealId = donor.sourceDealId;
+    }
   }
 
   return { survivorId: survivor.id, updates, deleteIds: siblings.map((r) => r.id) };
@@ -185,7 +206,7 @@ export interface DedupeReport {
   survivorsToUpdate: number;
   committed: boolean;
   perCluster: ClusterOutcome[];
-  ambiguous: Array<{ procoreProjectId: string | null; bidboardIds: string[]; portfolioIds: string[] }>;
+  ambiguous: Array<{ procoreProjectId: string | null; bidboardIds: string[]; portfolioIds: string[]; hubspotIds: string[] }>;
 }
 
 /**
@@ -227,7 +248,7 @@ export async function runSyncMappingsDedupe(
       perCluster.push({ procoreProjectId, survivorId: plan.survivorId, deletedIds: plan.deleteIds, updates: plan.updates });
     } catch (err) {
       if (err instanceof AmbiguousClusterError) {
-        ambiguous.push({ procoreProjectId: err.procoreProjectId, bidboardIds: err.bidboardIds, portfolioIds: err.portfolioIds });
+        ambiguous.push({ procoreProjectId: err.procoreProjectId, bidboardIds: err.bidboardIds, portfolioIds: err.portfolioIds, hubspotIds: err.hubspotIds });
       } else {
         throw err;
       }

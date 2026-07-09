@@ -5,7 +5,7 @@ import {
   AmbiguousClusterError,
   type DedupeMappingRow,
   type Queryable,
-} from "../server/sync-mappings-dedupe";
+} from "../shared/sync-mappings-dedupe";
 
 function row(over: Partial<DedupeMappingRow> & { id: number }): DedupeMappingRow {
   return {
@@ -121,6 +121,30 @@ describe("planClusterDedupe", () => {
     ]);
     expect(plan.survivorId).toBe(1);
     expect(plan.deleteIds).toEqual([2]);
+  });
+
+  it("throws AmbiguousClusterError when rows carry two distinct HubSpot deals", () => {
+    expect(() =>
+      planClusterDedupe([row({ id: 1, hubspotDealId: "H1" }), row({ id: 2, hubspotDealId: "H2" })]),
+    ).toThrow(AmbiguousClusterError);
+  });
+
+  it("prefers a HubSpot-deal-bearing row as survivor over a lower-id junk row (keeps it reachable)", () => {
+    const plan = planClusterDedupe([
+      row({ id: 1, sourceDealId: "PJ-1", hubspotDealId: null }), // junk self-reference (source == procore id)
+      row({ id: 2, sourceDealId: "H-9", hubspotDealId: "H-9" }), // real HubSpot deal
+    ]);
+    expect(plan.survivorId).toBe(2);
+    expect(plan.deleteIds).toEqual([1]);
+  });
+
+  it("migrates the source identity onto a junk-sourced lineage survivor from a real sibling", () => {
+    const plan = planClusterDedupe([
+      row({ id: 1, bidboardProjectId: "BB-1", sourceDealId: "PJ-1" }), // lineage wins survivorship, but junk source
+      row({ id: 2, sourceDealId: "REAL-DEAL", hubspotDealId: null }), // carries the real external deal key
+    ]);
+    expect(plan.survivorId).toBe(1);
+    expect(plan.updates.sourceDealId).toBe("REAL-DEAL");
   });
 
   it("a single-row cluster is a no-op (defensive; the driver never feeds it one)", () => {

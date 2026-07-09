@@ -15,7 +15,7 @@ vi.mock("../server/db.ts", () => ({
 }));
 
 const { storage } = await import("../server/storage.ts");
-const { runSyncMappingsDedupe } = await import("../server/sync-mappings-dedupe.ts");
+const { runSyncMappingsDedupe } = await import("../shared/sync-mappings-dedupe.ts");
 
 const DDL = `
   CREATE TABLE sync_mappings (
@@ -110,7 +110,7 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
         bidboardProjectId: "BB-9",
         lastSyncStatus: "synced",
         metadata: { proposalId: "P1" },
-      } as any);
+      } as any, { onProcoreConflict: "update" });
 
       // A second sync arrives with a fresher status but a NULL name/number, NO bidboard id, and its own metadata.
       const result = await storage.createSyncMapping({
@@ -118,7 +118,7 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
         procoreProjectId: "PJ-9",
         lastSyncStatus: "re-synced",
         metadata: { proposalId: "SHOULD-NOT-WIN" },
-      } as any);
+      } as any, { onProcoreConflict: "update" });
 
       expect(await count(pg)).toBe(1); // upsert, not a duplicate
       expect(result.lastSyncStatus).toBe("re-synced"); // telemetry refreshed
@@ -136,15 +136,34 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
         storage.createSyncMapping({ sourceDealId: "deal-b", bidboardProjectId: "BB-OWN" } as any),
       ).rejects.toThrow();
     });
+
+    it("DEFAULT (no opts) REJECTS a duplicate procore_project_id — ownership/bidboard-link semantics preserved", async () => {
+      // /api/bidboard/link-deal etc. rely on the insert THROWING (not silently upserting the other deal's row).
+      await storage.createSyncMapping({ sourceDealId: "deal-a", procoreProjectId: "PJ-OWN" } as any);
+      await expect(
+        storage.createSyncMapping({ sourceDealId: "deal-b", procoreProjectId: "PJ-OWN" } as any),
+      ).rejects.toThrow();
+    });
+
+    it("opt-in upsert FILLS a supplied companyCamProjectId on conflict (link, not a silent no-op)", async () => {
+      await storage.createSyncMapping({ sourceDealId: "deal-1", procoreProjectId: "PJ-CC", procoreProjectName: "P" } as any, { onProcoreConflict: "update" });
+      // A later CompanyCam match for the same Procore project (its older mapping missed the 200-row preload).
+      const result = await storage.createSyncMapping(
+        { sourceDealId: "deal-1", procoreProjectId: "PJ-CC", companyCamProjectId: "CC-77" } as any,
+        { onProcoreConflict: "update" },
+      );
+      expect(await count(pg)).toBe(1); // no duplicate
+      expect(result.companyCamProjectId).toBe("CC-77"); // the supplied link is written, not swallowed
+    });
   });
 
   describe("42P10 fallback when the arbiter index does not exist yet", () => {
     it("createSyncMapping falls back to a plain insert (PR is safe to merge before db:push)", async () => {
       const pg = await freshDb({ withCanonicalIndexes: false });
-      await storage.createSyncMapping({ sourceDealId: "deal-1", procoreProjectId: "PJ-1", lastSyncStatus: "a" } as any);
-      // No procore unique index → ON CONFLICT raises 42P10 → fallback inserts a second row instead of throwing.
+      await storage.createSyncMapping({ sourceDealId: "deal-1", procoreProjectId: "PJ-1", lastSyncStatus: "a" } as any, { onProcoreConflict: "update" });
+      // opt-in upsert, but NO procore unique index → ON CONFLICT raises 42P10 → fallback inserts a second row instead of throwing.
       await expect(
-        storage.createSyncMapping({ sourceDealId: "deal-2", procoreProjectId: "PJ-1", lastSyncStatus: "b" } as any),
+        storage.createSyncMapping({ sourceDealId: "deal-2", procoreProjectId: "PJ-1", lastSyncStatus: "b" } as any, { onProcoreConflict: "update" }),
       ).resolves.toBeTruthy();
       expect(await count(pg)).toBe(2);
       // Fallback is a genuine plain insert — the first row is left untouched (no upsert merge).

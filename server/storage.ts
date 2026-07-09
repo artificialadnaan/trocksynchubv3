@@ -144,17 +144,16 @@ function canonicalMappingOrderBy() {
   ];
 }
 
-// SET clause for createSyncMapping's upsert on the procore_project_id unique index (#2). A conflict here
-// means the SAME Procore project is being re-synced by a path that did NOT pre-check — it's a safety net,
-// not the authoritative update path (that's procore-hubspot-sync's existing-mapping branch via
-// updateSyncMapping). So it is deliberately additive: refresh only the sync telemetry (last_sync_*), and
-// FILL-ONLY the procore descriptive columns + metadata — COALESCE(existing, excluded) keeps an existing
-// non-null value and only populates a gap, so a re-sync can never OVERWRITE data (critically, it can't
-// wipe a load-bearing metadata.proposalId). This mirrors the dedup driver's "never overwrite the
-// survivor" rule. Deliberately omits: the lineage keys (bidboard_/portfolio_project_id + names +
-// sent_to_portfolio_at), the source identity (source_system/source_deal_id), AND the hubspot_*/companycam
-// identity columns — those are owned by the explicit updateSyncMapping path, and mutating hubspot_deal_id
-// here could diverge it from the frozen source_deal_id that getSyncMappingByHubspotDealId relies on.
+// SET clause for the OPT-IN upsert (createSyncMapping's `onProcoreConflict: "update"`) on the
+// procore_project_id unique index (#2). A conflict means the SAME Procore project is re-synced. It is
+// deliberately ADDITIVE: refresh only the sync telemetry (last_sync_*), and FILL-ONLY the descriptive +
+// companycam + metadata columns — COALESCE(existing, excluded) keeps an existing non-null value and only
+// populates a gap, so a re-sync can never OVERWRITE data (critically, never wipes a load-bearing
+// metadata.proposalId). `companycam_project_id` is included fill-only so a CompanyCam re-match LINKS the
+// existing row (not a silent no-op) without clobbering a prior link. Deliberately omits: the lineage keys
+// (bidboard_/portfolio_project_id + names + sent_to_portfolio_at) and the source/hubspot identity — those
+// are owned by the explicit updateSyncMapping path, and mutating hubspot_deal_id here could diverge it
+// from the frozen source_deal_id that getSyncMappingByHubspotDealId relies on.
 const SYNC_MAPPING_CONFLICT_SET = {
   lastSyncAt: sql`excluded.last_sync_at`,
   lastSyncStatus: sql`excluded.last_sync_status`,
@@ -162,6 +161,7 @@ const SYNC_MAPPING_CONFLICT_SET = {
   procoreProjectName: sql`COALESCE(${syncMappings.procoreProjectName}, excluded.procore_project_name)`,
   procoreProjectNumber: sql`COALESCE(${syncMappings.procoreProjectNumber}, excluded.procore_project_number)`,
   procoreCompanyId: sql`COALESCE(${syncMappings.procoreCompanyId}, excluded.procore_company_id)`,
+  companyCamProjectId: sql`COALESCE(${syncMappings.companyCamProjectId}, excluded.companycam_project_id)`,
   metadata: sql`COALESCE(${syncMappings.metadata}, excluded.metadata)`,
 } as const;
 
@@ -265,7 +265,7 @@ export interface IStorage {
   /** Find the BID-BOARD-linked mapping for a source deal, skipping partial/portfolio duplicate rows */
   getBidboardMappingBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<SyncMapping | undefined>;
   /** Create a new sync mapping linking entities */
-  createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping>;
+  createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping, opts?: { onProcoreConflict?: "update" }): Promise<SyncMapping>;
   /** Update an existing sync mapping */
   updateSyncMapping(id: number, data: Partial<InsertSyncMapping>): Promise<SyncMapping | undefined>;
   /** Search mappings by deal name, project name, or project number */
@@ -569,13 +569,19 @@ export class DatabaseStorage implements IStorage {
     return mapping;
   }
 
-  async createSyncMapping(mapping: LegacyCompatibleInsertSyncMapping): Promise<SyncMapping> {
+  async createSyncMapping(
+    mapping: LegacyCompatibleInsertSyncMapping,
+    opts?: { onProcoreConflict?: "update" },
+  ): Promise<SyncMapping> {
     const values = normalizeSyncMappingSource(mapping);
-    // Idempotent on the canonical procore_project_id key (#2): re-syncing the same Procore project
-    // refreshes the sync-owned fields instead of inserting a duplicate. Rows with a NULL
-    // procore_project_id fall outside the partial index → plain insert, so the bidboard_project_id
-    // ownership-guard throw (bidboard.ts) is preserved (a bidboard conflict is a DIFFERENT index and
-    // stays unhandled → throws).
+    // DEFAULT: a plain insert. A conflict on ANY unique index — the new procore/portfolio indexes AND the
+    // bidboard_project_id ownership guard — THROWS, preserving every caller's pre-existing semantics
+    // (e.g. /api/bidboard/link-deal must still reject a bidboard already owned by another deal). Only a
+    // caller that legitimately RE-SYNCS the same Procore project opts into the idempotent upsert below.
+    if (opts?.onProcoreConflict !== "update") {
+      const [result] = await db.insert(syncMappings).values(values).returning();
+      return result;
+    }
     try {
       const [result] = await db
         .insert(syncMappings)

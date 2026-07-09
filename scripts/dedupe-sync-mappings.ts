@@ -4,7 +4,7 @@
  * sync_mappings rows" backlog item deferred in migration 0015.
  *
  * Collapses duplicate rows that share a non-null procore_project_id, keeping one survivor per cluster
- * and COALESCE-merging the deleted siblings' non-null fields into it (see server/sync-mappings-dedupe.ts).
+ * and COALESCE-merging the deleted siblings' non-null fields into it (see shared/sync-mappings-dedupe.ts).
  *
  * DRY-RUN by default: prints the plan + writes a JSON snapshot to .audit/, writes NOTHING to the DB.
  * Pass --commit to apply. Must run BEFORE `CI=1 npm run db:push` (which adds the unique indexes).
@@ -15,7 +15,7 @@
  */
 import pg from "pg";
 import { writeFileSync, mkdirSync } from "fs";
-import { runSyncMappingsDedupe } from "../server/sync-mappings-dedupe";
+import { runSyncMappingsDedupe } from "../shared/sync-mappings-dedupe";
 
 async function main() {
   if (!process.env.DATABASE_URL) {
