@@ -1317,7 +1317,10 @@ export async function runPhase1BidBoardActions(
         companyId,
         result.portfolioProjectId,
         "validate_portfolio_identity",
-        retryOptions?.identityContext
+        // This validate is on the COMMON path after the add-to-portfolio if/else, so it ALSO runs on a gate skip.
+        // Carry the pre-existing-link flag so a cross-number rebuild skip isn't quarantined by the number check
+        // (false for a fresh create → still fully validated).
+        { ...retryOptions?.identityContext, portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping }
       );
     }
 
@@ -1364,7 +1367,9 @@ export async function runPhase1BidBoardActions(
               companyId,
               pid,
               "validate_portfolio_identity",
-              retryOptions?.identityContext
+              // Also reached on a gate skip (portfolioProjectId recovered from the Estimation tab) — carry the
+              // pre-existing-link flag so a cross-number rebuild isn't quarantined (false for a fresh create).
+              { ...retryOptions?.identityContext, portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping }
             );
           }
         }
