@@ -40,19 +40,43 @@ describe("matchLiveProjects (live-confirm response matcher)", () => {
     expect(r).toMatchObject({ exists: true, portfolioProjectId: "7" });
   });
 
-  it("no exact match, page BELOW the cap → exists:false", () => {
-    const r = matchLiveProjects([{ id: 1, project_number: "OTHER-1" }], "DFW-4-08226-aa", "", 20);
+  it("no exact match, COMPLETE scan → exists:false (safe to create)", () => {
+    const r = matchLiveProjects([{ id: 1, project_number: "OTHER-1" }], "DFW-4-08226-aa", "", true);
     expect(r).toEqual({ exists: false });
   });
 
-  it("no exact match but the search page is AT the cap → exists:unknown (match may be beyond page 1)", () => {
-    const page = Array.from({ length: 3 }, (_, i) => ({ id: i, project_number: `FUZZY-${i}` }));
-    const r = matchLiveProjects(page, "DFW-4-08226-aa", "", 3);
+  it("FIX: a full page of fuzzy DFW non-matches, COMPLETE scan → exists:false (no false abort)", () => {
+    // Procore's filters[search]=DFW-1-14126-ag fuzzily matches the "DFW" token and floods the results,
+    // but NONE are the exact number. A complete scan must conclude false (create), not unknown — this is
+    // the prod bug: a saturated fuzzy page used to trip the page-cap guard and false-abort the create.
+    const flood = Array.from({ length: 100 }, (_, i) => ({ id: 900 + i, project_number: `DFW-9-${i}` }));
+    const r = matchLiveProjects(flood, "DFW-1-14126-ag", "", true);
+    expect(r).toEqual({ exists: false });
+  });
+
+  it("one exact match amid a full page of fuzzy noise, COMPLETE scan → exists:true", () => {
+    const flood = Array.from({ length: 100 }, (_, i) => ({ id: 900 + i, project_number: `DFW-9-${i}` }));
+    flood.push({ id: 42, project_number: "DFW-1-14126-ag" });
+    const r = matchLiveProjects(flood, "DFW-1-14126-ag", "", true);
+    expect(r).toEqual({ exists: true, portfolioProjectId: "42", source: "live" });
+  });
+
+  it("INCOMPLETE scan (page bound hit) with no exact match → exists:unknown (fail-closed)", () => {
+    const flood = Array.from({ length: 100 }, (_, i) => ({ id: 900 + i, project_number: `DFW-9-${i}` }));
+    const r = matchLiveProjects(flood, "DFW-1-14126-ag", "", false);
     expect(r.exists).toBe("unknown");
   });
 
-  it("ONE match but the page is AT the cap → exists:unknown (a duplicate could be beyond page 1)", () => {
-    const r = matchLiveProjects([{ id: 5, project_number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", "", 1);
+  it("INCOMPLETE scan with ONE exact match → exists:unknown (a duplicate could be on an unread page)", () => {
+    const r = matchLiveProjects([{ id: 5, project_number: "DFW-4-08226-aa" }], "DFW-4-08226-aa", "", false);
+    expect(r.exists).toBe("unknown");
+  });
+
+  it(">1 DISTINCT exact matches → exists:unknown even when the scan is INCOMPLETE (ambiguity is decisive)", () => {
+    const r = matchLiveProjects(
+      [{ id: 1, project_number: "DFW-4-08226-aa" }, { id: 2, project_number: "DFW-4-08226-aa" }],
+      "DFW-4-08226-aa", "", false
+    );
     expect(r.exists).toBe("unknown");
   });
 
