@@ -38,63 +38,57 @@ export function defaultResolverDeps(): ResolverDeps {
   };
 }
 
-// Procore's projects list pages at per_page (mirrors the codebase paginator procore.ts:153 fetchProcorePages).
-// MAX_PAGES bounds the loop: filters[search] is FUZZY, so a common token (e.g. "DFW") returns every project
-// sharing it (~300); 25×100 = 2500 is far beyond any real project-number search — hitting it means the scan
-// is incomplete → fail closed.
-const LIVE_SEARCH_PER_PAGE = 100;
-const LIVE_SEARCH_MAX_PAGES = 25;
+// Relevance-ranked TOP-N window for the live-confirm. Procore's filters[search] is FUZZY — a number like
+// "DFW-1-14126-ag" matches the "DFW" token and returns thousands of projects (>2500 observed), so ENUMERATING
+// to completeness is infeasible. But the search is RELEVANCE-RANKED: an exact project_number match ranks at
+// the top (the sibling matcher at bidboard.ts:1860 relies on exactly this, reading only the top 5). So we read
+// a wide top-N window (300 = 60× that margin) and exact-match within it: an exact match would appear here; its
+// absence means it does not exist.
+const LIVE_SEARCH_TOP_N = 300;
 
 /**
- * Pure matcher for the live-confirm response — operates on the COMPLETE accumulated result set (the caller
- * paginates). Keeps only EXACT project-number matches, trimming BOTH sides (Procore may pad `project_number`,
- * e.g. " DFW-4-08226-aa "; the sibling matcher at bidboard.ts:1863 relies on the same field). Outcomes:
+ * Pure matcher for the live-confirm response — operates on the relevance-ranked TOP-N results. Keeps only
+ * EXACT project-number matches, trimming BOTH sides (Procore may pad `project_number`, e.g. " DFW-4-08226-aa ";
+ * the sibling matcher at bidboard.ts:1860 relies on the same field). Outcomes:
  *   - >1 DISTINCT matching ids   → { exists: "unknown" }    (ambiguous duplicate state → fail closed, don't
  *                                                            resolve the ambiguity by arbitrarily picking one)
- *   - scan not `complete`        → { exists: "unknown" }    (the caller hit the page bound; an exact match
- *                                                            could sit on an unread page → can't assert
- *                                                            existence OR uniqueness)
  *   - exactly 1 distinct id      → { exists: true, ... }    (portfolio exists → skip + self-heal)
- *   - 0 exact matches            → { exists: false }        (safe to create)
+ *   - 0 exact matches            → { exists: false }        (not in the top-N relevance window → does not exist
+ *                                                            → safe to create)
  * A non-array response → "unknown".
  *
- * NOTE (convention shift, 2026-07-10): the 4th arg is now `complete: boolean`, NOT `pageCap: number`. The old
- * `projects.length >= pageCap → unknown` guard false-aborted the create for any number whose token fuzzily
- * matched >= a page of projects (e.g. every "DFW-*" Dallas deal). Completeness is now a FACT from the driver
- * having read every page, not a guess off one truncated page.
+ * TRADEOFF (accepted 2026-07-10): "0 exact in top-N → create" trusts that Procore ranks an exact project_number
+ * match into the top-N window — the same assumption the codebase already makes at bidboard.ts:1860 (top-5).
+ * If Procore ranked an existing exact match below N, a duplicate could be created; N=300 makes that remote.
+ * This supersedes the (correct-but-infeasible) paginate-to-completeness approach: filters[search] returns
+ * thousands of fuzzy matches, so completeness can't be reached, and the honest fail-closed blocked every create.
  */
 export function matchLiveProjects(
   projects: unknown,
   projectNumber: string,
-  excludeId: string = "",
-  complete: boolean = true
+  excludeId: string = ""
 ): PortfolioExistenceResult {
   if (!Array.isArray(projects)) return { exists: "unknown", reason: "unexpected procore response" };
   const target = projectNumber.trim();
   const exact = projects.filter((p: any) => String(p?.project_number ?? p?.number ?? "").trim() === target);
   // Exclude the source Bid Board project id: it can share the project number but is NOT the Portfolio project.
   const distinctIds = Array.from(new Set(exact.map((p: any) => String(p.id)))).filter((id) => id && id !== excludeId);
-  // Ambiguity is decisive even on an incomplete scan: two distinct exact ids already prove a duplicate state.
   if (distinctIds.length > 1) {
     return { exists: "unknown", reason: `multiple (${distinctIds.length}) procore projects share number ${target}` };
-  }
-  // Existence/absence can only be asserted from a COMPLETE scan — an unread page could hold the (or another) match.
-  if (!complete) {
-    return { exists: "unknown", reason: `search exceeded ${LIVE_SEARCH_MAX_PAGES}-page bound; cannot confirm existence/uniqueness` };
   }
   if (distinctIds.length === 1) return { exists: true, portfolioProjectId: distinctIds[0], source: "live" };
   return { exists: false };
 }
 
 /**
- * One authoritative live Procore confirm (cache-miss path only). Uses Procore's KEYED search
- * (filters[search]=<number>) — but that search is FUZZY (it matches on tokens, so "DFW-1-14126-ag" returns
- * every "DFW-*" project), so a single page is NOT authoritative. We PAGINATE to completeness (read every page
- * until one returns < per_page) and hand the full set + a `complete` flag to matchLiveProjects, which asserts
- * false/true only from a complete scan. It is a cache-MISS backstop for recently-created (necessarily active)
- * portfolios; the archived-inclusive source is the upsert-only procore_projects cache (which retains rows
- * after a project is archived). Any error / non-array / bound-exceeded → { exists: "unknown" } so the caller
- * fails closed. Never throws.
+ * One live Procore confirm (cache-miss path only). Reads the relevance-ranked TOP-N of Procore's KEYED search
+ * (filters[search]=<number>, per_page=LIVE_SEARCH_TOP_N) and exact-matches within it. filters[search] is FUZZY
+ * and returns thousands of loose matches, so enumerating is infeasible — but it's relevance-ranked, so an exact
+ * project_number match lands in the top-N (matchLiveProjects owns that tradeoff; bidboard.ts:1860 makes the
+ * same assumption with top-5). It is a cache-MISS backstop for recently-created (necessarily active) portfolios;
+ * the archived-inclusive source is the upsert-only procore_projects cache. v1.0 = the version the rest of the
+ * codebase uses for company projects (procore.ts:450/847); the original v1.1 path 404'd. Any error / non-ok /
+ * non-array → { exists: "unknown" } so the caller fails closed. Never throws.
  */
 const LIVE_CONFIRM_TIMEOUT_MS = 15000;
 
@@ -103,10 +97,10 @@ export async function liveConfirmByNumber(
   projectNumber: string,
   excludeId: string = ""
 ): Promise<PortfolioExistenceResult> {
-  // Bound the WHOLE operation, not just one fetch: this runs while Phase 1 holds the global browser lock, and
+  // Bound the WHOLE operation: this runs while Phase 1 holds the global browser lock, and
   // fetchWithRateLimitRetry can sleep up to 60s between 429 retries WITHOUT observing the abort signal. So race
-  // the (now multi-page) request against a hard timeout that both aborts the in-flight fetch and resolves to a
-  // fail-closed "unknown", so a rate-limited/stalled Procore can never hang the automation past the timeout.
+  // the request against a hard timeout that both aborts the in-flight fetch and resolves to a fail-closed
+  // "unknown", so a rate-limited/stalled Procore can never hang the automation past LIVE_CONFIRM_TIMEOUT_MS.
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutGuard = new Promise<PortfolioExistenceResult>((resolve) => {
@@ -120,27 +114,13 @@ export async function liveConfirmByNumber(
       const { getAccessToken, getProcoreApiBaseUrl } = await import("./procore");
       const { fetchWithRateLimitRetry } = await import("./lib/rate-limit-tracker");
       const [accessToken, baseUrl] = await Promise.all([getAccessToken(), getProcoreApiBaseUrl()]);
-      const all: unknown[] = [];
-      let complete = false;
-      // Paginate the FUZZY keyed search to completeness (mirrors procore.ts:153). v1.0 = the version the rest
-      // of the codebase uses for company projects (procore.ts:450/847); the original v1.1 path 404'd.
-      for (let page = 1; page <= LIVE_SEARCH_MAX_PAGES; page++) {
-        // Once the outer timeout fires (Promise.race already settled to unknown), stop issuing further pages —
-        // fetchWithRateLimitRetry's 429 sleeps don't observe the signal, so without this the detached loop
-        // would keep fetching the remaining pages for nothing.
-        if (controller.signal.aborted) return { exists: "unknown", reason: "live confirm aborted (timeout)" };
-        const resp = await fetchWithRateLimitRetry(
-          `${baseUrl}/rest/v1.0/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}&page=${page}`,
-          { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId }, signal: controller.signal },
-          "procore"
-        );
-        if (!resp.ok) return { exists: "unknown", reason: `procore ${resp.status}` };
-        const batch = await resp.json();
-        if (!Array.isArray(batch)) return { exists: "unknown", reason: "unexpected procore response" };
-        all.push(...batch);
-        if (batch.length < LIVE_SEARCH_PER_PAGE) { complete = true; break; } // last page reached → scan complete
-      }
-      return matchLiveProjects(all, projectNumber, excludeId, complete);
+      const resp = await fetchWithRateLimitRetry(
+        `${baseUrl}/rest/v1.0/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_TOP_N}`,
+        { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId }, signal: controller.signal },
+        "procore"
+      );
+      if (!resp.ok) return { exists: "unknown", reason: `procore ${resp.status}` };
+      return matchLiveProjects(await resp.json(), projectNumber, excludeId);
     } catch (err) {
       return { exists: "unknown", reason: err instanceof Error ? err.message : String(err) };
     }
