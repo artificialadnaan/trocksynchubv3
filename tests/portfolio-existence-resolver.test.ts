@@ -210,6 +210,31 @@ describe("handlePortfolioCreateGate", () => {
     expect(calls.updateSyncMapping).toHaveLength(0);
   });
 
+  it("FORWARD-LOOKING: mapping already linked → skip via the existing-link guard, WITHOUT a Procore resolve", async () => {
+    // Cross-number rebuild: the mapping is linked to a portfolio recorded under a DIFFERENT number, so the
+    // number-based resolve would (wrongly) say create. The stored link must short-circuit to skip.
+    const { deps, calls } = makeDeps({
+      cacheRow: undefined,
+      liveResult: { exists: false }, // resolve WOULD say create...
+      mapping: { id: 7, portfolioProjectId: "598134326608331" }, // ...but the deal is already linked
+    });
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out).toMatchObject({ action: "skip", portfolioProjectId: "598134326608331" });
+    expect(out.existence).toMatchObject({ exists: true, source: "mapping" });
+    // the number-based resolve must NOT run — the stored link is authoritative
+    expect(deps.getProcoreProjectsByNumber).not.toHaveBeenCalled();
+    expect(deps.liveConfirmByNumber).not.toHaveBeenCalled();
+    // no redundant self-heal write (already linked)
+    expect(calls.updateSyncMapping).toHaveLength(0);
+  });
+
+  it("blank portfolio_project_id on the mapping does NOT short-circuit → falls through to the Procore resolve", async () => {
+    const { deps } = makeDeps({ cacheRow: undefined, liveResult: { exists: false }, mapping: { id: 7, portfolioProjectId: "   " } });
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out.action).toBe("create");
+    expect(deps.liveConfirmByNumber).toHaveBeenCalled();
+  });
+
   it("false → action create, no writes", async () => {
     const { deps, calls } = makeDeps({ cacheRow: undefined, liveResult: { exists: false } });
     const out = await handlePortfolioCreateGate(BASE, deps);

@@ -1,7 +1,7 @@
 import { storage } from "./storage";
 
 export type PortfolioExistenceResult =
-  | { exists: true; portfolioProjectId: string; source: "cache" | "live" }
+  | { exists: true; portfolioProjectId: string; source: "cache" | "live" | "mapping" }
   | { exists: false }
   | { exists: "unknown"; reason: string };
 
@@ -170,6 +170,7 @@ export function decidePortfolioCreateAction(existence: PortfolioExistenceResult)
 
 /**
  * Resolve → decide → perform the decision's side effect:
+ *   already linked → skip (the mapping's existing portfolio_project_id is authoritative)
  *   skip  → self-heal write-back of portfolio_project_id (if unset)
  *   create→ (none)
  *   abort → write a status='error' audit alert (the 15-min failure digest scans it)
@@ -179,12 +180,30 @@ export async function handlePortfolioCreateGate(
   input: ResolverInput,
   deps: ResolverDeps
 ): Promise<{ action: PortfolioCreateAction; portfolioProjectId?: string; existence: PortfolioExistenceResult }> {
+  // Forward-looking existing-link guard: if this deal's mapping is ALREADY linked to a portfolio — a prior
+  // self-heal, OR a manual link for a cross-number REBUILD (same real project re-bid under a new number, which
+  // the number-based resolve below structurally cannot see) — that stored link is authoritative. Skip the
+  // create; without this, re-triggering an already-linked rebuild would create a duplicate portfolio.
+  let mapping: Awaited<ReturnType<ResolverDeps["getSyncMappingByBidboardProjectId"]>> | undefined;
+  try {
+    mapping = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
+  } catch {
+    /* a lookup error is handled upstream (the runner fails closed); fall through to the Procore resolve */
+  }
+  const existingLink = mapping?.portfolioProjectId?.trim();
+  if (existingLink) {
+    return {
+      action: "skip",
+      portfolioProjectId: existingLink,
+      existence: { exists: true, portfolioProjectId: existingLink, source: "mapping" },
+    };
+  }
+
   const existence = await resolveExistingPortfolioProject(input, deps);
   const action = decidePortfolioCreateAction(existence);
 
   if (action === "skip" && existence.exists === true) {
     try {
-      const mapping = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
       if (mapping?.id && !mapping.portfolioProjectId) {
         await deps.updateSyncMapping(mapping.id, { portfolioProjectId: existence.portfolioProjectId });
       }
