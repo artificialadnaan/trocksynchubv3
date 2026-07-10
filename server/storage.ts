@@ -701,6 +701,11 @@ export class DatabaseStorage implements IStorage {
         sentToPortfolioAt: new Date(),
         lastSyncAt: new Date(),
         lastSyncStatus: 'portfolio_transition',
+        // Deliberate manual link (an authenticated caller chose this portfolioProjectId): mark it as an
+        // authoritative override so Phase-2 identity validation trusts it even when the linked portfolio's
+        // number/name intentionally differs (a cross-number rebuild). Harmless for a same-number link — the
+        // project number is unique, so that link is already the correct portfolio and validates anyway.
+        metadata: sql`COALESCE(${syncMappings.metadata}, '{}'::jsonb) || '{"manualPortfolioOverride": true}'::jsonb`,
       })
       .where(eq(syncMappings.id, mapping.id))
       .returning();
