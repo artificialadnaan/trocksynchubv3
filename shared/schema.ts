@@ -180,6 +180,9 @@ export const pendingPhase2Jobs = pgTable("pending_phase2_jobs", {
   proposalPdfPath: text("proposal_pdf_path"),
   estimateExcelPath: text("estimate_excel_path"),
   customerName: text("customer_name"),
+  // True when Phase 1 skipped the create via a PRE-EXISTING mapping link (cross-number rebuild). Persisted so a
+  // webhook-fallback Phase 2 validates that link as authoritative instead of quarantining the number mismatch.
+  portfolioFromExistingLink: boolean("portfolio_from_existing_link").notNull().default(false),
   status: text("status").notNull().default("pending"), // pending | claimed | completed | failed
   claimedAt: timestamp("claimed_at"),
   completedAt: timestamp("completed_at"),

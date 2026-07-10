@@ -22,6 +22,8 @@ export interface PendingPhase2Job {
   proposalPdfPath?: string | null;
   estimateExcelPath?: string | null;
   customerName?: string | null;
+  /** Phase 1 skipped the create via a pre-existing mapping link (cross-number rebuild) — Phase 2 must treat it as authoritative. */
+  portfolioFromExistingLink?: boolean;
   timestamp: number;
 }
 
@@ -51,6 +53,10 @@ async function ensureTable(): Promise<void> {
     await db.execute(sql`
       CREATE INDEX IF NOT EXISTS "IDX_phase2_status" ON pending_phase2_jobs (status)
     `);
+    // Additive column for tables created before the cross-number-rebuild flag existed.
+    await db.execute(sql`
+      ALTER TABLE pending_phase2_jobs ADD COLUMN IF NOT EXISTS portfolio_from_existing_link BOOLEAN NOT NULL DEFAULT FALSE
+    `);
     tableEnsured = true;
   } catch (e) {
     // Table likely already exists — proceed
@@ -64,7 +70,7 @@ async function ensureTable(): Promise<void> {
  */
 export async function registerPendingPhase2(
   bidboardProjectId: string,
-  options?: { bidboardProjectUrl?: string; proposalPdfPath?: string | null; estimateExcelPath?: string | null; customerName?: string }
+  options?: { bidboardProjectUrl?: string; proposalPdfPath?: string | null; estimateExcelPath?: string | null; customerName?: string; portfolioFromExistingLink?: boolean }
 ): Promise<void> {
   await ensureTable();
   await db.insert(pendingPhase2Jobs).values({
@@ -73,6 +79,7 @@ export async function registerPendingPhase2(
     proposalPdfPath: options?.proposalPdfPath ?? null,
     estimateExcelPath: options?.estimateExcelPath ?? null,
     customerName: options?.customerName ?? null,
+    portfolioFromExistingLink: options?.portfolioFromExistingLink ?? false,
     status: "pending",
     attempts: 0,
   });
@@ -130,6 +137,7 @@ export async function takeNextPendingPhase2(): Promise<PendingPhase2Job | null> 
     proposalPdfPath: claimed.proposal_pdf_path,
     estimateExcelPath: claimed.estimate_excel_path,
     customerName: claimed.customer_name,
+    portfolioFromExistingLink: claimed.portfolio_from_existing_link ?? false,
     timestamp: new Date(claimed.created_at).getTime(),
   };
 }
@@ -300,6 +308,7 @@ export async function getPendingPhase2ForBidboard(bidboardProjectId: string): Pr
     proposalPdfPath: row.proposalPdfPath,
     estimateExcelPath: row.estimateExcelPath,
     customerName: row.customerName,
+    portfolioFromExistingLink: row.portfolioFromExistingLink ?? false,
     timestamp: row.createdAt ? new Date(row.createdAt).getTime() : Date.now(),
   };
 }

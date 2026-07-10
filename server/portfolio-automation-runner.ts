@@ -100,6 +100,9 @@ export async function runPhase1WithRetry(
           proposalPdfPath: output.proposalPdfPath ?? null,
           estimateExcelPath: output.estimateExcelPath ?? null,
           customerName: context.customerName,
+          // Persist the cross-number-rebuild flag so a webhook-fallback Phase 2 validates the linked portfolio as
+          // authoritative instead of quarantining it for the intentional number mismatch.
+          portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping,
         });
         pendingJobRegistered = true;
       } catch (regErr) {
