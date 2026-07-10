@@ -21,12 +21,12 @@ Note: `procore_projects` is **no longer portfolio-only** (was ~99, now 799 rows)
 - **orphaned_portfolio:** a row whose non-blank `portfolio_project_id` ∉ `portfolioCacheIds`.
 
 ### 2. Driver — `server/sync-mappings-reconciler.ts`
-`runSyncMappingsReconcile(deps, { commit }): Promise<ReconReport>`. Loads ALL `sync_mappings` (raw SQL over the whole table — NOT `getSyncMappings()`'s 200 cap) + `SELECT procore_id FROM procore_projects`; runs the checker; in `commit` mode writes each **error** issue as an `audit_logs status='error'` row (scanned by the 15-min `alertScheduler`) **and** a deduped `manual_review_queue` entry (keyed on `project_number`, via `getUnresolvedManualReviewQueueEntry` — no re-queue). `info` issues are counted only. Dry-run (default) writes nothing. Returns counts + per-issue detail; snapshot to `.audit/`.
+`runSyncMappingsReconcile(deps, { commit }): Promise<ReconReport>`. Loads ALL `sync_mappings` (raw SQL over the whole table — NOT `getSyncMappings()`'s 200 cap) + `SELECT procore_id FROM procore_projects`; runs the checker; in `commit` mode, per **error** issue: upserts a `manual_review_queue` entry on `(project_number, cycle_id)` with a stable per-ISSUE `cycleId = sync-integrity:<type>:<procoreId>:<sorted mappingIds>` (so distinct row-pairs sharing a Procore id never collapse), and — **only on FIRST detection** (no already-unresolved review for that cycleId) — writes an `audit_logs status='error'` row that the 15-min `alertScheduler` emails, so persistent still-unresolved drift doesn't re-alert every daily run. Each issue's writes are isolated in a `try/catch` (`failedWrites` counted) so one bad write can't abort the scan. `info` issues are counted only. Dry-run (default) writes nothing. Returns counts + per-issue detail; snapshot to `.audit/`.
 
 ### 3. Cron — `server/cron/syncMappingsReconcileScheduler.ts`
 Daily `0 3 * * *` America/Chicago, **env-gated `SYNC_MAPPINGS_RECONCILE_ENABLED`** (default OFF → merge is inert; Adnaan flips it), calling the driver in `commit` mode. Registered in `server/index.ts` next to the other schedulers.
 
-### 4. Manual route — `POST /api/sync-mappings-reconcile` (auth)
+### 4. Manual route — `POST /api/reconciliation/sync-mappings-integrity` (auth)
 `?commit=true` to write alerts, else dry-run; returns the report. For on-demand runs + verification.
 
 ### 5. CLI — `scripts/reconcile-sync-mappings.ts` (dry-run/`--commit`)

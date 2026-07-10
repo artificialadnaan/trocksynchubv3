@@ -36,11 +36,15 @@ function isBlank(v: unknown): boolean {
 function norm(v: unknown): string | null {
   return isBlank(v) ? null : String(v).trim();
 }
-/** (source_system, source_deal_id) identity — two rows are the "same deal" iff both present and equal. */
+/**
+ * (source_system, source_deal_id) identity — two rows are the "same deal" iff BOTH the deal id AND the
+ * system are present and equal. Fail-loud: if either system is blank we do NOT treat them as the same
+ * deal (so a genuine cross-deal collision stays an error rather than being downgraded to info).
+ */
 function sameDeal(a: ReconMappingRow, b: ReconMappingRow): boolean {
   const ad = norm(a.sourceDealId);
-  const bd = norm(b.sourceDealId);
-  return ad !== null && ad === bd && norm(a.sourceSystem) === norm(b.sourceSystem);
+  const as = norm(a.sourceSystem);
+  return ad !== null && ad === norm(b.sourceDealId) && as !== null && as === norm(b.sourceSystem);
 }
 
 export function findIntegrityIssues(rows: ReconMappingRow[], portfolioCacheIds: Set<string>): Issue[] {

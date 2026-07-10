@@ -41,6 +41,8 @@ export interface ReconcilerDeps {
     reason: string;
     details: Record<string, unknown>;
   }): Promise<unknown>;
+  /** Returns the existing manual_review row for this exact (projectNumber, cycleId), if any. */
+  findExistingManualReview(projectNumber: string, cycleId: string): Promise<{ resolvedAt: Date | string | null } | undefined>;
 }
 
 export interface ReconReport {
@@ -48,6 +50,7 @@ export interface ReconReport {
   cacheSize: number;
   counts: Record<IssueType, number>;
   alertsWritten: number;
+  failedWrites: number;
   committed: boolean;
   issues: Issue[];
 }
@@ -69,31 +72,52 @@ export async function runSyncMappingsReconcile(
   for (const i of issues) counts[i.type]++;
 
   let alertsWritten = 0;
+  let failedWrites = 0;
   if (opts.commit) {
     for (const issue of alerts) {
-      const projectNumber = issue.projectNumber ?? `sync-mapping-${issue.mappingIds.join("-")}`;
-      // Stable per-issue-identity cycle id → the manual_review upsert de-dupes across runs.
-      const cycleId = `sync-integrity:${issue.type}:${issue.procoreId ?? issue.mappingIds.join("-")}`;
-      const details = { type: issue.type, mappingIds: issue.mappingIds, procoreId: issue.procoreId, projectNumber: issue.projectNumber };
-      await deps.writeAuditError({
-        action: `sync_mappings_integrity_${issue.type}`,
-        entityType: "sync_mapping",
-        entityId: String(issue.mappingIds[0]),
-        source: "sync_mappings_reconciler",
-        status: "error",
-        category: "sync",
-        errorMessage: issue.detail,
-        details,
-      });
-      await deps.upsertManualReview({
-        projectNumber,
-        projectName: `sync_mappings integrity: ${issue.type}`,
-        currentStage: "integrity_reconcile",
-        cycleId,
-        reason: issue.detail,
-        details,
-      });
-      alertsWritten++;
+      // Per-issue try/catch: a single failed write must not abort the scan and drop every later alert.
+      try {
+        const projectNumber = issue.projectNumber ?? `sync-mapping-${issue.mappingIds.join("-")}`;
+        // Stable per-ISSUE identity (id + the exact row pair) → the manual_review upsert de-dupes across
+        // runs but never collapses two DISTINCT issues that happen to share a procore id.
+        const cycleId = `sync-integrity:${issue.type}:${issue.procoreId ?? "_"}:${issue.mappingIds.join("-")}`;
+        const details = { type: issue.type, mappingIds: issue.mappingIds, procoreId: issue.procoreId, projectNumber: issue.projectNumber };
+
+        // Fire the audit-log alert (which the 15-min alertScheduler emails) only on FIRST detection —
+        // i.e. when there is no already-unresolved manual_review row for this exact issue. That stops a
+        // persistent, still-unqueued-but-unresolved drift from re-emailing every daily run, while the
+        // manual_review entry itself is always kept current (upserted). A resolve → re-detect re-alerts.
+        const existing = await deps.findExistingManualReview(projectNumber, cycleId);
+        const alreadyAlerted = existing != null && existing.resolvedAt == null;
+
+        await deps.upsertManualReview({
+          projectNumber,
+          projectName: `sync_mappings integrity: ${issue.type}`,
+          currentStage: "integrity_reconcile",
+          cycleId,
+          reason: issue.detail,
+          details,
+        });
+        if (!alreadyAlerted) {
+          await deps.writeAuditError({
+            action: `sync_mappings_integrity_${issue.type}`,
+            entityType: "sync_mapping",
+            entityId: String(issue.mappingIds[0]),
+            source: "sync_mappings_reconciler",
+            status: "error",
+            category: "sync",
+            errorMessage: issue.detail,
+            details,
+          });
+          alertsWritten++;
+        }
+      } catch (err) {
+        failedWrites++;
+        console.error(
+          `[sync-mappings-reconcile] failed to record issue ${issue.type} rows=[${issue.mappingIds.join(",")}]:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
   }
 
@@ -102,6 +126,7 @@ export async function runSyncMappingsReconcile(
     cacheSize: cacheIds.size,
     counts,
     alertsWritten,
+    failedWrites,
     committed: opts.commit && alerts.length > 0,
     issues,
   };
@@ -125,21 +150,25 @@ function mapRow(r: Record<string, any>): ReconMappingRow {
   };
 }
 
-/** Default deps: raw SQL loads via a single connection + the storage alert writers. */
+/** Default deps: raw SQL loads via the pool (one pooled connection per query) + storage alert writers. */
 export function defaultReconcilerDeps(
   client: Queryable,
   storage: {
     createAuditLog(row: any): Promise<unknown>;
     createManualReviewQueueEntry(data: any): Promise<unknown>;
+    getManualReviewQueueEntry(projectNumber: string, cycleId: string): Promise<{ resolvedAt: Date | string | null } | undefined>;
   },
 ): ReconcilerDeps {
   return {
     loadRows: async () => (await client.query(LOAD_ROWS_SQL)).rows.map(mapRow),
+    // The FULL procore_projects cache (all active Procore projects — no longer portfolio-only), trimmed
+    // the same way the checker normalizes mapping-side ids so a padded cache id can't false-flag orphans.
     loadPortfolioCacheIds: async () => {
       const res = await client.query(`SELECT procore_id FROM procore_projects WHERE procore_id IS NOT NULL`);
-      return new Set(res.rows.map((r) => String(r.procore_id)));
+      return new Set(res.rows.map((r) => String(r.procore_id).trim()).filter((s) => s !== ""));
     },
     writeAuditError: (row) => storage.createAuditLog(row),
     upsertManualReview: (entry) => storage.createManualReviewQueueEntry(entry as any),
+    findExistingManualReview: (projectNumber, cycleId) => storage.getManualReviewQueueEntry(projectNumber, cycleId),
   };
 }

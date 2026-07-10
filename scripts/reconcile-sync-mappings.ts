@@ -9,7 +9,11 @@ import pg from "pg";
 import { writeFileSync, mkdirSync } from "fs";
 import { runSyncMappingsReconcile, defaultReconcilerDeps } from "../server/sync-mappings-reconciler";
 
-const noopStorage = { createAuditLog: async () => ({}), createManualReviewQueueEntry: async () => ({}) };
+const noopStorage = {
+  createAuditLog: async () => ({}),
+  createManualReviewQueueEntry: async () => ({}),
+  getManualReviewQueueEntry: async () => undefined,
+};
 
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL must be set");
@@ -22,7 +26,7 @@ async function main() {
         ` | INFO: cross_column_redundant=${report.counts.cross_column_redundant}`,
     );
     for (const i of report.issues.filter((x) => x.severity === "error")) {
-      console.log(`   [${i.type}] rows=[${i.mappingIds.join(",")}] procore=${i.procoreId} — ${i.detail}`);
+      console.log(`   [${i.type}] rows=[${i.mappingIds.join(",")}] id=${i.procoreId} — ${i.detail}`);
     }
     mkdirSync(".audit", { recursive: true });
     const path = `.audit/sync-mappings-reconcile-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;

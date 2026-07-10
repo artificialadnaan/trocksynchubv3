@@ -7,13 +7,22 @@ function row(over: Partial<ReconMappingRow> & { id: number }): ReconMappingRow {
   return { sourceSystem: "hubspot", sourceDealId: null, procoreProjectId: null, portfolioProjectId: null, bidboardProjectId: null, procoreProjectNumber: null, ...over };
 }
 
-function fakeDeps(rows: ReconMappingRow[], cache: Set<string>) {
+function fakeDeps(
+  rows: ReconMappingRow[],
+  cache: Set<string>,
+  opts: { existing?: Map<string, { resolvedAt: Date | string | null }>; failAuditOnce?: boolean } = {},
+) {
   const calls = { audit: [] as any[], review: [] as any[] };
+  let failed = false;
   const deps: ReconcilerDeps = {
     loadRows: async () => rows,
     loadPortfolioCacheIds: async () => cache,
-    writeAuditError: async (r) => { calls.audit.push(r); },
+    writeAuditError: async (r) => {
+      if (opts.failAuditOnce && !failed) { failed = true; throw new Error("transient audit write failure"); }
+      calls.audit.push(r);
+    },
     upsertManualReview: async (e) => { calls.review.push(e); },
+    findExistingManualReview: async (pn, cid) => opts.existing?.get(`${pn}::${cid}`),
   };
   return { deps, calls };
 }
@@ -45,8 +54,47 @@ describe("runSyncMappingsReconcile (alerting)", () => {
     expect(calls.review).toHaveLength(1);
     expect(calls.audit[0]).toMatchObject({ action: "sync_mappings_integrity_cross_column_conflict", status: "error", source: "sync_mappings_reconciler" });
     expect(calls.review[0].projectNumber).toBe("DFW-1");
-    // stable per-issue cycleId → the manual_review upsert de-dupes across runs
-    expect(calls.review[0].cycleId).toBe("sync-integrity:cross_column_conflict:X");
+    // cycleId is stable per-issue (id + row pair) → de-dupes across runs, never collapses distinct pairs
+    expect(calls.review[0].cycleId).toBe("sync-integrity:cross_column_conflict:X:1-2");
+  });
+
+  it("distinct conflicts sharing one Procore id get DISTINCT cycleIds (no manual_review collapse)", async () => {
+    // id X is procore on row 1 and portfolio on TWO different-deal rows 2 and 3 → two conflicts.
+    const rows = [
+      row({ id: 1, sourceDealId: "D1", procoreProjectId: "X", procoreProjectNumber: "DFW-1" }),
+      row({ id: 2, sourceDealId: "D2", portfolioProjectId: "X" }),
+      row({ id: 3, sourceDealId: "D3", portfolioProjectId: "X" }),
+    ];
+    const { deps, calls } = fakeDeps(rows, new Set(["X"]));
+    await runSyncMappingsReconcile(deps, { commit: true });
+    expect(calls.review).toHaveLength(2);
+    expect(new Set(calls.review.map((r) => r.cycleId)).size).toBe(2); // distinct → both survive the upsert
+  });
+
+  it("first detection alerts; a still-UNRESOLVED issue does not re-fire the audit alert (but review stays current)", async () => {
+    const rows = [
+      row({ id: 1, sourceDealId: "D1", procoreProjectId: "X", procoreProjectNumber: "DFW-1" }),
+      row({ id: 2, sourceDealId: "D2", portfolioProjectId: "X" }),
+    ];
+    const existing = new Map([["DFW-1::sync-integrity:cross_column_conflict:X:1-2", { resolvedAt: null }]]);
+    const { deps, calls } = fakeDeps(rows, new Set(["X"]), { existing });
+    const report = await runSyncMappingsReconcile(deps, { commit: true });
+    expect(calls.review).toHaveLength(1); // review still upserted (kept current)
+    expect(calls.audit).toHaveLength(0); // but NOT re-alerted
+    expect(report.alertsWritten).toBe(0);
+  });
+
+  it("a single failing write does not abort the scan — later issues still recorded, failedWrites counted", async () => {
+    const rows = [
+      row({ id: 1, sourceDealId: "D1", procoreProjectId: "X" }),
+      row({ id: 2, sourceDealId: "D2", portfolioProjectId: "X" }),
+      row({ id: 3, sourceDealId: "D3", procoreProjectId: "Y" }),
+      row({ id: 4, sourceDealId: "D4", portfolioProjectId: "Y" }),
+    ];
+    const { deps, calls } = fakeDeps(rows, new Set(["X", "Y"]), { failAuditOnce: true });
+    const report = await runSyncMappingsReconcile(deps, { commit: true });
+    expect(report.failedWrites).toBe(1); // the first issue's audit write threw
+    expect(calls.audit.length).toBe(1); // the second issue still got its audit write
   });
 
   it("orphaned portfolio alerts; clean table → no writes, committed false", async () => {
@@ -79,6 +127,7 @@ describe("defaultReconcilerDeps (raw-SQL loads over the whole table, PGlite)", (
     const storage = {
       createAuditLog: async (r: any) => { recorded.audit.push(r); return r; },
       createManualReviewQueueEntry: async (d: any) => { recorded.review.push(d); return d; },
+      getManualReviewQueueEntry: async () => undefined,
     };
     const report = await runSyncMappingsReconcile(defaultReconcilerDeps(pg as any, storage), { commit: true });
     expect(report.totalRows).toBe(2);
@@ -86,5 +135,42 @@ describe("defaultReconcilerDeps (raw-SQL loads over the whole table, PGlite)", (
     expect(report.counts.cross_column_conflict).toBe(1); // D1 vs D2 share id X across columns
     expect(recorded.audit).toHaveLength(1);
     expect(recorded.review).toHaveLength(1);
+  });
+
+  it("re-run is idempotent against REAL tables: one manual_review row, audit fires once then not while unresolved", async () => {
+    const pg = new PGlite();
+    await pg.exec(`
+      CREATE TABLE sync_mappings (id SERIAL PRIMARY KEY, source_system text, source_deal_id text, procore_project_id text, portfolio_project_id text, bidboard_project_id text, procore_project_number text);
+      CREATE TABLE procore_projects (procore_id text);
+      CREATE TABLE manual_review_queue (id SERIAL PRIMARY KEY, project_number text NOT NULL, project_name text NOT NULL, current_stage text NOT NULL, cycle_id text NOT NULL, reason text NOT NULL, details jsonb, created_at timestamp DEFAULT now(), updated_at timestamp DEFAULT now(), resolved_at timestamp, UNIQUE(project_number, cycle_id));
+      CREATE TABLE audit_logs (id SERIAL PRIMARY KEY, action text, status text, details jsonb, created_at timestamp DEFAULT now());
+      INSERT INTO sync_mappings (source_system, source_deal_id, procore_project_id, procore_project_number) VALUES ('hubspot','D1','X','DFW-1');
+      INSERT INTO sync_mappings (source_system, source_deal_id, portfolio_project_id) VALUES ('hubspot','D2','X');
+      INSERT INTO procore_projects (procore_id) VALUES ('X');
+    `);
+    // Storage backed by the real upsert semantics (onConflict (project_number, cycle_id) DO UPDATE WHERE resolved_at IS NULL).
+    const storage = {
+      createAuditLog: async (r: any) => { await pg.query(`INSERT INTO audit_logs (action, status, details) VALUES ($1,$2,$3)`, [r.action, r.status, JSON.stringify(r.details)]); return r; },
+      createManualReviewQueueEntry: async (d: any) => {
+        await pg.query(
+          `INSERT INTO manual_review_queue (project_number, project_name, current_stage, cycle_id, reason, details)
+           VALUES ($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (project_number, cycle_id) DO UPDATE SET reason = EXCLUDED.reason, updated_at = now() WHERE manual_review_queue.resolved_at IS NULL`,
+          [d.projectNumber, d.projectName, d.currentStage, d.cycleId, d.reason, JSON.stringify(d.details)],
+        );
+        return d;
+      },
+      getManualReviewQueueEntry: async (projectNumber: string, cycleId: string) => {
+        const r = (await pg.query(`SELECT resolved_at FROM manual_review_queue WHERE project_number=$1 AND cycle_id=$2`, [projectNumber, cycleId])).rows[0] as any;
+        return r ? { resolvedAt: r.resolved_at ?? null } : undefined;
+      },
+    };
+    const deps = defaultReconcilerDeps(pg as any, storage);
+    await runSyncMappingsReconcile(deps, { commit: true });
+    await runSyncMappingsReconcile(deps, { commit: true }); // second run
+    const reviewCount = Number(((await pg.query(`SELECT count(*)::int AS n FROM manual_review_queue`)).rows[0] as any).n);
+    const auditCount = Number(((await pg.query(`SELECT count(*)::int AS n FROM audit_logs`)).rows[0] as any).n);
+    expect(reviewCount).toBe(1); // upsert → single row across both runs
+    expect(auditCount).toBe(1); // alerted on first detection only (still unresolved on run 2)
   });
 });

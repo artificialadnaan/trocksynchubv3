@@ -100,6 +100,18 @@ describe("findIntegrityIssues — orphaned portfolio", () => {
     );
     expect(issues).toHaveLength(0);
   });
+
+  it("a portfolio row can BOTH collide cross-column AND be orphaned (co-fire)", () => {
+    const issues = findIntegrityIssues(
+      [
+        row({ id: 1, sourceDealId: "D1", procoreProjectId: "X" }),
+        row({ id: 2, sourceDealId: "D2", portfolioProjectId: "X" }), // collides (different deal) AND X ∉ cache
+      ],
+      cache("OTHER"),
+    );
+    expect(issues.some((i) => i.type === "cross_column_conflict")).toBe(true);
+    expect(issues.some((i) => i.type === "orphaned_portfolio" && i.mappingIds[0] === 2)).toBe(true);
+  });
 });
 
 describe("partitionIssues", () => {
