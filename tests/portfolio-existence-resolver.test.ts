@@ -203,10 +203,12 @@ describe("handlePortfolioCreateGate", () => {
     expect(calls.createAuditLog).toHaveLength(0);
   });
 
-  it("exists but mapping already has portfolio_project_id → skip, no redundant write", async () => {
-    const { deps, calls } = makeDeps({ cacheRow: { procoreId: "999" }, mapping: { id: 7, portfolioProjectId: "999" } });
+  it("exists but mapping already has portfolio_project_id → skip via the link, no redundant write", async () => {
+    // Distinct ids prove the guard returns the MAPPING's link (777), not the cache resolve (999).
+    const { deps, calls } = makeDeps({ cacheRow: { procoreId: "999" }, mapping: { id: 7, portfolioProjectId: "777" } });
     const out = await handlePortfolioCreateGate(BASE, deps);
-    expect(out.action).toBe("skip");
+    expect(out).toMatchObject({ action: "skip", portfolioProjectId: "777" });
+    expect(out.existence).toMatchObject({ source: "mapping" });
     expect(calls.updateSyncMapping).toHaveLength(0);
   });
 
