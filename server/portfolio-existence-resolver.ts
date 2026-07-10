@@ -106,7 +106,10 @@ export async function liveConfirmByNumber(
       const { fetchWithRateLimitRetry } = await import("./lib/rate-limit-tracker");
       const [accessToken, baseUrl] = await Promise.all([getAccessToken(), getProcoreApiBaseUrl()]);
       const resp = await fetchWithRateLimitRetry(
-        `${baseUrl}/rest/v1.1/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}`,
+        // v1.0 — the version the rest of the codebase uses for company projects (procore.ts:450/847).
+        // The original v1.1 path 404'd (dormant until the first cache-miss live-confirm exercised it),
+        // which made the gate fail-closed/abort on every cache-miss create.
+        `${baseUrl}/rest/v1.0/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}`,
         { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId }, signal: controller.signal },
         "procore"
       );
