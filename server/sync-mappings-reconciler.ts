@@ -41,8 +41,6 @@ export interface ReconcilerDeps {
     reason: string;
     details: Record<string, unknown>;
   }): Promise<unknown>;
-  /** Returns the existing manual_review row for this exact (projectNumber, cycleId), if any. */
-  findExistingManualReview(projectNumber: string, cycleId: string): Promise<{ resolvedAt: Date | string | null } | undefined>;
 }
 
 export interface ReconReport {
@@ -60,7 +58,15 @@ export async function runSyncMappingsReconcile(
   opts: { commit: boolean },
 ): Promise<ReconReport> {
   const rows = await deps.loadRows();
-  const cacheIds = await deps.loadPortfolioCacheIds();
+  // A cache-load failure must NOT drop the cross-column checks (which don't need the cache). Fall back to
+  // an empty set → the checker's empty-cache fail-safe skips ONLY the orphan check.
+  let cacheIds: Set<string>;
+  try {
+    cacheIds = await deps.loadPortfolioCacheIds();
+  } catch (err) {
+    console.error("[sync-mappings-reconcile] procore_projects cache load failed; skipping orphan checks:", err instanceof Error ? err.message : err);
+    cacheIds = new Set();
+  }
   const issues = findIntegrityIssues(rows, cacheIds);
   const { alerts } = partitionIssues(issues);
 
@@ -83,13 +89,21 @@ export async function runSyncMappingsReconcile(
         const cycleId = `sync-integrity:${issue.type}:${issue.procoreId ?? "_"}:${issue.mappingIds.join("-")}`;
         const details = { type: issue.type, mappingIds: issue.mappingIds, procoreId: issue.procoreId, projectNumber: issue.projectNumber };
 
-        // Fire the audit-log alert (which the 15-min alertScheduler emails) only on FIRST detection —
-        // i.e. when there is no already-unresolved manual_review row for this exact issue. That stops a
-        // persistent, still-unqueued-but-unresolved drift from re-emailing every daily run, while the
-        // manual_review entry itself is always kept current (upserted). A resolve → re-detect re-alerts.
-        const existing = await deps.findExistingManualReview(projectNumber, cycleId);
-        const alreadyAlerted = existing != null && existing.resolvedAt == null;
-
+        // Alert FIRST (audit_logs status='error' → the 15-min alertScheduler emails it), THEN queue for
+        // triage. No first-detection gate: persistent unresolved drift intentionally re-alerts each run
+        // (it is still broken), while the manual_review_queue upsert on (project_number, cycle_id) keeps the
+        // triage surface de-duped so it never grows. Audit-before-review means a row in the queue always
+        // corresponds to an issue that was (attempted-)alerted.
+        await deps.writeAuditError({
+          action: `sync_mappings_integrity_${issue.type}`,
+          entityType: "sync_mapping",
+          entityId: String(issue.mappingIds[0]),
+          source: "sync_mappings_reconciler",
+          status: "error",
+          category: "sync",
+          errorMessage: issue.detail,
+          details,
+        });
         await deps.upsertManualReview({
           projectNumber,
           projectName: `sync_mappings integrity: ${issue.type}`,
@@ -98,19 +112,7 @@ export async function runSyncMappingsReconcile(
           reason: issue.detail,
           details,
         });
-        if (!alreadyAlerted) {
-          await deps.writeAuditError({
-            action: `sync_mappings_integrity_${issue.type}`,
-            entityType: "sync_mapping",
-            entityId: String(issue.mappingIds[0]),
-            source: "sync_mappings_reconciler",
-            status: "error",
-            category: "sync",
-            errorMessage: issue.detail,
-            details,
-          });
-          alertsWritten++;
-        }
+        alertsWritten++;
       } catch (err) {
         failedWrites++;
         console.error(
@@ -156,7 +158,6 @@ export function defaultReconcilerDeps(
   storage: {
     createAuditLog(row: any): Promise<unknown>;
     createManualReviewQueueEntry(data: any): Promise<unknown>;
-    getManualReviewQueueEntry(projectNumber: string, cycleId: string): Promise<{ resolvedAt: Date | string | null } | undefined>;
   },
 ): ReconcilerDeps {
   return {
@@ -169,6 +170,5 @@ export function defaultReconcilerDeps(
     },
     writeAuditError: (row) => storage.createAuditLog(row),
     upsertManualReview: (entry) => storage.createManualReviewQueueEntry(entry as any),
-    findExistingManualReview: (projectNumber, cycleId) => storage.getManualReviewQueueEntry(projectNumber, cycleId),
   };
 }

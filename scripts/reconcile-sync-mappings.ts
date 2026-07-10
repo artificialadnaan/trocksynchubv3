@@ -12,7 +12,6 @@ import { runSyncMappingsReconcile, defaultReconcilerDeps } from "../server/sync-
 const noopStorage = {
   createAuditLog: async () => ({}),
   createManualReviewQueueEntry: async () => ({}),
-  getManualReviewQueueEntry: async () => undefined,
 };
 
 async function main() {

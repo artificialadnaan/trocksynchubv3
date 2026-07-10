@@ -10,19 +10,21 @@ function row(over: Partial<ReconMappingRow> & { id: number }): ReconMappingRow {
 function fakeDeps(
   rows: ReconMappingRow[],
   cache: Set<string>,
-  opts: { existing?: Map<string, { resolvedAt: Date | string | null }>; failAuditOnce?: boolean } = {},
+  opts: { failAuditOnce?: boolean; cacheThrows?: boolean } = {},
 ) {
   const calls = { audit: [] as any[], review: [] as any[] };
   let failed = false;
   const deps: ReconcilerDeps = {
     loadRows: async () => rows,
-    loadPortfolioCacheIds: async () => cache,
+    loadPortfolioCacheIds: async () => {
+      if (opts.cacheThrows) throw new Error("procore_projects cache down");
+      return cache;
+    },
     writeAuditError: async (r) => {
       if (opts.failAuditOnce && !failed) { failed = true; throw new Error("transient audit write failure"); }
       calls.audit.push(r);
     },
     upsertManualReview: async (e) => { calls.review.push(e); },
-    findExistingManualReview: async (pn, cid) => opts.existing?.get(`${pn}::${cid}`),
   };
   return { deps, calls };
 }
@@ -71,17 +73,16 @@ describe("runSyncMappingsReconcile (alerting)", () => {
     expect(new Set(calls.review.map((r) => r.cycleId)).size).toBe(2); // distinct → both survive the upsert
   });
 
-  it("first detection alerts; a still-UNRESOLVED issue does not re-fire the audit alert (but review stays current)", async () => {
+  it("a cache-load failure still runs the cross-column checks (only orphan checks skipped)", async () => {
     const rows = [
-      row({ id: 1, sourceDealId: "D1", procoreProjectId: "X", procoreProjectNumber: "DFW-1" }),
-      row({ id: 2, sourceDealId: "D2", portfolioProjectId: "X" }),
+      row({ id: 1, sourceDealId: "D1", procoreProjectId: "X" }),
+      row({ id: 2, sourceDealId: "D2", portfolioProjectId: "X" }), // conflict — needs no cache
     ];
-    const existing = new Map([["DFW-1::sync-integrity:cross_column_conflict:X:1-2", { resolvedAt: null }]]);
-    const { deps, calls } = fakeDeps(rows, new Set(["X"]), { existing });
+    const { deps, calls } = fakeDeps(rows, new Set(["X"]), { cacheThrows: true });
     const report = await runSyncMappingsReconcile(deps, { commit: true });
-    expect(calls.review).toHaveLength(1); // review still upserted (kept current)
-    expect(calls.audit).toHaveLength(0); // but NOT re-alerted
-    expect(report.alertsWritten).toBe(0);
+    expect(report.cacheSize).toBe(0); // fell back to empty set
+    expect(report.counts.cross_column_conflict).toBe(1); // still detected + alerted
+    expect(calls.audit).toHaveLength(1);
   });
 
   it("a single failing write does not abort the scan — later issues still recorded, failedWrites counted", async () => {
@@ -127,7 +128,6 @@ describe("defaultReconcilerDeps (raw-SQL loads over the whole table, PGlite)", (
     const storage = {
       createAuditLog: async (r: any) => { recorded.audit.push(r); return r; },
       createManualReviewQueueEntry: async (d: any) => { recorded.review.push(d); return d; },
-      getManualReviewQueueEntry: async () => undefined,
     };
     const report = await runSyncMappingsReconcile(defaultReconcilerDeps(pg as any, storage), { commit: true });
     expect(report.totalRows).toBe(2);
@@ -137,7 +137,7 @@ describe("defaultReconcilerDeps (raw-SQL loads over the whole table, PGlite)", (
     expect(recorded.review).toHaveLength(1);
   });
 
-  it("re-run is idempotent against REAL tables: one manual_review row, audit fires once then not while unresolved", async () => {
+  it("re-run against REAL tables: manual_review de-dupes to ONE row (upsert); audit re-alerts each run (persistent drift)", async () => {
     const pg = new PGlite();
     await pg.exec(`
       CREATE TABLE sync_mappings (id SERIAL PRIMARY KEY, source_system text, source_deal_id text, procore_project_id text, portfolio_project_id text, bidboard_project_id text, procore_project_number text);
@@ -160,17 +160,13 @@ describe("defaultReconcilerDeps (raw-SQL loads over the whole table, PGlite)", (
         );
         return d;
       },
-      getManualReviewQueueEntry: async (projectNumber: string, cycleId: string) => {
-        const r = (await pg.query(`SELECT resolved_at FROM manual_review_queue WHERE project_number=$1 AND cycle_id=$2`, [projectNumber, cycleId])).rows[0] as any;
-        return r ? { resolvedAt: r.resolved_at ?? null } : undefined;
-      },
     };
     const deps = defaultReconcilerDeps(pg as any, storage);
     await runSyncMappingsReconcile(deps, { commit: true });
     await runSyncMappingsReconcile(deps, { commit: true }); // second run
     const reviewCount = Number(((await pg.query(`SELECT count(*)::int AS n FROM manual_review_queue`)).rows[0] as any).n);
     const auditCount = Number(((await pg.query(`SELECT count(*)::int AS n FROM audit_logs`)).rows[0] as any).n);
-    expect(reviewCount).toBe(1); // upsert → single row across both runs
-    expect(auditCount).toBe(1); // alerted on first detection only (still unresolved on run 2)
+    expect(reviewCount).toBe(1); // upsert on (project_number, cycle_id) → single triage row across both runs
+    expect(auditCount).toBe(2); // persistent unresolved drift intentionally re-alerts each run
   });
 });

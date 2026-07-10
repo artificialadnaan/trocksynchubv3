@@ -62,7 +62,9 @@ export function findIntegrityIssues(rows: ReconMappingRow[], portfolioCacheIds: 
     if (!procore) continue;
     for (const b of portfolioIdToRows.get(procore) ?? []) {
       if (b.id === a.id) continue; // same row (procore==portfolio) is a benign transitioned row, not cross-ROW
-      const key = [a.id, b.id].sort((x, y) => x - y).join(":");
+      // Key on the colliding id TOO — the same row-pair can collide on two different ids (A has
+      // procore=X/portfolio=Y, B has procore=Y/portfolio=X), and both are distinct drift to report.
+      const key = `${procore}:${[a.id, b.id].sort((x, y) => x - y).join(":")}`;
       if (seenPairs.has(key)) continue;
       seenPairs.add(key);
       const same = sameDeal(a, b);

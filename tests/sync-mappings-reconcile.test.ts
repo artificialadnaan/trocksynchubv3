@@ -71,6 +71,19 @@ describe("findIntegrityIssues — cross-column", () => {
     );
     expect(issues[0]).toMatchObject({ type: "cross_column_conflict", severity: "error" });
   });
+
+  it("reports BOTH collisions when one row-pair crosses on two different ids (X and Y)", () => {
+    const issues = findIntegrityIssues(
+      [
+        row({ id: 1, sourceDealId: "D1", procoreProjectId: "X", portfolioProjectId: "Y" }),
+        row({ id: 2, sourceDealId: "D2", procoreProjectId: "Y", portfolioProjectId: "X" }),
+      ],
+      cache("X", "Y"),
+    );
+    const xcol = issues.filter((i) => i.type === "cross_column_conflict");
+    expect(xcol).toHaveLength(2);
+    expect(new Set(xcol.map((i) => i.procoreId))).toEqual(new Set(["X", "Y"]));
+  });
 });
 
 describe("findIntegrityIssues — orphaned portfolio", () => {
