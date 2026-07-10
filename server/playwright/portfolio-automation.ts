@@ -2863,6 +2863,16 @@ export function detectPortfolioIdentityMismatch(
     };
   }
 
+  // The mapping's EXPLICIT portfolio link matched the reached portfolio (the id check above did not fire). That
+  // link is the strongest identity signal — established by a self-heal or a MANUAL cross-number REBUILD link
+  // (same real project re-bid under a NEW number, linked to the older-number portfolio). So the project
+  // number/name/hubspot-deal need not match the trigger; don't second-guess a confirmed id link on them. (For
+  // a fresh create the mapping isn't linked yet — expectedPortfolioProjectId is null — so this never fires
+  // there, and the number/name checks below still guard the create path.)
+  if (expectedPortfolioProjectId) {
+    return null;
+  }
+
   const expectedProjectNumber = normalizeKey(expected.expectedProjectNumber);
   const actualProjectNumber = normalizeKey(actual.actualProjectNumber);
   const linkedProjectNumber = normalizeKey(actual.linkedProjectNumber);

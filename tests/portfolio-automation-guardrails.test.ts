@@ -162,6 +162,40 @@ describe("portfolio automation guard rails", () => {
     });
   });
 
+  it("does NOT flag a number mismatch when the reached portfolio IS the mapping's explicit link (cross-number rebuild)", async () => {
+    const { detectPortfolioIdentityMismatch } = await import("../server/playwright/portfolio-automation.ts");
+    // District at Boynton (DFW-1-14126-ag) is manually linked to The District Boynton's portfolio 598134326608331
+    // (number DBTDBPAINT). The explicit id link is authoritative — the intentionally-different number must NOT
+    // quarantine the valid rebuild link.
+    const mismatch = detectPortfolioIdentityMismatch(
+      {
+        bidboardProjectId: "562949955804180",
+        expectedProjectName: "District at Boynton",
+        expectedProjectNumber: "DFW-1-14126-ag",
+        expectedHubspotDealId: "hs-1",
+        expectedPortfolioProjectId: "598134326608331",
+      },
+      {
+        portfolioProjectId: "598134326608331",
+        actualProjectName: "The District Boynton",
+        actualProjectNumber: "DBTDBPAINT",
+        linkedHubspotDealId: "hs-2",
+        linkedProjectName: "The District Boynton",
+        linkedProjectNumber: "DBTDBPAINT",
+      }
+    );
+    expect(mismatch).toBeNull();
+  });
+
+  it("STILL flags portfolio_project_id_mismatch when the reached portfolio is NOT the mapping's link", async () => {
+    const { detectPortfolioIdentityMismatch } = await import("../server/playwright/portfolio-automation.ts");
+    const mismatch = detectPortfolioIdentityMismatch(
+      { bidboardProjectId: "b", expectedProjectNumber: "DFW-1-14126-ag", expectedPortfolioProjectId: "598134326608331" },
+      { portfolioProjectId: "999999", actualProjectNumber: "OTHER", linkedProjectNumber: "OTHER" }
+    );
+    expect(mismatch).toMatchObject({ reason: "portfolio_project_id_mismatch" });
+  });
+
   it("does not flag a mismatch when the expected and actual identity align", async () => {
     const { detectPortfolioIdentityMismatch } = await import("../server/playwright/portfolio-automation.ts");
 

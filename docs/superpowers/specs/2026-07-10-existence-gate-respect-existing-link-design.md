@@ -17,7 +17,9 @@ Everything else is unchanged: not-yet-linked deals still resolve by number (cach
 ## Safety
 - Strictly *reduces* duplicate risk: an already-linked deal can no longer be re-created.
 - A blank/whitespace `portfolio_project_id` does NOT short-circuit (falls through to the resolve).
-- A mapping-lookup error is swallowed here and falls through to the Procore resolve; the runner already fails closed on its own lookup error upstream, so the create is still gated.
+- A mapping-lookup error **fails closed**: existence → `unknown` → `abort` + the existing audit alert, WITHOUT falling through to the number-based resolve (which could create a duplicate for an already-linked rebuild whose only signal is the stored link). Does not rely on the runner's separate upstream lookup.
+- Self-heal re-reads the mapping fresh before writing, so a concurrently-set `portfolio_project_id` is never clobbered.
+- **Phase-2 identity check (companion fix in `detectPortfolioIdentityMismatch`):** Phase 2 re-validates the resolved portfolio's NUMBER against the deal/trigger number, which would `quarantine` + throw on a cross-number rebuild (linked portfolio's number intentionally differs). Fix: when the mapping's explicit `expectedPortfolioProjectId` **matches** the reached portfolio id, that link is authoritative → return no-mismatch and skip the number/name/hubspot checks. A fresh create isn't linked yet (`expectedPortfolioProjectId` null), so those checks still guard the create path unchanged.
 - Edge (accepted): a linked deal with a *blank* `procore_project_number` fails closed at the runner's pre-gate blank-number check before reaching this guard — safe (no create), just not a clean skip. Rare; linked deals carry a number.
 
 ## Testing (vitest)

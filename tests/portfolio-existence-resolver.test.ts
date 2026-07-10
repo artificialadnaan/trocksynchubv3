@@ -207,6 +207,25 @@ describe("handlePortfolioCreateGate", () => {
     expect(calls.createAuditLog).toHaveLength(0);
   });
 
+  it("self-heal re-reads fresh: if the row got linked concurrently during the resolve, it does NOT clobber the newer link", async () => {
+    const updateCalls: any[] = [];
+    let call = 0;
+    const deps: any = {
+      getProcoreProjectsByNumber: async () => [{ procoreId: "999" }], // cache hit → resolve says skip
+      liveConfirmByNumber: async () => ({ exists: false }),
+      getSyncMappingByBidboardProjectId: async () => {
+        call += 1;
+        // 1st call (top guard): still unlinked; 2nd call (fresh self-heal read): linked by a concurrent action
+        return call === 1 ? { id: 7, portfolioProjectId: null } : { id: 7, portfolioProjectId: "555" };
+      },
+      updateSyncMapping: async (id: number, patch: any) => { updateCalls.push({ id, patch }); },
+      createAuditLog: async () => {},
+    };
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out.action).toBe("skip");
+    expect(updateCalls).toHaveLength(0); // fresh read saw the concurrent link → no clobbering write
+  });
+
   it("exists but mapping already has portfolio_project_id → skip via the link, no redundant write", async () => {
     // Distinct ids prove the guard returns the MAPPING's link (777), not the cache resolve (999).
     const { deps, calls } = makeDeps({ cacheRow: { procoreId: "999" }, mapping: { id: 7, portfolioProjectId: "777" } });

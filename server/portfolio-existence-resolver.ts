@@ -210,8 +210,12 @@ export async function handlePortfolioCreateGate(
 
   if (action === "skip" && existence.exists === true) {
     try {
-      if (mapping?.id && !mapping.portfolioProjectId) {
-        await deps.updateSyncMapping(mapping.id, { portfolioProjectId: existence.portfolioProjectId });
+      // Re-read the mapping fresh: the top-of-function lookup can be stale after the (networked) resolve, during
+      // which another automation or a manual action could have linked this row. Only write when it is STILL
+      // unlinked, so a newer portfolio_project_id is never clobbered.
+      const fresh = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
+      if (fresh?.id && !fresh.portfolioProjectId) {
+        await deps.updateSyncMapping(fresh.id, { portfolioProjectId: existence.portfolioProjectId });
       }
     } catch {
       /* self-heal is best-effort; skipping the create is the important part */
