@@ -125,6 +125,10 @@ export async function liveConfirmByNumber(
       // Paginate the FUZZY keyed search to completeness (mirrors procore.ts:153). v1.0 = the version the rest
       // of the codebase uses for company projects (procore.ts:450/847); the original v1.1 path 404'd.
       for (let page = 1; page <= LIVE_SEARCH_MAX_PAGES; page++) {
+        // Once the outer timeout fires (Promise.race already settled to unknown), stop issuing further pages —
+        // fetchWithRateLimitRetry's 429 sleeps don't observe the signal, so without this the detached loop
+        // would keep fetching the remaining pages for nothing.
+        if (controller.signal.aborted) return { exists: "unknown", reason: "live confirm aborted (timeout)" };
         const resp = await fetchWithRateLimitRetry(
           `${baseUrl}/rest/v1.0/companies/${companyId}/projects?filters[search]=${encodeURIComponent(projectNumber)}&per_page=${LIVE_SEARCH_PER_PAGE}&page=${page}`,
           { headers: { Authorization: `Bearer ${accessToken}`, "Procore-Company-Id": companyId }, signal: controller.signal },
