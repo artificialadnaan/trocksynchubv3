@@ -253,5 +253,20 @@ export async function handlePortfolioCreateGate(
     }
   }
 
+  if (action === "create") {
+    // Symmetric to the skip self-heal re-read: a manual repair (especially a cross-number rebuild link the
+    // number-based resolve cannot see) could have linked this row DURING the networked resolve. Re-read before
+    // honoring create, so the runner never clicks Add-to-Portfolio and makes the duplicate this gate prevents.
+    try {
+      const fresh = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
+      const freshLink = fresh?.portfolioProjectId?.trim();
+      if (freshLink) {
+        return { action: "skip", portfolioProjectId: freshLink, existence: { exists: true, portfolioProjectId: freshLink, source: "mapping" } };
+      }
+    } catch {
+      /* best-effort re-read; fall through to create */
+    }
+  }
+
   return { action, existence };
 }
