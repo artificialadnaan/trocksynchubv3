@@ -208,6 +208,31 @@ export async function handlePortfolioCreateGate(
     : await resolveExistingPortfolioProject(input, deps);
   const action = decidePortfolioCreateAction(existence);
 
+  // Best-effort status='error' alert for an indeterminate outcome (the 15-min failure digest scans it). Shared by
+  // the resolve-time abort and the create-path re-read failure below — both fail closed rather than risk a dup.
+  const writeIndeterminateAlert = async (reason: string) => {
+    try {
+      await deps.createAuditLog({
+        action: "portfolio_existence_check_indeterminate",
+        entityType: "bidboard_project",
+        entityId: input.bidboardProjectId,
+        source: "portfolio_automation",
+        status: "error",
+        category: "sync",
+        errorMessage:
+          `Portfolio automation aborted for bidboard ${input.bidboardProjectId} (project ${input.procoreProjectNumber}): ` +
+          `could not confirm whether a Procore portfolio already exists — failing closed to avoid a duplicate. Retry when Procore is reachable.`,
+        details: {
+          bidboardProjectId: input.bidboardProjectId,
+          procoreProjectNumber: input.procoreProjectNumber,
+          reason,
+        },
+      });
+    } catch {
+      /* alert write is best-effort; the abort itself (no create) is the safety guarantee */
+    }
+  };
+
   if (action === "skip" && existence.exists === true) {
     try {
       // Re-read the mapping fresh: the top-of-function lookup can be stale after the (networked) resolve, during
@@ -231,26 +256,7 @@ export async function handlePortfolioCreateGate(
   }
 
   if (action === "abort") {
-    try {
-      await deps.createAuditLog({
-        action: "portfolio_existence_check_indeterminate",
-        entityType: "bidboard_project",
-        entityId: input.bidboardProjectId,
-        source: "portfolio_automation",
-        status: "error",
-        category: "sync",
-        errorMessage:
-          `Portfolio automation aborted for bidboard ${input.bidboardProjectId} (project ${input.procoreProjectNumber}): ` +
-          `could not confirm whether a Procore portfolio already exists — failing closed to avoid a duplicate. Retry when Procore is reachable.`,
-        details: {
-          bidboardProjectId: input.bidboardProjectId,
-          procoreProjectNumber: input.procoreProjectNumber,
-          reason: existence.exists === "unknown" ? existence.reason : "unknown",
-        },
-      });
-    } catch {
-      /* alert write is best-effort; the abort itself (no create) is the safety guarantee */
-    }
+    await writeIndeterminateAlert(existence.exists === "unknown" ? existence.reason : "unknown");
   }
 
   if (action === "create") {
@@ -263,8 +269,14 @@ export async function handlePortfolioCreateGate(
       if (freshLink) {
         return { action: "skip", portfolioProjectId: freshLink, existence: { exists: true, portfolioProjectId: freshLink, source: "mapping" } };
       }
-    } catch {
-      /* best-effort re-read; fall through to create */
+    } catch (err) {
+      // FAIL CLOSED: this re-read is the ONLY guard against a concurrent/manual link (especially a cross-number
+      // rebuild the number-based resolve cannot see) added DURING the networked resolve. If we can't read the
+      // mapping we can't rule that out — abort (retry next cycle) rather than create the duplicate this gate
+      // exists to prevent. Mirrors the top-of-function lookup, which also fails closed on a read error.
+      const reason = `create-path mapping re-read failed: ${err instanceof Error ? err.message : String(err)}`;
+      await writeIndeterminateAlert(reason);
+      return { action: "abort", existence: { exists: "unknown", reason } };
     }
   }
 

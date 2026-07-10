@@ -272,6 +272,30 @@ describe("handlePortfolioCreateGate", () => {
     expect(calls.createAuditLog).toHaveLength(1);
   });
 
+  it("create-path mapping RE-READ error → abort (fail closed), never falls through to a create", async () => {
+    // Top guard reads cleanly (no link) so we reach the create decision; but a transient DB error on the
+    // create-path re-read means we can't rule out a concurrent/cross-number link added DURING the resolve. We
+    // must fail closed (abort + status='error' alert), not fall through and click Add-to-Portfolio → duplicate.
+    const auditLogs: any[] = [];
+    let call = 0;
+    const deps: any = {
+      getProcoreProjectsByNumber: async () => [], // cache miss
+      liveConfirmByNumber: async () => ({ exists: false } as PortfolioExistenceResult), // → resolve says create
+      getSyncMappingByBidboardProjectId: async () => {
+        call += 1;
+        if (call === 1) return undefined; // top guard: no existing link → proceed to resolve
+        throw new Error("mapping db down"); // create-path re-read fails
+      },
+      updateSyncMapping: async () => {},
+      createAuditLog: async (row: any) => { auditLogs.push(row); },
+    };
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out.action).toBe("abort");
+    expect(out.existence.exists).toBe("unknown");
+    expect(auditLogs).toHaveLength(1);
+    expect(auditLogs[0]).toMatchObject({ action: "portfolio_existence_check_indeterminate", status: "error" });
+  });
+
   it("false → action create, no writes", async () => {
     const { deps, calls } = makeDeps({ cacheRow: undefined, liveResult: { exists: false } });
     const out = await handlePortfolioCreateGate(BASE, deps);

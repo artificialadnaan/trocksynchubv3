@@ -701,12 +701,15 @@ export class DatabaseStorage implements IStorage {
       lastSyncAt: new Date(),
       lastSyncStatus: 'portfolio_transition',
     };
-    if (opts?.manualOverride) {
-      // Mark the link authoritative ONLY for an EXPLICIT cross-number rebuild override, so Phase-2 identity
-      // validation trusts the intentionally-different portfolio number/name. A NORMAL manual transition is left
-      // unmarked, so a wrong pasted/selected portfolioProjectId still gets quarantined by the number/name check.
-      setValues.metadata = sql`COALESCE(${syncMappings.metadata}, '{}'::jsonb) || '{"manualPortfolioOverride": true}'::jsonb`;
-    }
+    // The manualPortfolioOverride marker reflects THIS transition's intent, so every re-link re-establishes trust
+    // from scratch. An EXPLICIT cross-number rebuild override (manualOverride:true) marks the link authoritative,
+    // so Phase-2 identity validation trusts the intentionally-different portfolio number/name. ANY normal
+    // transition CLEARS it to false — so correcting a previously-marked mapping to a normal, matching portfolio
+    // (or re-pointing it at a different id) is fully number/name-validated again, and a stale marker can never
+    // silently bypass a wrong link. Merge (||) either way so unrelated metadata keys are preserved.
+    setValues.metadata = opts?.manualOverride
+      ? sql`COALESCE(${syncMappings.metadata}, '{}'::jsonb) || '{"manualPortfolioOverride": true}'::jsonb`
+      : sql`COALESCE(${syncMappings.metadata}, '{}'::jsonb) || '{"manualPortfolioOverride": false}'::jsonb`;
     const [result] = await db.update(syncMappings)
       .set(setValues)
       .where(eq(syncMappings.id, mapping.id))

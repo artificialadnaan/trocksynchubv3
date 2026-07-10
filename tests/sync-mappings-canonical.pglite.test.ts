@@ -264,6 +264,41 @@ describe("sync_mappings canonical invariants (PGlite)", () => {
     });
   });
 
+  describe("transitionToPortfolio manualPortfolioOverride marker", () => {
+    let pg: PGlite;
+    beforeEach(async () => {
+      pg = await freshDb();
+    });
+
+    it("CLEARS a stale marker on a NORMAL transition (no override) so the corrected link is re-validated", async () => {
+      // A previously-marked cross-number rebuild link, later corrected to a normal matching portfolio WITHOUT the
+      // override. The marker must NOT persist, or Phase-2 identity validation would bypass the (wrong) new link.
+      await seed(pg, { source_deal_id: "d1", bidboard_project_id: "BB-1", metadata: { manualPortfolioOverride: true, proposalId: "P1" } });
+      const row = await storage.transitionToPortfolio("BB-1", "PF-NORMAL", "Normal Portfolio");
+      expect((row?.metadata as any)?.manualPortfolioOverride).toBe(false); // stale marker cleared → re-validated
+      expect((row?.metadata as any)?.proposalId).toBe("P1"); // unrelated metadata preserved (|| merge)
+      expect(row?.portfolioProjectId).toBe("PF-NORMAL");
+    });
+
+    it("SETS the marker on an EXPLICIT rebuild override (manualOverride:true), preserving other metadata", async () => {
+      await seed(pg, { source_deal_id: "d2", bidboard_project_id: "BB-2", metadata: { proposalId: "P2" } });
+      const row = await storage.transitionToPortfolio("BB-2", "PF-REBUILD", "Rebuild Portfolio", { manualOverride: true });
+      expect((row?.metadata as any)?.manualPortfolioOverride).toBe(true);
+      expect((row?.metadata as any)?.proposalId).toBe("P2"); // preserved
+      expect(row?.portfolioProjectId).toBe("PF-REBUILD");
+    });
+
+    it("a re-run WITHOUT override clears a marker set by a PRIOR override on the same mapping", async () => {
+      // Idempotency/regression guard: mark, then a plain transition must reset trust to false.
+      await seed(pg, { source_deal_id: "d3", bidboard_project_id: "BB-3" });
+      await storage.transitionToPortfolio("BB-3", "PF-A", "A", { manualOverride: true });
+      const marked = await storage.getSyncMappingByBidboardProjectId("BB-3");
+      expect((marked?.metadata as any)?.manualPortfolioOverride).toBe(true);
+      const cleared = await storage.transitionToPortfolio("BB-3", "PF-B", "B");
+      expect((cleared?.metadata as any)?.manualPortfolioOverride).toBe(false);
+    });
+  });
+
   describe("runSyncMappingsDedupe end-to-end", () => {
     it("collapses a procore_project_id cluster to one survivor and merges non-null fields", async () => {
       const pg = await freshDb({ withCanonicalIndexes: false });
