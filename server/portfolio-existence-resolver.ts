@@ -215,9 +215,11 @@ export async function handlePortfolioCreateGate(
       const fresh = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
       const freshLink = fresh?.portfolioProjectId?.trim();
       if (freshLink) {
-        // Concurrently linked during the resolve — the stored link is authoritative and consistent with the DB;
-        // return IT (and do not overwrite it) rather than the independently-resolved id.
-        return { action, portfolioProjectId: freshLink, existence: { exists: true, portfolioProjectId: freshLink, source: "mapping" } };
+        // Concurrently linked during the resolve — return the fresh DB value (and do not overwrite it) rather
+        // than the independently-resolved id. Keep the RESOLVED source (not "mapping"): a concurrent link is NOT
+        // a deliberate manual override, so it must still be identity-validated downstream (the authoritative
+        // bypass is keyed on the mapping's manualPortfolioOverride marker, never on this source label).
+        return { action, portfolioProjectId: freshLink, existence: { exists: true, portfolioProjectId: freshLink, source: existence.source } };
       }
       if (fresh?.id) {
         await deps.updateSyncMapping(fresh.id, { portfolioProjectId: existence.portfolioProjectId });

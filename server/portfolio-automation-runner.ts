@@ -100,9 +100,6 @@ export async function runPhase1WithRetry(
           proposalPdfPath: output.proposalPdfPath ?? null,
           estimateExcelPath: output.estimateExcelPath ?? null,
           customerName: context.customerName,
-          // Persist the cross-number-rebuild flag so a webhook-fallback Phase 2 validates the linked portfolio as
-          // authoritative instead of quarantining it for the intentional number mismatch.
-          portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping,
         });
         pendingJobRegistered = true;
       } catch (regErr) {
@@ -153,9 +150,6 @@ export async function runPhase1WithRetry(
               projectName: context.projectName,
               projectNumber: context.projectNumber,
               customerName: context.customerName,
-              // Carry through whether Phase 1 skipped via a PRE-EXISTING mapping link (cross-number rebuild) so
-              // Phase 2's identity check treats that link as authoritative; a fresh create leaves this false.
-              portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping,
             },
           });
           // Merge Phase 2 (and Phase 3) steps into result

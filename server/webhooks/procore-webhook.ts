@@ -160,14 +160,14 @@ export async function handleProcoreProjectWebhook(
           const jobId = pending.id;
           setTimeout(async () => {
           try {
-            const phase2Input = {
-              bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
-              proposalPdfPath: pending.proposalPdfPath ?? null,
-              customerName: pending.customerName ?? undefined,
-              // Carry the persisted cross-number-rebuild flag so identity validation treats the linked portfolio
-              // as authoritative (a fresh create persisted this false, so it is still fully validated).
-              identityContext: { portfolioFromExistingLink: pending.portfolioFromExistingLink ?? false },
-            };
+            const phase2Input =
+              pending.bidboardProjectUrl || pending.proposalPdfPath != null || pending.customerName
+                ? {
+                    bidboardProjectUrl: pending.bidboardProjectUrl || undefined,
+                    proposalPdfPath: pending.proposalPdfPath ?? null,
+                    customerName: pending.customerName ?? undefined,
+                  }
+                : undefined;
 
             const result = await runPhase2WithRetry(
               companyId,

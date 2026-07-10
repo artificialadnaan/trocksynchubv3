@@ -131,13 +131,6 @@ export interface PortfolioAutomationResult {
   bidboardProjectId: string;
   bidboardProjectName?: string;
   portfolioProjectId?: string;
-  /**
-   * True when the existence gate skipped the create because the deal's mapping was ALREADY linked to a
-   * portfolio (a pre-existing/manual cross-number rebuild link, source "mapping"). The runner forwards this to
-   * Phase 2's identity validation so it treats that link's number/name as authoritative (a fresh create leaves
-   * this false, so its portfolio is still fully validated).
-   */
-  portfolioLinkedFromExistingMapping?: boolean;
   steps: StepResult[];
   startedAt: Date;
   completedAt?: Date;
@@ -170,12 +163,6 @@ export interface PortfolioIdentityContext {
   projectNumber?: string | null;
   customerName?: string;
   hubspotDealId?: string;
-  /**
-   * True when the resolved portfolio came from the mapping's PRE-EXISTING link (a cross-number rebuild / manual
-   * link). Identity validation then treats that link as authoritative and skips the number/name/hubspot checks
-   * (its number intentionally differs from the deal number). Absent/false for a fresh create → full validation.
-   */
-  portfolioFromExistingLink?: boolean;
 }
 
 const SEND_TO_BUDGET_FALSE_NEGATIVE =
@@ -1110,11 +1097,6 @@ export async function runPhase1BidBoardActions(
 
       if (gate.action === "skip" && gate.portfolioProjectId) {
         result.portfolioProjectId = result.portfolioProjectId ?? gate.portfolioProjectId;
-        // The gate skipped because the mapping was ALREADY linked (source "mapping") — a pre-existing/manual
-        // cross-number rebuild link. Flag it so Phase 2's identity check treats that link as authoritative.
-        if (gate.existence.exists === true && gate.existence.source === "mapping") {
-          result.portfolioLinkedFromExistingMapping = true;
-        }
       }
       gateSaysSkip = gate.action === "skip";
     }
@@ -1317,10 +1299,7 @@ export async function runPhase1BidBoardActions(
         companyId,
         result.portfolioProjectId,
         "validate_portfolio_identity",
-        // This validate is on the COMMON path after the add-to-portfolio if/else, so it ALSO runs on a gate skip.
-        // Carry the pre-existing-link flag so a cross-number rebuild skip isn't quarantined by the number check
-        // (false for a fresh create → still fully validated).
-        { ...retryOptions?.identityContext, portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping }
+        retryOptions?.identityContext
       );
     }
 
@@ -1367,9 +1346,7 @@ export async function runPhase1BidBoardActions(
               companyId,
               pid,
               "validate_portfolio_identity",
-              // Also reached on a gate skip (portfolioProjectId recovered from the Estimation tab) — carry the
-              // pre-existing-link flag so a cross-number rebuild isn't quarantined (false for a fresh create).
-              { ...retryOptions?.identityContext, portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping }
+              retryOptions?.identityContext
             );
           }
         }
@@ -2889,12 +2866,13 @@ export function detectPortfolioIdentityMismatch(
   }
 
   // The mapping's EXPLICIT portfolio link matched the reached portfolio (the id check above did not fire) AND the
-  // caller flagged this portfolio as coming from a PRE-EXISTING link (a self-heal or a MANUAL cross-number
-  // REBUILD link — same real project re-bid under a NEW number, linked to the older-number portfolio). That link
-  // is authoritative, so the project number/name/hubspot-deal need not match the trigger. The `portfolioFromExistingLink`
-  // gate is REQUIRED: a fresh create can have the mapping stamped with the reached id before this runs (e.g. the
-  // webhook path), and there the number/name checks must STILL fire to catch a wrong portfolio — so we only skip
-  // them for a confirmed pre-existing link, never for a create.
+  // mapping carries the durable `manualPortfolioOverride` marker (surfaced as `portfolioFromExistingLink` by
+  // buildExpectedPortfolioIdentity). That marker is set ONLY for a deliberate MANUAL cross-number REBUILD link
+  // (same real project re-bid under a new number, linked to the older-number portfolio), so its number/name/
+  // hubspot-deal need not match the trigger. The marker gate is REQUIRED and precise: a fresh create, a
+  // same-number self-heal, or a concurrently-linked row never carries the marker, so their number/name checks
+  // still fire and catch a wrong portfolio. Because it is read from the mapping, EVERY Phase-2 consumer
+  // (direct chain, webhook, orphan failsafe) derives it identically — no per-caller plumbing.
   if (expectedPortfolioProjectId && expected.portfolioFromExistingLink) {
     return null;
   }
@@ -2986,7 +2964,11 @@ async function buildExpectedPortfolioIdentity(
       mapping?.hubspotDealId ||
       undefined,
     expectedPortfolioProjectId: mapping?.portfolioProjectId || null,
-    portfolioFromExistingLink: identityContext?.portfolioFromExistingLink ?? false,
+    // Authoritative ONLY for a deliberate manual cross-number override, marked durably on the mapping. Read
+    // here so EVERY Phase-2 consumer (direct chain, webhook, orphan failsafe) derives it uniformly — a
+    // self-heal or a concurrently-linked row never carries this marker, so it is still fully validated.
+    portfolioFromExistingLink:
+      (mapping?.metadata as Record<string, unknown> | null | undefined)?.manualPortfolioOverride === true,
   };
 }
 
