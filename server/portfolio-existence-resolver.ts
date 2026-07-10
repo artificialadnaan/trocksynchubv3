@@ -185,10 +185,14 @@ export async function handlePortfolioCreateGate(
   // the number-based resolve below structurally cannot see) — that stored link is authoritative. Skip the
   // create; without this, re-triggering an already-linked rebuild would create a duplicate portfolio.
   let mapping: Awaited<ReturnType<ResolverDeps["getSyncMappingByBidboardProjectId"]>> | undefined;
+  let mappingLookupError: string | undefined;
   try {
     mapping = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
-  } catch {
-    /* a lookup error is handled upstream (the runner fails closed); fall through to the Procore resolve */
+  } catch (err) {
+    // FAIL CLOSED: a lookup error means we can't tell whether this deal is already linked. For a cross-number
+    // rebuild the stored link is the ONLY "portfolio exists" signal, so falling through to the number-based
+    // resolve could create a duplicate. Don't rely on the caller's separate lookup — abort here.
+    mappingLookupError = err instanceof Error ? err.message : String(err);
   }
   const existingLink = mapping?.portfolioProjectId?.trim();
   if (existingLink) {
@@ -199,7 +203,9 @@ export async function handlePortfolioCreateGate(
     };
   }
 
-  const existence = await resolveExistingPortfolioProject(input, deps);
+  const existence: PortfolioExistenceResult = mappingLookupError
+    ? { exists: "unknown", reason: `sync-mapping lookup failed: ${mappingLookupError}` }
+    : await resolveExistingPortfolioProject(input, deps);
   const action = decidePortfolioCreateAction(existence);
 
   if (action === "skip" && existence.exists === true) {

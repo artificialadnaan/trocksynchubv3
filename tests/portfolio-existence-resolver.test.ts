@@ -106,6 +106,7 @@ function makeDeps(over: Partial<{
   cacheThrows: boolean; // make the cache read reject (fail-closed test)
   liveResult: PortfolioExistenceResult | Error;
   mapping: any;
+  mappingThrows: boolean; // make the sync-mapping lookup reject (fail-closed test)
 }> = {}) {
   const calls: any = { updateSyncMapping: [], createAuditLog: [] };
   const deps = {
@@ -117,7 +118,10 @@ function makeDeps(over: Partial<{
       if (over.liveResult instanceof Error) throw over.liveResult;
       return over.liveResult ?? ({ exists: false } as PortfolioExistenceResult);
     }),
-    getSyncMappingByBidboardProjectId: vi.fn(async () => over.mapping),
+    getSyncMappingByBidboardProjectId: vi.fn(async () => {
+      if (over.mappingThrows) throw new Error("mapping db down");
+      return over.mapping;
+    }),
     updateSyncMapping: vi.fn(async (id: number, patch: any) => { calls.updateSyncMapping.push({ id, patch }); }),
     createAuditLog: vi.fn(async (row: any) => { calls.createAuditLog.push(row); }),
   };
@@ -235,6 +239,17 @@ describe("handlePortfolioCreateGate", () => {
     const out = await handlePortfolioCreateGate(BASE, deps);
     expect(out.action).toBe("create");
     expect(deps.liveConfirmByNumber).toHaveBeenCalled();
+  });
+
+  it("mapping lookup ERROR → abort (fail closed), never falls through to a number-based create", async () => {
+    // A transient lookup failure can't rule out an existing (possibly cross-number rebuild) link, so we must
+    // NOT create. Also don't waste the number-based resolve — go straight to a fail-closed abort + audit.
+    const { deps, calls } = makeDeps({ mappingThrows: true, cacheRow: undefined, liveResult: { exists: false } });
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out.action).toBe("abort");
+    expect(deps.getProcoreProjectsByNumber).not.toHaveBeenCalled();
+    expect(deps.liveConfirmByNumber).not.toHaveBeenCalled();
+    expect(calls.createAuditLog).toHaveLength(1);
   });
 
   it("false → action create, no writes", async () => {
