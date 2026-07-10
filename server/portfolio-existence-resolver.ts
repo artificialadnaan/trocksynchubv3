@@ -211,10 +211,15 @@ export async function handlePortfolioCreateGate(
   if (action === "skip" && existence.exists === true) {
     try {
       // Re-read the mapping fresh: the top-of-function lookup can be stale after the (networked) resolve, during
-      // which another automation or a manual action could have linked this row. Only write when it is STILL
-      // unlinked, so a newer portfolio_project_id is never clobbered.
+      // which another automation or a manual action could have linked this row.
       const fresh = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
-      if (fresh?.id && !fresh.portfolioProjectId) {
+      const freshLink = fresh?.portfolioProjectId?.trim();
+      if (freshLink) {
+        // Concurrently linked during the resolve — the stored link is authoritative and consistent with the DB;
+        // return IT (and do not overwrite it) rather than the independently-resolved id.
+        return { action, portfolioProjectId: freshLink, existence: { exists: true, portfolioProjectId: freshLink, source: "mapping" } };
+      }
+      if (fresh?.id) {
         await deps.updateSyncMapping(fresh.id, { portfolioProjectId: existence.portfolioProjectId });
       }
     } catch {

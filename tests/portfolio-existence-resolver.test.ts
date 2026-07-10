@@ -224,6 +224,7 @@ describe("handlePortfolioCreateGate", () => {
     const out = await handlePortfolioCreateGate(BASE, deps);
     expect(out.action).toBe("skip");
     expect(updateCalls).toHaveLength(0); // fresh read saw the concurrent link → no clobbering write
+    expect(out.portfolioProjectId).toBe("555"); // returns the authoritative fresh link, not the resolved "999"
   });
 
   it("exists but mapping already has portfolio_project_id → skip via the link, no redundant write", async () => {

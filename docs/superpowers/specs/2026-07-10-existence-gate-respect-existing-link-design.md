@@ -10,7 +10,7 @@ Adnaan's call: **no fuzzy secondary duplicate check** (name/customer/value). Jus
 
 ## Change (one place, `handlePortfolioCreateGate`)
 
-Before the number-based resolve, look up the deal's mapping; if `portfolio_project_id` is already set (non-blank), **short-circuit to `skip`** with that id and `existence.source: "mapping"` — the stored link is authoritative. The mapping lookup is reused for the existing self-heal write (one lookup, not two). `PortfolioExistenceResult`'s `exists:true` source gains `"mapping"`.
+Before the number-based resolve, look up the deal's mapping; if `portfolio_project_id` is already set (non-blank), **short-circuit to `skip`** with that id and `existence.source: "mapping"` — the stored link is authoritative. The self-heal path (only reached when the top lookup was unlinked) **re-reads the mapping fresh** before writing, so a link set concurrently during the networked resolve is never clobbered; if that fresh read is now linked, its value is returned as authoritative. So there are two reads on the resolve-then-self-heal path, by design. `PortfolioExistenceResult`'s `exists:true` source gains `"mapping"`.
 
 Everything else is unchanged: not-yet-linked deals still resolve by number (cache/live), self-heal on same-number hits, create on genuine absence, fail closed on uncertainty. The runner (`portfolio-automation.ts`) needs no change — it already treats `skip` as "don't add to portfolio."
 
