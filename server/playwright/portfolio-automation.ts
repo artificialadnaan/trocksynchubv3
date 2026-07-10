@@ -131,6 +131,13 @@ export interface PortfolioAutomationResult {
   bidboardProjectId: string;
   bidboardProjectName?: string;
   portfolioProjectId?: string;
+  /**
+   * True when the existence gate skipped the create because the deal's mapping was ALREADY linked to a
+   * portfolio (a pre-existing/manual cross-number rebuild link, source "mapping"). The runner forwards this to
+   * Phase 2's identity validation so it treats that link's number/name as authoritative (a fresh create leaves
+   * this false, so its portfolio is still fully validated).
+   */
+  portfolioLinkedFromExistingMapping?: boolean;
   steps: StepResult[];
   startedAt: Date;
   completedAt?: Date;
@@ -163,6 +170,12 @@ export interface PortfolioIdentityContext {
   projectNumber?: string | null;
   customerName?: string;
   hubspotDealId?: string;
+  /**
+   * True when the resolved portfolio came from the mapping's PRE-EXISTING link (a cross-number rebuild / manual
+   * link). Identity validation then treats that link as authoritative and skips the number/name/hubspot checks
+   * (its number intentionally differs from the deal number). Absent/false for a fresh create → full validation.
+   */
+  portfolioFromExistingLink?: boolean;
 }
 
 const SEND_TO_BUDGET_FALSE_NEGATIVE =
@@ -238,6 +251,8 @@ export interface ExpectedPortfolioIdentity {
   expectedProjectNumber?: string | null;
   expectedHubspotDealId?: string;
   expectedPortfolioProjectId?: string | null;
+  /** The reached portfolio is the mapping's authoritative pre-existing link → skip number/name/hubspot checks. */
+  portfolioFromExistingLink?: boolean;
 }
 
 export interface ActualPortfolioIdentity {
@@ -1095,6 +1110,11 @@ export async function runPhase1BidBoardActions(
 
       if (gate.action === "skip" && gate.portfolioProjectId) {
         result.portfolioProjectId = result.portfolioProjectId ?? gate.portfolioProjectId;
+        // The gate skipped because the mapping was ALREADY linked (source "mapping") — a pre-existing/manual
+        // cross-number rebuild link. Flag it so Phase 2's identity check treats that link as authoritative.
+        if (gate.existence.exists === true && gate.existence.source === "mapping") {
+          result.portfolioLinkedFromExistingMapping = true;
+        }
       }
       gateSaysSkip = gate.action === "skip";
     }
@@ -2863,13 +2883,14 @@ export function detectPortfolioIdentityMismatch(
     };
   }
 
-  // The mapping's EXPLICIT portfolio link matched the reached portfolio (the id check above did not fire). That
-  // link is the strongest identity signal — established by a self-heal or a MANUAL cross-number REBUILD link
-  // (same real project re-bid under a NEW number, linked to the older-number portfolio). So the project
-  // number/name/hubspot-deal need not match the trigger; don't second-guess a confirmed id link on them. (For
-  // a fresh create the mapping isn't linked yet — expectedPortfolioProjectId is null — so this never fires
-  // there, and the number/name checks below still guard the create path.)
-  if (expectedPortfolioProjectId) {
+  // The mapping's EXPLICIT portfolio link matched the reached portfolio (the id check above did not fire) AND the
+  // caller flagged this portfolio as coming from a PRE-EXISTING link (a self-heal or a MANUAL cross-number
+  // REBUILD link — same real project re-bid under a NEW number, linked to the older-number portfolio). That link
+  // is authoritative, so the project number/name/hubspot-deal need not match the trigger. The `portfolioFromExistingLink`
+  // gate is REQUIRED: a fresh create can have the mapping stamped with the reached id before this runs (e.g. the
+  // webhook path), and there the number/name checks must STILL fire to catch a wrong portfolio — so we only skip
+  // them for a confirmed pre-existing link, never for a create.
+  if (expectedPortfolioProjectId && expected.portfolioFromExistingLink) {
     return null;
   }
 
@@ -2960,6 +2981,7 @@ async function buildExpectedPortfolioIdentity(
       mapping?.hubspotDealId ||
       undefined,
     expectedPortfolioProjectId: mapping?.portfolioProjectId || null,
+    portfolioFromExistingLink: identityContext?.portfolioFromExistingLink ?? false,
   };
 }
 

@@ -162,11 +162,11 @@ describe("portfolio automation guard rails", () => {
     });
   });
 
-  it("does NOT flag a number mismatch when the reached portfolio IS the mapping's explicit link (cross-number rebuild)", async () => {
+  it("does NOT flag a number mismatch for a PRE-EXISTING link (cross-number rebuild, portfolioFromExistingLink)", async () => {
     const { detectPortfolioIdentityMismatch } = await import("../server/playwright/portfolio-automation.ts");
     // District at Boynton (DFW-1-14126-ag) is manually linked to The District Boynton's portfolio 598134326608331
-    // (number DBTDBPAINT). The explicit id link is authoritative — the intentionally-different number must NOT
-    // quarantine the valid rebuild link.
+    // (number DBTDBPAINT). With portfolioFromExistingLink the id link is authoritative — the intentionally-different
+    // number must NOT quarantine the valid rebuild link.
     const mismatch = detectPortfolioIdentityMismatch(
       {
         bidboardProjectId: "562949955804180",
@@ -174,6 +174,7 @@ describe("portfolio automation guard rails", () => {
         expectedProjectNumber: "DFW-1-14126-ag",
         expectedHubspotDealId: "hs-1",
         expectedPortfolioProjectId: "598134326608331",
+        portfolioFromExistingLink: true,
       },
       {
         portfolioProjectId: "598134326608331",
@@ -185,6 +186,28 @@ describe("portfolio automation guard rails", () => {
       }
     );
     expect(mismatch).toBeNull();
+  });
+
+  it("STILL flags a number mismatch for a FRESH create (mapping stamped, but portfolioFromExistingLink is false)", async () => {
+    const { detectPortfolioIdentityMismatch } = await import("../server/playwright/portfolio-automation.ts");
+    // Same id-matches-but-number-differs shape, but the flag is absent → this is a create whose mapping was
+    // stamped with the reached (wrong) portfolio; the number check must still fire so a wrong portfolio is caught.
+    const mismatch = detectPortfolioIdentityMismatch(
+      {
+        bidboardProjectId: "562949955804180",
+        expectedProjectName: "District at Boynton",
+        expectedProjectNumber: "DFW-1-14126-ag",
+        expectedPortfolioProjectId: "598134326608331",
+        // portfolioFromExistingLink omitted → false
+      },
+      {
+        portfolioProjectId: "598134326608331",
+        actualProjectName: "The District Boynton",
+        actualProjectNumber: "DBTDBPAINT",
+        linkedProjectNumber: "DBTDBPAINT",
+      }
+    );
+    expect(mismatch).toMatchObject({ reason: "portfolio_project_number_mismatch" });
   });
 
   it("STILL flags portfolio_project_id_mismatch when the reached portfolio is NOT the mapping's link", async () => {

@@ -150,6 +150,9 @@ export async function runPhase1WithRetry(
               projectName: context.projectName,
               projectNumber: context.projectNumber,
               customerName: context.customerName,
+              // Carry through whether Phase 1 skipped via a PRE-EXISTING mapping link (cross-number rebuild) so
+              // Phase 2's identity check treats that link as authoritative; a fresh create leaves this false.
+              portfolioFromExistingLink: result.portfolioLinkedFromExistingMapping,
             },
           });
           // Merge Phase 2 (and Phase 3) steps into result
