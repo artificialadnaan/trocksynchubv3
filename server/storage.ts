@@ -297,7 +297,7 @@ export interface IStorage {
   /** Search mappings by deal name, project name, or project number */
   searchSyncMappings(query: string): Promise<SyncMapping[]>;
   /** Transition a project from BidBoard (estimating) to Portfolio (active project) phase */
-  transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined>;
+  transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string, opts?: { manualOverride?: boolean }): Promise<SyncMapping | undefined>;
 
   getStageMappings(): Promise<StageMapping[]>;
   createStageMapping(mapping: InsertStageMapping): Promise<StageMapping>;
@@ -676,7 +676,7 @@ export class DatabaseStorage implements IStorage {
     ).orderBy(desc(syncMappings.lastSyncAt)).limit(200);
   }
 
-  async transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string): Promise<SyncMapping | undefined> {
+  async transitionToPortfolio(bidboardProjectId: string, portfolioProjectId: string, portfolioProjectName?: string, opts?: { manualOverride?: boolean }): Promise<SyncMapping | undefined> {
     // Find mapping by bidboard project ID
     let mapping = await this.getSyncMappingByBidboardProjectId(bidboardProjectId);
     
@@ -692,16 +692,26 @@ export class DatabaseStorage implements IStorage {
     
     // Update the mapping with portfolio info, preserving the original BidBoard project ID.
     // Do not use mapping.procoreProjectName as fallback—that is the BidBoard project name, not the Portfolio project name.
+    const setValues: Record<string, unknown> = {
+      bidboardProjectId: mapping.bidboardProjectId || bidboardProjectId,
+      portfolioProjectId,
+      portfolioProjectName: portfolioProjectName ?? null,
+      projectPhase: 'portfolio',
+      sentToPortfolioAt: new Date(),
+      lastSyncAt: new Date(),
+      lastSyncStatus: 'portfolio_transition',
+    };
+    // The manualPortfolioOverride marker reflects THIS transition's intent, so every re-link re-establishes trust
+    // from scratch. An EXPLICIT cross-number rebuild override (manualOverride:true) marks the link authoritative,
+    // so Phase-2 identity validation trusts the intentionally-different portfolio number/name. ANY normal
+    // transition CLEARS it to false — so correcting a previously-marked mapping to a normal, matching portfolio
+    // (or re-pointing it at a different id) is fully number/name-validated again, and a stale marker can never
+    // silently bypass a wrong link. Merge (||) either way so unrelated metadata keys are preserved.
+    setValues.metadata = opts?.manualOverride
+      ? sql`COALESCE(${syncMappings.metadata}, '{}'::jsonb) || '{"manualPortfolioOverride": true}'::jsonb`
+      : sql`COALESCE(${syncMappings.metadata}, '{}'::jsonb) || '{"manualPortfolioOverride": false}'::jsonb`;
     const [result] = await db.update(syncMappings)
-      .set({
-        bidboardProjectId: mapping.bidboardProjectId || bidboardProjectId,
-        portfolioProjectId,
-        portfolioProjectName: portfolioProjectName ?? null,
-        projectPhase: 'portfolio',
-        sentToPortfolioAt: new Date(),
-        lastSyncAt: new Date(),
-        lastSyncStatus: 'portfolio_transition',
-      })
+      .set(setValues)
       .where(eq(syncMappings.id, mapping.id))
       .returning();
     

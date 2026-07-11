@@ -1,7 +1,7 @@
 import { storage } from "./storage";
 
 export type PortfolioExistenceResult =
-  | { exists: true; portfolioProjectId: string; source: "cache" | "live" }
+  | { exists: true; portfolioProjectId: string; source: "cache" | "live" | "mapping" }
   | { exists: false }
   | { exists: "unknown"; reason: string };
 
@@ -170,6 +170,7 @@ export function decidePortfolioCreateAction(existence: PortfolioExistenceResult)
 
 /**
  * Resolve → decide → perform the decision's side effect:
+ *   already linked → skip (the mapping's existing portfolio_project_id is authoritative)
  *   skip  → self-heal write-back of portfolio_project_id (if unset)
  *   create→ (none)
  *   abort → write a status='error' audit alert (the 15-min failure digest scans it)
@@ -179,22 +180,37 @@ export async function handlePortfolioCreateGate(
   input: ResolverInput,
   deps: ResolverDeps
 ): Promise<{ action: PortfolioCreateAction; portfolioProjectId?: string; existence: PortfolioExistenceResult }> {
-  const existence = await resolveExistingPortfolioProject(input, deps);
-  const action = decidePortfolioCreateAction(existence);
-
-  if (action === "skip" && existence.exists === true) {
-    try {
-      const mapping = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
-      if (mapping?.id && !mapping.portfolioProjectId) {
-        await deps.updateSyncMapping(mapping.id, { portfolioProjectId: existence.portfolioProjectId });
-      }
-    } catch {
-      /* self-heal is best-effort; skipping the create is the important part */
-    }
-    return { action, portfolioProjectId: existence.portfolioProjectId, existence };
+  // Forward-looking existing-link guard: if this deal's mapping is ALREADY linked to a portfolio — a prior
+  // self-heal, OR a manual link for a cross-number REBUILD (same real project re-bid under a new number, which
+  // the number-based resolve below structurally cannot see) — that stored link is authoritative. Skip the
+  // create; without this, re-triggering an already-linked rebuild would create a duplicate portfolio.
+  let mapping: Awaited<ReturnType<ResolverDeps["getSyncMappingByBidboardProjectId"]>> | undefined;
+  let mappingLookupError: string | undefined;
+  try {
+    mapping = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
+  } catch (err) {
+    // FAIL CLOSED: a lookup error means we can't tell whether this deal is already linked. For a cross-number
+    // rebuild the stored link is the ONLY "portfolio exists" signal, so falling through to the number-based
+    // resolve could create a duplicate. Don't rely on the caller's separate lookup — abort here.
+    mappingLookupError = err instanceof Error ? err.message : String(err);
+  }
+  const existingLink = mapping?.portfolioProjectId?.trim();
+  if (existingLink) {
+    return {
+      action: "skip",
+      portfolioProjectId: existingLink,
+      existence: { exists: true, portfolioProjectId: existingLink, source: "mapping" },
+    };
   }
 
-  if (action === "abort") {
+  const existence: PortfolioExistenceResult = mappingLookupError
+    ? { exists: "unknown", reason: `sync-mapping lookup failed: ${mappingLookupError}` }
+    : await resolveExistingPortfolioProject(input, deps);
+  const action = decidePortfolioCreateAction(existence);
+
+  // Best-effort status='error' alert for an indeterminate outcome (the 15-min failure digest scans it). Shared by
+  // the resolve-time abort and the create-path re-read failure below — both fail closed rather than risk a dup.
+  const writeIndeterminateAlert = async (reason: string) => {
     try {
       await deps.createAuditLog({
         action: "portfolio_existence_check_indeterminate",
@@ -209,11 +225,58 @@ export async function handlePortfolioCreateGate(
         details: {
           bidboardProjectId: input.bidboardProjectId,
           procoreProjectNumber: input.procoreProjectNumber,
-          reason: existence.exists === "unknown" ? existence.reason : "unknown",
+          reason,
         },
       });
     } catch {
       /* alert write is best-effort; the abort itself (no create) is the safety guarantee */
+    }
+  };
+
+  if (action === "skip" && existence.exists === true) {
+    try {
+      // Re-read the mapping fresh: the top-of-function lookup can be stale after the (networked) resolve, during
+      // which another automation or a manual action could have linked this row.
+      const fresh = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
+      const freshLink = fresh?.portfolioProjectId?.trim();
+      if (freshLink) {
+        // Concurrently linked during the resolve — return the fresh DB value (and do not overwrite it) rather
+        // than the independently-resolved id. Keep the RESOLVED source (not "mapping"): a concurrent link is NOT
+        // a deliberate manual override, so it must still be identity-validated downstream (the authoritative
+        // bypass is keyed on the mapping's manualPortfolioOverride marker, never on this source label).
+        return { action, portfolioProjectId: freshLink, existence: { exists: true, portfolioProjectId: freshLink, source: existence.source } };
+      }
+      if (fresh?.id) {
+        await deps.updateSyncMapping(fresh.id, { portfolioProjectId: existence.portfolioProjectId });
+      }
+    } catch {
+      /* self-heal is best-effort; skipping the create is the important part */
+    }
+    return { action, portfolioProjectId: existence.portfolioProjectId, existence };
+  }
+
+  if (action === "abort") {
+    await writeIndeterminateAlert(existence.exists === "unknown" ? existence.reason : "unknown");
+  }
+
+  if (action === "create") {
+    // Symmetric to the skip self-heal re-read: a manual repair (especially a cross-number rebuild link the
+    // number-based resolve cannot see) could have linked this row DURING the networked resolve. Re-read before
+    // honoring create, so the runner never clicks Add-to-Portfolio and makes the duplicate this gate prevents.
+    try {
+      const fresh = await deps.getSyncMappingByBidboardProjectId(input.bidboardProjectId);
+      const freshLink = fresh?.portfolioProjectId?.trim();
+      if (freshLink) {
+        return { action: "skip", portfolioProjectId: freshLink, existence: { exists: true, portfolioProjectId: freshLink, source: "mapping" } };
+      }
+    } catch (err) {
+      // FAIL CLOSED: this re-read is the ONLY guard against a concurrent/manual link (especially a cross-number
+      // rebuild the number-based resolve cannot see) added DURING the networked resolve. If we can't read the
+      // mapping we can't rule that out — abort (retry next cycle) rather than create the duplicate this gate
+      // exists to prevent. Mirrors the top-of-function lookup, which also fails closed on a read error.
+      const reason = `create-path mapping re-read failed: ${err instanceof Error ? err.message : String(err)}`;
+      await writeIndeterminateAlert(reason);
+      return { action: "abort", existence: { exists: "unknown", reason } };
     }
   }
 

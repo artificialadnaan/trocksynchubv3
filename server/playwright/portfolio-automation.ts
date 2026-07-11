@@ -238,6 +238,8 @@ export interface ExpectedPortfolioIdentity {
   expectedProjectNumber?: string | null;
   expectedHubspotDealId?: string;
   expectedPortfolioProjectId?: string | null;
+  /** The reached portfolio is the mapping's authoritative pre-existing link → skip number/name/hubspot checks. */
+  portfolioFromExistingLink?: boolean;
 }
 
 export interface ActualPortfolioIdentity {
@@ -2863,6 +2865,18 @@ export function detectPortfolioIdentityMismatch(
     };
   }
 
+  // The mapping's EXPLICIT portfolio link matched the reached portfolio (the id check above did not fire) AND the
+  // mapping carries the durable `manualPortfolioOverride` marker (surfaced as `portfolioFromExistingLink` by
+  // buildExpectedPortfolioIdentity). That marker is set ONLY for a deliberate MANUAL cross-number REBUILD link
+  // (same real project re-bid under a new number, linked to the older-number portfolio), so its number/name/
+  // hubspot-deal need not match the trigger. The marker gate is REQUIRED and precise: a fresh create, a
+  // same-number self-heal, or a concurrently-linked row never carries the marker, so their number/name checks
+  // still fire and catch a wrong portfolio. Because it is read from the mapping, EVERY Phase-2 consumer
+  // (direct chain, webhook, orphan failsafe) derives it identically — no per-caller plumbing.
+  if (expectedPortfolioProjectId && expected.portfolioFromExistingLink) {
+    return null;
+  }
+
   const expectedProjectNumber = normalizeKey(expected.expectedProjectNumber);
   const actualProjectNumber = normalizeKey(actual.actualProjectNumber);
   const linkedProjectNumber = normalizeKey(actual.linkedProjectNumber);
@@ -2950,6 +2964,11 @@ async function buildExpectedPortfolioIdentity(
       mapping?.hubspotDealId ||
       undefined,
     expectedPortfolioProjectId: mapping?.portfolioProjectId || null,
+    // Authoritative ONLY for a deliberate manual cross-number override, marked durably on the mapping. Read
+    // here so EVERY Phase-2 consumer (direct chain, webhook, orphan failsafe) derives it uniformly — a
+    // self-heal or a concurrently-linked row never carries this marker, so it is still fully validated.
+    portfolioFromExistingLink:
+      (mapping?.metadata as Record<string, unknown> | null | undefined)?.manualPortfolioOverride === true,
   };
 }
 

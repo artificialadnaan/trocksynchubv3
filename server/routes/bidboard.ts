@@ -994,7 +994,7 @@ export function registerBidboardRoutes(app: Express, requireAuth: RequestHandler
   }));
 
   app.post("/api/bidboard/transition-to-portfolio", requireAuth, asyncHandler(async (req, res) => {
-    let { bidboardProjectId, portfolioProjectId, portfolioProjectName } = req.body;
+    let { bidboardProjectId, portfolioProjectId, portfolioProjectName, manualOverride } = req.body;
 
     if (!bidboardProjectId || !portfolioProjectId) {
       return res.status(400).json({ message: "bidboardProjectId and portfolioProjectId are required" });
@@ -1010,7 +1010,9 @@ export function registerBidboardRoutes(app: Express, requireAuth: RequestHandler
       }
     }
 
-    const mapping = await storage.transitionToPortfolio(bidboardProjectId, portfolioProjectId, portfolioProjectName);
+    // Only an EXPLICIT rebuild override (caller passes manualOverride:true) marks the link authoritative for the
+    // Phase-2 identity bypass; an ordinary transition stays fully validated.
+    const mapping = await storage.transitionToPortfolio(bidboardProjectId, portfolioProjectId, portfolioProjectName, { manualOverride: manualOverride === true });
 
     if (!mapping) {
       return res.status(404).json({ message: "No mapping found for BidBoard project" });

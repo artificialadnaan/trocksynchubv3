@@ -106,6 +106,7 @@ function makeDeps(over: Partial<{
   cacheThrows: boolean; // make the cache read reject (fail-closed test)
   liveResult: PortfolioExistenceResult | Error;
   mapping: any;
+  mappingThrows: boolean; // make the sync-mapping lookup reject (fail-closed test)
 }> = {}) {
   const calls: any = { updateSyncMapping: [], createAuditLog: [] };
   const deps = {
@@ -117,7 +118,10 @@ function makeDeps(over: Partial<{
       if (over.liveResult instanceof Error) throw over.liveResult;
       return over.liveResult ?? ({ exists: false } as PortfolioExistenceResult);
     }),
-    getSyncMappingByBidboardProjectId: vi.fn(async () => over.mapping),
+    getSyncMappingByBidboardProjectId: vi.fn(async () => {
+      if (over.mappingThrows) throw new Error("mapping db down");
+      return over.mapping;
+    }),
     updateSyncMapping: vi.fn(async (id: number, patch: any) => { calls.updateSyncMapping.push({ id, patch }); }),
     createAuditLog: vi.fn(async (row: any) => { calls.createAuditLog.push(row); }),
   };
@@ -203,11 +207,93 @@ describe("handlePortfolioCreateGate", () => {
     expect(calls.createAuditLog).toHaveLength(0);
   });
 
-  it("exists but mapping already has portfolio_project_id → skip, no redundant write", async () => {
-    const { deps, calls } = makeDeps({ cacheRow: { procoreId: "999" }, mapping: { id: 7, portfolioProjectId: "999" } });
+  it("self-heal re-reads fresh: if the row got linked concurrently during the resolve, it does NOT clobber the newer link", async () => {
+    const updateCalls: any[] = [];
+    let call = 0;
+    const deps: any = {
+      getProcoreProjectsByNumber: async () => [{ procoreId: "999" }], // cache hit → resolve says skip
+      liveConfirmByNumber: async () => ({ exists: false }),
+      getSyncMappingByBidboardProjectId: async () => {
+        call += 1;
+        // 1st call (top guard): still unlinked; 2nd call (fresh self-heal read): linked by a concurrent action
+        return call === 1 ? { id: 7, portfolioProjectId: null } : { id: 7, portfolioProjectId: "555" };
+      },
+      updateSyncMapping: async (id: number, patch: any) => { updateCalls.push({ id, patch }); },
+      createAuditLog: async () => {},
+    };
     const out = await handlePortfolioCreateGate(BASE, deps);
     expect(out.action).toBe("skip");
+    expect(updateCalls).toHaveLength(0); // fresh read saw the concurrent link → no clobbering write
+    expect(out.portfolioProjectId).toBe("555"); // returns the authoritative fresh link, not the resolved "999"
+  });
+
+  it("exists but mapping already has portfolio_project_id → skip via the link, no redundant write", async () => {
+    // Distinct ids prove the guard returns the MAPPING's link (777), not the cache resolve (999).
+    const { deps, calls } = makeDeps({ cacheRow: { procoreId: "999" }, mapping: { id: 7, portfolioProjectId: "777" } });
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out).toMatchObject({ action: "skip", portfolioProjectId: "777" });
+    expect(out.existence).toMatchObject({ source: "mapping" });
     expect(calls.updateSyncMapping).toHaveLength(0);
+  });
+
+  it("FORWARD-LOOKING: mapping already linked → skip via the existing-link guard, WITHOUT a Procore resolve", async () => {
+    // Cross-number rebuild: the mapping is linked to a portfolio recorded under a DIFFERENT number, so the
+    // number-based resolve would (wrongly) say create. The stored link must short-circuit to skip.
+    const { deps, calls } = makeDeps({
+      cacheRow: undefined,
+      liveResult: { exists: false }, // resolve WOULD say create...
+      mapping: { id: 7, portfolioProjectId: "598134326608331" }, // ...but the deal is already linked
+    });
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out).toMatchObject({ action: "skip", portfolioProjectId: "598134326608331" });
+    expect(out.existence).toMatchObject({ exists: true, source: "mapping" });
+    // the number-based resolve must NOT run — the stored link is authoritative
+    expect(deps.getProcoreProjectsByNumber).not.toHaveBeenCalled();
+    expect(deps.liveConfirmByNumber).not.toHaveBeenCalled();
+    // no redundant self-heal write (already linked)
+    expect(calls.updateSyncMapping).toHaveLength(0);
+  });
+
+  it("blank portfolio_project_id on the mapping does NOT short-circuit → falls through to the Procore resolve", async () => {
+    const { deps } = makeDeps({ cacheRow: undefined, liveResult: { exists: false }, mapping: { id: 7, portfolioProjectId: "   " } });
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out.action).toBe("create");
+    expect(deps.liveConfirmByNumber).toHaveBeenCalled();
+  });
+
+  it("mapping lookup ERROR → abort (fail closed), never falls through to a number-based create", async () => {
+    // A transient lookup failure can't rule out an existing (possibly cross-number rebuild) link, so we must
+    // NOT create. Also don't waste the number-based resolve — go straight to a fail-closed abort + audit.
+    const { deps, calls } = makeDeps({ mappingThrows: true, cacheRow: undefined, liveResult: { exists: false } });
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out.action).toBe("abort");
+    expect(deps.getProcoreProjectsByNumber).not.toHaveBeenCalled();
+    expect(deps.liveConfirmByNumber).not.toHaveBeenCalled();
+    expect(calls.createAuditLog).toHaveLength(1);
+  });
+
+  it("create-path mapping RE-READ error → abort (fail closed), never falls through to a create", async () => {
+    // Top guard reads cleanly (no link) so we reach the create decision; but a transient DB error on the
+    // create-path re-read means we can't rule out a concurrent/cross-number link added DURING the resolve. We
+    // must fail closed (abort + status='error' alert), not fall through and click Add-to-Portfolio → duplicate.
+    const auditLogs: any[] = [];
+    let call = 0;
+    const deps: any = {
+      getProcoreProjectsByNumber: async () => [], // cache miss
+      liveConfirmByNumber: async () => ({ exists: false } as PortfolioExistenceResult), // → resolve says create
+      getSyncMappingByBidboardProjectId: async () => {
+        call += 1;
+        if (call === 1) return undefined; // top guard: no existing link → proceed to resolve
+        throw new Error("mapping db down"); // create-path re-read fails
+      },
+      updateSyncMapping: async () => {},
+      createAuditLog: async (row: any) => { auditLogs.push(row); },
+    };
+    const out = await handlePortfolioCreateGate(BASE, deps);
+    expect(out.action).toBe("abort");
+    expect(out.existence.exists).toBe("unknown");
+    expect(auditLogs).toHaveLength(1);
+    expect(auditLogs[0]).toMatchObject({ action: "portfolio_existence_check_indeterminate", status: "error" });
   });
 
   it("false → action create, no writes", async () => {
