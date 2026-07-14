@@ -19,6 +19,10 @@ export const rfpRequestBodySchema = z.object({
     projectType: z.string().trim().min(1),
     amount: z.number().finite().nullable(),
     estimator: z.string().trim().nullable(),
+    ownerName: z.string().trim().nullable().optional().catch(undefined),
+    ownerEmail: z.string().trim().nullable().optional().catch(undefined),
+    requestedByName: z.string().trim().max(200).nullable().optional().catch(undefined),
+    requestedByEmail: z.string().trim().max(320).email().nullable().optional().catch(undefined),
     companyName: z.string().trim().nullable(),
     contactName: z.string().trim().nullable(),
     clientEmail: z.string().trim().email().nullable(),
@@ -56,6 +60,10 @@ Field mapping notes:
 | `deal.projectType` | `string` | yes | `dealData.project_types`; feeds approver lookup and BidBoard project type. |
 | `deal.amount` | `number | null` | yes | `dealData.amount`, normalized to number instead of HubSpot string. |
 | `deal.estimator` | `string | null` | yes | `dealData.estimator`. |
+| `deal.ownerName` | `string | null` | no | Assigned deal owner/rep name. Retained separately from the requester. |
+| `deal.ownerEmail` | `string | null` | no | Assigned deal owner/rep email. |
+| `deal.requestedByName` | `string | null` | no | Name of the user who initiated this RFP approval round. Capped at 200 characters; malformed optional values are dropped rather than rejecting the RFP. |
+| `deal.requestedByEmail` | `string | null` | no | Email of the user who initiated this RFP approval round. Must be a valid email and is capped at 320 characters; malformed optional values are dropped rather than rejecting the RFP. |
 | `deal.companyName` | `string | null` | yes | `dealData.company_name` or associated company name. |
 | `deal.contactName` | `string | null` | yes | `dealData.contact_name` or associated contact name. |
 | `deal.clientEmail` | `string | null` | yes | `dealData.client_email` or associated contact email. |
@@ -75,6 +83,11 @@ Field mapping notes:
 | `attachments[].contentType` | `string` | yes | Existing attachment `type` or `mimeType`. |
 
 Implementation note: `deal.projectNumber` is intentionally required for cross-source idempotency. Requests without it should fail validation with `422`.
+
+Requester identity is additive for rolling deploys. SyncHub persists these fields in the existing
+`deal_data` JSONB object (no database migration) and the approval email resolves **Requested by** in
+this order: explicit `requestedByName`/`requestedByEmail`, legacy owner identity, then `N/A`. Deal
+owner remains a separate email row. Neither field affects approver routing or authorization.
 
 ## 2. Response Shapes
 
@@ -543,6 +556,10 @@ export interface NormalizedRfpDeal {
   projectType: string;
   amount: number | null;
   estimator: string | null;
+  ownerName?: string | null;
+  ownerEmail?: string | null;
+  requestedByName?: string | null;
+  requestedByEmail?: string | null;
   companyName: string | null;
   contactName: string | null;
   clientEmail: string | null;

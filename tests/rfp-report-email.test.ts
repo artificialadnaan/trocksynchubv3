@@ -17,6 +17,7 @@ import {
   pickEditedValue,
   blankToUndef,
   safeHttpUrl,
+  resolveRfpRequestedBy,
   buildRfpReportEmailHtml,
   type RfpReportRow,
 } from "../server/rfp-reports";
@@ -131,6 +132,45 @@ describe("blankToUndef", () => {
     expect(blankToUndef("   ")).toBeUndefined();
     expect(blankToUndef("DFW-4-1")).toBe("DFW-4-1");
     expect(blankToUndef(0)).toBe(0);
+  });
+});
+
+describe("resolveRfpRequestedBy", () => {
+  it("prefers the explicit requester when requester and owner differ", () => {
+    expect(
+      resolveRfpRequestedBy({
+        requestedByName: "Rita Requester",
+        requestedByEmail: "rita@trockgc.com",
+        ownerName: "Olivia Owner",
+        ownerEmail: "owner@trockgc.com",
+      })
+    ).toBe("Rita Requester");
+  });
+
+  it("uses an email-only requester before owner fallback", () => {
+    expect(
+      resolveRfpRequestedBy({
+        requestedByEmail: "rita@trockgc.com",
+        ownerName: "Olivia Owner",
+      })
+    ).toBe("rita@trockgc.com");
+  });
+
+  it("falls back to legacy owner identity when requester fields are missing or malformed", () => {
+    expect(resolveRfpRequestedBy({ ownerName: "Legacy Owner", ownerEmail: "owner@trockgc.com" })).toBe(
+      "Legacy Owner"
+    );
+    expect(
+      resolveRfpRequestedBy({
+        requestedByName: { unsafe: true },
+        requestedByEmail: 123,
+        ownerEmail: "owner@trockgc.com",
+      })
+    ).toBe("owner@trockgc.com");
+  });
+
+  it("returns an em dash when neither requester nor owner is available", () => {
+    expect(resolveRfpRequestedBy({ requestedByName: "  ", ownerName: "" })).toBe("—");
   });
 });
 

@@ -34,6 +34,24 @@ export function blankToUndef(v: unknown): unknown {
   return v !== undefined && v !== null && String(v).trim() !== "" ? v : undefined;
 }
 
+/** Resolve the person who initiated the RFP round. New payloads carry an explicit requester;
+ *  historical rows fall back to the deal owner that previously doubled as requester identity. */
+export function resolveRfpRequestedBy(dealData: Record<string, unknown>): string {
+  const text = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  };
+
+  return (
+    text(dealData.requestedByName) ??
+    text(dealData.requestedByEmail) ??
+    text(dealData.ownerName) ??
+    text(dealData.ownerEmail) ??
+    "—"
+  );
+}
+
 export function pickEditedValue(
   editedFields: Record<string, unknown> | null | undefined,
   key: string
@@ -122,7 +140,7 @@ export interface RfpReportRow {
   changeCount: number;
   /** Actionable RFP amount (reviewer-edited value wins over original); null when absent. */
   amount: number | null;
-  /** Person the RFP belongs to — the deal owner (name preferred, falls back to email). */
+  /** User who initiated the RFP; historical rows fall back to the deal owner. */
   requestedBy: string;
   /** Approver email, or null when the RFP is still pending. */
   approvedBy: string | null;
@@ -178,7 +196,9 @@ export async function getRfpReportList(
     const recPattern = `%${filters.recipient.trim()}%`;
     conditions.push(
       sql`(
-        COALESCE(${rfpApprovalRequests.dealData}->>'ownerEmail', '') ILIKE ${recPattern}
+        COALESCE(${rfpApprovalRequests.dealData}->>'requestedByEmail', '') ILIKE ${recPattern}
+        OR COALESCE(${rfpApprovalRequests.dealData}->>'requestedByName', '') ILIKE ${recPattern}
+        OR COALESCE(${rfpApprovalRequests.dealData}->>'ownerEmail', '') ILIKE ${recPattern}
         OR COALESCE(${rfpApprovalRequests.dealData}->>'ownerName', '') ILIKE ${recPattern}
         OR COALESCE(${rfpApprovalRequests.dealData}->>'dealname', '') ILIKE ${recPattern}
         OR COALESCE(${rfpApprovalRequests.dealData}->>'project_name', '') ILIKE ${recPattern}
@@ -249,8 +269,7 @@ export async function getRfpReportList(
     );
     const projectType = resolveDisplayProjectType(dealData, editedFields, projectNumber);
     const recipient = String(dealData.ownerEmail || dealData.ownerName || "—");
-    // "Requested by" = the deal owner (name preferred); distinct from the approver.
-    const requestedBy = String(dealData.ownerName || dealData.ownerEmail || "—");
+    const requestedBy = resolveRfpRequestedBy(dealData);
     const amount = resolveRfpAmount(dealData, editedFields);
     // A Bid Board project only exists once the RFP is approved; gate on status so a non-approved
     // row can never surface a Bid Board link (defensive — bidboardProjectId is only set on approval).

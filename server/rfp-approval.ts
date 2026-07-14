@@ -2,6 +2,7 @@ import crypto, { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import path from 'path';
+import { z } from 'zod';
 import { isUniqueViolation, storage, type SourceSystem } from './storage';
 import { getHubSpotClient, getAccessToken, updateHubSpotDeal, updateHubSpotDealStage, getDealOwnerInfo } from './hubspot';
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber, resolveEffectiveRfpProjectType } from './constants';
@@ -38,9 +39,12 @@ export interface NormalizedRfpRequestInput {
     projectType: string;
     amount: number | null;
     estimator: string | null;
-    /** Deal owner / rep — the "Requested by" person (CRM-sourced; HubSpot resolves its own). */
+    /** Deal owner / assigned rep (CRM-sourced; HubSpot resolves its own). */
     ownerName?: string | null;
     ownerEmail?: string | null;
+    /** User who initiated the RFP approval round. Optional for legacy/HubSpot senders. */
+    requestedByName?: string | null;
+    requestedByEmail?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -988,6 +992,8 @@ function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { owner
     contact_name: input.deal.contactName || '',
     ownerName: ownerInfo.ownerName || '',
     ownerEmail: ownerInfo.ownerEmail || '',
+    requestedByName: input.deal.requestedByName || '',
+    requestedByEmail: input.deal.requestedByEmail || '',
     attachments: input.attachments.map((attachment) => ({
       name: attachment.name,
       url: attachment.url,
@@ -1029,9 +1035,32 @@ async function sendRfpReviewEmails(params: {
   const location = esc([params.dealData.address, params.dealData.city, params.dealData.state, params.dealData.zip].filter(Boolean).join(', ') || 'N/A');
   const description = esc(resolveRfpDescription(params.dealData) || 'N/A');
   const estimator = esc(params.dealData.estimator || 'N/A');
-  // Fall back to the owner email when only an email was resolved (e.g. the CRM's hubspot_owner_email
-  // fallback supplies an email but no name) so "Deal Owner" shows the requester instead of N/A.
-  const ownerName = esc(params.ownerName || params.dealData.ownerEmail || 'N/A');
+
+  const validContactEmail = (raw: unknown): string | null => {
+    const parsed = z.string().trim().max(320).email().safeParse(raw);
+    return parsed.success ? parsed.data : null;
+  };
+  const contactHtml = (nameRaw: unknown, emailRaw: unknown): string | null => {
+    const name = typeof nameRaw === 'string' ? nameRaw.trim() : '';
+    const email = validContactEmail(emailRaw);
+    if (!name && !email) return null;
+
+    const parts: string[] = [];
+    if (name) parts.push(esc(name));
+    if (email) {
+      const safeEmail = esc(email);
+      parts.push(`<a href="mailto:${safeEmail}" style="color:#d11921;text-decoration:underline;word-break:break-word;">${safeEmail}</a>`);
+    }
+    return parts.join('<br>');
+  };
+
+  // New CRM senders provide the actual user who initiated the approval round. During a rolling
+  // deploy (and for historical/HubSpot payloads), fall back to the deal owner rather than showing
+  // an empty requester. Never combine a requester's name with the owner's email: a partial
+  // requester identity remains partial so the approver cannot contact the wrong person.
+  const explicitRequesterHtml = contactHtml(params.dealData.requestedByName, params.dealData.requestedByEmail);
+  const dealOwnerHtml = contactHtml(params.ownerName, params.dealData.ownerEmail) || 'N/A';
+  const requestedByHtml = explicitRequesterHtml || dealOwnerHtml;
 
   const row = (label: string, value: string, isHtml = false) =>
     `<tr>
@@ -1094,7 +1123,8 @@ async function sendRfpReviewEmails(params: {
               ${row('Company', companyName)}
               ${row('Location', location)}
               ${row('Estimator', estimator)}
-              ${row('Deal Owner', ownerName)}
+              ${row('Requested by', requestedByHtml, true)}
+              ${row('Deal Owner', dealOwnerHtml, true)}
               ${row('Description', description)}
               ${row('Attachments', attachmentListHtml, true)}
             </table>
@@ -1250,9 +1280,9 @@ export async function createRfpApprovalRequestFromNormalizedInput(
 
     const token = randomUUID();
     const sourceDealUrl = await buildSourceDealUrl(input.sourceSystem, input.sourceDealId);
-    // HubSpot resolves the owner via its own API; trock_crm sends the resolved owner (assigned_rep
-    // → name/email, with fallbacks) in the request payload. Previously the trock_crm branch was an
-    // empty stub, which left "Requested by" blank on every CRM-sourced RFP.
+    // HubSpot resolves the owner via its own API; trock_crm sends the resolved deal owner
+    // (assigned_rep → name/email, with fallbacks) in the request payload. The actual user who
+    // initiated the RFP is carried separately in requestedByName/requestedByEmail.
     const rawOwnerInfo = input.sourceSystem === 'hubspot'
       ? await getDealOwnerInfo(input.sourceDealId)
       : { ownerName: input.deal.ownerName ?? '', ownerEmail: input.deal.ownerEmail ?? '' };

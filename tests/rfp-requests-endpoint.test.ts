@@ -267,7 +267,7 @@ describe("POST /api/rfp-requests", () => {
     });
   });
 
-  it("stores the CRM-sent deal owner in deal_data (Requested by source)", async () => {
+  it("stores the CRM-sent deal owner in deal_data independently of requester identity", async () => {
     await withServer(async (baseUrl) => {
       const response = await postRfpRequest(
         baseUrl,
@@ -290,14 +290,155 @@ describe("POST /api/rfp-requests", () => {
     });
   });
 
-  it("still accepts a request with no owner fields and stores empty owner (backward compatible)", async () => {
+  it("stores and renders the actual type-4 requester separately from the deal owner without changing routing", async () => {
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({
+          deal: {
+            ...requestBody().deal,
+            projectNumber: "DFW-4-12345-aa",
+            projectType: "4",
+            ownerName: "Olivia Owner",
+            ownerEmail: "owner@trockgc.com",
+            requestedByName: "Rita <Ops> & Co",
+            requestedByEmail: "requester@trockgc.com",
+          },
+        })
+      );
+
+      expect(response.status).toBe(201);
+      expect(rfpRows[0].dealData).toMatchObject({
+        ownerName: "Olivia Owner",
+        ownerEmail: "owner@trockgc.com",
+        requestedByName: "Rita <Ops> & Co",
+        requestedByEmail: "requester@trockgc.com",
+      });
+
+      const email = sendEmailMock.mock.calls[0]?.[0] as any;
+      expect(email.to).toBe("reviewer@trockgc.com");
+      const html = email.htmlBody ?? "";
+      expect(html).toContain("Requested by");
+      expect(html).toContain("Rita &lt;Ops&gt; &amp; Co");
+      expect(html).not.toContain("Rita <Ops> & Co");
+      expect(html).toContain('href="mailto:requester@trockgc.com"');
+      expect(html).toContain("Deal Owner");
+      expect(html).toContain("Olivia Owner");
+      expect(html).toContain('href="mailto:owner@trockgc.com"');
+    });
+  });
+
+  it("renders a partial requester name without borrowing the deal owner's email", async () => {
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({
+          deal: {
+            ...requestBody().deal,
+            projectNumber: "REQUESTER-NAME-ONLY",
+            ownerName: "Olivia Owner",
+            ownerEmail: "owner@trockgc.com",
+            requestedByName: "Rita Requester",
+          },
+        })
+      );
+
+      expect(response.status).toBe(201);
+      const html = (sendEmailMock.mock.calls[0]?.[0] as any)?.htmlBody ?? "";
+      const requestedByStart = html.indexOf("Requested by");
+      const ownerStart = html.indexOf("Deal Owner");
+      const requestedByRow = html.slice(requestedByStart, ownerStart);
+      expect(requestedByRow).toContain("Rita Requester");
+      expect(requestedByRow).not.toContain("owner@trockgc.com");
+    });
+  });
+
+  it("renders an email-only requester as a validated mailto link", async () => {
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({
+          deal: {
+            ...requestBody().deal,
+            projectNumber: "REQUESTER-EMAIL-ONLY",
+            requestedByEmail: "requester-only@trockgc.com",
+          },
+        })
+      );
+
+      expect(response.status).toBe(201);
+      const html = (sendEmailMock.mock.calls[0]?.[0] as any)?.htmlBody ?? "";
+      expect(html).toContain('href="mailto:requester-only@trockgc.com"');
+    });
+  });
+
+  it("accepts a legacy request with no requester or owner fields and renders N/A", async () => {
     await withServer(async (baseUrl) => {
       const body = requestBody({ deal: { ...requestBody().deal, projectNumber: "NOOWNER-1" } });
-      // ensure the payload genuinely omits owner fields
+      // Ensure the payload genuinely omits both generations of identity fields.
       expect((body.deal as any).ownerName).toBeUndefined();
+      expect((body.deal as any).requestedByName).toBeUndefined();
       const response = await postRfpRequest(baseUrl, body);
       expect(response.status).toBe(201);
-      expect(rfpRows[0].dealData).toMatchObject({ ownerName: "", ownerEmail: "" });
+      expect(rfpRows[0].dealData).toMatchObject({
+        ownerName: "",
+        ownerEmail: "",
+        requestedByName: "",
+        requestedByEmail: "",
+      });
+      const html = (sendEmailMock.mock.calls[0]?.[0] as any)?.htmlBody ?? "";
+      const requestedByStart = html.indexOf("Requested by");
+      const ownerStart = html.indexOf("Deal Owner");
+      const descriptionStart = html.indexOf("Description", ownerStart);
+      expect(html.slice(requestedByStart, ownerStart)).toContain("N/A");
+      expect(html.slice(ownerStart, descriptionStart)).toContain("N/A");
+    });
+  });
+
+  it("drops malformed or oversized requester fields and falls back to the legacy owner", async () => {
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({
+          deal: {
+            ...requestBody().deal,
+            projectNumber: "BAD-REQUESTER-1",
+            ownerName: "Legacy Owner",
+            ownerEmail: "legacy-owner@trockgc.com",
+            requestedByName: "x".repeat(201),
+            requestedByEmail: "javascript:alert(1)",
+          },
+        })
+      );
+
+      expect(response.status).toBe(201);
+      expect(rfpRows[0].dealData).toMatchObject({ requestedByName: "", requestedByEmail: "" });
+      const html = (sendEmailMock.mock.calls[0]?.[0] as any)?.htmlBody ?? "";
+      expect(html).not.toContain("javascript:alert(1)");
+      const requestedByStart = html.indexOf("Requested by");
+      const ownerStart = html.indexOf("Deal Owner");
+      const requestedByRow = html.slice(requestedByStart, ownerStart);
+      expect(requestedByRow).toContain("Legacy Owner");
+      expect(requestedByRow).toContain('href="mailto:legacy-owner@trockgc.com"');
+    });
+  });
+
+  it("drops non-string requester fields instead of rejecting an otherwise-valid RFP", async () => {
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({
+          deal: {
+            ...requestBody().deal,
+            projectNumber: "NONSTRING-REQUESTER-1",
+            requestedByName: { id: "user-1" } as any,
+            requestedByEmail: 12345 as any,
+          },
+        })
+      );
+
+      expect(response.status).toBe(201);
+      expect(rfpRows[0].dealData).toMatchObject({ requestedByName: "", requestedByEmail: "" });
     });
   });
 
@@ -318,7 +459,7 @@ describe("POST /api/rfp-requests", () => {
     });
   });
 
-  it("review email shows the owner email as Deal Owner when only an email is resolved", async () => {
+  it("legacy owner-only payload populates both Requested by fallback and Deal Owner", async () => {
     await withServer(async (baseUrl) => {
       const response = await postRfpRequest(
         baseUrl,
@@ -328,7 +469,9 @@ describe("POST /api/rfp-requests", () => {
       );
       expect(response.status).toBe(201);
       const html = (sendEmailMock.mock.calls[0]?.[0] as any)?.htmlBody ?? "";
-      expect(html).toContain("owner@trockgc.com"); // falls back to email instead of "N/A"
+      expect(html).toContain("Requested by");
+      expect(html).toContain("Deal Owner");
+      expect(html.match(/href="mailto:owner@trockgc\.com"/g)).toHaveLength(2);
     });
   });
 
