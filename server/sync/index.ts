@@ -113,7 +113,10 @@ export async function runBidBoardStageSync(
       extractedAt: new Date().toISOString(),
     });
     if (!pushResult.ok && !pushResult.skipped) {
-      log(`[BidBoardCRM] CRM ingestion push failed after ${pushResult.attempts} attempts; continuing stage sync`, "sync");
+      const reason = pushResult.terminalFailure
+        ? "reached a terminal processing failure"
+        : "could not be confirmed as durably accepted (ambiguous response)";
+      log(`[BidBoardCRM] CRM ingestion ${reason} after ${pushResult.attempts} attempt(s); continuing stage sync`, "sync");
     }
     // Record the push outcome and email on retry-exhausted failure / recovery. Never throws — a
     // skipped (unconfigured) push is ignored. This is the failure half of the alerting pair; the CRM

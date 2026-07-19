@@ -11,7 +11,31 @@ export interface BuildBidBoardCrmPayloadInput {
 }
 
 export interface PushBidBoardRowsInput extends BuildBidBoardCrmPayloadInput {
-  retryDelaysMs?: number[];
+  /** Backoff before each status probe after an ambiguous POST (defaults [500,1500,4000]ms). Test seam. */
+  statusPollDelaysMs?: number[];
+  /** Injectable fetch for tests. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Outcome of a durable CRM push.
+ *  - `ok` means the ingestion is durably ACCEPTED (2xx, or a status probe reported queued/processing/
+ *    succeeded). Alerting treats ok as healthy.
+ *  - `terminalFailure` means the CRM accepted the payload but PROCESSING reached a real terminal failure.
+ *  - `accepted === false` (with ok false, no terminalFailure) means we could NOT establish durable
+ *    acceptance — an ambiguous gateway response (e.g. 502) that the status probe never resolved. This is
+ *    explicitly NOT proof the CRM rolled back.
+ */
+export interface PushBidBoardRowsResult {
+  ok: boolean;
+  attempts: number;
+  skipped?: boolean;
+  status?: number;
+  error?: string;
+  accepted?: boolean;
+  terminalFailure?: boolean;
+  ingestionStatus?: "accepted" | "queued" | "processing" | "succeeded" | "failed" | "unknown";
+  idempotencyKey?: string;
 }
 
 export function buildBidBoardCrmPayload(input: BuildBidBoardCrmPayloadInput) {
@@ -30,17 +54,77 @@ export function signBidBoardCrmPayload(body: string, secret: string) {
   return `sha256=${crypto.createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
+/** The CRM's idempotency key for a push: sha256 of the EXACT request body bytes.
+ *  CONTRACT: must stay byte-identical with the CRM's computeIdempotencyKey (server/src/modules/
+ *  bid-board-sync/inbox.ts) — both hash the same serialized body — so a status probe by key resolves the
+ *  inbox row after an ambiguous POST. buildBidBoardCrmPayload constructs the object in a fixed key order and
+ *  the same `body` string is what we POST, so the CRM's sha256(rawBody) equals this. */
+export function computeBidBoardIdempotencyKey(body: Buffer | string) {
+  return crypto.createHash("sha256").update(body).digest("hex");
+}
+
+/** The signed status endpoint sits next to /ingest. */
+export function deriveBidBoardStatusUrl(ingestUrl: string) {
+  return `${ingestUrl.replace(/\/+$/, "")}/status`;
+}
+
 async function delay(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promise<{
-  ok: boolean;
-  attempts: number;
-  skipped?: boolean;
-  status?: number;
-  error?: string;
-}> {
+type CrmIngestionStatus = "queued" | "processing" | "succeeded" | "failed" | "unknown";
+
+interface StatusProbeResult {
+  ok: boolean; // the probe itself succeeded (endpoint reachable + 2xx)
+  status?: CrmIngestionStatus;
+  lastError?: string;
+  error?: string; // probe transport/HTTP error
+}
+
+async function probeCrmIngestionStatus(
+  statusUrl: string,
+  args: { officeSlug: string; idempotencyKey: string; secret: string; fetchImpl: typeof fetch }
+): Promise<StatusProbeResult> {
+  const body = JSON.stringify({ office_slug: args.officeSlug, idempotency_key: args.idempotencyKey });
+  try {
+    const response = await args.fetchImpl(statusUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-bid-board-sync-signature": signBidBoardCrmPayload(body, args.secret),
+      },
+      body,
+    });
+    if (!response.ok) {
+      return { ok: false, error: `status probe responded ${response.status}` };
+    }
+    const json = (await response.json().catch(() => null)) as
+      | { status?: CrmIngestionStatus; lastError?: string }
+      | null;
+    const status = json?.status;
+    if (status === "queued" || status === "processing" || status === "succeeded" || status === "failed") {
+      return { ok: true, status, lastError: json?.lastError };
+    }
+    return { ok: true, status: "unknown" };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Push the scraped Bid Board rows to the CRM ingest endpoint and establish a DURABLE outcome.
+ *
+ * The CRM now acknowledges with 202 the moment it durably enqueues (the import runs async), so the happy
+ * path is a single POST. On an AMBIGUOUS response (a gateway 502, a network drop, a 5xx) we do NOT
+ * immediately re-POST the full payload — that is what produced three overlapping imports in the 2026-07-19
+ * incident. Instead we probe the CRM's signed status endpoint by idempotency key:
+ *   - queued/processing/succeeded → durably accepted → success (no alert);
+ *   - failed → a real terminal processing failure → surfaced for a (correctly-worded) alert;
+ *   - unknown → the POST likely never landed → ONE bounded re-POST, then keep probing.
+ * If acceptance still can't be confirmed, we return accepted:false so the caller alerts on "unconfirmed"
+ * (NOT "rolled back").
+ */
+export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promise<PushBidBoardRowsResult> {
   const url = process.env.CRM_BID_BOARD_SYNC_URL;
   const secret = process.env.BID_BOARD_SYNC_SECRET;
   if (!url || !secret) {
@@ -56,17 +140,22 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
     };
   }
 
+  const fetchImpl = input.fetchImpl ?? fetch;
   const payload = buildBidBoardCrmPayload(input);
+  const officeSlug = payload.office_slug;
   const body = JSON.stringify(payload);
-  const retryDelays = input.retryDelaysMs ?? [1000, 5000];
+  const idempotencyKey = computeBidBoardIdempotencyKey(body);
+  const statusUrl = deriveBidBoardStatusUrl(url);
+  const pollDelays = input.statusPollDelaysMs ?? [500, 1500, 4000];
+
   let attempts = 0;
   let lastStatus: number | undefined;
   let lastError: string | undefined;
 
-  for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+  const postOnce = async (): Promise<{ posted: boolean; ok: boolean }> => {
     attempts++;
     try {
-      const response = await fetch(url, {
+      const response = await fetchImpl(url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -76,20 +165,73 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
       });
       lastStatus = response.status;
       if (response.ok) {
-        log(`[BidBoardCRM] Posted ${input.rows.length} Bid Board rows to CRM`, "sync");
-        return { ok: true, attempts, status: response.status };
+        log(`[BidBoardCRM] Posted ${input.rows.length} Bid Board rows to CRM (accepted ${response.status})`, "sync");
+        return { posted: true, ok: true };
       }
       lastError = `CRM responded ${response.status}: ${await response.text().catch(() => "")}`;
-      log(`[BidBoardCRM] Push attempt ${attempts} failed: ${lastError}`, "sync");
+      log(`[BidBoardCRM] Push attempt ${attempts} ambiguous: ${lastError}`, "sync");
+      return { posted: true, ok: false };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
-      log(`[BidBoardCRM] Push attempt ${attempts} failed: ${lastError}`, "sync");
+      log(`[BidBoardCRM] Push attempt ${attempts} ambiguous: ${lastError}`, "sync");
+      return { posted: false, ok: false };
     }
+  };
 
-    const waitMs = retryDelays[attempt];
-    if (waitMs != null) await delay(waitMs);
+  const accepted = (ingestionStatus: PushBidBoardRowsResult["ingestionStatus"]): PushBidBoardRowsResult => ({
+    ok: true,
+    accepted: true,
+    attempts,
+    status: lastStatus,
+    ingestionStatus,
+    idempotencyKey,
+  });
+
+  const first = await postOnce();
+  if (first.ok) return accepted("accepted");
+
+  // Ambiguous. Resolve via the status endpoint instead of blindly re-POSTing the full payload.
+  let repostsRemaining = 1;
+  for (const wait of pollDelays) {
+    await delay(wait);
+    const probe = await probeCrmIngestionStatus(statusUrl, { officeSlug, idempotencyKey, secret, fetchImpl });
+    if (probe.ok && probe.status) {
+      if (probe.status === "queued" || probe.status === "processing" || probe.status === "succeeded") {
+        log(`[BidBoardCRM] Ambiguous POST resolved as durably accepted (status=${probe.status})`, "sync");
+        return accepted(probe.status);
+      }
+      if (probe.status === "failed") {
+        log(`[BidBoardCRM] CRM ingestion reached a TERMINAL failure (status=failed)`, "sync");
+        return {
+          ok: false,
+          accepted: true,
+          terminalFailure: true,
+          attempts,
+          status: lastStatus,
+          ingestionStatus: "failed",
+          error: probe.lastError ?? lastError,
+          idempotencyKey,
+        };
+      }
+      // unknown → the POST likely never reached the CRM. Retry ONCE, then keep probing.
+      if (probe.status === "unknown" && repostsRemaining > 0) {
+        repostsRemaining--;
+        const reposted = await postOnce();
+        if (reposted.ok) return accepted("accepted");
+      }
+    } else if (probe.error) {
+      lastError = probe.error;
+    }
   }
 
-  log(`[BidBoardCRM] Giving up after ${attempts} attempts; extraction remains successful`, "sync");
-  return { ok: false, attempts, status: lastStatus, error: lastError };
+  log(`[BidBoardCRM] Could not establish durable acceptance after ${attempts} attempt(s); extraction remains successful`, "sync");
+  return {
+    ok: false,
+    accepted: false,
+    attempts,
+    status: lastStatus,
+    ingestionStatus: "unknown",
+    error: lastError ?? "could not establish durable CRM acceptance",
+    idempotencyKey,
+  };
 }

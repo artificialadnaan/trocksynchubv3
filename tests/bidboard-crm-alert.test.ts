@@ -53,9 +53,9 @@ describe("decidePushAlert (pure)", () => {
 });
 
 describe("renderPushAlertEmail (pure)", () => {
-  it("failure email carries the error, http status, attempts and office", () => {
+  it("terminal-failure email carries the error, http status, attempts and office — and does NOT claim a rollback", () => {
     const { subject, htmlBody } = renderPushAlertEmail({
-      kind: "failure", office: "dallas", attempts: 3, status: 500,
+      kind: "terminal_failure", office: "dallas", attempts: 3, status: 500,
       error: 'CRM responded 500: {"error":{"message":"Internal server error"}}',
       sourceFilename: "ProjectList.xlsx", now: NOW,
     });
@@ -64,6 +64,23 @@ describe("renderPushAlertEmail (pure)", () => {
     expect(htmlBody).toContain("500");
     expect(htmlBody).toContain("Internal server error");
     expect(htmlBody).toContain("3");
+    // The false-rollback claim from the old copy must be gone.
+    expect(htmlBody.toLowerCase()).not.toContain("rolls back");
+    expect(htmlBody.toLowerCase()).not.toContain("rejected the push");
+    expect(htmlBody.toLowerCase()).toContain("accepted");
+  });
+
+  it("unconfirmed email frames an ambiguous 502 as unresolved — explicitly NOT a rollback/data loss", () => {
+    const { subject, htmlBody } = renderPushAlertEmail({
+      kind: "unconfirmed", office: "dallas", attempts: 2, status: 502,
+      error: "CRM responded 502: <gateway>", sourceFilename: "ProjectList.xlsx", now: NOW,
+    });
+    expect(subject.toLowerCase()).toMatch(/unconfirmed|ambiguous/);
+    expect(htmlBody.toLowerCase()).toContain("not");
+    expect(htmlBody.toLowerCase()).not.toContain("rolls back");
+    expect(htmlBody.toLowerCase()).not.toContain("rejected the push");
+    // Mentions the ambiguous/gateway nature so ops don't assume data loss.
+    expect(htmlBody.toLowerCase()).toMatch(/ambiguous|502|in flight|could not confirm/);
   });
 
   it("recovered email is clearly a recovery", () => {
@@ -72,7 +89,7 @@ describe("renderPushAlertEmail (pure)", () => {
   });
 
   it("escapes HTML metacharacters in the office slug in the body", () => {
-    const { htmlBody } = renderPushAlertEmail({ kind: "failure", office: "a<b>&\"c", attempts: 1, now: NOW });
+    const { htmlBody } = renderPushAlertEmail({ kind: "terminal_failure", office: "a<b>&\"c", attempts: 1, now: NOW });
     expect(htmlBody).toContain("a&lt;b&gt;&amp;&quot;c");
     expect(htmlBody).not.toContain("<b>");
   });
@@ -220,5 +237,37 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     const retried = await run(db, { ok: true, attempts: 1 }, new Date(NOW.getTime() + 40 * MIN));
     expect((retried as any).action).toBe("alert_recovered"); // retried
     expect(db.store.get("dallas").state).toBe("ok");
+  });
+
+  it("a 502 later confirmed as processing/succeeded (ok:true, accepted:true) does NOT alert", async () => {
+    const db = fakeDb();
+    const res = await run(db, { ok: true, accepted: true, attempts: 1, ingestionStatus: "processing" }, NOW);
+    expect(send).not.toHaveBeenCalled();
+    expect((res as any).action).toBe("none");
+  });
+
+  it("a genuine TERMINAL processing failure alerts with terminal wording (no rollback claim)", async () => {
+    const db = fakeDb();
+    const res = await run(
+      db,
+      { ok: false, accepted: true, terminalFailure: true, attempts: 3, status: 502, error: "schema drift" },
+      NOW
+    );
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    const body: string = send.mock.calls[0][0].htmlBody;
+    expect(body.toLowerCase()).toContain("accepted");
+    expect(body.toLowerCase()).not.toContain("rolls back");
+    expect(db.store.get("dallas").state).toBe("failing");
+  });
+
+  it("an UNCONFIRMED ambiguous outcome (ok:false, accepted:false) alerts without claiming a rollback", async () => {
+    const db = fakeDb();
+    const res = await run(db, { ok: false, accepted: false, attempts: 2, status: 502, error: "gateway 502" }, NOW);
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    const email = send.mock.calls[0][0];
+    expect(email.subject.toLowerCase()).toMatch(/unconfirmed|ambiguous/);
+    expect(email.htmlBody.toLowerCase()).not.toContain("rolls back");
   });
 });
