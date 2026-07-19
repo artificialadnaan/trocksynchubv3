@@ -83,6 +83,23 @@ describe("renderPushAlertEmail (pure)", () => {
     expect(htmlBody.toLowerCase()).toMatch(/ambiguous|502|in flight|could not confirm/);
   });
 
+  it("request_rejected email names the 4xx rejection and does NOT claim a rollback", () => {
+    const { subject, htmlBody } = renderPushAlertEmail({
+      kind: "request_rejected", office: "dallas", attempts: 1, status: 401,
+      error: "CRM responded 401", idempotencyKey: "abc123", now: NOW,
+    });
+    expect(subject.toLowerCase()).toMatch(/reject/);
+    expect(htmlBody).toContain("401");
+    expect(htmlBody.toLowerCase()).not.toContain("rolls back");
+  });
+
+  it("failure emails carry the idempotency key so ops can query the CRM status endpoint", () => {
+    for (const kind of ["terminal_failure", "unconfirmed", "request_rejected"] as const) {
+      const { htmlBody } = renderPushAlertEmail({ kind, office: "dallas", idempotencyKey: "key-xyz-789", now: NOW });
+      expect(htmlBody).toContain("key-xyz-789");
+    }
+  });
+
   it("recovered email is clearly a recovery", () => {
     const { subject } = renderPushAlertEmail({ kind: "recovered", office: "dallas", now: NOW });
     expect(subject.toLowerCase()).toMatch(/recover|resumed|back/);
@@ -268,6 +285,21 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     expect(send).toHaveBeenCalledTimes(1);
     const email = send.mock.calls[0][0];
     expect(email.subject.toLowerCase()).toMatch(/unconfirmed|ambiguous/);
+    expect(email.htmlBody.toLowerCase()).not.toContain("rolls back");
+  });
+
+  it("a deterministic REJECTION (ok:false, rejected:true) alerts with request_rejected wording + the key", async () => {
+    const db = fakeDb();
+    const res = await run(
+      db,
+      { ok: false, accepted: false, rejected: true, attempts: 1, status: 401, error: "bad sig", idempotencyKey: "k1" },
+      NOW
+    );
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    const email = send.mock.calls[0][0];
+    expect(email.subject.toLowerCase()).toMatch(/reject/);
+    expect(email.htmlBody).toContain("k1");
     expect(email.htmlBody.toLowerCase()).not.toContain("rolls back");
   });
 });

@@ -81,6 +81,23 @@ describe("Bid Board CRM ingestion push", () => {
     expect(fetchImpl.mock.calls[0][0]).toBe(INGEST_URL);
   });
 
+  it("a deterministic 4xx (e.g. 401 bad signature) is a REJECTION — no status probe, no re-POST", async () => {
+    const fetchImpl = vi.fn(async () => res(401)) as any;
+    const result = await pushBidBoardRowsToCrm({ ...baseInput, fetchImpl });
+    expect(result).toMatchObject({ ok: false, accepted: false, rejected: true });
+    expect(result.terminalFailure).toBeFalsy();
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // exactly one POST; no probe, no re-POST
+  });
+
+  it("a 429 (rate limit) stays AMBIGUOUS and goes through the status probe (not a rejection)", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      url === STATUS_URL ? res(200, { status: "processing" }) : res(429)
+    ) as any;
+    const result = await pushBidBoardRowsToCrm({ ...baseInput, fetchImpl });
+    expect(result).toMatchObject({ ok: true, accepted: true, ingestionStatus: "processing" });
+    expect(result.rejected).toBeFalsy();
+  });
+
   it("a gateway 502 followed by status=processing is treated as ACCEPTED (no re-POST, no failure)", async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       if (url === STATUS_URL) return res(200, { status: "processing" });

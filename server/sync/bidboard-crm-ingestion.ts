@@ -34,6 +34,9 @@ export interface PushBidBoardRowsResult {
   error?: string;
   accepted?: boolean;
   terminalFailure?: boolean;
+  /** A deterministic client-side rejection (4xx other than 429/408) — the CRM will not accept this request
+   *  as-is (bad signature, malformed, or oversized). Distinct from an ambiguous 502. */
+  rejected?: boolean;
   ingestionStatus?: "accepted" | "queued" | "processing" | "succeeded" | "failed" | "unknown";
   idempotencyKey?: string;
 }
@@ -152,7 +155,13 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
   let lastStatus: number | undefined;
   let lastError: string | undefined;
 
-  const postOnce = async (): Promise<{ posted: boolean; ok: boolean }> => {
+  // A deterministic client rejection (bad signature, malformed body, oversized payload) will NEVER be
+  // accepted as-is, so it's a definite failure — NOT ambiguous. 429/408 are transient (rate limit / request
+  // timeout) so they stay ambiguous and go through the status-probe path.
+  const isDeterministicRejection = (status: number) =>
+    status >= 400 && status < 500 && status !== 429 && status !== 408;
+
+  const postOnce = async (): Promise<{ posted: boolean; ok: boolean; rejected: boolean }> => {
     attempts++;
     try {
       const response = await fetchImpl(url, {
@@ -166,15 +175,16 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
       lastStatus = response.status;
       if (response.ok) {
         log(`[BidBoardCRM] Posted ${input.rows.length} Bid Board rows to CRM (accepted ${response.status})`, "sync");
-        return { posted: true, ok: true };
+        return { posted: true, ok: true, rejected: false };
       }
       lastError = `CRM responded ${response.status}: ${await response.text().catch(() => "")}`;
-      log(`[BidBoardCRM] Push attempt ${attempts} ambiguous: ${lastError}`, "sync");
-      return { posted: true, ok: false };
+      const rejected = isDeterministicRejection(response.status);
+      log(`[BidBoardCRM] Push attempt ${attempts} ${rejected ? "REJECTED" : "ambiguous"}: ${lastError}`, "sync");
+      return { posted: true, ok: false, rejected };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       log(`[BidBoardCRM] Push attempt ${attempts} ambiguous: ${lastError}`, "sync");
-      return { posted: false, ok: false };
+      return { posted: false, ok: false, rejected: false };
     }
   };
 
@@ -187,8 +197,24 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
     idempotencyKey,
   });
 
+  const rejectedResult = (): PushBidBoardRowsResult => ({
+    ok: false,
+    accepted: false,
+    rejected: true,
+    attempts,
+    status: lastStatus,
+    ingestionStatus: "unknown",
+    error: lastError,
+    idempotencyKey,
+  });
+
   const first = await postOnce();
   if (first.ok) return accepted("accepted");
+  // A deterministic 4xx is a definite rejection — don't probe or re-POST; surface it for a clear alert.
+  if (first.rejected) {
+    log(`[BidBoardCRM] CRM REJECTED the push (${lastStatus}); not retrying`, "sync");
+    return rejectedResult();
+  }
 
   // Ambiguous. Resolve via the status endpoint instead of blindly re-POSTing the full payload.
   let repostsRemaining = 1;
@@ -218,6 +244,7 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
         repostsRemaining--;
         const reposted = await postOnce();
         if (reposted.ok) return accepted("accepted");
+        if (reposted.rejected) return rejectedResult();
       }
     } else if (probe.error) {
       lastError = probe.error;
