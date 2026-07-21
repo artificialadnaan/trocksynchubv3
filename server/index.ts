@@ -84,6 +84,12 @@ app.use((req, res, next) => {
 
 app.use(
   express.json({
+    // Raise the JSON body cap from body-parser's 100 KB default. The CRM's HMAC-authed
+    // /api/bid-board/create-from-rfp posts the deal's normalized RFP body PLUS its full attachments list
+    // (one presigned URL per deal file); a project with hundreds of files exceeds 100 KB and was rejected
+    // with a 413 before the handler ran, permanently stranding the Bid Board create. 10mb is generous
+    // headroom for that inline list (the durable fix is to deliver attachments out-of-band / paginated).
+    limit: "10mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },

@@ -127,6 +127,26 @@ describe("POST /api/bid-board/create-from-rfp (endpoint)", () => {
     });
   });
 
+  it("accepts a LARGE attachments body (raised limit) instead of 413ing the Bid Board create", async () => {
+    await withServer(async (baseUrl) => {
+      // A project with hundreds of files: the inline attachments list pushes the body well past
+      // body-parser's 100 KB default. Before the raised limit this 413'd BEFORE the handler ran, permanently
+      // stranding the create (the real incident on a 637-file deal).
+      const attachments = Array.from({ length: 400 }, (_, i) => ({
+        name: `document-${i}.pdf`,
+        url: `https://r2.example.com/office_dallas/deal-1/file-${i}.pdf?X-Amz-Signature=${"a".repeat(400)}`,
+        contentType: "application/pdf",
+      }));
+      const raw = JSON.stringify(requestBody({ attachments }));
+      expect(raw.length).toBeGreaterThan(150_000); // comfortably past the old 100 KB cap
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST", headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) }, body: raw,
+      });
+      expect(res.status).toBe(202); // NOT 413
+      expect(enqueueCommandMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("500 (not 202) when the command can't be persisted — so the CRM retries instead of losing the vote", async () => {
     enqueueCommandMock.mockRejectedValueOnce(new Error("db down"));
     await withServer(async (baseUrl) => {
