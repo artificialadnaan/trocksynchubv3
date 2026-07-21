@@ -51,7 +51,12 @@ function sign(body: string) {
 
 async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   const { registerRfpRequestRoutes } = await import("../server/routes/rfp-requests.ts");
+  const { mountJsonBodyParsers } = await import("../server/json-body.ts");
   const app = express();
+  // Exercise the REAL production body-parser config: a small (100 KB) global cap that SKIPS create-from-rfp,
+  // plus create-from-rfp's own scoped 10mb route parser (mounted by registerRfpRequestRoutes). This proves the
+  // large-body case works via the scoped parser, not a wide-open global cap.
+  mountJsonBodyParsers(app);
   registerRfpRequestRoutes(app);
   const server = app.listen(0);
   await new Promise<void>((resolve) => server.once("listening", () => resolve()));
@@ -124,6 +129,31 @@ describe("POST /api/bid-board/create-from-rfp (endpoint)", () => {
       expect(cmd.sourceDealId).toBe("crm-deal-1");
       expect(cmd.sourceEventId).toBe("crm:rfp-vote:approved:round-1");
       expect(cmd.deal.projectNumber).toBe("TR-1001");
+    });
+  });
+
+  it("accepts a LARGE attachments body (raised limit) instead of 413ing the Bid Board create", async () => {
+    await withServer(async (baseUrl) => {
+      // A project with hundreds of files: the inline attachments list pushes the body well past
+      // body-parser's 100 KB default. Before the raised limit this 413'd BEFORE the handler ran, permanently
+      // stranding the create (the real incident on a 637-file deal).
+      const attachments = Array.from({ length: 400 }, (_, i) => ({
+        name: `document-${i}.pdf`,
+        url: `https://r2.example.com/office_dallas/deal-1/file-${i}.pdf?X-Amz-Signature=${"a".repeat(400)}`,
+        contentType: "application/pdf",
+      }));
+      const raw = JSON.stringify(requestBody({ attachments }));
+      expect(raw.length).toBeGreaterThan(150_000); // comfortably past the old 100 KB cap
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST", headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) }, body: raw,
+      });
+      expect(res.status).toBe(202); // NOT 413
+      expect(enqueueCommandMock).toHaveBeenCalledTimes(1);
+      // The whole attachments list must survive parsing + enqueue — including the LAST element (i.e. the body
+      // wasn't silently truncated at some cap between the parser and the durable command).
+      const cmd = enqueueCommandMock.mock.calls[0][0] as { attachments: Array<{ name: string }> };
+      expect(cmd.attachments).toHaveLength(400);
+      expect(cmd.attachments[399].name).toBe("document-399.pdf");
     });
   });
 

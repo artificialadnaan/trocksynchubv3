@@ -154,6 +154,11 @@ export function registerRfpRequestRoutes(app: Express): void {
   logMissingRfpRequestSecret();
 
   const jsonWithRawBody = express.json({
+    // Match the app-level parser's raised cap (server/index.ts): create-from-rfp carries the deal's full
+    // attachments list, which for a many-file project exceeds body-parser's 100 KB default → a pre-handler
+    // 413 that stranded the Bid Board create. Set here too so this route parses large bodies even if reached
+    // before / without the global parser (and so the endpoint is self-contained + testable).
+    limit: "10mb",
     verify: (req, _res, buf) => {
       (req as any).rfpRawBody = Buffer.from(buf);
     },
