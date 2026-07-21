@@ -32,6 +32,7 @@
  */
 
 import express, { type Request, Response, NextFunction } from "express";
+import { mountJsonBodyParsers } from "./json-body";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -82,21 +83,10 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(
-  express.json({
-    // Raise the JSON body cap from body-parser's 100 KB default. The CRM's HMAC-authed
-    // /api/bid-board/create-from-rfp posts the deal's normalized RFP body PLUS its full attachments list
-    // (one presigned URL per deal file); a project with hundreds of files exceeds 100 KB and was rejected
-    // with a 413 before the handler ran, permanently stranding the Bid Board create. 10mb is generous
-    // headroom for that inline list (the durable fix is to deliver attachments out-of-band / paginated).
-    limit: "10mb",
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    },
-  }),
-);
-
-app.use(express.urlencoded({ extended: false }));
+// Global JSON parser keeps body-parser's small 100 KB default (this runs before auth/HMAC — a large global cap
+// would be a memory-exhaustion surface). The one large-body endpoint, /api/bid-board/create-from-rfp, is
+// SKIPPED here and parsed by its own scoped 10mb route parser. See server/json-body.ts.
+mountJsonBodyParsers(app);
 
 app.use((req, res, next) => {
   const start = Date.now();

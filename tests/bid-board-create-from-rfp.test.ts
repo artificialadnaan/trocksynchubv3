@@ -51,7 +51,12 @@ function sign(body: string) {
 
 async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   const { registerRfpRequestRoutes } = await import("../server/routes/rfp-requests.ts");
+  const { mountJsonBodyParsers } = await import("../server/json-body.ts");
   const app = express();
+  // Exercise the REAL production body-parser config: a small (100 KB) global cap that SKIPS create-from-rfp,
+  // plus create-from-rfp's own scoped 10mb route parser (mounted by registerRfpRequestRoutes). This proves the
+  // large-body case works via the scoped parser, not a wide-open global cap.
+  mountJsonBodyParsers(app);
   registerRfpRequestRoutes(app);
   const server = app.listen(0);
   await new Promise<void>((resolve) => server.once("listening", () => resolve()));
@@ -144,6 +149,11 @@ describe("POST /api/bid-board/create-from-rfp (endpoint)", () => {
       });
       expect(res.status).toBe(202); // NOT 413
       expect(enqueueCommandMock).toHaveBeenCalledTimes(1);
+      // The whole attachments list must survive parsing + enqueue — including the LAST element (i.e. the body
+      // wasn't silently truncated at some cap between the parser and the durable command).
+      const cmd = enqueueCommandMock.mock.calls[0][0] as { attachments: Array<{ name: string }> };
+      expect(cmd.attachments).toHaveLength(400);
+      expect(cmd.attachments[399].name).toBe("document-399.pdf");
     });
   });
 
