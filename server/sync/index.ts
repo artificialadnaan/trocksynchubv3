@@ -115,7 +115,9 @@ export async function runBidBoardStageSync(
     if (!pushResult.ok && !pushResult.skipped) {
       const reason = pushResult.terminalFailure
         ? "reached a terminal processing failure"
-        : "could not be confirmed as durably accepted (ambiguous response)";
+        : pushResult.rejected
+          ? "was rejected by the CRM (deterministic client error)"
+          : "could not be confirmed as durably accepted (ambiguous response)";
       log(`[BidBoardCRM] CRM ingestion ${reason} after ${pushResult.attempts} attempt(s); continuing stage sync`, "sync");
     }
     // Record the push outcome and email on retry-exhausted failure / recovery. Never throws — a

@@ -75,6 +75,31 @@ async function delay(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Per-request deadlines. Every fetch in this flow runs inside the scheduled stage-sync cycle, which sets
+// `bidboardStageSyncRunning` for its whole duration; a single request that connects but never completes its
+// response would leave that flag set forever, so every later interval would skip and neither the CRM alert nor
+// the remaining HubSpot sync would run. Bounding each request turns a hung connection into an ordinary failed
+// attempt/probe on the existing catch paths (both are already retry/re-POST bounded and CRM-idempotent).
+const CRM_POST_TIMEOUT_MS = 30_000; // the payload upload
+const STATUS_PROBE_TIMEOUT_MS = 15_000; // the signed /ingest/status lookup (a quick CRM read)
+
+/** Run one fetch through the (test-injectable) impl under an AbortController deadline. Mirrors
+ *  server/lib/fetch-with-timeout.ts but threads the injected `fetchImpl` so tests keep their seam. */
+async function fetchImplWithTimeout(
+  fetchImpl: typeof fetch,
+  url: string,
+  options: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 type CrmIngestionStatus = "queued" | "processing" | "succeeded" | "failed" | "unknown";
 
 interface StatusProbeResult {
@@ -90,14 +115,19 @@ async function probeCrmIngestionStatus(
 ): Promise<StatusProbeResult> {
   const body = JSON.stringify({ office_slug: args.officeSlug, idempotency_key: args.idempotencyKey });
   try {
-    const response = await args.fetchImpl(statusUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-bid-board-sync-signature": signBidBoardCrmPayload(body, args.secret),
+    const response = await fetchImplWithTimeout(
+      args.fetchImpl,
+      statusUrl,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-bid-board-sync-signature": signBidBoardCrmPayload(body, args.secret),
+        },
+        body,
       },
-      body,
-    });
+      STATUS_PROBE_TIMEOUT_MS
+    );
     if (!response.ok) {
       return { ok: false, error: `status probe responded ${response.status}` };
     }
@@ -164,14 +194,19 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
   const postOnce = async (): Promise<{ posted: boolean; ok: boolean; rejected: boolean }> => {
     attempts++;
     try {
-      const response = await fetchImpl(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-bid-board-sync-signature": signBidBoardCrmPayload(body, secret),
+      const response = await fetchImplWithTimeout(
+        fetchImpl,
+        url,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-bid-board-sync-signature": signBidBoardCrmPayload(body, secret),
+          },
+          body,
         },
-        body,
-      });
+        CRM_POST_TIMEOUT_MS
+      );
       lastStatus = response.status;
       if (response.ok) {
         log(`[BidBoardCRM] Posted ${input.rows.length} Bid Board rows to CRM (accepted ${response.status})`, "sync");

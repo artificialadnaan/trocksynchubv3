@@ -112,6 +112,22 @@ describe("Bid Board CRM ingestion push", () => {
     expect(ingestCalls).toHaveLength(1);
   });
 
+  it("bounds EVERY CRM request (POST + status probe) with an abort deadline so a hung connection can't wedge the cycle", async () => {
+    // The whole flow runs inside the stage-sync cycle (bidboardStageSyncRunning stays set for its duration). A
+    // request that connects but never completes its response would otherwise await forever, so every later
+    // interval would skip and neither the alert nor the HubSpot sync would run. 502 -> ambiguous -> probe says
+    // processing -> accepted; the assertion is that the POST AND the probe each carry an AbortController signal.
+    const fetchImpl = vi.fn(async (url: string) =>
+      url === STATUS_URL ? res(200, { status: "processing" }) : res(502)
+    ) as any;
+    const result = await pushBidBoardRowsToCrm({ ...baseInput, fetchImpl });
+    expect(result.accepted).toBe(true);
+    expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(2); // at least the POST + one probe
+    for (const call of fetchImpl.mock.calls) {
+      expect(call[1].signal).toBeInstanceOf(AbortSignal); // pre-fix this was undefined on both paths
+    }
+  });
+
   it("a 502 followed by status=succeeded is ACCEPTED", async () => {
     const fetchImpl = vi.fn(async (url: string) =>
       url === STATUS_URL ? res(200, { status: "succeeded" }) : res(502)
