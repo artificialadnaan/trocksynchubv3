@@ -41,6 +41,18 @@ describe("decidePushAlert (pure)", () => {
       .toBe("alert_failure");
   });
 
+  it("a CHANGED diagnosis within the window → alert_failure (definitive kind not throttled)", () => {
+    expect(
+      decidePushAlert({ ...base, pushOk: false, prevState: "failing", lastAlertedAt: ago(10), prevKind: "unconfirmed", currentKind: "terminal_failure" }).action
+    ).toBe("alert_failure");
+  });
+
+  it("the SAME diagnosis within the window → none (still throttled, no spam)", () => {
+    expect(
+      decidePushAlert({ ...base, pushOk: false, prevState: "failing", lastAlertedAt: ago(10), prevKind: "unconfirmed", currentKind: "unconfirmed" }).action
+    ).toBe("none");
+  });
+
   it("success after failing → alert_recovered, state ok", () => {
     expect(decidePushAlert({ ...base, pushOk: true, prevState: "failing", lastAlertedAt: ago(30) }))
       .toEqual({ action: "alert_recovered", nextState: "ok" });
@@ -124,8 +136,8 @@ function fakeDb() {
         return { rows: row ? [row] : [] };
       }
       if (t.includes("insert into") && t.includes("bidboard_crm_push_alert_state")) {
-        const [office_slug, state, last_alerted_at, last_success_at, last_error, updated_at] = params!;
-        store.set(office_slug, { office_slug, state, last_alerted_at, last_success_at, last_error, updated_at });
+        const [office_slug, state, last_alerted_at, last_alerted_kind, last_success_at, last_error, updated_at] = params!;
+        store.set(office_slug, { office_slug, state, last_alerted_at, last_alerted_kind, last_success_at, last_error, updated_at });
         return { rows: [] };
       }
       return { rows: [] };
@@ -193,6 +205,28 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     const res = await run(db, { ok: true, attempts: 1 }, NOW);
     expect(send).not.toHaveBeenCalled();
     expect((res as any).action).toBe("none");
+  });
+
+  it("re-alerts INSIDE the throttle window when the diagnosis changes (unconfirmed → terminal_failure)", async () => {
+    const db = fakeDb();
+    // First: an ambiguous UNCONFIRMED failure → alerts and records kind 'unconfirmed'.
+    await run(db, { ok: false, attempts: 3, idempotencyKey: "k" }, NOW);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.store.get("dallas").last_alerted_kind).toBe("unconfirmed");
+    // 10 min later (well inside the 60-min window) the probe now reports a TERMINAL failure — the definitive
+    // diagnosis must NOT be suppressed behind the earlier ambiguous alert.
+    await run(db, { ok: false, terminalFailure: true, attempts: 3, idempotencyKey: "k" }, new Date(NOW.getTime() + 10 * MIN));
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][0].subject).toMatch(/FAILED \(processing\)/); // terminal_failure subject
+    expect(db.store.get("dallas").last_alerted_kind).toBe("terminal_failure");
+  });
+
+  it("still throttles a REPEAT of the same diagnosis within the window", async () => {
+    const db = fakeDb();
+    await run(db, { ok: false, attempts: 3, idempotencyKey: "k" }, NOW);
+    send.mockClear();
+    await run(db, { ok: false, attempts: 3, idempotencyKey: "k" }, new Date(NOW.getTime() + 10 * MIN));
+    expect(send).not.toHaveBeenCalled(); // same 'unconfirmed' kind → throttled
   });
 
   it("a SKIPPED push (CRM sync not configured) never alerts", async () => {

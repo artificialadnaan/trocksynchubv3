@@ -15,6 +15,10 @@ import { log } from "../index";
 
 export type PushAlertState = "ok" | "failing";
 export type PushAlertAction = "alert_failure" | "alert_recovered" | "none";
+/** The three FAILURE diagnoses (recovery is not a failure kind). Persisted so a CHANGE in diagnosis — e.g. an
+ *  ambiguous `unconfirmed` later resolving to a definitive `terminal_failure` — alerts immediately instead of
+ *  being suppressed behind the re-alert throttle as a failing→failing repeat. */
+export type PushFailureKind = "terminal_failure" | "unconfirmed" | "request_rejected";
 
 export interface PushAlertDecisionInput {
   pushOk: boolean;
@@ -22,6 +26,10 @@ export interface PushAlertDecisionInput {
   lastAlertedAt: Date | null;
   now: Date;
   realertMinutes: number;
+  /** This cycle's failure diagnosis (null/omitted when pushOk). */
+  currentKind?: PushFailureKind | null;
+  /** The diagnosis last alerted on, from persisted state. */
+  prevKind?: PushFailureKind | null;
 }
 
 export interface PushAlertDecision {
@@ -36,9 +44,12 @@ export interface PushAlertDecision {
 export function decidePushAlert(i: PushAlertDecisionInput): PushAlertDecision {
   if (!i.pushOk) {
     if (i.prevState !== "failing") return { action: "alert_failure", nextState: "failing" };
+    // A CHANGE in the failure diagnosis is new, more-actionable information — alert now rather than let the
+    // re-alert throttle bury a definitive terminal_failure/request_rejected behind the earlier 'unconfirmed'.
+    const kindChanged = i.prevKind != null && i.currentKind != null && i.currentKind !== i.prevKind;
     const dueForRealert =
       i.lastAlertedAt === null || i.now.getTime() - i.lastAlertedAt.getTime() >= i.realertMinutes * 60_000;
-    return { action: dueForRealert ? "alert_failure" : "none", nextState: "failing" };
+    return { action: kindChanged || dueForRealert ? "alert_failure" : "none", nextState: "failing" };
   }
   return { action: i.prevState === "failing" ? "alert_recovered" : "none", nextState: "ok" };
 }
@@ -156,22 +167,27 @@ export async function ensurePushAlertStateTable(db: Querier = pool): Promise<voi
       office_slug TEXT PRIMARY KEY,
       state TEXT NOT NULL DEFAULT 'ok',
       last_alerted_at TIMESTAMPTZ,
+      last_alerted_kind TEXT,
       last_success_at TIMESTAMPTZ,
       last_error TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  // Backfill last_alerted_kind onto tables created before the failure-kind was tracked, so a diagnosis change
+  // (unconfirmed → terminal_failure) can bypass the throttle. Idempotent alongside the CREATE above.
+  await db.query(`ALTER TABLE bidboard_crm_push_alert_state ADD COLUMN IF NOT EXISTS last_alerted_kind TEXT`);
 }
 
 interface PersistedPushAlertState {
   state: PushAlertState;
   last_alerted_at: Date | null;
+  last_alerted_kind: PushFailureKind | null;
   last_success_at: Date | null;
 }
 
 export async function readPushAlertState(officeSlug: string, db: Querier = pool): Promise<PersistedPushAlertState | null> {
   const { rows } = await db.query(
-    `SELECT state, last_alerted_at, last_success_at FROM bidboard_crm_push_alert_state WHERE office_slug = $1`,
+    `SELECT state, last_alerted_at, last_alerted_kind, last_success_at FROM bidboard_crm_push_alert_state WHERE office_slug = $1`,
     [officeSlug]
   );
   if (rows.length === 0) return null;
@@ -179,25 +195,34 @@ export async function readPushAlertState(officeSlug: string, db: Querier = pool)
   return {
     state: r.state as PushAlertState,
     last_alerted_at: r.last_alerted_at ? new Date(r.last_alerted_at) : null,
+    last_alerted_kind: (r.last_alerted_kind as PushFailureKind | null) ?? null,
     last_success_at: r.last_success_at ? new Date(r.last_success_at) : null,
   };
 }
 
 export async function upsertPushAlertState(
   officeSlug: string,
-  fields: { state: PushAlertState; lastAlertedAt: Date | null; lastSuccessAt: Date | null; lastError: string | null; now: Date },
+  fields: {
+    state: PushAlertState;
+    lastAlertedAt: Date | null;
+    lastAlertedKind: PushFailureKind | null;
+    lastSuccessAt: Date | null;
+    lastError: string | null;
+    now: Date;
+  },
   db: Querier = pool
 ): Promise<void> {
   await db.query(
-    `INSERT INTO bidboard_crm_push_alert_state (office_slug, state, last_alerted_at, last_success_at, last_error, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO bidboard_crm_push_alert_state (office_slug, state, last_alerted_at, last_alerted_kind, last_success_at, last_error, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (office_slug) DO UPDATE
        SET state = EXCLUDED.state,
            last_alerted_at = EXCLUDED.last_alerted_at,
+           last_alerted_kind = EXCLUDED.last_alerted_kind,
            last_success_at = EXCLUDED.last_success_at,
            last_error = EXCLUDED.last_error,
            updated_at = EXCLUDED.updated_at`,
-    [officeSlug, fields.state, fields.lastAlertedAt, fields.lastSuccessAt, fields.lastError, fields.now]
+    [officeSlug, fields.state, fields.lastAlertedAt, fields.lastAlertedKind, fields.lastSuccessAt, fields.lastError, fields.now]
   );
 }
 
@@ -281,25 +306,29 @@ export async function recordPushOutcomeAndMaybeAlert(
     // Self-heal the table so a standalone sync entrypoint (no web-boot migration) can't throw here.
     await ensurePushAlertStateTable(db);
     const prior = await readPushAlertState(args.officeSlug, db);
+    const failureKind: PushFailureKind | null = args.pushResult.ok
+      ? null
+      : args.pushResult.rejected
+      ? "request_rejected"
+      : args.pushResult.terminalFailure
+      ? "terminal_failure"
+      : "unconfirmed";
     const decision = decidePushAlert({
       pushOk: args.pushResult.ok,
       prevState: prior?.state ?? null,
       lastAlertedAt: prior?.last_alerted_at ?? null,
       now,
       realertMinutes,
+      currentKind: failureKind,
+      prevKind: prior?.last_alerted_kind ?? null,
     });
 
     // Send first so the throttle anchor / state flip can be gated on a SUCCESSFUL send: a failed first
     // send must re-alert next cycle, not stay quiet for a whole window. A thrown/false send is swallowed.
     let sent = false;
     if (decision.action !== "none") {
-      const failureKind = args.pushResult.rejected
-        ? "request_rejected"
-        : args.pushResult.terminalFailure
-        ? "terminal_failure"
-        : "unconfirmed";
       const { subject, htmlBody } = renderPushAlertEmail({
-        kind: decision.action === "alert_recovered" ? "recovered" : failureKind,
+        kind: decision.action === "alert_recovered" ? "recovered" : (failureKind ?? "unconfirmed"),
         office: args.officeSlug,
         attempts: args.pushResult.attempts,
         status: args.pushResult.status,
@@ -325,17 +354,24 @@ export async function recordPushOutcomeAndMaybeAlert(
     //    recovery notice is retried next successful cycle.
     let persistedState: PushAlertState = decision.nextState;
     let lastAlertedAt: Date | null;
+    let lastAlertedKind: PushFailureKind | null;
     if (decision.action === "alert_failure") {
+      // Anchor BOTH the throttle instant and the recorded diagnosis on a SUCCESSFUL send; a failed send must
+      // re-alert next cycle, so keep the prior kind so the change is still detected.
       lastAlertedAt = sent ? now : (prior?.last_alerted_at ?? null);
+      lastAlertedKind = sent ? failureKind : (prior?.last_alerted_kind ?? null);
     } else if (decision.action === "alert_recovered") {
       if (sent) {
         lastAlertedAt = null;
+        lastAlertedKind = null;
       } else {
         persistedState = "failing";
         lastAlertedAt = prior?.last_alerted_at ?? null;
+        lastAlertedKind = prior?.last_alerted_kind ?? null;
       }
     } else {
       lastAlertedAt = prior?.last_alerted_at ?? null;
+      lastAlertedKind = prior?.last_alerted_kind ?? null;
     }
 
     await upsertPushAlertState(
@@ -343,6 +379,7 @@ export async function recordPushOutcomeAndMaybeAlert(
       {
         state: persistedState,
         lastAlertedAt,
+        lastAlertedKind,
         // Record the success instant only when the push actually succeeded; preserve prior otherwise.
         lastSuccessAt: args.pushResult.ok ? now : (prior?.last_success_at ?? null),
         lastError: args.pushResult.ok ? null : (args.pushResult.error ?? null),

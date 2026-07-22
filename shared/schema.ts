@@ -118,6 +118,7 @@ export const bidboardCrmPushAlertState = pgTable("bidboard_crm_push_alert_state"
   officeSlug: text("office_slug").primaryKey(),
   state: text("state").notNull().default("ok"), // ok | failing
   lastAlertedAt: timestamp("last_alerted_at", { withTimezone: true }),
+  lastAlertedKind: text("last_alerted_kind"), // terminal_failure | unconfirmed | request_rejected
   lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
   lastError: text("last_error"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

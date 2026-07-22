@@ -66,9 +66,15 @@ export function computeBidBoardIdempotencyKey(body: Buffer | string) {
   return crypto.createHash("sha256").update(body).digest("hex");
 }
 
-/** The signed status endpoint sits next to /ingest. */
+/** The signed status endpoint sits next to /ingest. Append to the PATH via URL parsing (not raw string
+ *  concat) so a configured query string — e.g. CRM_BID_BOARD_SYNC_URL=".../ingest?version=2" — yields
+ *  ".../ingest/status?version=2", not the broken ".../ingest?version=2/status" that would probe the wrong
+ *  endpoint and mis-report every ambiguous submission as unconfirmed. */
 export function deriveBidBoardStatusUrl(ingestUrl: string) {
-  return `${ingestUrl.replace(/\/+$/, "")}/status`;
+  const statusUrl = new URL(ingestUrl);
+  statusUrl.pathname = `${statusUrl.pathname.replace(/\/+$/, "")}/status`;
+  statusUrl.hash = "";
+  return statusUrl.toString();
 }
 
 async function delay(ms: number) {

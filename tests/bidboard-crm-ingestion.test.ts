@@ -71,6 +71,8 @@ describe("Bid Board CRM ingestion push", () => {
   it("derives the status endpoint next to /ingest", () => {
     expect(deriveBidBoardStatusUrl(INGEST_URL)).toBe(STATUS_URL);
     expect(deriveBidBoardStatusUrl(INGEST_URL + "/")).toBe(STATUS_URL);
+    // A configured query string must attach to the PATH, not corrupt into ".../ingest?version=2/status".
+    expect(deriveBidBoardStatusUrl(INGEST_URL + "?version=2")).toBe(STATUS_URL + "?version=2");
   });
 
   it("a 2xx POST is durably accepted in a single request (no polling)", async () => {
