@@ -128,6 +128,38 @@ describe("Bid Board CRM ingestion push", () => {
     }
   });
 
+  it("keeps the deadline armed through the BODY read — a response that stalls after headers is aborted, not hung", async () => {
+    vi.useFakeTimers();
+    try {
+      // Headers arrive immediately (fetch resolves) but the body read never settles on its own — only the
+      // AbortController deadline can end it. Pre-fix the timer was cleared the instant fetch() resolved, so the
+      // callers' text()/json() reads awaited forever with the stage-sync cycle wedged.
+      const stallUntilAbort = (signal: AbortSignal) =>
+        new Promise<string>((_resolve, reject) => {
+          if (signal.aborted) reject(new Error("aborted"));
+          else signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      const fetchImpl = vi.fn((url: string, options: any) =>
+        Promise.resolve({
+          ok: url !== INGEST_URL, // POST -> non-2xx (reads the error body); probe -> 2xx (reads the json body)
+          status: url === INGEST_URL ? 502 : 200,
+          text: () => stallUntilAbort(options.signal),
+          json: () => stallUntilAbort(options.signal),
+        })
+      ) as any;
+
+      const promise = pushBidBoardRowsToCrm({ ...baseInput, fetchImpl });
+      await vi.advanceTimersByTimeAsync(120_000); // drive past the POST deadline and every probe deadline
+      const result = await promise;
+
+      // It RETURNED (did not hang); no probe body ever resolved, so acceptance stays unconfirmed.
+      expect(result.ok).toBe(false);
+      expect(result.accepted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a 502 followed by status=succeeded is ACCEPTED", async () => {
     const fetchImpl = vi.fn(async (url: string) =>
       url === STATUS_URL ? res(200, { status: "succeeded" }) : res(502)

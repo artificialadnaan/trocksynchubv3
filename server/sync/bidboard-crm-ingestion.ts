@@ -83,18 +83,37 @@ async function delay(ms: number) {
 const CRM_POST_TIMEOUT_MS = 30_000; // the payload upload
 const STATUS_PROBE_TIMEOUT_MS = 15_000; // the signed /ingest/status lookup (a quick CRM read)
 
-/** Run one fetch through the (test-injectable) impl under an AbortController deadline. Mirrors
- *  server/lib/fetch-with-timeout.ts but threads the injected `fetchImpl` so tests keep their seam. */
+interface TimedResponse {
+  ok: boolean;
+  status: number;
+  bodyText: string; // the FULL body, already drained under the deadline
+}
+
+/** Run one fetch through the (test-injectable) impl AND fully drain its body under a SINGLE AbortController
+ *  deadline. fetch() resolves on response HEADERS, so the body read must happen inside the deadline too — a
+ *  server that sends headers then stalls the body would otherwise hang the caller's text()/json() forever with
+ *  bidboardStageSyncRunning still set, defeating the timeout. We return the already-materialized body so callers
+ *  never touch the socket again. Mirrors server/lib/fetch-with-timeout.ts but threads the injected `fetchImpl`
+ *  so tests keep their seam. */
 async function fetchImplWithTimeout(
   fetchImpl: typeof fetch,
   url: string,
   options: RequestInit,
   timeoutMs: number
-): Promise<Response> {
+): Promise<TimedResponse> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(url, { ...options, signal: controller.signal });
+    const response = await fetchImpl(url, { ...options, signal: controller.signal });
+    // Drain the body while the deadline is still armed. A deadline abort MUST propagate (that is the whole
+    // point — it lands on the caller's catch as a failed attempt/probe); but a NON-abort body-read failure
+    // (e.g. a connection reset mid-body) is swallowed to "" so the caller still classifies by HTTP status,
+    // preserving the old lenient `response.text().catch(() => "")` / `response.json().catch(() => null)`.
+    const bodyText = await response.text().catch((err) => {
+      if (controller.signal.aborted) throw err;
+      return "";
+    });
+    return { ok: response.ok, status: response.status, bodyText };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -131,9 +150,12 @@ async function probeCrmIngestionStatus(
     if (!response.ok) {
       return { ok: false, error: `status probe responded ${response.status}` };
     }
-    const json = (await response.json().catch(() => null)) as
-      | { status?: CrmIngestionStatus; lastError?: string }
-      | null;
+    let json: { status?: CrmIngestionStatus; lastError?: string } | null = null;
+    try {
+      json = response.bodyText ? JSON.parse(response.bodyText) : null;
+    } catch {
+      json = null;
+    }
     const status = json?.status;
     if (status === "queued" || status === "processing" || status === "succeeded" || status === "failed") {
       return { ok: true, status, lastError: json?.lastError };
@@ -212,7 +234,7 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
         log(`[BidBoardCRM] Posted ${input.rows.length} Bid Board rows to CRM (accepted ${response.status})`, "sync");
         return { posted: true, ok: true, rejected: false };
       }
-      lastError = `CRM responded ${response.status}: ${await response.text().catch(() => "")}`;
+      lastError = `CRM responded ${response.status}: ${response.bodyText}`;
       const rejected = isDeterministicRejection(response.status);
       log(`[BidBoardCRM] Push attempt ${attempts} ${rejected ? "REJECTED" : "ambiguous"}: ${lastError}`, "sync");
       return { posted: true, ok: false, rejected };

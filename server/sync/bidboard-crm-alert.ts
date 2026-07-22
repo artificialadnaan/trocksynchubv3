@@ -50,6 +50,9 @@ export function decidePushAlert(i: PushAlertDecisionInput): PushAlertDecision {
  *  - `unconfirmed`: SyncHub could NOT confirm the CRM durably accepted the push — an ambiguous gateway
  *    response (e.g. a 502) that the signed status probe never resolved. This is explicitly NOT proof the
  *    CRM rolled back; the import may still be in flight. Investigate rather than assume data loss.
+ *  - `request_rejected`: the CRM returned a DETERMINISTIC client error (a 4xx other than 429/408) — a bad
+ *    signature (BID_BOARD_SYNC_SECRET mismatch), a malformed body, or an oversized payload. The push will
+ *    never be accepted as-is, so SyncHub did NOT retry or probe status; fix the request/config and re-run.
  *  - `recovered`: pushes are healthy again.
  */
 export interface PushAlertEmailInput {
