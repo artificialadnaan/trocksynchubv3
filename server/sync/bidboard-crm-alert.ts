@@ -43,32 +43,79 @@ export function decidePushAlert(i: PushAlertDecisionInput): PushAlertDecision {
   return { action: i.prevState === "failing" ? "alert_recovered" : "none", nextState: "ok" };
 }
 
+/**
+ * Alert kinds:
+ *  - `terminal_failure`: the CRM durably ACCEPTED the push but its async processing reached a real
+ *    terminal failure (the inbox row / job dead-lettered). This is a genuine failure to act on.
+ *  - `unconfirmed`: SyncHub could NOT confirm the CRM durably accepted the push — an ambiguous gateway
+ *    response (e.g. a 502) that the signed status probe never resolved. This is explicitly NOT proof the
+ *    CRM rolled back; the import may still be in flight. Investigate rather than assume data loss.
+ *  - `request_rejected`: the CRM returned a DETERMINISTIC client error (a 4xx other than 429/408) — a bad
+ *    signature (BID_BOARD_SYNC_SECRET mismatch), a malformed body, or an oversized payload. The push will
+ *    never be accepted as-is, so SyncHub did NOT retry or probe status; fix the request/config and re-run.
+ *  - `recovered`: pushes are healthy again.
+ */
 export interface PushAlertEmailInput {
-  kind: "failure" | "recovered";
+  kind: "terminal_failure" | "unconfirmed" | "request_rejected" | "recovered";
   office: string;
   attempts?: number;
   status?: number;
   error?: string;
   sourceFilename?: string;
+  idempotencyKey?: string;
   now: Date;
 }
 
 /** Pure email renderer — separate from sending so it is unit-testable without a transport. */
 export function renderPushAlertEmail(e: PushAlertEmailInput): { subject: string; htmlBody: string } {
   const office = escapeHtml(e.office); // env-controlled, but escape defensively like the other body fields
-  if (e.kind === "failure") {
-    const subject = `⚠️ Bid Board → CRM push FAILED — office ${e.office}`;
-    const htmlBody = `
-      <h2>Bid Board → CRM ingestion push failed</h2>
+  // Common failure-detail block, incl. the idempotency key so ops can query the CRM signed status endpoint
+  // (POST /api/bid-board-sync/ingest/status with {office_slug, idempotency_key}) for the exact row.
+  const details = `
       <p><strong>Office:</strong> ${office}</p>
       <p><strong>When:</strong> ${e.now.toISOString()}</p>
-      <p><strong>Attempts before giving up:</strong> ${e.attempts ?? "—"}</p>
-      <p><strong>HTTP status:</strong> ${e.status ?? "—"}</p>
+      <p><strong>Push attempts:</strong> ${e.attempts ?? "—"}</p>
+      <p><strong>Last HTTP status:</strong> ${e.status ?? "—"}</p>
       <p><strong>Error:</strong> ${escapeHtml(e.error ?? "(none captured)")}</p>
       <p><strong>Export file:</strong> ${escapeHtml(e.sourceFilename ?? "—")}</p>
-      <p>The scrape succeeded but the CRM rejected the push. Because a failed CRM ingest rolls back its
-      own run record, this alert (raised by SyncHub, outside that transaction) is the primary failure
-      signal. Further failures are throttled to roughly hourly until the push recovers.</p>
+      <p><strong>Idempotency key:</strong> ${escapeHtml(e.idempotencyKey ?? "—")}</p>`;
+
+  if (e.kind === "terminal_failure") {
+    const subject = `⚠️ Bid Board → CRM ingestion FAILED (processing) — office ${e.office}`;
+    const htmlBody = `
+      <h2>Bid Board → CRM ingestion failed during processing</h2>${details}
+      <p>The CRM durably ACCEPTED this push, but its asynchronous ingestion reached a terminal failure
+      after retries (the ingestion job dead-lettered). This is a real processing failure — query the CRM
+      signed status endpoint with the idempotency key above (or inspect the bid_board_ingestion_inbox row,
+      status 'failed') for the underlying error. Further alerts are throttled to roughly hourly until
+      pushes recover.</p>
+    `;
+    return { subject, htmlBody };
+  }
+
+  if (e.kind === "request_rejected") {
+    const subject = `⚠️ Bid Board → CRM push REJECTED (${e.status ?? "4xx"}) — office ${e.office}`;
+    const htmlBody = `
+      <h2>Bid Board → CRM rejected the push</h2>${details}
+      <p>The CRM returned a deterministic client error (HTTP ${e.status ?? "4xx"}) — the request will
+      <strong>not</strong> be accepted as-is. This is typically a bad signature (BID_BOARD_SYNC_SECRET
+      mismatch), a malformed body, or an oversized payload (25MB limit). SyncHub did not retry or probe
+      status. Fix the request/configuration and re-run. Further alerts are throttled to roughly hourly
+      until pushes recover.</p>
+    `;
+    return { subject, htmlBody };
+  }
+
+  if (e.kind === "unconfirmed") {
+    const subject = `⚠️ Bid Board → CRM push UNCONFIRMED — office ${e.office}`;
+    const htmlBody = `
+      <h2>Bid Board → CRM push could not be confirmed</h2>${details}
+      <p>The scrape succeeded, but SyncHub could not confirm the CRM durably accepted the push — the CRM
+      gateway returned an ambiguous response (e.g. a 502) and a signed status probe did not report the
+      ingestion as queued, processing, or succeeded. This does <strong>NOT</strong> mean the CRM rolled
+      back or lost data; the import may still be in flight, or the request may never have reached the CRM.
+      Query the CRM signed status endpoint with the idempotency key above before re-running. Further alerts
+      are throttled to roughly hourly until pushes recover.</p>
     `;
     return { subject, htmlBody };
   }
@@ -78,7 +125,7 @@ export function renderPushAlertEmail(e: PushAlertEmailInput): { subject: string;
     <h2>Bid Board → CRM ingestion push has recovered</h2>
     <p><strong>Office:</strong> ${office}</p>
     <p><strong>When:</strong> ${e.now.toISOString()}</p>
-    <p>A push has succeeded again; the prior failure has cleared.</p>
+    <p>A push has been durably accepted again; the prior failure has cleared.</p>
   `;
   return { subject, htmlBody };
 }
@@ -157,11 +204,22 @@ export async function upsertPushAlertState(
 // ── Orchestrator ──────────────────────────────────────────────────────────────
 
 export interface PushResultLike {
+  /** True when the push is durably ACCEPTED (2xx, or a status probe reported queued/processing/succeeded).
+   *  Alerting treats this as healthy. */
   ok: boolean;
   skipped?: boolean;
   attempts: number;
   status?: number;
   error?: string;
+  /** The CRM accepted the payload but its async processing reached a terminal failure → 'terminal_failure'
+   *  wording. When absent/false and ok is false, the outcome is UNCONFIRMED (ambiguous 502) → 'unconfirmed'
+   *  wording (never a rollback claim). */
+  terminalFailure?: boolean;
+  /** A deterministic 4xx rejection (bad signature / malformed / oversized) → 'request_rejected' wording. */
+  rejected?: boolean;
+  /** The idempotency key for this push, so the alert can tell ops exactly which row to query on the CRM
+   *  signed status endpoint. */
+  idempotencyKey?: string;
 }
 
 export interface RecordPushDeps {
@@ -235,13 +293,19 @@ export async function recordPushOutcomeAndMaybeAlert(
     // send must re-alert next cycle, not stay quiet for a whole window. A thrown/false send is swallowed.
     let sent = false;
     if (decision.action !== "none") {
+      const failureKind = args.pushResult.rejected
+        ? "request_rejected"
+        : args.pushResult.terminalFailure
+        ? "terminal_failure"
+        : "unconfirmed";
       const { subject, htmlBody } = renderPushAlertEmail({
-        kind: decision.action === "alert_recovered" ? "recovered" : "failure",
+        kind: decision.action === "alert_recovered" ? "recovered" : failureKind,
         office: args.officeSlug,
         attempts: args.pushResult.attempts,
         status: args.pushResult.status,
         error: args.pushResult.error,
         sourceFilename: args.sourceFilename,
+        idempotencyKey: args.pushResult.idempotencyKey,
         now,
       });
       try {

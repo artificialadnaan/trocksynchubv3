@@ -53,9 +53,9 @@ describe("decidePushAlert (pure)", () => {
 });
 
 describe("renderPushAlertEmail (pure)", () => {
-  it("failure email carries the error, http status, attempts and office", () => {
+  it("terminal-failure email carries the error, http status, attempts and office — and does NOT claim a rollback", () => {
     const { subject, htmlBody } = renderPushAlertEmail({
-      kind: "failure", office: "dallas", attempts: 3, status: 500,
+      kind: "terminal_failure", office: "dallas", attempts: 3, status: 500,
       error: 'CRM responded 500: {"error":{"message":"Internal server error"}}',
       sourceFilename: "ProjectList.xlsx", now: NOW,
     });
@@ -64,6 +64,40 @@ describe("renderPushAlertEmail (pure)", () => {
     expect(htmlBody).toContain("500");
     expect(htmlBody).toContain("Internal server error");
     expect(htmlBody).toContain("3");
+    // The false-rollback claim from the old copy must be gone.
+    expect(htmlBody.toLowerCase()).not.toContain("rolls back");
+    expect(htmlBody.toLowerCase()).not.toContain("rejected the push");
+    expect(htmlBody.toLowerCase()).toContain("accepted");
+  });
+
+  it("unconfirmed email frames an ambiguous 502 as unresolved — explicitly NOT a rollback/data loss", () => {
+    const { subject, htmlBody } = renderPushAlertEmail({
+      kind: "unconfirmed", office: "dallas", attempts: 2, status: 502,
+      error: "CRM responded 502: <gateway>", sourceFilename: "ProjectList.xlsx", now: NOW,
+    });
+    expect(subject.toLowerCase()).toMatch(/unconfirmed|ambiguous/);
+    expect(htmlBody.toLowerCase()).toContain("not");
+    expect(htmlBody.toLowerCase()).not.toContain("rolls back");
+    expect(htmlBody.toLowerCase()).not.toContain("rejected the push");
+    // Mentions the ambiguous/gateway nature so ops don't assume data loss.
+    expect(htmlBody.toLowerCase()).toMatch(/ambiguous|502|in flight|could not confirm/);
+  });
+
+  it("request_rejected email names the 4xx rejection and does NOT claim a rollback", () => {
+    const { subject, htmlBody } = renderPushAlertEmail({
+      kind: "request_rejected", office: "dallas", attempts: 1, status: 401,
+      error: "CRM responded 401", idempotencyKey: "abc123", now: NOW,
+    });
+    expect(subject.toLowerCase()).toMatch(/reject/);
+    expect(htmlBody).toContain("401");
+    expect(htmlBody.toLowerCase()).not.toContain("rolls back");
+  });
+
+  it("failure emails carry the idempotency key so ops can query the CRM status endpoint", () => {
+    for (const kind of ["terminal_failure", "unconfirmed", "request_rejected"] as const) {
+      const { htmlBody } = renderPushAlertEmail({ kind, office: "dallas", idempotencyKey: "key-xyz-789", now: NOW });
+      expect(htmlBody).toContain("key-xyz-789");
+    }
   });
 
   it("recovered email is clearly a recovery", () => {
@@ -72,7 +106,7 @@ describe("renderPushAlertEmail (pure)", () => {
   });
 
   it("escapes HTML metacharacters in the office slug in the body", () => {
-    const { htmlBody } = renderPushAlertEmail({ kind: "failure", office: "a<b>&\"c", attempts: 1, now: NOW });
+    const { htmlBody } = renderPushAlertEmail({ kind: "terminal_failure", office: "a<b>&\"c", attempts: 1, now: NOW });
     expect(htmlBody).toContain("a&lt;b&gt;&amp;&quot;c");
     expect(htmlBody).not.toContain("<b>");
   });
@@ -220,5 +254,52 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     const retried = await run(db, { ok: true, attempts: 1 }, new Date(NOW.getTime() + 40 * MIN));
     expect((retried as any).action).toBe("alert_recovered"); // retried
     expect(db.store.get("dallas").state).toBe("ok");
+  });
+
+  it("a 502 later confirmed as processing/succeeded (ok:true, accepted:true) does NOT alert", async () => {
+    const db = fakeDb();
+    const res = await run(db, { ok: true, accepted: true, attempts: 1, ingestionStatus: "processing" }, NOW);
+    expect(send).not.toHaveBeenCalled();
+    expect((res as any).action).toBe("none");
+  });
+
+  it("a genuine TERMINAL processing failure alerts with terminal wording (no rollback claim)", async () => {
+    const db = fakeDb();
+    const res = await run(
+      db,
+      { ok: false, accepted: true, terminalFailure: true, attempts: 3, status: 502, error: "schema drift" },
+      NOW
+    );
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    const body: string = send.mock.calls[0][0].htmlBody;
+    expect(body.toLowerCase()).toContain("accepted");
+    expect(body.toLowerCase()).not.toContain("rolls back");
+    expect(db.store.get("dallas").state).toBe("failing");
+  });
+
+  it("an UNCONFIRMED ambiguous outcome (ok:false, accepted:false) alerts without claiming a rollback", async () => {
+    const db = fakeDb();
+    const res = await run(db, { ok: false, accepted: false, attempts: 2, status: 502, error: "gateway 502" }, NOW);
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    const email = send.mock.calls[0][0];
+    expect(email.subject.toLowerCase()).toMatch(/unconfirmed|ambiguous/);
+    expect(email.htmlBody.toLowerCase()).not.toContain("rolls back");
+  });
+
+  it("a deterministic REJECTION (ok:false, rejected:true) alerts with request_rejected wording + the key", async () => {
+    const db = fakeDb();
+    const res = await run(
+      db,
+      { ok: false, accepted: false, rejected: true, attempts: 1, status: 401, error: "bad sig", idempotencyKey: "k1" },
+      NOW
+    );
+    expect((res as any).action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    const email = send.mock.calls[0][0];
+    expect(email.subject.toLowerCase()).toMatch(/reject/);
+    expect(email.htmlBody).toContain("k1");
+    expect(email.htmlBody.toLowerCase()).not.toContain("rolls back");
   });
 });
