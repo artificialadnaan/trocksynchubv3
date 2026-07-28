@@ -23,6 +23,18 @@ export const LARGE_BODY_PATHS: ReadonlySet<string> = new Set([CREATE_FROM_RFP_PA
  * raw body (for HMAC verification on the RFP routes) and skips LARGE_BODY_PATHS so each of those routes is
  * parsed by its own scoped 10mb parser instead.
  */
+/**
+ * Express routes with default `strict: false` / `caseSensitive: false`, so `/api/rfp-requests/`,
+ * `/API/RFP-Requests` and `/api/rfp-requests//` all reach the same handler. An exact, case-sensitive
+ * lookup would miss those and send them through the 100 KB global parser — reintroducing the very
+ * 413 this skip exists to prevent — so match on the same normalization Express itself applies.
+ */
+export function normalizeRoutePath(path: string): string {
+  const lowered = path.toLowerCase();
+  const trimmed = lowered.replace(/\/+$/, "");
+  return trimmed === "" ? "/" : trimmed;
+}
+
 export function mountJsonBodyParsers(app: Express): void {
   const globalJson = express.json({
     verify: (req: Request, _res: Response, buf: Buffer) => {
@@ -30,7 +42,7 @@ export function mountJsonBodyParsers(app: Express): void {
     },
   });
   app.use((req: Request, res: Response, next: NextFunction) => {
-    if (LARGE_BODY_PATHS.has(req.path)) return next();
+    if (LARGE_BODY_PATHS.has(normalizeRoutePath(req.path))) return next();
     return globalJson(req, res, next);
   });
   app.use(express.urlencoded({ extended: false }));

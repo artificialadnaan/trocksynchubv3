@@ -118,3 +118,26 @@ describe("POST /api/rfp-requests body limit", () => {
     expect(status).not.toBe(401);
   });
 });
+
+describe("large-body skip matches the paths Express actually routes", () => {
+  // Express's default routing is non-strict and case-insensitive, so `/api/rfp-requests/` and
+  // `/API/RFP-Requests` both reach the same handler. An exact, case-sensitive Set lookup missed
+  // those, sending them through the 100 KB global parser and reintroducing the 413.
+  it.each(["/api/rfp-requests/", "/API/RFP-Requests", "/api/rfp-requests//"])(
+    "skips the global parser for the equivalent path %s",
+    async (path) => {
+      const body = oversizedBody();
+
+      const status = await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-rfp-request-signature": "sha256=deadbeef" },
+          body,
+        });
+        return res.status;
+      });
+
+      expect(status).not.toBe(413);
+    }
+  );
+});
