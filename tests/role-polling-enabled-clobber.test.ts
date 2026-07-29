@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     getAutomationConfig: vi.fn(),
     getAutomationConfigs: vi.fn(),
     upsertAutomationConfig: vi.fn(),
+    patchAutomationConfig: vi.fn(),
   },
   syncProcoreRoleAssignments: vi.fn(),
   syncProcoreRoleAssignmentsBatch: vi.fn(),
@@ -88,6 +89,32 @@ function configReturning(row: unknown, cursorRow?: unknown) {
   };
 }
 
+/**
+ * Back the storage mock with a real store whose patch merges right-biased per key, like Postgres `||`.
+ * The route now derives enabled/interval from the row the patch RETURNS, so a stubbed return would test
+ * nothing about that.
+ */
+function backedStore(initial: Record<string, any> = {}) {
+  const rows: Record<string, any> = { ...initial };
+  mocks.storage.getAutomationConfig.mockImplementation(async (key: string) =>
+    key in rows ? { key, value: rows[key] } : undefined,
+  );
+  mocks.storage.patchAutomationConfig.mockImplementation(
+    async (key: string, patch: Record<string, unknown>) => {
+      const prev = rows[key];
+      rows[key] = prev != null && typeof prev === "object" && !Array.isArray(prev)
+        ? { ...prev, ...patch }
+        : { ...patch };
+      return { key, value: rows[key] };
+    },
+  );
+  mocks.storage.upsertAutomationConfig.mockImplementation(async (data: any) => {
+    rows[data.key] = data.value;
+    return data;
+  });
+  return rows;
+}
+
 describe("role polling — the enabled-key clobber", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -95,6 +122,7 @@ describe("role polling — the enabled-key clobber", () => {
     vi.useRealTimers();
     mocks.storage.getAutomationConfig.mockResolvedValue(undefined);
     mocks.storage.upsertAutomationConfig.mockResolvedValue({});
+    mocks.storage.patchAutomationConfig.mockImplementation(async (key: string, patch: any) => ({ key, value: patch }));
   });
 
   it("STARTS on boot when the row exists but has no `enabled` key, and repairs the row", async () => {
@@ -111,11 +139,11 @@ describe("role polling — the enabled-key clobber", () => {
     expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15 * 60 * 1000);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("no `enabled` key"));
     // ...and it heals the row so the next boot needs no special case.
-    expect(mocks.storage.upsertAutomationConfig).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "role_assignment_polling",
-        value: expect.objectContaining({ enabled: true, batchSize: 150, intervalMinutes: 15 }),
-      }),
+    // A field-level patch: it sets `enabled` and cannot resurrect the rest of the snapshot it read.
+    expect(mocks.storage.patchAutomationConfig).toHaveBeenCalledWith(
+      "role_assignment_polling",
+      { enabled: true },
+      expect.any(String),
     );
   });
 
@@ -132,14 +160,12 @@ describe("role polling — the enabled-key clobber", () => {
     await initPolling();
 
     expect(setIntervalSpy).not.toHaveBeenCalled();
-    expect(mocks.storage.upsertAutomationConfig).not.toHaveBeenCalled();
+    expect(mocks.storage.patchAutomationConfig).not.toHaveBeenCalled();
   });
 
   it("a batchSize-only config update PRESERVES enabled and keeps the poller running", async () => {
     // The exact call that caused the outage. It must no longer erase `enabled` nor stop the timer.
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ enabled: true, intervalMinutes: 15, batchSize: 50 }),
-    );
+    const rows = backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 50 } });
     const app = createFakeApp();
     const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
     registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
@@ -148,18 +174,17 @@ describe("role polling — the enabled-key clobber", () => {
     expect(handlers).toBeTruthy();
     await invokeRoute(handlers, { body: { batchSize: 150 } });
 
-    const stored = mocks.storage.upsertAutomationConfig.mock.calls.at(-1)?.[0];
-    expect(stored.key).toBe("role_assignment_polling");
-    expect(stored.value.enabled).toBe(true);
-    expect(stored.value.batchSize).toBe(150);
-    // The interval it was already running on, not the 30 default.
-    expect(stored.value.intervalMinutes).toBe(15);
+    // Only batchSize is patched; `enabled` and `intervalMinutes` are never mentioned, so the merge keeps them.
+    const call = mocks.storage.patchAutomationConfig.mock.calls.at(-1);
+    expect(call?.[0]).toBe("role_assignment_polling");
+    expect(call?.[1]).toEqual({ batchSize: 150 });
+    expect(rows["role_assignment_polling"]).toMatchObject({
+      enabled: true, batchSize: 150, intervalMinutes: 15,
+    });
   });
 
   it("an explicit enabled:false through the same route still disables", async () => {
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ enabled: true, intervalMinutes: 15, batchSize: 150 }),
-    );
+    const rows = backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 150 } });
     const app = createFakeApp();
     const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
     registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
@@ -168,7 +193,7 @@ describe("role polling — the enabled-key clobber", () => {
       body: { enabled: false },
     });
 
-    expect(mocks.storage.upsertAutomationConfig.mock.calls.at(-1)?.[0].value.enabled).toBe(false);
+    expect(rows["role_assignment_polling"].enabled).toBe(false);
   });
 
   it("RESUMES the rotation from the persisted cursor instead of restarting at project #1", async () => {
@@ -206,11 +231,10 @@ describe("role polling — the enabled-key clobber", () => {
     await vi.advanceTimersByTimeAsync(150_000);
 
     // Its OWN key, carrying nothing else — so this write cannot replay policy fields.
-    expect(mocks.storage.upsertAutomationConfig).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "role_assignment_polling_cursor",
-        value: { batchCursor: 150 },
-      }),
+    expect(mocks.storage.patchAutomationConfig).toHaveBeenCalledWith(
+      "role_assignment_polling_cursor",
+      { batchCursor: 150 },
+      expect.any(String),
     );
   });
 
@@ -230,9 +254,8 @@ describe("role polling — the enabled-key clobber", () => {
     await initPolling();
     await vi.advanceTimersByTimeAsync(150_000);
 
-    const policyWrites = mocks.storage.upsertAutomationConfig.mock.calls
-      .map((c: any[]) => c[0])
-      .filter((w: any) => w.key === "role_assignment_polling");
+    const policyWrites = mocks.storage.patchAutomationConfig.mock.calls
+      .filter((c: any[]) => c[0] === "role_assignment_polling");
     expect(policyWrites).toHaveLength(0);
   });
 
@@ -244,7 +267,7 @@ describe("role polling — the enabled-key clobber", () => {
     const setIntervalSpy = vi.spyOn(global, "setInterval");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     mocks.storage.getAutomationConfig.mockImplementation(configReturning(CLOBBERED_ROW));
-    mocks.storage.upsertAutomationConfig.mockRejectedValue(new Error("db unavailable"));
+    mocks.storage.patchAutomationConfig.mockRejectedValue(new Error("db unavailable"));
 
     const { initPolling } = await import("../server/routes/settings.ts");
     await initPolling();
@@ -345,7 +368,7 @@ describe("role polling — the enabled-key clobber", () => {
     await initPolling();
 
     expect(setIntervalSpy).not.toHaveBeenCalled();
-    expect(mocks.storage.upsertAutomationConfig).not.toHaveBeenCalled();
+    expect(mocks.storage.patchAutomationConfig).not.toHaveBeenCalled();
   });
 
   it("does NOT recover a non-boolean `enabled` either", async () => {
@@ -365,7 +388,7 @@ describe("role polling — the enabled-key clobber", () => {
     // An absent ROW is not a key-less row. Coercing it to `{}` made the recovery rule fire on first install,
     // so an interval-only request would have created an enabled policy and started polling — while boot
     // defines a missing row as disabled. The two must agree.
-    mocks.storage.getAutomationConfig.mockResolvedValue(undefined);
+    const rows = backedStore({});
     const app = createFakeApp();
     const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
     registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
@@ -374,10 +397,65 @@ describe("role polling — the enabled-key clobber", () => {
       body: { intervalMinutes: 20 },
     });
 
-    const stored = mocks.storage.upsertAutomationConfig.mock.calls
-      .map((c: any[]) => c[0])
-      .find((w: any) => w.key === "role_assignment_polling");
-    expect(stored.value.enabled).toBe(false);
+    // Nothing enables it: the request never mentioned `enabled`, so the patch does not set it, and a row
+    // without it reads as disabled everywhere.
+    expect(rows["role_assignment_polling"].enabled).toBeUndefined();
+    expect(rows["role_assignment_polling"].intervalMinutes).toBe(20);
+  });
+
+  it("does NOT recover a non-OBJECT stored value", async () => {
+    // The generic automation-config PUT accepts arbitrary JSON. `false`, a string, or an array all lack an
+    // `enabled` property, so a hasOwnProperty check alone read them as the clobbered object and would have
+    // repaired them into an enabled, email-sending poller. They were disabled before this branch existed.
+    for (const value of [false, "disabled", [1, 2], 0] as unknown[]) {
+      vi.clearAllMocks();
+      vi.useFakeTimers();
+      const setIntervalSpy = vi.spyOn(global, "setInterval");
+      mocks.storage.getAutomationConfig.mockImplementation(configReturning(value));
+      mocks.storage.patchAutomationConfig.mockResolvedValue({} as any);
+      vi.resetModules();
+
+      const { initPolling } = await import("../server/routes/settings.ts");
+      await initPolling();
+
+      expect(setIntervalSpy, `value ${JSON.stringify(value)} must not start polling`).not.toHaveBeenCalled();
+      expect(mocks.storage.patchAutomationConfig).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    }
+  });
+
+  it("an explicit `enabled: null` through the POST DISABLES rather than being discarded", async () => {
+    // `reqEnabled ?? existing` treated a supplied null as "not supplied", so the poller kept running. null is
+    // a value: it read as disabled before this branch, and the startup rule treats any present non-boolean
+    // `enabled` as disabled. The route has to normalise it the same way.
+    const rows = backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 150 } });
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
+      body: { enabled: null },
+    });
+
+    expect(rows["role_assignment_polling"].enabled).toBe(false);
+  });
+
+  it("an enabled-only request PRESERVES the stored batchSize, not this replica's stale copy", async () => {
+    // ROLE_POLLING_BATCH_SIZE is module state and can be stale — another replica, or the generic config PUT,
+    // may have changed the stored value. Writing it back on a request that never mentioned batchSize breaks
+    // the very partial-update guarantee this endpoint is supposed to provide.
+    const rows = backedStore({ role_assignment_polling: { enabled: false, intervalMinutes: 15, batchSize: 175 } });
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
+      body: { enabled: true },
+    });
+
+    const call = mocks.storage.patchAutomationConfig.mock.calls.at(-1);
+    expect(call?.[1]).toEqual({ enabled: true });
+    expect(rows["role_assignment_polling"].batchSize).toBe(175);
   });
 
   it("a concurrent explicit disable during startup WINS over the repair", async () => {
@@ -405,9 +483,8 @@ describe("role polling — the enabled-key clobber", () => {
     expect(policyReads).toBeGreaterThanOrEqual(2);
     expect(setIntervalSpy).not.toHaveBeenCalled();
     // ...and crucially it did not stamp `enabled: true` over the disable.
-    const policyWrites = mocks.storage.upsertAutomationConfig.mock.calls
-      .map((c: any[]) => c[0])
-      .filter((w: any) => w.key === "role_assignment_polling");
+    const policyWrites = mocks.storage.patchAutomationConfig.mock.calls
+      .filter((c: any[]) => c[0] === "role_assignment_polling");
     expect(policyWrites).toHaveLength(0);
   });
 
@@ -415,7 +492,7 @@ describe("role polling — the enabled-key clobber", () => {
     // The boot repair is async and can fail. Until it lands, the row still has no `enabled` — and a
     // batchSize-only request that defaulted to false would persist an explicit disable and stop the timer,
     // turning a recoverable state into one that looks deliberate. Boot and this route share one rule.
-    mocks.storage.getAutomationConfig.mockImplementation(configReturning(CLOBBERED_ROW));
+    backedStore({ role_assignment_polling: { ...CLOBBERED_ROW } });
     const app = createFakeApp();
     const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
     registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
@@ -424,9 +501,10 @@ describe("role polling — the enabled-key clobber", () => {
       body: { batchSize: 150 },
     });
 
-    const stored = mocks.storage.upsertAutomationConfig.mock.calls
-      .map((c: any[]) => c[0])
-      .find((w: any) => w.key === "role_assignment_polling");
-    expect(stored.value.enabled).toBe(true);
+    // The request never mentioned `enabled`, so the patch leaves it absent — which the shared rule still
+    // reads as enabled for an existing row. Nothing writes a false over a recoverable state.
+    const call = mocks.storage.patchAutomationConfig.mock.calls.at(-1);
+    expect(call?.[1]).toEqual({ batchSize: 150 });
+    expect(call?.[1]).not.toHaveProperty("enabled");
   });
 });
