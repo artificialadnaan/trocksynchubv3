@@ -331,6 +331,86 @@ describe("role polling — the enabled-key clobber", () => {
     expect(payload.automations.hubspot_polling.enabled).toBe(false);
   });
 
+  it("does NOT recover `enabled: null` — that is an explicit value, not a missing key", async () => {
+    // The recovery is for the clobber's fingerprint: NO `enabled` property. `enabled ?? true` also caught
+    // null, which the generic automation-config PUT can persist and which used to read as disabled — so
+    // upgrading would have quietly started polling and emailing for a row somebody had turned off.
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    mocks.storage.getAutomationConfig.mockImplementation(
+      configReturning({ ...CLOBBERED_ROW, enabled: null }),
+    );
+
+    const { initPolling } = await import("../server/routes/settings.ts");
+    await initPolling();
+
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    expect(mocks.storage.upsertAutomationConfig).not.toHaveBeenCalled();
+  });
+
+  it("does NOT recover a non-boolean `enabled` either", async () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    mocks.storage.getAutomationConfig.mockImplementation(
+      configReturning({ ...CLOBBERED_ROW, enabled: "yes" }),
+    );
+
+    const { initPolling } = await import("../server/routes/settings.ts");
+    await initPolling();
+
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+  });
+
+  it("a partial update on a FRESH install (no row at all) does not create an enabled policy", async () => {
+    // An absent ROW is not a key-less row. Coercing it to `{}` made the recovery rule fire on first install,
+    // so an interval-only request would have created an enabled policy and started polling — while boot
+    // defines a missing row as disabled. The two must agree.
+    mocks.storage.getAutomationConfig.mockResolvedValue(undefined);
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
+      body: { intervalMinutes: 20 },
+    });
+
+    const stored = mocks.storage.upsertAutomationConfig.mock.calls
+      .map((c: any[]) => c[0])
+      .find((w: any) => w.key === "role_assignment_polling");
+    expect(stored.value.enabled).toBe(false);
+  });
+
+  it("a concurrent explicit disable during startup WINS over the repair", async () => {
+    // Multiple replicas. This one reads a key-less row; an admin disables polling through another replica
+    // while this one is still reading the cursor. Repairing unconditionally would write `enabled: true` over
+    // that newer `false` and start polling locally — recovery undoing operator intent. The row is re-read
+    // immediately before acting, so the disable is honoured.
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    let policyReads = 0;
+    mocks.storage.getAutomationConfig.mockImplementation(async (key: string) => {
+      if (key === "role_assignment_polling") {
+        policyReads += 1;
+        // First read: the legacy key-less row. Second (the pre-repair re-read): an admin has disabled it.
+        return policyReads === 1
+          ? { key, value: CLOBBERED_ROW }
+          : { key, value: { ...CLOBBERED_ROW, enabled: false } };
+      }
+      return undefined;
+    });
+
+    const { initPolling } = await import("../server/routes/settings.ts");
+    await initPolling();
+
+    expect(policyReads).toBeGreaterThanOrEqual(2);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    // ...and crucially it did not stamp `enabled: true` over the disable.
+    const policyWrites = mocks.storage.upsertAutomationConfig.mock.calls
+      .map((c: any[]) => c[0])
+      .filter((w: any) => w.key === "role_assignment_polling");
+    expect(policyWrites).toHaveLength(0);
+  });
+
   it("a partial update on a still-clobbered row keeps it ENABLED rather than persisting a false", async () => {
     // The boot repair is async and can fail. Until it lands, the row still has no `enabled` — and a
     // batchSize-only request that defaulted to false would persist an explicit disable and stop the timer,

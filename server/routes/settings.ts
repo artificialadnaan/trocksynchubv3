@@ -50,7 +50,17 @@ const ROLE_POLLING_CURSOR_KEY = "role_assignment_polling_cursor";
  */
 function rolePollingEnabledFromRow(row: any): boolean {
   if (row == null) return false;
-  return row.enabled ?? true;
+  // ABSENT, specifically. `enabled ?? true` also caught `enabled: null`, which is an explicit value, not a
+  // missing key — and the generic authenticated automation-config PUT takes arbitrary JSON, so a null is
+  // reachable and used to read as disabled. Recovering it would silently start polling and sending email for
+  // a row somebody had turned off. Anything present but not a boolean is likewise not the clobber signature.
+  if (!hasExplicitEnabled(row)) return true;
+  return row.enabled === true;
+}
+
+/** Does the row carry an `enabled` property at all? The clobber is the one shape that does not. */
+function hasExplicitEnabled(row: any): boolean {
+  return row != null && Object.prototype.hasOwnProperty.call(row, 'enabled');
 }
 let ROLE_POLLING_BATCH_SIZE = 50;
 
@@ -564,27 +574,49 @@ export async function initPolling() {
     if (Number.isFinite(Number(storedCursor))) {
       rolePollingBatchCursor = Math.max(0, Math.floor(Number(storedCursor)));
     }
-    if (rolePollingEnabledFromRow(val)) {
-      if (val.enabled === undefined) {
+    // For a key-less row, RE-READ the policy immediately before acting on it.
+    //
+    // These are multiple replicas. One can read a key-less row, an administrator can disable polling through
+    // another replica while this one is still doing the cursor read, and the repair would then write
+    // `enabled: true` over that newer explicit `false` and start polling locally — recovery undoing operator
+    // intent. The re-read cannot close the window completely (there is no CAS here), but it narrows it to the
+    // two adjacent statements below instead of spanning every read above.
+    let effective = val;
+    let needsRepair = false;
+    if (val != null && !hasExplicitEnabled(val)) {
+      try {
+        const fresh = ((await storage.getAutomationConfig('role_assignment_polling'))?.value as any) ?? null;
+        if (fresh != null) effective = fresh;
+      } catch (reReadErr: any) {
+        console.warn(
+          '[RolePolling] Could not re-read the config before repair; acting on the first read:',
+          reReadErr?.message ?? reReadErr,
+        );
+      }
+      needsRepair = !hasExplicitEnabled(effective);
+    }
+
+    if (rolePollingEnabledFromRow(effective)) {
+      if (needsRepair) {
         console.warn(
           '[RolePolling] Config has no `enabled` key (partial-update clobber) — starting anyway and repairing the row',
         );
-        // Its OWN try/catch, and it runs BEFORE nothing. A transient failure here must not skip
-        // startRolePolling: there is no startup retry, so one failed repair would keep the poller down for
-        // the life of the process — perpetuating the very outage this branch exists to recover from.
+        // Its OWN try/catch. A transient failure here must not skip startRolePolling: there is no startup
+        // retry, so one failed repair would keep the poller down for the life of the process — perpetuating
+        // the very outage this branch exists to recover from.
         try {
           await storage.upsertAutomationConfig({
             key: 'role_assignment_polling',
-            value: { ...val, enabled: true },
+            value: { ...effective, enabled: true },
             description: 'Automatic Procore role assignment polling configuration',
           });
         } catch (repairErr: any) {
           console.warn('[RolePolling] Could not repair the config row; starting anyway:', repairErr?.message ?? repairErr);
         }
       }
-      startRolePolling(val.intervalMinutes ?? 23);
+      startRolePolling(effective.intervalMinutes ?? 23);
     } else {
-      console.log('[RolePolling] Disabled by saved config (enabled=false)');
+      console.log('[RolePolling] Disabled by saved config (enabled is false or non-boolean)');
     }
   } catch (e: any) {
     console.log('[RolePolling] No saved config, role polling disabled by default:', e?.message ?? e);
@@ -912,20 +944,24 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       // and kickoff emails only went out when a webhook happened to sync the right project.
       //
       // A partial update must now leave every field it did not mention exactly as it was.
-      const existing = ((await storage.getAutomationConfig("role_assignment_polling"))?.value as any) ?? {};
+      // `?? null`, NOT `?? {}`. An absent ROW is not a key-less row: coercing it to `{}` made the recovery
+      // rule fire on a fresh install, so an interval-only request would have created an ENABLED policy and
+      // started polling — while initPolling treats a missing row as disabled. Only an existing row recovers.
+      const existingRow = await storage.getAutomationConfig("role_assignment_polling");
+      const existing = (existingRow?.value as any) ?? null;
       const { enabled: reqEnabled, intervalMinutes, batchSize: reqBatchSize } = req.body ?? {};
       // The SAME rule boot uses. Defaulting to false here would take the clobbered row — which still exists
       // until the boot repair lands, and survives a failed repair — and persist an explicit `enabled: false`,
       // converting a recoverable state into one that looks like somebody meant it.
       const enabled = reqEnabled ?? rolePollingEnabledFromRow(existing);
-      const interval = intervalMinutes ?? existing.intervalMinutes ?? 30;
+      const interval = intervalMinutes ?? existing?.intervalMinutes ?? 30;
       if (reqBatchSize !== undefined) {
         ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(reqBatchSize) || 50));
       }
       // No batchCursor here — it lives in ROLE_POLLING_CURSOR_KEY so policy writes and progress writes
       // cannot clobber one another.
       const stored = {
-        ...existing,
+        ...(existing ?? {}),
         enabled,
         intervalMinutes: interval,
         batchSize: ROLE_POLLING_BATCH_SIZE,
