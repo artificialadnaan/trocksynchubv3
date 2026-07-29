@@ -263,6 +263,19 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
 
     if (!fullSync && 'nextCursor' in result) {
       rolePollingBatchCursor = result.nextCursor;
+      // Persist it. Held only in memory, the cursor reset to 0 on every deploy and crash, so the rotation
+      // perpetually re-walked the lowest procoreIds and never reached the newest projects. Best-effort:
+      // losing the write costs us one restart's progress, and must never abort the cycle.
+      try {
+        const existing = ((await storage.getAutomationConfig('role_assignment_polling'))?.value as any) ?? {};
+        await storage.upsertAutomationConfig({
+          key: 'role_assignment_polling',
+          value: { ...existing, batchCursor: result.nextCursor },
+          description: 'Automatic Procore role assignment polling configuration',
+        });
+      } catch (cursorErr: any) {
+        console.warn('[RolePolling] Could not persist batch cursor:', cursorErr?.message ?? cursorErr);
+      }
       if (result.nextCursor === 0) {
         console.log('[RolePolling] Full sweep rotation complete');
       }
@@ -500,14 +513,39 @@ export async function initPolling() {
   try {
     const config = await storage.getAutomationConfig("role_assignment_polling");
     const val = (config?.value as any);
-    if (val?.enabled) {
-      if (val.batchSize != null) {
-        ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(val.batchSize) || 50));
+    if (val != null && val.batchSize != null) {
+      ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(val.batchSize) || 50));
+    }
+    // Restore the rotation cursor so a restart does not resume from project #1. The list is sorted by
+    // ascending procoreId, so restarting always re-walks the OLDEST projects and starves the newest —
+    // which are exactly the ones whose PM assignment should raise a kickoff email.
+    if (val != null && Number.isFinite(Number(val.batchCursor))) {
+      rolePollingBatchCursor = Math.max(0, Math.floor(Number(val.batchCursor)));
+    }
+    // A config row that EXISTS but carries no `enabled` key is the signature of the partial-update
+    // clobber below (a batch-size change used to persist `{enabled: undefined}`, which JSON drops).
+    // Reading that as "disabled" is what silently switched role polling off in production: 262 of 374
+    // active projects went 30+ days without a role check and roughly half of all PM assignments never
+    // raised a kickoff email. An explicit `enabled: false` is still honoured — only the MISSING key
+    // defaults to on, because nothing but the bug can produce it.
+    const enabled = val == null ? false : (val.enabled ?? true);
+    if (enabled) {
+      if (val.enabled === undefined) {
+        console.warn(
+          '[RolePolling] Config has no `enabled` key (partial-update clobber) — starting anyway and repairing the row',
+        );
+        await storage.upsertAutomationConfig({
+          key: 'role_assignment_polling',
+          value: { ...val, enabled: true },
+          description: 'Automatic Procore role assignment polling configuration',
+        });
       }
       startRolePolling(val.intervalMinutes ?? 23);
+    } else {
+      console.log('[RolePolling] Disabled by saved config (enabled=false)');
     }
-  } catch (e) {
-    console.log('[RolePolling] No saved config, role polling disabled by default');
+  } catch (e: any) {
+    console.log('[RolePolling] No saved config, role polling disabled by default:', e?.message ?? e);
   }
 
   // BidBoard polling (61 min — Playwright-based, doesn't hit API directly)
@@ -812,12 +850,30 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
 
   app.post("/api/automation/role-polling/config", requireAuth, async (req, res) => {
     try {
-      const { enabled, intervalMinutes, batchSize: reqBatchSize } = req.body;
-      const interval = intervalMinutes ?? 30;
+      // MERGE over the stored row; do not rebuild it from the request body.
+      //
+      // This used to destructure `enabled` and persist `{ enabled, ... }` unconditionally. A request that
+      // only changed the batch size left it `undefined`, JSON dropped the key, and the row came back with
+      // no `enabled` at all — which initPolling read as disabled. The same call then fell through to
+      // `stopRolePolling()`. So one batch-size tweak in the UI stopped the poller AND kept it stopped
+      // across every restart afterwards: 262 of 374 active projects went 30+ days without a role check,
+      // and kickoff emails only went out when a webhook happened to sync the right project.
+      //
+      // A partial update must now leave every field it did not mention exactly as it was.
+      const existing = ((await storage.getAutomationConfig("role_assignment_polling"))?.value as any) ?? {};
+      const { enabled: reqEnabled, intervalMinutes, batchSize: reqBatchSize } = req.body ?? {};
+      const enabled = reqEnabled ?? existing.enabled ?? false;
+      const interval = intervalMinutes ?? existing.intervalMinutes ?? 30;
       if (reqBatchSize !== undefined) {
         ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(reqBatchSize) || 50));
       }
-      const stored = { enabled, intervalMinutes: interval, batchSize: ROLE_POLLING_BATCH_SIZE };
+      const stored = {
+        ...existing,
+        enabled,
+        intervalMinutes: interval,
+        batchSize: ROLE_POLLING_BATCH_SIZE,
+        batchCursor: rolePollingBatchCursor,
+      };
       await storage.upsertAutomationConfig({
         key: "role_assignment_polling",
         value: stored,
