@@ -546,8 +546,21 @@ export async function initPolling() {
     // ascending procoreId, so restarting always re-walks the OLDEST projects and starves the newest —
     // which are exactly the ones whose PM assignment should raise a kickoff email.
     // Its own row now; `batchCursor` on the policy row is read as a fallback for rows written before that.
-    const cursorRow = ((await storage.getAutomationConfig(ROLE_POLLING_CURSOR_KEY))?.value as any) ?? null;
-    const storedCursor = cursorRow?.batchCursor ?? val?.batchCursor;
+    //
+    // Its OWN try/catch, for the same reason the repair write has one: this read sits between the policy read
+    // and startRolePolling, so letting it reach the outer catch would mean one transient DB failure leaves
+    // the poller down for the life of the process — the exact failure this file already fixed once. Losing
+    // the cursor costs a rotation's progress; losing the START costs every kickoff email.
+    let storedCursor: unknown = val?.batchCursor;
+    try {
+      const cursorRow = ((await storage.getAutomationConfig(ROLE_POLLING_CURSOR_KEY))?.value as any) ?? null;
+      storedCursor = cursorRow?.batchCursor ?? val?.batchCursor;
+    } catch (cursorReadErr: any) {
+      console.warn(
+        '[RolePolling] Could not read the saved rotation cursor; falling back to the policy row:',
+        cursorReadErr?.message ?? cursorReadErr,
+      );
+    }
     if (Number.isFinite(Number(storedCursor))) {
       rolePollingBatchCursor = Math.max(0, Math.floor(Number(storedCursor)));
     }
@@ -690,7 +703,14 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         configMap[c.key] = c.value;
       }
 
-      const getEnabled = (key: string) => (configMap[key] as any)?.enabled === true;
+      // `=== true` is right for every automation whose row is written whole. role_assignment_polling is the
+      // exception: a missing `enabled` there means the partial-update clobber, which boot recovers by
+      // starting anyway — so this list has to agree, or the dashboard contradicts the running process.
+      // (Codex named the status endpoint; this third derivation had the same divergence.)
+      const getEnabled = (key: string) =>
+        key === 'role_assignment_polling'
+          ? rolePollingEnabledFromRow(configMap[key] ?? null)
+          : (configMap[key] as any)?.enabled === true;
 
       res.json({
         automations: {
@@ -859,7 +879,10 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       const config = await storage.getAutomationConfig("role_assignment_polling");
       const val = (config?.value as any) || {};
       res.json({
-        enabled: val.enabled || false,
+        // The SAME rule boot and the POST use. Reporting `val.enabled || false` meant that for a clobbered
+        // row whose repair failed, boot started the poller while this endpoint — and therefore the UI — said
+        // it was off. A recovery rule that only some observers know is a rule that will be argued with.
+        enabled: rolePollingEnabledFromRow(config?.value ?? null),
         intervalMinutes: val.intervalMinutes ?? 30,
         isRunning: rolePollingTimer !== null,
         lastPollAt: lastRolePollAt?.toISOString() || null,

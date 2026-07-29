@@ -256,6 +256,81 @@ describe("role polling — the enabled-key clobber", () => {
     );
   });
 
+  it("STARTS the poller even when reading the saved cursor fails", async () => {
+    // The cursor read sits between the policy read and startRolePolling. Letting it reach the outer catch
+    // meant one transient DB failure left the poller down for the life of the process — the same failure
+    // mode the isolated repair write already fixed, reintroduced two lines above it. Losing the cursor
+    // costs a rotation's progress; losing the START costs every kickoff email.
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.storage.getAutomationConfig.mockImplementation(async (key: string) => {
+      if (key === "role_assignment_polling") {
+        return { key, value: { ...CLOBBERED_ROW, enabled: true, batchCursor: 42 } };
+      }
+      if (key === "role_assignment_polling_cursor") throw new Error("db unavailable");
+      return undefined;
+    });
+    mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
+      synced: 0, newAssignments: [], nextCursor: 0, totalProjects: 374, batchProcessed: 0,
+    });
+
+    const { initPolling } = await import("../server/routes/settings.ts");
+    await initPolling();
+
+    expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15 * 60 * 1000);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Could not read the saved rotation cursor"),
+      expect.anything(),
+    );
+    // ...and it fell back to the legacy policy-row cursor rather than restarting at 0.
+    await vi.advanceTimersByTimeAsync(150_000);
+    expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(150, 42);
+  });
+
+  it("GET status reports a clobbered row as ENABLED, matching what boot actually did", async () => {
+    // Boot starts the poller for a row with no `enabled`; this endpoint used `val.enabled || false` and told
+    // the UI it was off. A recovery rule only some observers know is a rule that gets argued with.
+    mocks.storage.getAutomationConfig.mockImplementation(configReturning(CLOBBERED_ROW));
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const res = await invokeRoute(app.routes["GET /api/automation/role-polling/config"]);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
+  });
+
+  it("GET status still reports an explicit enabled:false as disabled", async () => {
+    mocks.storage.getAutomationConfig.mockImplementation(
+      configReturning({ ...CLOBBERED_ROW, enabled: false }),
+    );
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const res = await invokeRoute(app.routes["GET /api/automation/role-polling/config"]);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+  });
+
+  it("the automations LIST agrees too — the third derivation of the same rule", async () => {
+    // Codex named the status endpoint; enumerating the readers turned up this one as well, deriving
+    // enabled-ness a third way via `?.enabled === true`. Other automations keep that strict rule; only
+    // role polling has the clobber history that makes a missing key mean "on".
+    mocks.storage.getAutomationConfigs.mockResolvedValue([
+      { key: "role_assignment_polling", value: CLOBBERED_ROW },
+      { key: "hubspot_polling", value: { intervalMinutes: 11 } },
+    ]);
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const res = await invokeRoute(app.routes["GET /api/automation/status"]);
+    const payload = res.json.mock.calls.at(-1)?.[0];
+    expect(payload.automations.role_assignment_polling.enabled).toBe(true);
+    // A key-less row for any OTHER automation still reads as disabled — no clobber history, no exception.
+    expect(payload.automations.hubspot_polling.enabled).toBe(false);
+  });
+
   it("a partial update on a still-clobbered row keeps it ENABLED rather than persisting a false", async () => {
     // The boot repair is async and can fail. Until it lands, the row still has no `enabled` — and a
     // batchSize-only request that defaulted to false would persist an explicit disable and stop the timer,
