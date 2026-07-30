@@ -359,10 +359,12 @@ describe("role polling — the enabled-key clobber", () => {
     // `Number(x) || 30` rejects 0 and NaN but passes -5 through, and a negative delay makes setInterval fire
     // continuously — a runaway against the Procore API, i.e. the rate-limit event the batching exists to
     // prevent. I fixed the boot path and left this one raw; both share one resolver now.
+    // 23, not 30: boot and this route share one fallback now, so a row without an interval keeps its
+    // schedule across a restart instead of silently changing.
     for (const [stored, expectedMs] of [
-      [-5, 30 * 60 * 1000],
-      [0, 30 * 60 * 1000],
-      ["soon", 30 * 60 * 1000],
+      [-5, 23 * 60 * 1000],
+      [0, 23 * 60 * 1000],
+      ["soon", 23 * 60 * 1000],
       [99999, 1440 * 60 * 1000],
       [20, 20 * 60 * 1000],
     ] as Array<[unknown, number]>) {
@@ -399,8 +401,9 @@ describe("role polling — the enabled-key clobber", () => {
       body: { intervalMinutes: -5 },
     });
 
-    expect(rows["role_assignment_polling"].intervalMinutes).toBe(30);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ intervalMinutes: 30 }));
+    // 23 — the single shared default, so the persisted row, the response and a later restart all agree.
+    expect(rows["role_assignment_polling"].intervalMinutes).toBe(23);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ intervalMinutes: 23 }));
   });
 
   it("ignores a COERCIBLE non-number cursor (false, []) in favour of a valid fallback", async () => {
@@ -441,6 +444,56 @@ describe("role polling — the enabled-key clobber", () => {
 
     // 175 from the database, not the 50 default this process booted with.
     expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(175, expect.any(Number));
+  });
+
+  it("uses ONE interval fallback, so a row without one keeps its schedule across a restart", async () => {
+    // Boot fell back to 23 and the config route to 30. A row with no `intervalMinutes` therefore ran on a
+    // different schedule depending on whether it had just been saved or just been restarted — a silent
+    // change with no configuration event behind it.
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    backedStore({ role_assignment_polling: { enabled: false } }); // no intervalMinutes at all
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], { body: { enabled: true } });
+    const viaRoute = setIntervalSpy.mock.calls.at(-1)?.[1];
+
+    // ...and the same row through boot.
+    vi.resetModules();
+    vi.clearAllMocks();
+    const bootSpy = vi.spyOn(global, "setInterval");
+    await bootWith({ enabled: true });
+    const viaBoot = bootSpy.mock.calls.at(-1)?.[1];
+
+    expect(viaRoute).toBe(viaBoot);
+    expect(viaRoute).toBe(23 * 60 * 1000);
+  });
+
+  it("RESETS the batch size when the authoritative row omits it", async () => {
+    // A row with no batchSize is the database saying "the default", not "keep whatever this process had".
+    // Leaving stale module state meant the replica polled at its old size while the DB implied 50 — and the
+    // next restart changed it silently.
+    vi.useFakeTimers();
+    // Boot with 175, so the module state is non-default...
+    await bootWith({ enabled: true, intervalMinutes: 15, batchSize: 175 });
+    mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
+      synced: 0, newAssignments: [], nextCursor: 0, totalProjects: 374, batchProcessed: 0,
+    });
+    await vi.advanceTimersByTimeAsync(150_000);
+    expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(175, expect.any(Number));
+
+    // ...then the policy is replaced by a row with no batchSize, and a config request returns it.
+    mocks.syncProcoreRoleAssignmentsBatch.mockClear();
+    backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15 } });
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], { body: { enabled: true } });
+
+    await vi.advanceTimersByTimeAsync(150_000);
+    expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(50, expect.any(Number));
   });
 
   // ── Timer inputs ─────────────────────────────────────────────────────────────────────────────────

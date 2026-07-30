@@ -40,6 +40,15 @@ let rolePollingBatchCursor = 0;
 const ROLE_POLLING_CURSOR_KEY = "role_assignment_polling_cursor";
 
 /**
+ * The defaults, once. Boot fell back to 23 minutes and the config route to 30, so a row with no
+ * `intervalMinutes` ran on a different schedule depending on whether it had just been saved or just been
+ * restarted — a silent change with no configuration event behind it. 23 is the deliberate value: it is
+ * coprime with the other pollers so they do not all hit Procore in the same window.
+ */
+const ROLE_POLLING_DEFAULT_INTERVAL_MINUTES = 23;
+const ROLE_POLLING_DEFAULT_BATCH_SIZE = 50;
+
+/**
  * Is role polling on? `enabled === true` on a plain object. Nothing else.
  *
  * An earlier revision recovered a row with no `enabled` key by treating it as ON, so that deploying the fix
@@ -84,10 +93,13 @@ function resolveRolePollingInterval(raw: unknown, fallbackMinutes: number): numb
  */
 function applyRolePollingBatchSize(row: any): void {
   const raw = row?.batchSize;
-  if (typeof raw !== 'number' && typeof raw !== 'string') return;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return;
-  ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, n || 50));
+  const n = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN;
+  // A row that omits batchSize is the database saying "the default", not "keep whatever this process had".
+  // Returning early left the replica polling at its old size while the DB implied 50, and the next restart
+  // changed it silently — module state disagreeing with storage is the same bug class as the rest of this PR.
+  ROLE_POLLING_BATCH_SIZE = Number.isFinite(n)
+    ? Math.max(10, Math.min(200, n || ROLE_POLLING_DEFAULT_BATCH_SIZE))
+    : ROLE_POLLING_DEFAULT_BATCH_SIZE;
 }
 
 /** The clobber's fingerprint: a plain object with no `enabled` property. Reported, never acted on. */
@@ -99,7 +111,7 @@ function looksClobbered(row: any): boolean {
     !Object.prototype.hasOwnProperty.call(row, 'enabled')
   );
 }
-let ROLE_POLLING_BATCH_SIZE = 50;
+let ROLE_POLLING_BATCH_SIZE = 50; // replaced by applyRolePollingBatchSize from the authoritative row
 
 // ─── BidBoard polling state ───────────────────────────────────────────────────
 let bidboardPollingTimer: ReturnType<typeof setInterval> | null = null;
@@ -633,7 +645,7 @@ export async function initPolling() {
     if (rolePollingEnabledFromRow(val)) {
       // Validate before it reaches setInterval. A stored 0, negative, NaN or string would otherwise become a
       // runaway or never-firing timer; the poller hits the Procore API, so a runaway is a rate-limit event.
-      const interval = resolveRolePollingInterval(val.intervalMinutes, 23);
+      const interval = resolveRolePollingInterval(val.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES);
       if (interval !== Number(val.intervalMinutes)) {
         console.warn(`[RolePolling] Stored intervalMinutes ${JSON.stringify(val.intervalMinutes)} is unusable; using ${interval}`);
       }
@@ -989,7 +1001,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       // boot resolved it against a different 23-minute fallback. Normalising here makes storage, response,
       // timer and restart agree.
       if (has('intervalMinutes')) {
-        patch.intervalMinutes = resolveRolePollingInterval(body.intervalMinutes, 30);
+        patch.intervalMinutes = resolveRolePollingInterval(body.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES);
       }
       if (has('batchSize')) {
         patch.batchSize = Math.max(10, Math.min(200, Number(body.batchSize) || 50));
@@ -1012,7 +1024,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       ))?.value as any;
 
       const enabled = rolePollingEnabledFromRow(merged);
-      const interval = resolveRolePollingInterval(merged?.intervalMinutes, 30);
+      const interval = resolveRolePollingInterval(merged?.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES);
       applyRolePollingBatchSize(merged);
       if (enabled) {
         startRolePolling(interval);
