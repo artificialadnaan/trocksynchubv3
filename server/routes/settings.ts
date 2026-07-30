@@ -40,31 +40,32 @@ let rolePollingBatchCursor = 0;
 const ROLE_POLLING_CURSOR_KEY = "role_assignment_polling_cursor";
 
 /**
- * Is role polling on, given its stored row? ONE rule, because two copies of it disagreed.
+ * Is role polling on? `enabled === true` on a plain object. Nothing else.
  *
- * A row that exists with NO `enabled` key is the fingerprint of the partial-update clobber that took polling
- * down: rebuilding the row from a request body that omitted `enabled` persisted `{enabled: undefined}`, and
- * JSON drops the key. Nothing else produces that shape, so the truthful reading is "this was on" — and both
- * boot and the config endpoint must agree, or a partial update lands an explicit `enabled: false` and turns a
- * recoverable state into one that looks deliberate.
+ * An earlier revision recovered a row with no `enabled` key by treating it as ON, so that deploying the fix
+ * would also repair the production row the clobber had damaged. Review found eleven distinct ways that
+ * default could fire when it should not — a non-object value, an explicit null, a row this very endpoint had
+ * just created, a concurrently-disabled row — and every one of them failed in the same direction: starting a
+ * poller that emails project managers. A recovery whose worst case is "sends mail nobody asked for", bought
+ * to save a single API call, is not worth its blast radius.
+ *
+ * So the rule is now boring, and the damaged row is repaired by hand (one POST with {"enabled": true}).
+ * Boot still SAYS when it sees the clobber signature — being silent about it is what let the outage run for
+ * weeks — it just does not act on it.
  */
 function rolePollingEnabledFromRow(row: any): boolean {
-  // A plain object, or nothing. The generic automation-config PUT accepts arbitrary JSON, so the stored value
-  // can be `false`, `"disabled"`, or an array — none of which have an `enabled` property, and all of which
-  // would otherwise be read as the clobbered object and repaired into an enabled poller that sends email.
-  // Those values were disabled before this branch existed and must stay that way.
   if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
-  // ABSENT, specifically. `enabled ?? true` also caught `enabled: null`, which is an explicit value, not a
-  // missing key — and the generic authenticated automation-config PUT takes arbitrary JSON, so a null is
-  // reachable and used to read as disabled. Recovering it would silently start polling and sending email for
-  // a row somebody had turned off. Anything present but not a boolean is likewise not the clobber signature.
-  if (!hasExplicitEnabled(row)) return true;
   return row.enabled === true;
 }
 
-/** Does the row carry an `enabled` property at all? The clobber is the one shape that does not. */
-function hasExplicitEnabled(row: any): boolean {
-  return row != null && Object.prototype.hasOwnProperty.call(row, 'enabled');
+/** The clobber's fingerprint: a plain object with no `enabled` property. Reported, never acted on. */
+function looksClobbered(row: any): boolean {
+  return (
+    row != null &&
+    typeof row === 'object' &&
+    !Array.isArray(row) &&
+    !Object.prototype.hasOwnProperty.call(row, 'enabled')
+  );
 }
 let ROLE_POLLING_BATCH_SIZE = 50;
 
@@ -565,67 +566,46 @@ export async function initPolling() {
     // and startRolePolling, so letting it reach the outer catch would mean one transient DB failure leaves
     // the poller down for the life of the process — the exact failure this file already fixed once. Losing
     // the cursor costs a rotation's progress; losing the START costs every kickoff email.
-    let storedCursor: unknown = val?.batchCursor;
+    // First finite candidate wins. `??` alone let `""` or `false` through to Number(), which yields 0 —
+    // silently restarting the rotation at project #1, the very starvation this restore exists to prevent.
+    const firstFinite = (...candidates: unknown[]) =>
+      candidates.find((c) => c !== null && c !== '' && Number.isFinite(Number(c)));
+    let storedCursor: unknown = firstFinite(val?.batchCursor);
     try {
       const cursorRow = ((await storage.getAutomationConfig(ROLE_POLLING_CURSOR_KEY))?.value as any) ?? null;
-      storedCursor = cursorRow?.batchCursor ?? val?.batchCursor;
+      storedCursor = firstFinite(cursorRow?.batchCursor, val?.batchCursor);
     } catch (cursorReadErr: any) {
       console.warn(
         '[RolePolling] Could not read the saved rotation cursor; falling back to the policy row:',
         cursorReadErr?.message ?? cursorReadErr,
       );
     }
-    if (Number.isFinite(Number(storedCursor))) {
+    if (storedCursor !== undefined) {
       rolePollingBatchCursor = Math.max(0, Math.floor(Number(storedCursor)));
     }
-    // For a key-less row, RE-READ the policy immediately before acting on it.
-    //
-    // These are multiple replicas. One can read a key-less row, an administrator can disable polling through
-    // another replica while this one is still doing the cursor read, and the repair would then write
-    // `enabled: true` over that newer explicit `false` and start polling locally — recovery undoing operator
-    // intent. The re-read cannot close the window completely (there is no CAS here), but it narrows it to the
-    // two adjacent statements below instead of spanning every read above.
-    let effective = val;
-    let needsRepair = false;
-    if (val != null && !hasExplicitEnabled(val)) {
-      try {
-        // Assign it even when null/absent. Guarding on `!= null` kept the STALE key-less row whenever the
-        // re-read found the value replaced by an explicit null or the row deleted — so the repair would then
-        // stamp `enabled: true` over exactly the disable this re-read exists to notice. The recovery predicate
-        // has to be allowed to reject what the re-read found.
-        const row = await storage.getAutomationConfig('role_assignment_polling');
-        effective = (row?.value as any) ?? null;
-      } catch (reReadErr: any) {
-        console.warn(
-          '[RolePolling] Could not re-read the config before repair; acting on the first read:',
-          reReadErr?.message ?? reReadErr,
-        );
-      }
-      needsRepair = !hasExplicitEnabled(effective);
+    if (looksClobbered(val)) {
+      // Diagnosable, not silent. This exact shape took role polling down for weeks with nothing logged:
+      // `if (val?.enabled)` simply fell through. It is left disabled deliberately — see
+      // rolePollingEnabledFromRow — and repaired by an explicit enable.
+      console.warn(
+        '[RolePolling] Config row has NO `enabled` key — the partial-update clobber. Polling stays OFF. ' +
+          'POST /api/automation/role-polling/config {"enabled":true} to restore it.',
+      );
     }
 
-    if (rolePollingEnabledFromRow(effective)) {
-      if (needsRepair) {
-        console.warn(
-          '[RolePolling] Config has no `enabled` key (partial-update clobber) — starting anyway and repairing the row',
-        );
-        // Its OWN try/catch. A transient failure here must not skip startRolePolling: there is no startup
-        // retry, so one failed repair would keep the poller down for the life of the process — perpetuating
-        // the very outage this branch exists to recover from.
-        try {
-          // Field-level patch: it cannot resurrect fields from the snapshot this process read.
-          await storage.patchAutomationConfig(
-            'role_assignment_polling',
-            { enabled: true },
-            'Automatic Procore role assignment polling configuration',
-          );
-        } catch (repairErr: any) {
-          console.warn('[RolePolling] Could not repair the config row; starting anyway:', repairErr?.message ?? repairErr);
-        }
+    if (rolePollingEnabledFromRow(val)) {
+      // Validate before it reaches setInterval. A stored 0, negative, NaN or string would otherwise become a
+      // runaway or never-firing timer; the poller hits the Procore API, so a runaway is a rate-limit event.
+      const rawInterval = Number(val.intervalMinutes);
+      const interval = Number.isFinite(rawInterval) && rawInterval > 0
+        ? Math.max(1, Math.min(1440, rawInterval))
+        : 23;
+      if (interval !== rawInterval) {
+        console.warn(`[RolePolling] Stored intervalMinutes ${JSON.stringify(val.intervalMinutes)} is unusable; using ${interval}`);
       }
-      startRolePolling(effective?.intervalMinutes ?? 23);
+      startRolePolling(interval);
     } else {
-      console.log('[RolePolling] Disabled by saved config (enabled is false or non-boolean)');
+      console.log('[RolePolling] Disabled by saved config');
     }
   } catch (e: any) {
     console.log('[RolePolling] No saved config, role polling disabled by default:', e?.message ?? e);
@@ -978,10 +958,17 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       // The row AFTER the merge is the only authoritative answer to "is it on, and at what interval" — this
       // replica's module state can be stale (another replica or the generic PUT may have changed batchSize),
       // so deriving from it would violate the partial-update guarantee it is meant to provide.
+      // `enabled: false` ONLY if this call creates the row.
+      //
+      // patchAutomationConfig upserts, so on a fresh install a request that omits `enabled` would create
+      // `{ intervalMinutes: 20 }` — an object with no `enabled`, which is precisely the clobber signature the
+      // recovery rule reads as ON. A fresh install would self-enable and start emailing. The recovery is for
+      // rows that PRE-DATE the fix; a row this endpoint just created cannot be one of them.
       const merged = (await storage.patchAutomationConfig(
         "role_assignment_polling",
         patch,
         "Automatic Procore role assignment polling configuration",
+        { enabled: false },
       ))?.value as any;
 
       const enabled = rolePollingEnabledFromRow(merged);

@@ -3,9 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Role polling was OFF in production for weeks and nothing said so. `POST /api/automation/role-polling/config`
 // rebuilt the stored row from the request body, so a call that only changed batchSize persisted
 // `{ enabled: undefined, ... }` — JSON drops the key — and then fell through to stopRolePolling(). Every boot
-// after that read the key-less row as disabled. Measured consequence: 262 of 374 active projects went 30+ days
-// without a role check, and roughly half of all PM assignments never raised a project-kickoff email, because
-// kickoff only fires for assignments a sync run reports as NEW.
+// after that read the key-less row as disabled. Measured: 262 of 374 active projects went 30+ days without a
+// role check, and 67 of 142 PM assignments never raised a project-kickoff email, because kickoff only fires
+// for assignments a sync run reports as NEW.
+//
+// The fix is that partial updates MERGE (atomically, in Postgres) instead of rebuilding. An earlier revision
+// also recovered the damaged row automatically — treating a missing `enabled` as ON — and review found eleven
+// ways that could fire when it should not, every one of them starting a poller that emails PMs. It is gone:
+// the row is repaired by one explicit enable, and boot only REPORTS the signature.
 const mocks = vi.hoisted(() => ({
   storage: {
     getAutomationConfig: vi.fn(),
@@ -50,8 +55,6 @@ vi.mock("../server/playwright/browser", () => ({
 
 function createFakeApp() {
   const routes: Record<string, any[]> = {};
-  // registerSettingsRoutes also registers put/delete/patch handlers; collect them all so route
-  // registration does not blow up before it reaches the one under test.
   const record = (verb: string) =>
     vi.fn((path: string, ...handlers: any[]) => { routes[`${verb} ${path}`] = handlers; });
   return {
@@ -64,21 +67,27 @@ function createFakeApp() {
   };
 }
 
+/**
+ * AWAIT the handler, rather than draining a fixed number of microtasks.
+ *
+ * This used to call `next()` synchronously, discard the returned promise and `await Promise.resolve()` twice.
+ * Correctness then depended on the route having at most two awaits before `res.json` — so adding one (the
+ * atomic patch call did exactly that) made every assertion vacuous instead of failing loudly. That is how a
+ * Critical regression got through a green suite in this file.
+ */
 async function invokeRoute(handlers: any[], req: Record<string, unknown> = {}) {
   const res: any = { status: vi.fn(() => res), json: vi.fn() };
   let index = 0;
-  const next = vi.fn((err?: unknown) => {
+  const next: any = vi.fn(async (err?: unknown) => {
     if (err) throw err;
     const handler = handlers[index++];
-    if (handler) return handler(req, res, next);
+    if (handler) return await handler(req, res, next);
   });
-  next();
-  await Promise.resolve();
-  await Promise.resolve();
+  await next();
   return res;
 }
 
-/** The row as production actually held it: batchSize + interval, and NO `enabled`. */
+/** The row as production actually holds it: batchSize + interval, and NO `enabled`. */
 const CLOBBERED_ROW = { batchSize: 150, intervalMinutes: 15 };
 
 function configReturning(row: unknown, cursorRow?: unknown) {
@@ -90,9 +99,9 @@ function configReturning(row: unknown, cursorRow?: unknown) {
 }
 
 /**
- * Back the storage mock with a real store whose patch merges right-biased per key, like Postgres `||`.
- * The route now derives enabled/interval from the row the patch RETURNS, so a stubbed return would test
- * nothing about that.
+ * Back the storage mock with a real store whose patch merges right-biased per key, like Postgres `||`, and
+ * whose insertDefaults apply to the INSERT path only. The route derives its answer from the row the patch
+ * RETURNS, so a stubbed return would test nothing about that.
  */
 function backedStore(initial: Record<string, any> = {}) {
   const rows: Record<string, any> = { ...initial };
@@ -100,11 +109,10 @@ function backedStore(initial: Record<string, any> = {}) {
     key in rows ? { key, value: rows[key] } : undefined,
   );
   mocks.storage.patchAutomationConfig.mockImplementation(
-    async (key: string, patch: Record<string, unknown>) => {
+    async (key: string, patch: Record<string, unknown>, _d?: string, insertDefaults?: Record<string, unknown>) => {
       const prev = rows[key];
-      rows[key] = prev != null && typeof prev === "object" && !Array.isArray(prev)
-        ? { ...prev, ...patch }
-        : { ...patch };
+      const existed = prev != null && typeof prev === "object" && !Array.isArray(prev);
+      rows[key] = existed ? { ...prev, ...patch } : { ...(insertDefaults ?? {}), ...patch };
       return { key, value: rows[key] };
     },
   );
@@ -113,6 +121,12 @@ function backedStore(initial: Record<string, any> = {}) {
     return data;
   });
   return rows;
+}
+
+async function bootWith(row: unknown, cursorRow?: unknown) {
+  mocks.storage.getAutomationConfig.mockImplementation(configReturning(row, cursorRow));
+  const { initPolling } = await import("../server/routes/settings.ts");
+  await initPolling();
 }
 
 describe("role polling — the enabled-key clobber", () => {
@@ -125,165 +139,181 @@ describe("role polling — the enabled-key clobber", () => {
     mocks.storage.patchAutomationConfig.mockImplementation(async (key: string, patch: any) => ({ key, value: patch }));
   });
 
-  it("STARTS on boot when the row exists but has no `enabled` key, and repairs the row", async () => {
-    // Only the clobber can produce a row with no `enabled`, so the honest reading is "this was on".
-    // Treating it as off is what silently stopped the kickoff emails.
+  // ── The clobbered row is REPORTED, never acted on ────────────────────────────────────────────────
+  it("leaves a key-less row OFF and says so loudly", async () => {
+    // Being silent is what let this run for weeks: `if (val?.enabled)` had no else branch. It stays off — an
+    // automatic recovery here fails by sending mail nobody asked for — but it is now diagnosable, and the
+    // warning names the exact call that fixes it.
     vi.useFakeTimers();
     const setIntervalSpy = vi.spyOn(global, "setInterval");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    mocks.storage.getAutomationConfig.mockImplementation(configReturning(CLOBBERED_ROW));
 
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
-
-    expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15 * 60 * 1000);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("no `enabled` key"));
-    // ...and it heals the row so the next boot needs no special case.
-    // A field-level patch: it sets `enabled` and cannot resurrect the rest of the snapshot it read.
-    expect(mocks.storage.patchAutomationConfig).toHaveBeenCalledWith(
-      "role_assignment_polling",
-      { enabled: true },
-      expect.any(String),
-    );
-  });
-
-  it("still honours an EXPLICIT enabled:false — only the missing key defaults on", async () => {
-    // Someone deliberately turning polling off must stay off. The default is a repair for a known bug,
-    // not a policy that polling is always on.
-    vi.useFakeTimers();
-    const setIntervalSpy = vi.spyOn(global, "setInterval");
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ ...CLOBBERED_ROW, enabled: false }),
-    );
-
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
+    await bootWith(CLOBBERED_ROW);
 
     expect(setIntervalSpy).not.toHaveBeenCalled();
-    expect(mocks.storage.patchAutomationConfig).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("NO `enabled` key"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('{"enabled":true}'));
+    // Boot must not write to the policy row at all.
+    expect(
+      mocks.storage.patchAutomationConfig.mock.calls.filter((c: any[]) => c[0] === "role_assignment_polling"),
+    ).toHaveLength(0);
   });
 
-  it("a batchSize-only config update PRESERVES enabled and keeps the poller running", async () => {
-    // The exact call that caused the outage. It must no longer erase `enabled` nor stop the timer.
+  it("starts on an explicit enabled:true", async () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    await bootWith({ ...CLOBBERED_ROW, enabled: true });
+    expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15 * 60 * 1000);
+  });
+
+  it("stays off for enabled:false, null, a non-boolean, and a non-object value", async () => {
+    // Only `enabled === true` on a plain object starts it. The generic automation-config PUT accepts arbitrary
+    // JSON, so `false`, `"disabled"` and arrays are all reachable and were all disabled before this branch.
+    for (const value of [
+      { ...CLOBBERED_ROW, enabled: false },
+      { ...CLOBBERED_ROW, enabled: null },
+      { ...CLOBBERED_ROW, enabled: "yes" },
+      false,
+      "disabled",
+      [1, 2],
+    ] as unknown[]) {
+      vi.resetModules();
+      vi.clearAllMocks();
+      vi.useFakeTimers();
+      const setIntervalSpy = vi.spyOn(global, "setInterval");
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await bootWith(value);
+      expect(setIntervalSpy, `${JSON.stringify(value)} must not start polling`).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    }
+  });
+
+  // ── Every reader agrees ──────────────────────────────────────────────────────────────────────────
+  it("GET status and the automations LIST both report a key-less row as disabled", async () => {
+    // Three derivations of this rule disagreed at one point. They share one function now, so the dashboard
+    // cannot contradict the running process.
+    mocks.storage.getAutomationConfig.mockImplementation(configReturning(CLOBBERED_ROW));
+    mocks.storage.getAutomationConfigs.mockResolvedValue([
+      { key: "role_assignment_polling", value: CLOBBERED_ROW },
+      { key: "hubspot_polling", value: { enabled: true, intervalMinutes: 11 } },
+    ]);
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const status = await invokeRoute(app.routes["GET /api/automation/role-polling/config"]);
+    expect(status.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+
+    const list = await invokeRoute(app.routes["GET /api/automation/status"]);
+    const payload = list.json.mock.calls.at(-1)?.[0];
+    expect(payload.automations.role_assignment_polling.enabled).toBe(false);
+    expect(payload.automations.hubspot_polling.enabled).toBe(true);
+  });
+
+  // ── The actual fix: partial updates merge ────────────────────────────────────────────────────────
+  it("a batchSize-only update PRESERVES enabled and the stored interval", async () => {
+    // The exact call that caused the outage. It patches one field and mentions nothing else.
     const rows = backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 50 } });
     const app = createFakeApp();
     const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
     registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
 
-    const handlers = app.routes["POST /api/automation/role-polling/config"];
-    expect(handlers).toBeTruthy();
-    await invokeRoute(handlers, { body: { batchSize: 150 } });
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], { body: { batchSize: 150 } });
 
-    // Only batchSize is patched; `enabled` and `intervalMinutes` are never mentioned, so the merge keeps them.
     const call = mocks.storage.patchAutomationConfig.mock.calls.at(-1);
-    expect(call?.[0]).toBe("role_assignment_polling");
     expect(call?.[1]).toEqual({ batchSize: 150 });
-    expect(rows["role_assignment_polling"]).toMatchObject({
-      enabled: true, batchSize: 150, intervalMinutes: 15,
-    });
+    expect(rows["role_assignment_polling"]).toMatchObject({ enabled: true, batchSize: 150, intervalMinutes: 15 });
   });
 
-  it("an explicit enabled:false through the same route still disables", async () => {
+  it("an enabled-only update PRESERVES the stored batchSize, not this replica's copy", async () => {
+    // ROLE_POLLING_BATCH_SIZE is module state and can be stale — another replica, or the generic config PUT,
+    // may have changed the stored value. Writing it back on a request that never mentioned it breaks the very
+    // partial-update guarantee this endpoint exists to provide.
+    const rows = backedStore({ role_assignment_polling: { enabled: false, intervalMinutes: 15, batchSize: 175 } });
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], { body: { enabled: true } });
+
+    expect(mocks.storage.patchAutomationConfig.mock.calls.at(-1)?.[1]).toEqual({ enabled: true });
+    expect(rows["role_assignment_polling"].batchSize).toBe(175);
+  });
+
+  it("an explicit enabled:null DISABLES rather than being discarded", async () => {
+    // `reqEnabled ?? existing` treated a supplied null as "not supplied" and left the poller running. null is
+    // a value: it read as disabled before this branch, and the startup rule agrees.
     const rows = backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 150 } });
     const app = createFakeApp();
     const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
     registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
 
-    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
-      body: { enabled: false },
-    });
+    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], { body: { enabled: null } });
 
     expect(rows["role_assignment_polling"].enabled).toBe(false);
   });
 
-  it("RESUMES the rotation from the persisted cursor instead of restarting at project #1", async () => {
-    // The cursor lived only in memory, so every deploy and crash reset it to 0. The project list is sorted
-    // by ascending procoreId, so restarting always re-walked the OLDEST projects and starved the newest —
-    // exactly the ones whose fresh PM assignment should raise a kickoff.
+  it("a FRESH install does not self-enable — asserted on the OUTCOME, not the stored field", async () => {
+    // patchAutomationConfig upserts, so an interval-only request on a fresh install creates
+    // `{ intervalMinutes: 20 }` — an object with no `enabled`. Under the old recovery rule that read as ON and
+    // started emailing. The previous version of this test checked only that the field was absent, which was
+    // true and meaningless; it passed while the behaviour regressed. insertDefaults gives a NEW row
+    // `enabled: false` without ever writing that over an existing one.
     vi.useFakeTimers();
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ ...CLOBBERED_ROW, enabled: true }, { batchCursor: 300 }),
-    );
+    const setIntervalSpy = vi.spyOn(global, "setInterval");
+    const rows = backedStore({});
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const res = await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
+      body: { intervalMinutes: 20 },
+    });
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    expect(rows["role_assignment_polling"].enabled).toBe(false);
+    expect(rows["role_assignment_polling"].intervalMinutes).toBe(20);
+  });
+
+  // ── The rotation cursor ──────────────────────────────────────────────────────────────────────────
+  it("RESUMES from the persisted cursor instead of restarting at project #1", async () => {
+    // The cursor lived only in memory, so every deploy reset it to 0. The list is sorted by ascending
+    // procoreId, so restarting always re-walked the OLDEST projects and starved the newest — exactly the ones
+    // whose fresh PM assignment should raise a kickoff.
+    vi.useFakeTimers();
     mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
       synced: 0, newAssignments: [], nextCursor: 0, totalProjects: 374, batchProcessed: 0,
     });
 
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
-
-    // The staggered first cycle fires 150s after startup.
+    await bootWith({ ...CLOBBERED_ROW, enabled: true }, { batchCursor: 300 });
     await vi.advanceTimersByTimeAsync(150_000);
 
     expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(150, 300);
   });
 
-  it("PERSISTS the advanced cursor after a cycle, so the next boot continues the rotation", async () => {
+  it("PERSISTS the advanced cursor to its own row, never the policy row", async () => {
+    // Read-modify-writing the policy row to save a cursor replays whatever the cycle read: a disable landing
+    // in between would be undone by a progress write.
     vi.useFakeTimers();
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ ...CLOBBERED_ROW, enabled: true }, { batchCursor: 0 }),
-    );
-    mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
-      synced: 10, newAssignments: [], nextCursor: 150, totalProjects: 374, batchProcessed: 150,
-    });
-
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
-    await vi.advanceTimersByTimeAsync(150_000);
-
-    // Its OWN key, carrying nothing else — so this write cannot replay policy fields.
-    expect(mocks.storage.patchAutomationConfig).toHaveBeenCalledWith(
-      "role_assignment_polling_cursor",
-      { batchCursor: 150 },
-      expect.any(String),
-    );
-  });
-
-  it("cursor persistence NEVER rewrites the policy row, so a concurrent disable cannot be replayed", async () => {
-    // Read-modify-writing the policy row to save a cursor replays whatever the cycle happened to read. An
-    // admin disabling polling between that read and this write would have `enabled: true` restored, and the
-    // next restart would quietly poll again — the operator's decision undone by a progress write.
-    vi.useFakeTimers();
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ ...CLOBBERED_ROW, enabled: true }, { batchCursor: 0 }),
-    );
     mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
       synced: 1, newAssignments: [], nextCursor: 150, totalProjects: 374, batchProcessed: 150,
     });
 
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
+    await bootWith({ ...CLOBBERED_ROW, enabled: true }, { batchCursor: 0 });
     await vi.advanceTimersByTimeAsync(150_000);
 
-    const policyWrites = mocks.storage.patchAutomationConfig.mock.calls
-      .filter((c: any[]) => c[0] === "role_assignment_polling");
-    expect(policyWrites).toHaveLength(0);
-  });
-
-  it("STARTS the poller even when repairing the clobbered row fails", async () => {
-    // There is no startup retry. If the repair write throws and takes startRolePolling down with it, one
-    // transient failure keeps the poller off for the life of the process — perpetuating the outage this
-    // branch exists to end.
-    vi.useFakeTimers();
-    const setIntervalSpy = vi.spyOn(global, "setInterval");
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    mocks.storage.getAutomationConfig.mockImplementation(configReturning(CLOBBERED_ROW));
-    mocks.storage.patchAutomationConfig.mockRejectedValue(new Error("db unavailable"));
-
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
-
-    expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15 * 60 * 1000);
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("starting anyway"),
-      expect.anything(),
+    expect(mocks.storage.patchAutomationConfig).toHaveBeenCalledWith(
+      "role_assignment_polling_cursor", { batchCursor: 150 }, expect.any(String),
     );
+    expect(
+      mocks.storage.patchAutomationConfig.mock.calls.filter((c: any[]) => c[0] === "role_assignment_polling"),
+    ).toHaveLength(0);
   });
 
   it("STARTS the poller even when reading the saved cursor fails", async () => {
     // The cursor read sits between the policy read and startRolePolling. Letting it reach the outer catch
-    // meant one transient DB failure left the poller down for the life of the process — the same failure
-    // mode the isolated repair write already fixed, reintroduced two lines above it. Losing the cursor
-    // costs a rotation's progress; losing the START costs every kickoff email.
+    // meant one transient DB failure left the poller down for the life of the process, with no retry.
     vi.useFakeTimers();
     const setIntervalSpy = vi.spyOn(global, "setInterval");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -311,200 +341,40 @@ describe("role polling — the enabled-key clobber", () => {
     expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(150, 42);
   });
 
-  it("GET status reports a clobbered row as ENABLED, matching what boot actually did", async () => {
-    // Boot starts the poller for a row with no `enabled`; this endpoint used `val.enabled || false` and told
-    // the UI it was off. A recovery rule only some observers know is a rule that gets argued with.
-    mocks.storage.getAutomationConfig.mockImplementation(configReturning(CLOBBERED_ROW));
-    const app = createFakeApp();
-    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
-    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
-
-    const res = await invokeRoute(app.routes["GET /api/automation/role-polling/config"]);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
-  });
-
-  it("GET status still reports an explicit enabled:false as disabled", async () => {
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ ...CLOBBERED_ROW, enabled: false }),
-    );
-    const app = createFakeApp();
-    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
-    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
-
-    const res = await invokeRoute(app.routes["GET /api/automation/role-polling/config"]);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
-  });
-
-  it("the automations LIST agrees too — the third derivation of the same rule", async () => {
-    // Codex named the status endpoint; enumerating the readers turned up this one as well, deriving
-    // enabled-ness a third way via `?.enabled === true`. Other automations keep that strict rule; only
-    // role polling has the clobber history that makes a missing key mean "on".
-    mocks.storage.getAutomationConfigs.mockResolvedValue([
-      { key: "role_assignment_polling", value: CLOBBERED_ROW },
-      { key: "hubspot_polling", value: { intervalMinutes: 11 } },
-    ]);
-    const app = createFakeApp();
-    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
-    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
-
-    const res = await invokeRoute(app.routes["GET /api/automation/status"]);
-    const payload = res.json.mock.calls.at(-1)?.[0];
-    expect(payload.automations.role_assignment_polling.enabled).toBe(true);
-    // A key-less row for any OTHER automation still reads as disabled — no clobber history, no exception.
-    expect(payload.automations.hubspot_polling.enabled).toBe(false);
-  });
-
-  it("does NOT recover `enabled: null` — that is an explicit value, not a missing key", async () => {
-    // The recovery is for the clobber's fingerprint: NO `enabled` property. `enabled ?? true` also caught
-    // null, which the generic automation-config PUT can persist and which used to read as disabled — so
-    // upgrading would have quietly started polling and emailing for a row somebody had turned off.
+  it("ignores a non-numeric stored cursor rather than coercing it to 0", async () => {
+    // `Number("")` and `Number(false)` are 0, so a junk value silently restarted the rotation at project #1 —
+    // the starvation this restore exists to prevent, reintroduced by a coercion.
     vi.useFakeTimers();
-    const setIntervalSpy = vi.spyOn(global, "setInterval");
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ ...CLOBBERED_ROW, enabled: null }),
-    );
-
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
-
-    expect(setIntervalSpy).not.toHaveBeenCalled();
-    expect(mocks.storage.patchAutomationConfig).not.toHaveBeenCalled();
-  });
-
-  it("does NOT recover a non-boolean `enabled` either", async () => {
-    vi.useFakeTimers();
-    const setIntervalSpy = vi.spyOn(global, "setInterval");
-    mocks.storage.getAutomationConfig.mockImplementation(
-      configReturning({ ...CLOBBERED_ROW, enabled: "yes" }),
-    );
-
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
-
-    expect(setIntervalSpy).not.toHaveBeenCalled();
-  });
-
-  it("a partial update on a FRESH install (no row at all) does not create an enabled policy", async () => {
-    // An absent ROW is not a key-less row. Coercing it to `{}` made the recovery rule fire on first install,
-    // so an interval-only request would have created an enabled policy and started polling — while boot
-    // defines a missing row as disabled. The two must agree.
-    const rows = backedStore({});
-    const app = createFakeApp();
-    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
-    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
-
-    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
-      body: { intervalMinutes: 20 },
+    mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
+      synced: 0, newAssignments: [], nextCursor: 0, totalProjects: 374, batchProcessed: 0,
     });
 
-    // Nothing enables it: the request never mentioned `enabled`, so the patch does not set it, and a row
-    // without it reads as disabled everywhere.
-    expect(rows["role_assignment_polling"].enabled).toBeUndefined();
-    expect(rows["role_assignment_polling"].intervalMinutes).toBe(20);
+    await bootWith({ ...CLOBBERED_ROW, enabled: true, batchCursor: 275 }, { batchCursor: "" });
+    await vi.advanceTimersByTimeAsync(150_000);
+
+    expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(150, 275);
   });
 
-  it("does NOT recover a non-OBJECT stored value", async () => {
-    // The generic automation-config PUT accepts arbitrary JSON. `false`, a string, or an array all lack an
-    // `enabled` property, so a hasOwnProperty check alone read them as the clobbered object and would have
-    // repaired them into an enabled, email-sending poller. They were disabled before this branch existed.
-    for (const value of [false, "disabled", [1, 2], 0] as unknown[]) {
+  // ── Timer inputs ─────────────────────────────────────────────────────────────────────────────────
+  it("refuses an unusable stored interval instead of handing it to setInterval", async () => {
+    // The poller hits the Procore API. A stored 0 or NaN would become a runaway or never-firing timer, and a
+    // runaway here is a rate-limit event — the thing the batching exists to avoid.
+    for (const [stored, expectedMs] of [
+      [0, 23 * 60 * 1000],
+      [-5, 23 * 60 * 1000],
+      ["fifteen", 23 * 60 * 1000],
+      [15, 15 * 60 * 1000],
+    ] as Array<[unknown, number]>) {
+      vi.resetModules();
       vi.clearAllMocks();
       vi.useFakeTimers();
       const setIntervalSpy = vi.spyOn(global, "setInterval");
-      mocks.storage.getAutomationConfig.mockImplementation(configReturning(value));
-      mocks.storage.patchAutomationConfig.mockResolvedValue({} as any);
-      vi.resetModules();
-
-      const { initPolling } = await import("../server/routes/settings.ts");
-      await initPolling();
-
-      expect(setIntervalSpy, `value ${JSON.stringify(value)} must not start polling`).not.toHaveBeenCalled();
-      expect(mocks.storage.patchAutomationConfig).not.toHaveBeenCalled();
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await bootWith({ ...CLOBBERED_ROW, enabled: true, intervalMinutes: stored });
+      expect(setIntervalSpy, `stored ${JSON.stringify(stored)}`).toHaveBeenCalledWith(
+        expect.any(Function), expectedMs,
+      );
       vi.useRealTimers();
     }
-  });
-
-  it("an explicit `enabled: null` through the POST DISABLES rather than being discarded", async () => {
-    // `reqEnabled ?? existing` treated a supplied null as "not supplied", so the poller kept running. null is
-    // a value: it read as disabled before this branch, and the startup rule treats any present non-boolean
-    // `enabled` as disabled. The route has to normalise it the same way.
-    const rows = backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 150 } });
-    const app = createFakeApp();
-    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
-    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
-
-    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
-      body: { enabled: null },
-    });
-
-    expect(rows["role_assignment_polling"].enabled).toBe(false);
-  });
-
-  it("an enabled-only request PRESERVES the stored batchSize, not this replica's stale copy", async () => {
-    // ROLE_POLLING_BATCH_SIZE is module state and can be stale — another replica, or the generic config PUT,
-    // may have changed the stored value. Writing it back on a request that never mentioned batchSize breaks
-    // the very partial-update guarantee this endpoint is supposed to provide.
-    const rows = backedStore({ role_assignment_polling: { enabled: false, intervalMinutes: 15, batchSize: 175 } });
-    const app = createFakeApp();
-    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
-    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
-
-    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
-      body: { enabled: true },
-    });
-
-    const call = mocks.storage.patchAutomationConfig.mock.calls.at(-1);
-    expect(call?.[1]).toEqual({ enabled: true });
-    expect(rows["role_assignment_polling"].batchSize).toBe(175);
-  });
-
-  it("a concurrent explicit disable during startup WINS over the repair", async () => {
-    // Multiple replicas. This one reads a key-less row; an admin disables polling through another replica
-    // while this one is still reading the cursor. Repairing unconditionally would write `enabled: true` over
-    // that newer `false` and start polling locally — recovery undoing operator intent. The row is re-read
-    // immediately before acting, so the disable is honoured.
-    vi.useFakeTimers();
-    const setIntervalSpy = vi.spyOn(global, "setInterval");
-    let policyReads = 0;
-    mocks.storage.getAutomationConfig.mockImplementation(async (key: string) => {
-      if (key === "role_assignment_polling") {
-        policyReads += 1;
-        // First read: the legacy key-less row. Second (the pre-repair re-read): an admin has disabled it.
-        return policyReads === 1
-          ? { key, value: CLOBBERED_ROW }
-          : { key, value: { ...CLOBBERED_ROW, enabled: false } };
-      }
-      return undefined;
-    });
-
-    const { initPolling } = await import("../server/routes/settings.ts");
-    await initPolling();
-
-    expect(policyReads).toBeGreaterThanOrEqual(2);
-    expect(setIntervalSpy).not.toHaveBeenCalled();
-    // ...and crucially it did not stamp `enabled: true` over the disable.
-    const policyWrites = mocks.storage.patchAutomationConfig.mock.calls
-      .filter((c: any[]) => c[0] === "role_assignment_polling");
-    expect(policyWrites).toHaveLength(0);
-  });
-
-  it("a partial update on a still-clobbered row keeps it ENABLED rather than persisting a false", async () => {
-    // The boot repair is async and can fail. Until it lands, the row still has no `enabled` — and a
-    // batchSize-only request that defaulted to false would persist an explicit disable and stop the timer,
-    // turning a recoverable state into one that looks deliberate. Boot and this route share one rule.
-    backedStore({ role_assignment_polling: { ...CLOBBERED_ROW } });
-    const app = createFakeApp();
-    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
-    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
-
-    await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
-      body: { batchSize: 150 },
-    });
-
-    // The request never mentioned `enabled`, so the patch leaves it absent — which the shared rule still
-    // reads as enabled for an existing row. Nothing writes a false over a recoverable state.
-    const call = mocks.storage.patchAutomationConfig.mock.calls.at(-1);
-    expect(call?.[1]).toEqual({ batchSize: 150 });
-    expect(call?.[1]).not.toHaveProperty("enabled");
   });
 });
