@@ -58,6 +58,22 @@ function rolePollingEnabledFromRow(row: any): boolean {
   return row.enabled === true;
 }
 
+/**
+ * A usable poll interval in minutes, or the default. ONE resolver, because this reaches setInterval.
+ *
+ * `Number(x) || 30` looks like it validates and does not: it rejects 0/NaN/null but passes -5 straight
+ * through, and a negative delay makes setInterval fire continuously — a runaway against the Procore API,
+ * which is the rate-limit event the whole batching design exists to avoid. It also passes 99999.
+ *
+ * Both call sites use this. I fixed the boot path first and left the config route passing the raw value,
+ * which is the same "fixed the instance, missed the shape" mistake this file has already made twice.
+ */
+function resolveRolePollingInterval(raw: unknown, fallbackMinutes: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallbackMinutes;
+  return Math.max(1, Math.min(1440, n));
+}
+
 /** The clobber's fingerprint: a plain object with no `enabled` property. Reported, never acted on. */
 function looksClobbered(row: any): boolean {
   return (
@@ -596,11 +612,8 @@ export async function initPolling() {
     if (rolePollingEnabledFromRow(val)) {
       // Validate before it reaches setInterval. A stored 0, negative, NaN or string would otherwise become a
       // runaway or never-firing timer; the poller hits the Procore API, so a runaway is a rate-limit event.
-      const rawInterval = Number(val.intervalMinutes);
-      const interval = Number.isFinite(rawInterval) && rawInterval > 0
-        ? Math.max(1, Math.min(1440, rawInterval))
-        : 23;
-      if (interval !== rawInterval) {
+      const interval = resolveRolePollingInterval(val.intervalMinutes, 23);
+      if (interval !== Number(val.intervalMinutes)) {
         console.warn(`[RolePolling] Stored intervalMinutes ${JSON.stringify(val.intervalMinutes)} is unusable; using ${interval}`);
       }
       startRolePolling(interval);
@@ -972,7 +985,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       ))?.value as any;
 
       const enabled = rolePollingEnabledFromRow(merged);
-      const interval = Number(merged?.intervalMinutes) || 30;
+      const interval = resolveRolePollingInterval(merged?.intervalMinutes, 30);
       if (Number.isFinite(Number(merged?.batchSize))) {
         ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(merged.batchSize) || 50));
       }

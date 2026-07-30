@@ -355,6 +355,37 @@ describe("role polling — the enabled-key clobber", () => {
     expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(150, 275);
   });
 
+  it("the CONFIG ROUTE validates the interval too, not just boot", async () => {
+    // `Number(x) || 30` rejects 0 and NaN but passes -5 through, and a negative delay makes setInterval fire
+    // continuously — a runaway against the Procore API, i.e. the rate-limit event the batching exists to
+    // prevent. I fixed the boot path and left this one raw; both share one resolver now.
+    for (const [stored, expectedMs] of [
+      [-5, 30 * 60 * 1000],
+      [0, 30 * 60 * 1000],
+      ["soon", 30 * 60 * 1000],
+      [99999, 1440 * 60 * 1000],
+      [20, 20 * 60 * 1000],
+    ] as Array<[unknown, number]>) {
+      vi.resetModules();
+      vi.clearAllMocks();
+      vi.useFakeTimers();
+      const setIntervalSpy = vi.spyOn(global, "setInterval");
+      backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 150 } });
+      const app = createFakeApp();
+      const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+      registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+      await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
+        body: { intervalMinutes: stored },
+      });
+
+      expect(setIntervalSpy, `stored ${JSON.stringify(stored)}`).toHaveBeenCalledWith(
+        expect.any(Function), expectedMs,
+      );
+      vi.useRealTimers();
+    }
+  });
+
   // ── Timer inputs ─────────────────────────────────────────────────────────────────────────────────
   it("refuses an unusable stored interval instead of handing it to setInterval", async () => {
     // The poller hits the Procore API. A stored 0 or NaN would become a runaway or never-firing timer, and a
