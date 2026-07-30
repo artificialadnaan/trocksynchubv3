@@ -386,6 +386,63 @@ describe("role polling — the enabled-key clobber", () => {
     }
   });
 
+  it("PERSISTS the resolved interval, so storage, response, timer and restart all agree", async () => {
+    // Storing the raw value and resolving only for the timer gave three different answers to one question:
+    // the row said -5, the response said 30, GET echoed -5, and the next boot resolved it against a different
+    // 23-minute fallback. Normalising into the patch is what makes them one answer.
+    const rows = backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 150 } });
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const res = await invokeRoute(app.routes["POST /api/automation/role-polling/config"], {
+      body: { intervalMinutes: -5 },
+    });
+
+    expect(rows["role_assignment_polling"].intervalMinutes).toBe(30);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ intervalMinutes: 30 }));
+  });
+
+  it("ignores a COERCIBLE non-number cursor (false, []) in favour of a valid fallback", async () => {
+    // `Number.isFinite(Number(c))` accepts `false` and `[]` — both 0 — so a junk cursor row was SELECTED over
+    // a valid legacy one and then floored to 0, restarting the sweep at the oldest projects.
+    vi.useFakeTimers();
+    mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
+      synced: 0, newAssignments: [], nextCursor: 0, totalProjects: 374, batchProcessed: 0,
+    });
+
+    await bootWith({ ...CLOBBERED_ROW, enabled: true, batchCursor: 275 }, { batchCursor: false });
+    await vi.advanceTimersByTimeAsync(150_000);
+
+    expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(150, 275);
+  });
+
+  it("enable-all ADOPTS the stored batch size rather than this replica's stale copy", async () => {
+    // The merge preserved batchSize in the database but the returned row was discarded, so a stopped poller
+    // restarted on this process's old size while the DB held a newer one — and a later restart switched
+    // silently. Module state has to come from the row that was just written.
+    vi.useFakeTimers();
+    backedStore({ role_assignment_polling: { enabled: false, intervalMinutes: 30, batchSize: 175 } });
+    mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
+      synced: 0, newAssignments: [], nextCursor: 0, totalProjects: 374, batchProcessed: 0,
+    });
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const enableAll = app.routes["POST /api/internal/enable-all-automations"];
+    expect(enableAll, "enable-all route must exist").toBeTruthy();
+    // The route is secret-gated; the default is the same literal the handler falls back to.
+    await invokeRoute(enableAll, {
+      body: { secret: process.env.INTERNAL_API_SECRET || "synchub-test-2026" },
+      headers: {},
+    });
+    await vi.advanceTimersByTimeAsync(150_000);
+
+    // 175 from the database, not the 50 default this process booted with.
+    expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(175, expect.any(Number));
+  });
+
   // ── Timer inputs ─────────────────────────────────────────────────────────────────────────────────
   it("refuses an unusable stored interval instead of handing it to setInterval", async () => {
     // The poller hits the Procore API. A stored 0 or NaN would become a runaway or never-firing timer, and a

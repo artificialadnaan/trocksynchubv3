@@ -74,6 +74,22 @@ function resolveRolePollingInterval(raw: unknown, fallbackMinutes: number): numb
   return Math.max(1, Math.min(1440, n));
 }
 
+/**
+ * Adopt the batch size from an authoritative row.
+ *
+ * ROLE_POLLING_BATCH_SIZE is module state on one replica. Every place that has just read or written the row
+ * must refresh from it, or this process polls with a size the database disagrees with — and a later restart
+ * silently switches. The config route did this and enable-all did not; making it a function is how the next
+ * caller inherits it instead of rediscovering it.
+ */
+function applyRolePollingBatchSize(row: any): void {
+  const raw = row?.batchSize;
+  if (typeof raw !== 'number' && typeof raw !== 'string') return;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return;
+  ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, n || 50));
+}
+
 /** The clobber's fingerprint: a plain object with no `enabled` property. Reported, never acted on. */
 function looksClobbered(row: any): boolean {
   return (
@@ -570,9 +586,7 @@ export async function initPolling() {
   try {
     const config = await storage.getAutomationConfig("role_assignment_polling");
     const val = (config?.value as any);
-    if (val != null && val.batchSize != null) {
-      ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(val.batchSize) || 50));
-    }
+    applyRolePollingBatchSize(val);
     // Restore the rotation cursor so a restart does not resume from project #1. The list is sorted by
     // ascending procoreId, so restarting always re-walks the OLDEST projects and starves the newest —
     // which are exactly the ones whose PM assignment should raise a kickoff email.
@@ -584,8 +598,15 @@ export async function initPolling() {
     // the cursor costs a rotation's progress; losing the START costs every kickoff email.
     // First finite candidate wins. `??` alone let `""` or `false` through to Number(), which yields 0 —
     // silently restarting the rotation at project #1, the very starvation this restore exists to prevent.
-    const firstFinite = (...candidates: unknown[]) =>
-      candidates.find((c) => c !== null && c !== '' && Number.isFinite(Number(c)));
+    // `Number.isFinite(Number(c))` accepts `false` (→ 0) and `[]` (→ 0), both reachable through the generic
+    // automation-config PUT — so a junk cursor row would be SELECTED over a valid legacy one and then floored
+    // to 0, restarting the sweep at the oldest projects. Require a real non-negative number, or a string that
+    // is one.
+    const isCursor = (c: unknown) =>
+      (typeof c === 'number' || (typeof c === 'string' && c.trim() !== '')) &&
+      Number.isFinite(Number(c)) &&
+      Number(c) >= 0;
+    const firstFinite = (...candidates: unknown[]) => candidates.find(isCursor);
     let storedCursor: unknown = firstFinite(val?.batchCursor);
     try {
       const cursorRow = ((await storage.getAutomationConfig(ROLE_POLLING_CURSOR_KEY))?.value as any) ?? null;
@@ -963,7 +984,13 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       // the startup rule treats every present non-boolean `enabled` as disabled. Normalise it rather than
       // letting `??` discard it and leave the poller running.
       if (has('enabled')) patch.enabled = body.enabled === true;
-      if (has('intervalMinutes')) patch.intervalMinutes = Number(body.intervalMinutes) || 30;
+      // Resolve BEFORE persisting. Storing the raw value and resolving only for the timer gave three
+      // different answers to one question: the row said -5, the response said 30, GET echoed -5, and the next
+      // boot resolved it against a different 23-minute fallback. Normalising here makes storage, response,
+      // timer and restart agree.
+      if (has('intervalMinutes')) {
+        patch.intervalMinutes = resolveRolePollingInterval(body.intervalMinutes, 30);
+      }
       if (has('batchSize')) {
         patch.batchSize = Math.max(10, Math.min(200, Number(body.batchSize) || 50));
       }
@@ -986,9 +1013,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
 
       const enabled = rolePollingEnabledFromRow(merged);
       const interval = resolveRolePollingInterval(merged?.intervalMinutes, 30);
-      if (Number.isFinite(Number(merged?.batchSize))) {
-        ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(merged.batchSize) || 50));
-      }
+      applyRolePollingBatchSize(merged);
       if (enabled) {
         startRolePolling(interval);
       } else {
@@ -1325,7 +1350,9 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       // Role assignment polling — 30 min
       // MERGE, don't rebuild. The cursor is safe in its own row now, but rebuilding still discarded batchSize
       // — and rebuilding a config row from a partial literal is exactly the habit that took polling down.
-      await storage.patchAutomationConfig("role_assignment_polling", { enabled: true, intervalMinutes: 30 }, "Role assignment polling (auto-enabled)");
+      // Adopt the merged row's batch size before starting: the DB may carry a newer value than this replica.
+      const rolePollingRow = (await storage.patchAutomationConfig("role_assignment_polling", { enabled: true, intervalMinutes: 30 }, "Role assignment polling (auto-enabled)"))?.value as any;
+      applyRolePollingBatchSize(rolePollingRow);
       if (!rolePollingTimer) {
         startRolePolling(30);
       }
