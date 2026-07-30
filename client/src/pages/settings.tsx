@@ -1935,7 +1935,9 @@ function RolePollingCard() {
   });
 
   const [enabled, setEnabled] = useState(false);
-  const [interval, setIntervalVal] = useState(30);
+  // 23 = the server's ROLE_POLLING_DEFAULT_INTERVAL_MINUTES, so the control agrees with the schedule
+  // a fresh install actually runs before the config request resolves.
+  const [interval, setIntervalVal] = useState(23);
 
   useEffect(() => {
     if (config) {
@@ -2038,11 +2040,22 @@ function RolePollingCard() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="2">2 minutes</SelectItem>
-              <SelectItem value="5">5 minutes</SelectItem>
-              <SelectItem value="10">10 minutes</SelectItem>
-              <SelectItem value="15">15 minutes</SelectItem>
-              <SelectItem value="30">30 minutes</SelectItem>
+              {/* The presets, PLUS whatever is actually stored.
+
+                  A controlled Select renders a blank trigger when its value is not among the options, and
+                  the stored interval need not be a preset: the server's default is 23 (coprime with the
+                  other pollers so they do not all hit Procore in one window), and the generic
+                  automation-config PUT can store any value the server will accept. Listing only 2/5/10/15/30
+                  meant "Poll every ⟨blank⟩" for every one of those. Merging the current value in fixes the
+                  whole class rather than adding a 23 that the next non-preset value would reproduce. */}
+              {Array.from(new Set([2, 5, 10, 15, 30, Number(interval)]))
+                .filter((m) => Number.isFinite(m) && m > 0)
+                .sort((a, b) => a - b)
+                .map((m) => (
+                  <SelectItem key={m} value={String(m)}>
+                    {m} minutes
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
           <span className="text-xs text-muted-foreground">
