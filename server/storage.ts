@@ -320,6 +320,13 @@ export interface IStorage {
   getAutomationConfigs(): Promise<AutomationConfig[]>;
   getAutomationConfig(key: string): Promise<AutomationConfig | undefined>;
   upsertAutomationConfig(data: InsertAutomationConfig): Promise<AutomationConfig>;
+  /** Merge `patch` into an automation config's jsonb value ATOMICALLY, leaving untouched keys alone. */
+  patchAutomationConfig(
+    key: string,
+    patch: Record<string, unknown>,
+    description?: string,
+    insertDefaults?: Record<string, unknown>,
+  ): Promise<AutomationConfig>;
 
   getContractCounter(projectId: string, counterType: string): Promise<ContractCounter | undefined>;
   incrementContractCounter(projectId: string, projectNumber: string, counterType: string): Promise<number>;
@@ -828,6 +835,47 @@ export class DatabaseStorage implements IStorage {
       .onConflictDoUpdate({
         target: automationConfig.key,
         set: { ...data, updatedAt: new Date() },
+      }).returning();
+    return result;
+  }
+
+  /**
+   * Merge `patch` into the stored jsonb value, in ONE statement.
+   *
+   * Read-modify-write in application code replays whatever the reader happened to see: two requests on
+   * separate replicas, or a poller saving progress while an administrator flips a flag, and the later write
+   * silently restores the earlier snapshot's fields. Postgres `||` merges right-biased per key at write time,
+   * so a field nobody mentioned cannot be resurrected.
+   *
+   * The CASE guards a stored value that is not an object (the generic config PUT accepts arbitrary JSON, and
+   * `||` on a scalar would concatenate rather than merge).
+   */
+  async patchAutomationConfig(
+    key: string,
+    patch: Record<string, unknown>,
+    description?: string,
+    /**
+     * Applied ONLY when this call creates the row. An upsert's INSERT payload and its DO UPDATE merge are
+     * separate, so a caller can give a brand-new row a safe baseline without that baseline ever being written
+     * over an existing one — and without a read, so there is no window to race.
+     */
+    insertDefaults?: Record<string, unknown>,
+  ): Promise<AutomationConfig> {
+    const patchJson = JSON.stringify(patch);
+    const [result] = await db.insert(automationConfig)
+      .values({
+        key,
+        value: { ...(insertDefaults ?? {}), ...patch } as any,
+        ...(description ? { description } : {}),
+      } as InsertAutomationConfig)
+      .onConflictDoUpdate({
+        target: automationConfig.key,
+        set: {
+          value: sql`CASE WHEN jsonb_typeof(${automationConfig.value}) = 'object'
+                          THEN ${automationConfig.value} || ${patchJson}::jsonb
+                          ELSE ${patchJson}::jsonb END`,
+          updatedAt: new Date(),
+        },
       }).returning();
     return result;
   }

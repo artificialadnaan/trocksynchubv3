@@ -24,11 +24,96 @@ let lastRolePollResult: any = null;
 
 // ─── Role polling state ───────────────────────────────────────────────────────
 let rolePollingTimer: ReturnType<typeof setInterval> | null = null;
+/** The staggered first cycle. Tracked so stopRolePolling can cancel it — see startRolePolling. */
+let rolePollingStartupTimer: ReturnType<typeof setTimeout> | null = null;
 let rolePollingRunning = false;
 let lastPollStartedAt: number | null = null;
 const ROLE_SYNC_TIMEOUT_MS = 5 * 60 * 1000;
 let rolePollingBatchCursor = 0;
-let ROLE_POLLING_BATCH_SIZE = 50;
+
+/**
+ * The rotation cursor lives in its OWN config row, not alongside the policy fields.
+ *
+ * Read-modify-writing the policy row to save a cursor replays whatever the cycle happened to read: an admin
+ * disabling polling between that read and the write would have the cursor write restore `enabled: true`, and
+ * the next restart would silently poll again. The enable-all route rebuilds the policy row from scratch and
+ * would delete the cursor outright. Operational progress and operator intent do not belong in one value.
+ */
+const ROLE_POLLING_CURSOR_KEY = "role_assignment_polling_cursor";
+
+/**
+ * The defaults, once. Boot fell back to 23 minutes and the config route to 30, so a row with no
+ * `intervalMinutes` ran on a different schedule depending on whether it had just been saved or just been
+ * restarted — a silent change with no configuration event behind it. 23 is the deliberate value: it is
+ * coprime with the other pollers so they do not all hit Procore in the same window.
+ */
+const ROLE_POLLING_DEFAULT_INTERVAL_MINUTES = 23;
+const ROLE_POLLING_DEFAULT_BATCH_SIZE = 50;
+
+/**
+ * Is role polling on? `enabled === true` on a plain object. Nothing else.
+ *
+ * An earlier revision recovered a row with no `enabled` key by treating it as ON, so that deploying the fix
+ * would also repair the production row the clobber had damaged. Review found eleven distinct ways that
+ * default could fire when it should not — a non-object value, an explicit null, a row this very endpoint had
+ * just created, a concurrently-disabled row — and every one of them failed in the same direction: starting a
+ * poller that emails project managers. A recovery whose worst case is "sends mail nobody asked for", bought
+ * to save a single API call, is not worth its blast radius.
+ *
+ * So the rule is now boring, and the damaged row is repaired by hand (one POST with {"enabled": true}).
+ * Boot still SAYS when it sees the clobber signature — being silent about it is what let the outage run for
+ * weeks — it just does not act on it.
+ */
+function rolePollingEnabledFromRow(row: any): boolean {
+  if (row == null || typeof row !== 'object' || Array.isArray(row)) return false;
+  return row.enabled === true;
+}
+
+/**
+ * A usable poll interval in minutes, or the default. ONE resolver, because this reaches setInterval.
+ *
+ * `Number(x) || 30` looks like it validates and does not: it rejects 0/NaN/null but passes -5 straight
+ * through, and a negative delay makes setInterval fire continuously — a runaway against the Procore API,
+ * which is the rate-limit event the whole batching design exists to avoid. It also passes 99999.
+ *
+ * Both call sites use this. I fixed the boot path first and left the config route passing the raw value,
+ * which is the same "fixed the instance, missed the shape" mistake this file has already made twice.
+ */
+function resolveRolePollingInterval(raw: unknown, fallbackMinutes: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallbackMinutes;
+  return Math.max(1, Math.min(1440, n));
+}
+
+/**
+ * Adopt the batch size from an authoritative row.
+ *
+ * ROLE_POLLING_BATCH_SIZE is module state on one replica. Every place that has just read or written the row
+ * must refresh from it, or this process polls with a size the database disagrees with — and a later restart
+ * silently switches. The config route did this and enable-all did not; making it a function is how the next
+ * caller inherits it instead of rediscovering it.
+ */
+function applyRolePollingBatchSize(row: any): void {
+  const raw = row?.batchSize;
+  const n = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN;
+  // A row that omits batchSize is the database saying "the default", not "keep whatever this process had".
+  // Returning early left the replica polling at its old size while the DB implied 50, and the next restart
+  // changed it silently — module state disagreeing with storage is the same bug class as the rest of this PR.
+  ROLE_POLLING_BATCH_SIZE = Number.isFinite(n)
+    ? Math.max(10, Math.min(200, n || ROLE_POLLING_DEFAULT_BATCH_SIZE))
+    : ROLE_POLLING_DEFAULT_BATCH_SIZE;
+}
+
+/** The clobber's fingerprint: a plain object with no `enabled` property. Reported, never acted on. */
+function looksClobbered(row: any): boolean {
+  return (
+    row != null &&
+    typeof row === 'object' &&
+    !Array.isArray(row) &&
+    !Object.prototype.hasOwnProperty.call(row, 'enabled')
+  );
+}
+let ROLE_POLLING_BATCH_SIZE = 50; // replaced by applyRolePollingBatchSize from the authoritative row
 
 // ─── BidBoard polling state ───────────────────────────────────────────────────
 let bidboardPollingTimer: ReturnType<typeof setInterval> | null = null;
@@ -263,6 +348,21 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
 
     if (!fullSync && 'nextCursor' in result) {
       rolePollingBatchCursor = result.nextCursor;
+      // Persist it. Held only in memory, the cursor reset to 0 on every deploy and crash, so the rotation
+      // perpetually re-walked the lowest procoreIds and never reached the newest projects.
+      //
+      // Its OWN row, holding nothing but the cursor: no read-modify-write of the policy row, so a concurrent
+      // enable/disable cannot be replayed by this write, and the enable-all route cannot delete it.
+      // Best-effort — losing the write costs one restart's progress and must never abort the cycle.
+      try {
+        await storage.patchAutomationConfig(
+          ROLE_POLLING_CURSOR_KEY,
+          { batchCursor: result.nextCursor },
+          'Role assignment polling rotation cursor (operational state)',
+        );
+      } catch (cursorErr: any) {
+        console.warn('[RolePolling] Could not persist batch cursor:', cursorErr?.message ?? cursorErr);
+      }
       if (result.nextCursor === 0) {
         console.log('[RolePolling] Full sweep rotation complete');
       }
@@ -327,10 +427,28 @@ function startRolePolling(intervalMinutes: number) {
   stopRolePolling();
   console.log(`[RolePolling] Starting automatic role assignment sync every ${intervalMinutes} minutes`);
   rolePollingTimer = setInterval(() => runRolePollingCycle(), intervalMinutes * 60 * 1000);
-  setTimeout(() => runRolePollingCycle(), 150000); // staggered: 150s after startup
+  // The staggered first cycle is TRACKED, so stopping actually stops it.
+  //
+  // It used to be a bare setTimeout while stopRolePolling cleared only the interval. Enable, then disable
+  // inside the 150s window, and the delayed callback still ran a full batch — sending role-assignment and
+  // kickoff emails after the API had reported polling as disabled. Now much easier to hit, because the config
+  // route calls startRolePolling on every partial update that preserves an enabled row.
+  rolePollingStartupTimer = setTimeout(() => {
+    rolePollingStartupTimer = null;
+    // Belt and braces: a callback already in the event queue when the timer was cleared must still not run.
+    if (rolePollingTimer === null) {
+      console.log('[RolePolling] Staggered first cycle skipped — polling was disabled while it was pending');
+      return;
+    }
+    void runRolePollingCycle();
+  }, 150000);
 }
 
 function stopRolePolling() {
+  if (rolePollingStartupTimer) {
+    clearTimeout(rolePollingStartupTimer);
+    rolePollingStartupTimer = null;
+  }
   if (rolePollingTimer) {
     clearInterval(rolePollingTimer);
     rolePollingTimer = null;
@@ -500,14 +618,63 @@ export async function initPolling() {
   try {
     const config = await storage.getAutomationConfig("role_assignment_polling");
     const val = (config?.value as any);
-    if (val?.enabled) {
-      if (val.batchSize != null) {
-        ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(val.batchSize) || 50));
-      }
-      startRolePolling(val.intervalMinutes ?? 23);
+    applyRolePollingBatchSize(val);
+    // Restore the rotation cursor so a restart does not resume from project #1. The list is sorted by
+    // ascending procoreId, so restarting always re-walks the OLDEST projects and starves the newest —
+    // which are exactly the ones whose PM assignment should raise a kickoff email.
+    // Its own row now; `batchCursor` on the policy row is read as a fallback for rows written before that.
+    //
+    // Its OWN try/catch, for the same reason the repair write has one: this read sits between the policy read
+    // and startRolePolling, so letting it reach the outer catch would mean one transient DB failure leaves
+    // the poller down for the life of the process — the exact failure this file already fixed once. Losing
+    // the cursor costs a rotation's progress; losing the START costs every kickoff email.
+    // First finite candidate wins. `??` alone let `""` or `false` through to Number(), which yields 0 —
+    // silently restarting the rotation at project #1, the very starvation this restore exists to prevent.
+    // `Number.isFinite(Number(c))` accepts `false` (→ 0) and `[]` (→ 0), both reachable through the generic
+    // automation-config PUT — so a junk cursor row would be SELECTED over a valid legacy one and then floored
+    // to 0, restarting the sweep at the oldest projects. Require a real non-negative number, or a string that
+    // is one.
+    const isCursor = (c: unknown) =>
+      (typeof c === 'number' || (typeof c === 'string' && c.trim() !== '')) &&
+      Number.isFinite(Number(c)) &&
+      Number(c) >= 0;
+    const firstFinite = (...candidates: unknown[]) => candidates.find(isCursor);
+    let storedCursor: unknown = firstFinite(val?.batchCursor);
+    try {
+      const cursorRow = ((await storage.getAutomationConfig(ROLE_POLLING_CURSOR_KEY))?.value as any) ?? null;
+      storedCursor = firstFinite(cursorRow?.batchCursor, val?.batchCursor);
+    } catch (cursorReadErr: any) {
+      console.warn(
+        '[RolePolling] Could not read the saved rotation cursor; falling back to the policy row:',
+        cursorReadErr?.message ?? cursorReadErr,
+      );
     }
-  } catch (e) {
-    console.log('[RolePolling] No saved config, role polling disabled by default');
+    if (storedCursor !== undefined) {
+      rolePollingBatchCursor = Math.max(0, Math.floor(Number(storedCursor)));
+    }
+    if (looksClobbered(val)) {
+      // Diagnosable, not silent. This exact shape took role polling down for weeks with nothing logged:
+      // `if (val?.enabled)` simply fell through. It is left disabled deliberately — see
+      // rolePollingEnabledFromRow — and repaired by an explicit enable.
+      console.warn(
+        '[RolePolling] Config row has NO `enabled` key — the partial-update clobber. Polling stays OFF. ' +
+          'POST /api/automation/role-polling/config {"enabled":true} to restore it.',
+      );
+    }
+
+    if (rolePollingEnabledFromRow(val)) {
+      // Validate before it reaches setInterval. A stored 0, negative, NaN or string would otherwise become a
+      // runaway or never-firing timer; the poller hits the Procore API, so a runaway is a rate-limit event.
+      const interval = resolveRolePollingInterval(val.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES);
+      if (interval !== Number(val.intervalMinutes)) {
+        console.warn(`[RolePolling] Stored intervalMinutes ${JSON.stringify(val.intervalMinutes)} is unusable; using ${interval}`);
+      }
+      startRolePolling(interval);
+    } else {
+      console.log('[RolePolling] Disabled by saved config');
+    }
+  } catch (e: any) {
+    console.log('[RolePolling] No saved config, role polling disabled by default:', e?.message ?? e);
   }
 
   // BidBoard polling (61 min — Playwright-based, doesn't hit API directly)
@@ -623,7 +790,14 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         configMap[c.key] = c.value;
       }
 
-      const getEnabled = (key: string) => (configMap[key] as any)?.enabled === true;
+      // `=== true` is right for every automation whose row is written whole. role_assignment_polling is the
+      // exception: a missing `enabled` there means the partial-update clobber, which boot recovers by
+      // starting anyway — so this list has to agree, or the dashboard contradicts the running process.
+      // (Codex named the status endpoint; this third derivation had the same divergence.)
+      const getEnabled = (key: string) =>
+        key === 'role_assignment_polling'
+          ? rolePollingEnabledFromRow(configMap[key] ?? null)
+          : (configMap[key] as any)?.enabled === true;
 
       res.json({
         automations: {
@@ -792,8 +966,13 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       const config = await storage.getAutomationConfig("role_assignment_polling");
       const val = (config?.value as any) || {};
       res.json({
-        enabled: val.enabled || false,
-        intervalMinutes: val.intervalMinutes ?? 30,
+        // The SAME rule boot and the POST use. Reporting `val.enabled || false` meant that for a clobbered
+        // row whose repair failed, boot started the poller while this endpoint — and therefore the UI — said
+        // it was off. A recovery rule that only some observers know is a rule that will be argued with.
+        enabled: rolePollingEnabledFromRow(config?.value ?? null),
+        // Resolved, like boot and the POST. This was the fourth reader of one value and the only one still
+        // on the old rule, so the UI could show 30 (or a raw -5) while the poller actually ran on 23.
+        intervalMinutes: resolveRolePollingInterval(val.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES),
         isRunning: rolePollingTimer !== null,
         lastPollAt: lastRolePollAt?.toISOString() || null,
         lastPollResult: lastRolePollResult,
@@ -812,17 +991,63 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
 
   app.post("/api/automation/role-polling/config", requireAuth, async (req, res) => {
     try {
-      const { enabled, intervalMinutes, batchSize: reqBatchSize } = req.body;
-      const interval = intervalMinutes ?? 30;
-      if (reqBatchSize !== undefined) {
-        ROLE_POLLING_BATCH_SIZE = Math.max(10, Math.min(200, Number(reqBatchSize) || 50));
+      // MERGE over the stored row; do not rebuild it from the request body.
+      //
+      // This used to destructure `enabled` and persist `{ enabled, ... }` unconditionally. A request that
+      // only changed the batch size left it `undefined`, JSON dropped the key, and the row came back with
+      // no `enabled` at all — which initPolling read as disabled. The same call then fell through to
+      // `stopRolePolling()`. So one batch-size tweak in the UI stopped the poller AND kept it stopped
+      // across every restart afterwards: 262 of 374 active projects went 30+ days without a role check,
+      // and kickoff emails only went out when a webhook happened to sync the right project.
+      //
+      // A partial update must now leave every field it did not mention exactly as it was.
+      // `?? null`, NOT `?? {}`. An absent ROW is not a key-less row: coercing it to `{}` made the recovery
+      // rule fire on a fresh install, so an interval-only request would have created an ENABLED policy and
+      // started polling — while initPolling treats a missing row as disabled. Only an existing row recovers.
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const has = (k: string) => Object.prototype.hasOwnProperty.call(body, k);
+
+      // Patch ONLY what the request mentioned, and let Postgres do the merge.
+      //
+      // Read-merge-write in here replayed the snapshot this request happened to read: a batch-size call could
+      // read `enabled: true`, another request could persist `false`, and then this one would write its stale
+      // object back and start polling. Spreading `existing` did not fix that — it IS that. A field-level
+      // patch cannot resurrect a field nobody mentioned.
+      const patch: Record<string, unknown> = {};
+      // An explicitly supplied null is a VALUE, not an omission: it read as disabled before this branch, and
+      // the startup rule treats every present non-boolean `enabled` as disabled. Normalise it rather than
+      // letting `??` discard it and leave the poller running.
+      if (has('enabled')) patch.enabled = body.enabled === true;
+      // Resolve BEFORE persisting. Storing the raw value and resolving only for the timer gave three
+      // different answers to one question: the row said -5, the response said 30, GET echoed -5, and the next
+      // boot resolved it against a different 23-minute fallback. Normalising here makes storage, response,
+      // timer and restart agree.
+      if (has('intervalMinutes')) {
+        patch.intervalMinutes = resolveRolePollingInterval(body.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES);
       }
-      const stored = { enabled, intervalMinutes: interval, batchSize: ROLE_POLLING_BATCH_SIZE };
-      await storage.upsertAutomationConfig({
-        key: "role_assignment_polling",
-        value: stored,
-        description: "Automatic Procore role assignment polling configuration",
-      });
+      if (has('batchSize')) {
+        patch.batchSize = Math.max(10, Math.min(200, Number(body.batchSize) || 50));
+      }
+
+      // The row AFTER the merge is the only authoritative answer to "is it on, and at what interval" — this
+      // replica's module state can be stale (another replica or the generic PUT may have changed batchSize),
+      // so deriving from it would violate the partial-update guarantee it is meant to provide.
+      // `enabled: false` ONLY if this call creates the row.
+      //
+      // patchAutomationConfig upserts, so on a fresh install a request that omits `enabled` would create
+      // `{ intervalMinutes: 20 }` — an object with no `enabled`, which is precisely the clobber signature the
+      // recovery rule reads as ON. A fresh install would self-enable and start emailing. The recovery is for
+      // rows that PRE-DATE the fix; a row this endpoint just created cannot be one of them.
+      const merged = (await storage.patchAutomationConfig(
+        "role_assignment_polling",
+        patch,
+        "Automatic Procore role assignment polling configuration",
+        { enabled: false },
+      ))?.value as any;
+
+      const enabled = rolePollingEnabledFromRow(merged);
+      const interval = resolveRolePollingInterval(merged?.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES);
+      applyRolePollingBatchSize(merged);
       if (enabled) {
         startRolePolling(interval);
       } else {
@@ -1157,7 +1382,11 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       results["procore_polling"] = "enabled (15 min)";
 
       // Role assignment polling — 30 min
-      await storage.upsertAutomationConfig({ key: "role_assignment_polling", value: { enabled: true, intervalMinutes: 30 }, description: "Role assignment polling (auto-enabled)" });
+      // MERGE, don't rebuild. The cursor is safe in its own row now, but rebuilding still discarded batchSize
+      // — and rebuilding a config row from a partial literal is exactly the habit that took polling down.
+      // Adopt the merged row's batch size before starting: the DB may carry a newer value than this replica.
+      const rolePollingRow = (await storage.patchAutomationConfig("role_assignment_polling", { enabled: true, intervalMinutes: 30 }, "Role assignment polling (auto-enabled)"))?.value as any;
+      applyRolePollingBatchSize(rolePollingRow);
       if (!rolePollingTimer) {
         startRolePolling(30);
       }
