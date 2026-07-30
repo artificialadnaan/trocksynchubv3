@@ -24,6 +24,8 @@ let lastRolePollResult: any = null;
 
 // ─── Role polling state ───────────────────────────────────────────────────────
 let rolePollingTimer: ReturnType<typeof setInterval> | null = null;
+/** The staggered first cycle. Tracked so stopRolePolling can cancel it — see startRolePolling. */
+let rolePollingStartupTimer: ReturnType<typeof setTimeout> | null = null;
 let rolePollingRunning = false;
 let lastPollStartedAt: number | null = null;
 const ROLE_SYNC_TIMEOUT_MS = 5 * 60 * 1000;
@@ -425,10 +427,28 @@ function startRolePolling(intervalMinutes: number) {
   stopRolePolling();
   console.log(`[RolePolling] Starting automatic role assignment sync every ${intervalMinutes} minutes`);
   rolePollingTimer = setInterval(() => runRolePollingCycle(), intervalMinutes * 60 * 1000);
-  setTimeout(() => runRolePollingCycle(), 150000); // staggered: 150s after startup
+  // The staggered first cycle is TRACKED, so stopping actually stops it.
+  //
+  // It used to be a bare setTimeout while stopRolePolling cleared only the interval. Enable, then disable
+  // inside the 150s window, and the delayed callback still ran a full batch — sending role-assignment and
+  // kickoff emails after the API had reported polling as disabled. Now much easier to hit, because the config
+  // route calls startRolePolling on every partial update that preserves an enabled row.
+  rolePollingStartupTimer = setTimeout(() => {
+    rolePollingStartupTimer = null;
+    // Belt and braces: a callback already in the event queue when the timer was cleared must still not run.
+    if (rolePollingTimer === null) {
+      console.log('[RolePolling] Staggered first cycle skipped — polling was disabled while it was pending');
+      return;
+    }
+    void runRolePollingCycle();
+  }, 150000);
 }
 
 function stopRolePolling() {
+  if (rolePollingStartupTimer) {
+    clearTimeout(rolePollingStartupTimer);
+    rolePollingStartupTimer = null;
+  }
   if (rolePollingTimer) {
     clearInterval(rolePollingTimer);
     rolePollingTimer = null;
@@ -950,7 +970,9 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         // row whose repair failed, boot started the poller while this endpoint — and therefore the UI — said
         // it was off. A recovery rule that only some observers know is a rule that will be argued with.
         enabled: rolePollingEnabledFromRow(config?.value ?? null),
-        intervalMinutes: val.intervalMinutes ?? 30,
+        // Resolved, like boot and the POST. This was the fourth reader of one value and the only one still
+        // on the old rule, so the UI could show 30 (or a raw -5) while the poller actually ran on 23.
+        intervalMinutes: resolveRolePollingInterval(val.intervalMinutes, ROLE_POLLING_DEFAULT_INTERVAL_MINUTES),
         isRunning: rolePollingTimer !== null,
         lastPollAt: lastRolePollAt?.toISOString() || null,
         lastPollResult: lastRolePollResult,

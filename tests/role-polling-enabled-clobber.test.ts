@@ -496,6 +496,47 @@ describe("role polling — the enabled-key clobber", () => {
     expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(50, expect.any(Number));
   });
 
+  it("CANCELS the staggered first cycle when polling is disabled before it fires", async () => {
+    // The real bug: the 150s stagger was a bare setTimeout while stopRolePolling cleared only the interval.
+    // Enable, disable inside that window, and the delayed callback still ran a full batch — sending
+    // role-assignment and kickoff emails AFTER the API reported polling as disabled. The config route calling
+    // startRolePolling on every enabled-preserving partial update made it far easier to hit.
+    vi.useFakeTimers();
+    backedStore({ role_assignment_polling: { enabled: true, intervalMinutes: 15, batchSize: 150 } });
+    mocks.syncProcoreRoleAssignmentsBatch.mockResolvedValue({
+      synced: 0, newAssignments: [], nextCursor: 0, totalProjects: 374, batchProcessed: 0,
+    });
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+    const route = app.routes["POST /api/automation/role-polling/config"];
+
+    // A partial update that preserves the enabled row schedules the stagger...
+    await invokeRoute(route, { body: { batchSize: 150 } });
+    // ...and an administrator disables polling 30s later, well inside the 150s window.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await invokeRoute(route, { body: { enabled: false } });
+
+    // Past the original stagger deadline.
+    await vi.advanceTimersByTimeAsync(200_000);
+
+    expect(mocks.syncProcoreRoleAssignmentsBatch).not.toHaveBeenCalled();
+  });
+
+  it("GET reports the RESOLVED interval, so the UI matches the running schedule", async () => {
+    // The fourth reader of one value, and the only one left on the old rule: the poller ran on 23 while this
+    // endpoint told the UI 30 — or echoed a raw -5 back.
+    mocks.storage.getAutomationConfig.mockImplementation(
+      configReturning({ enabled: true, intervalMinutes: -5, batchSize: 150 }),
+    );
+    const app = createFakeApp();
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    registerSettingsRoutes(app as any, (_req: any, _res: any, next: any) => next());
+
+    const res = await invokeRoute(app.routes["GET /api/automation/role-polling/config"]);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ intervalMinutes: 23 }));
+  });
+
   // ── Timer inputs ─────────────────────────────────────────────────────────────────────────────────
   it("refuses an unusable stored interval instead of handing it to setInterval", async () => {
     // The poller hits the Procore API. A stored 0 or NaN would become a runaway or never-firing timer, and a
