@@ -87,7 +87,7 @@ export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: strin
   const htmlBody = `
       <h2>SyncHub cannot sign into Procore</h2>
       <p><strong>When:</strong> ${e.now.toISOString()}</p>
-      <p><strong>Cause:</strong> ${escapeHtml(REASON_LABELS[reason])}</p>
+      <p><strong>Cause:</strong> ${escapeHtml(REASON_LABELS[reason] ?? REASON_LABELS.unknown)}</p>
       <p><strong>Sign-in attempts:</strong> ${e.attempts ?? "—"}</p>
       <p><strong>Procore said:</strong> ${escapeHtml(e.error ?? "(none captured)")}</p>
       <p><strong>Blocked right now:</strong> ${escapeHtml(e.blocking ?? "all Playwright automation")}</p>
@@ -112,6 +112,7 @@ export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: strin
 export async function ensureLoginAlertStateTable(db: Querier = pool): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS procore_login_alert_state (
+      -- keep this column list byte-aligned with shared/schema.ts (procoreLoginAlertState)
       scope TEXT PRIMARY KEY,
       state TEXT NOT NULL DEFAULT 'ok',
       last_reason TEXT,
@@ -121,6 +122,19 @@ export async function ensureLoginAlertStateTable(db: Querier = pool): Promise<vo
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+}
+
+/** Queriers whose table has already been ensured this process. Keyed by the Querier so production
+ *  (one `pool` singleton) pays the DDL once, while injected/test Queriers still initialise
+ *  independently. Only recorded on SUCCESS, so a transient DB error retries on the next call. */
+const ensuredQueriers = new WeakSet<Querier>();
+
+/** Ensure-once wrapper: the self-heal still protects a standalone entrypoint on first use, without
+ *  running DDL (and emitting a NOTICE) on every single sign-in check. */
+async function ensureLoginAlertStateTableOnce(db: Querier): Promise<void> {
+  if (ensuredQueriers.has(db)) return;
+  await ensureLoginAlertStateTable(db);
+  ensuredQueriers.add(db);
 }
 
 interface PersistedLoginAlertState {
@@ -240,7 +254,8 @@ export async function recordLoginOutcomeAndMaybeAlert(
     const reason = args.outcome.ok ? null : (args.outcome.reason ?? "unknown");
 
     // Self-heal the table so a standalone entrypoint (no web-boot migration) can't throw here.
-    await ensureLoginAlertStateTable(db);
+    // Once per Querier per process, so the steady-state healthy path really is one PK read.
+    await ensureLoginAlertStateTableOnce(db);
     const prior = await readLoginAlertState(scope, db);
 
     const decision = decideAlertTransition({

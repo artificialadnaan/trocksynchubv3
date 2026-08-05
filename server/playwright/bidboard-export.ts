@@ -136,6 +136,10 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
   }
 
   try {
+    // A substring test is fine HERE, and only here: it asks "which tool page is this?", not "are we
+    // signed in?" — that question was already answered by ensureLoggedIn above, and is answered
+    // again by describeSelectorMiss below if the selectors miss. Sign-in decisions go through
+    // isProcoreLoginUrl / detectPageAuthState, never through text matching.
     if (!page.url().includes("/tools/bid-board")) {
       log("Navigating to Bid Board for export...", "playwright");
       await page.goto(bidBoardUrl, { waitUntil: "load", timeout: 60000 });

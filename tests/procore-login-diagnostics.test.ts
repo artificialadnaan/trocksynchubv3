@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Regression cover for the 2026-08-03 outage: the Procore password changed, and every
@@ -42,8 +42,14 @@ vi.mock("../server/sync/procore-login-alert.ts", async (importOriginal) => ({
   recordLoginOutcomeAndMaybeAlert: recordLoginOutcomeMock,
 }));
 
-const { detectPageAuthState, describeSelectorMiss, encryptPassword, ensureLoggedIn, isProcoreLoginUrl } =
-  await import("../server/playwright/auth.ts");
+const {
+  detectPageAuthState,
+  describeSelectorMiss,
+  encryptPassword,
+  ensureLoggedIn,
+  isProcoreHostUrl,
+  isProcoreLoginUrl,
+} = await import("../server/playwright/auth.ts");
 
 // ── Page fakes ───────────────────────────────────────────────────────────────
 
@@ -82,6 +88,30 @@ describe("isProcoreLoginUrl (pure)", () => {
   it("does not treat the real Bid Board URL as a sign-in page", () => {
     expect(isProcoreLoginUrl(BID_BOARD_URL)).toBe(false);
     expect(isProcoreLoginUrl("https://us02.procore.com/webclients/host/companies/1234/projects/9")).toBe(false);
+  });
+
+  // The two cases where a `url.includes("login")` substring test gives the OPPOSITE answer. Both
+  // matter: the first would skip reading a rejection banner, the second would read an unrelated
+  // alert element on an authenticated page as a credential rejection.
+  it("says yes to a sign-in path that never spells the word 'login'", () => {
+    expect(isProcoreLoginUrl("https://us02.procore.com/users/sign_in")).toBe(true);
+    expect(isProcoreLoginUrl("https://us02.procore.com/sessions/new")).toBe(true);
+    expect("https://us02.procore.com/users/sign_in".includes("login")).toBe(false);
+  });
+
+  it("says no to an authenticated app URL that merely carries 'login' in a query string", () => {
+    const appUrl = `${BID_BOARD_URL}?from=login`;
+    expect(isProcoreLoginUrl(appUrl)).toBe(false);
+    expect(appUrl.includes("login")).toBe(true);
+  });
+});
+
+describe("isProcoreHostUrl (pure)", () => {
+  it("matches Procore hosts by hostname, not by substring anywhere in the URL", () => {
+    expect(isProcoreHostUrl(BID_BOARD_URL)).toBe(true);
+    expect(isProcoreHostUrl("https://login.procore.com/")).toBe(true);
+    expect(isProcoreHostUrl("https://evil.example.com/?next=https://us02.procore.com/")).toBe(false);
+    expect(isProcoreHostUrl("not a url")).toBe(false);
   });
 });
 
@@ -214,6 +244,17 @@ describe("ensureLoggedIn — target-URL fast path", () => {
     expect(recordLoginOutcomeMock.mock.calls.at(-1)![0]).toMatchObject({ outcome: { ok: true } });
   });
 
+  it("records WHY the probe said not-authenticated even with no target URL to explain it", async () => {
+    // The call with no targetUrl has nothing else in the log to interpret it. An unauthenticated
+    // verdict that leaves no trace is how the outage stayed invisible for 73 minutes.
+    getPageMock.mockResolvedValue(loginPage());
+
+    await ensureLoggedIn();
+
+    const lines = logMock.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => /NOT logged in — .*password field/i.test(l))).toBe(true);
+  });
+
   it("reports a structured reason and alerts when no credentials are stored", async () => {
     getPageMock.mockResolvedValue(loginPage());
 
@@ -232,10 +273,22 @@ describe("ensureLoggedIn — target-URL fast path", () => {
 describe("ensureLoggedIn — Procore rejects the stored password", () => {
   const PROCORE_REJECTION = "The email address or password you entered is not valid.";
 
-  /** A fake that walks Procore's two-step login and then shows the rejection banner. */
+  /** A fake that walks Procore's login and then shows the rejection banner.
+   *
+   *  Note the post-submit URL: `/users/sign_in` on the app host. It is unambiguously a sign-in page,
+   *  and it does NOT contain the substring "login" — so a `url.includes("login")` gate would skip
+   *  reading the rejection banner entirely and degrade a plain dead password to reason `unknown`,
+   *  which is this PR's own bug reintroduced one layer in. Every sign-in decision must go through
+   *  isProcoreLoginUrl. */
   function rejectingLoginPage() {
     let url = "https://login.procore.com/";
-    const handle = { fill: vi.fn(async () => {}), click: vi.fn(async () => {}) };
+    const fill = vi.fn(async () => {});
+    const makeHandle = (selector: string) => ({
+      fill,
+      click: vi.fn(async () => {
+        if (/Sign In/i.test(selector)) url = "https://us02.procore.com/users/sign_in";
+      }),
+    });
     return {
       url: () => url,
       goto: vi.fn(async (to: string) => {
@@ -243,13 +296,13 @@ describe("ensureLoggedIn — Procore rejects the stored password", () => {
       }),
       waitForTimeout: vi.fn(async () => {}),
       waitForURL: vi.fn(async () => {}),
-      waitForSelector: vi.fn(async () => handle),
+      waitForSelector: vi.fn(async (selector: string) => makeHandle(selector)),
       $: vi.fn(async (selector: string) => {
         if (/otp|inputmode="numeric"|mfa/.test(selector)) return null; // no MFA prompt
         if (/alert-danger|role="alert"/.test(selector)) {
           return { textContent: async () => PROCORE_REJECTION };
         }
-        if (/password/i.test(selector)) return handle;
+        if (/password/i.test(selector)) return makeHandle(selector);
         return null;
       }),
     };
@@ -296,6 +349,18 @@ describe("ensureLoggedIn — Procore rejects the stored password", () => {
 // ── 4. The export RPA reports the right cause to its caller ─────────────────
 
 describe("exportBidBoardProjectList — error attribution", () => {
+  // vi.doMock registrations survive vi.resetModules() and would otherwise leak the stubbed
+  // ensureLoggedIn into every later suite. Currently latent (nothing after this depends on the
+  // mocked modules) so there is no failing revert-check behind this — it is hygiene, kept so a
+  // later test cannot start passing for the wrong reason.
+  afterEach(() => {
+    vi.doUnmock("../server/playwright/auth.ts");
+    vi.doUnmock("fs/promises");
+    vi.resetModules();
+  });
+
+  // vi.doMock registrations survive vi.resetModules() and would otherwise leak the stubbed
+  // ensureLoggedIn into navigateWith() and every later suite — a test passing for the wrong reason.
   async function runExportWith(page: any) {
     vi.resetModules();
     vi.doMock("fs/promises", () => ({
@@ -509,4 +574,57 @@ describe("recordLoginOutcomeAndMaybeAlert — dedupe", () => {
     const db = { query: vi.fn(async () => { throw new Error("db down"); }) };
     await expect(run(db, { ok: false, reason: "credentials_rejected" }, NOW)).resolves.toEqual({ action: "none" });
   });
+
+  it("a FAILED failure-alert send does not advance the throttle — the next cycle re-alerts", async () => {
+    // If a failed send silently advanced last_alerted_at, the dedupe window would swallow the retry
+    // and the outage would produce no email at all.
+    const db = fakeDb();
+    send.mockResolvedValueOnce({ success: false, provider: "gmail" });
+    const fail = { ok: false, reason: "credentials_rejected", attempts: 3, error: "not valid" };
+    await run(db, fail, NOW);
+    expect(db.store.get("procore-browser-login").last_alerted_at).toBeNull();
+
+    const retry = await run(db, fail, new Date(NOW.getTime() + 19 * MIN)); // still inside the window
+    expect(retry.action).toBe("alert_failure");
+  });
+
+  it("a FAILED recovery send keeps 'failing' AND the prior reason, so the retry is not a new incident", async () => {
+    const db = fakeDb();
+    await run(db, { ok: false, reason: "credentials_rejected", attempts: 3 }, NOW);
+    send.mockClear();
+    send.mockResolvedValueOnce({ success: false, provider: "gmail" });
+
+    const failed = await run(db, { ok: true }, new Date(NOW.getTime() + 20 * MIN));
+    expect(failed.action).toBe("alert_recovered");
+    const row = db.store.get("procore-browser-login");
+    expect(row.state).toBe("failing"); // NOT flipped to ok
+    expect(row.last_reason).toBe("credentials_rejected"); // signature preserved
+
+    const retried = await run(db, { ok: true }, new Date(NOW.getTime() + 40 * MIN));
+    expect(retried.action).toBe("alert_recovered");
+    expect(db.store.get("procore-browser-login").state).toBe("ok");
+  });
+
+  it("still sends when the reason has no label — an alert path must not fail on unexpected input", async () => {
+    // The union makes this unreachable for type-checked callers today, but the value crosses a
+    // runtime boundary (it is read back out of last_reason). An unlabelled reason used to throw
+    // inside the renderer, and the module's own outer catch would swallow it — no email, exactly
+    // when something unanticipated had happened.
+    const db = fakeDb();
+    const res = await run(db, { ok: false, reason: "a_reason_from_a_future_release", attempts: 1 }, NOW);
+    expect(res.action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0].htmlBody).toContain("automation_config.procore_browser_credentials");
+  });
+
+  it("runs the ensure-table DDL once per Querier, not on every sign-in check", async () => {
+    const db = fakeDb();
+    const ddl = () => db.query.mock.calls.filter((c) => String(c[0]).includes("CREATE TABLE")).length;
+    await run(db, { ok: false, reason: "credentials_rejected" }, NOW);
+    expect(ddl()).toBe(1);
+    await run(db, { ok: false, reason: "credentials_rejected" }, new Date(NOW.getTime() + 19 * MIN));
+    await run(db, { ok: true }, new Date(NOW.getTime() + 38 * MIN));
+    expect(ddl()).toBe(1);
+  });
+
 });

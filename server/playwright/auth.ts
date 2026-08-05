@@ -194,16 +194,32 @@ export interface AuthProbePage {
   $(selector: string): Promise<unknown>;
 }
 
+const PROCORE_HOST_RE = /(^|\.)procore\.com$/i;
 const LOGIN_HOST_RE = /(^|\.)login(-sandbox)?\.procore\.com$/i;
 const LOGIN_PATH_RE = /(^|\/)(login|signin|sign_in|sessions\/new|users\/sign_in)(\/|$)/i;
 
-/** True when the URL is a Procore SIGN-IN url — host-based, so a `?redirect=` query that still
- *  mentions the target page can no longer be mistaken for the target page itself. */
+/**
+ * THE definition of "this is a Procore sign-in page". Every such decision in this module goes
+ * through it — a substring test like `url.includes("login")` answers the same question differently
+ * depending on where it is asked: yes for an authenticated URL carrying `?redirect=…login…`, no for
+ * a sign-in page whose URL doesn't happen to spell the word. Host and path are compared as parsed
+ * components, never as text inside the whole URL.
+ */
 export function isProcoreLoginUrl(rawUrl: string): boolean {
   try {
     const u = new URL(rawUrl);
     if (LOGIN_HOST_RE.test(u.hostname)) return true;
     return LOGIN_PATH_RE.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** True when the URL is on a Procore host. Hostname-based for the same reason as above — a query
+ *  string mentioning procore.com must not make some other origin look like Procore. */
+export function isProcoreHostUrl(rawUrl: string): boolean {
+  try {
+    return PROCORE_HOST_RE.test(new URL(rawUrl).hostname);
   } catch {
     return false;
   }
@@ -320,9 +336,13 @@ export async function describeSelectorMiss(page: AuthProbePage, subject: string)
 
 async function isLoggedIn(page: Page): Promise<boolean> {
   const state = await detectPageAuthState(page);
-  if (state.authenticated) {
-    log(`Logged in — ${state.evidence} (${state.url})`, "playwright");
-  }
+  // Log BOTH verdicts with their evidence. The negative is the one that matters during an outage —
+  // an unauthenticated verdict that leaves no trace is how 2026-08-03 stayed invisible for 73
+  // minutes, and this is the call site that has no target URL to explain itself.
+  log(
+    `${state.authenticated ? "Logged in" : "NOT logged in"} — ${state.evidence} (${state.url})`,
+    "playwright"
+  );
   return state.authenticated;
 }
 
@@ -400,18 +420,25 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
   const postLoginUrl = page.url();
   log(`Post-login URL: ${postLoginUrl}`, "playwright");
 
-  // If still on login page, wait for navigation or error
-  if (postLoginUrl.includes("login")) {
+  // If still on login page, wait for navigation or error.
+  // Every "is this the sign-in page?" decision below goes through isProcoreLoginUrl. A substring
+  // test would answer the same question differently in different places: it says yes to an
+  // authenticated URL carrying `?redirect=…login…`, and no to a sign-in page whose URL happens not
+  // to spell the word — which would drop the rejection banner on the floor and downgrade a plain
+  // dead password to reason `unknown`, i.e. the exact misdiagnosis this module is fixing.
+  if (isProcoreLoginUrl(postLoginUrl)) {
     try {
       await Promise.race([
-        page.waitForURL(/procore\.com(?!.*login)/, { timeout: 30000 }),
+        page.waitForURL((u) => !isProcoreLoginUrl(u.toString()) && u.hostname.endsWith("procore.com"), {
+          timeout: 30000,
+        }),
         page.waitForSelector(PROCORE_SELECTORS.login.errorMessage, { timeout: 30000 }),
         page.waitForSelector(PROCORE_SELECTORS.login.mfaInput, { timeout: 30000 }),
       ]);
     } catch (error) {
-      // Check if we actually navigated away from login
+      // Check if we actually navigated away from the sign-in page
       const currentUrl = page.url();
-      if (!currentUrl.includes("login")) {
+      if (!isProcoreLoginUrl(currentUrl)) {
         log(`Navigation detected to: ${currentUrl}`, "playwright");
       } else {
         const screenshotPath = await takeScreenshot(page, "login-timeout");
@@ -440,9 +467,9 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
     };
   }
 
-  // Check for error message (only if still on login page)
+  // Check for error message (only if still on the sign-in page)
   const currentUrl = page.url();
-  if (currentUrl.includes("login")) {
+  if (isProcoreLoginUrl(currentUrl)) {
     const errorElement = await page.$(PROCORE_SELECTORS.login.errorMessage);
     if (errorElement) {
       const errorText = await errorElement.textContent();
@@ -465,9 +492,8 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
 
   // No authenticated marker, but we did submit credentials, saw no rejection, and are off the
   // sign-in host — accept it, while logging that the session is UNVERIFIED so a later selector miss
-  // can be read in context. (Host-based, not `includes("login")`: a redirect query string that
-  // mentions the word must not decide this either way.)
-  if (!isProcoreLoginUrl(currentUrl) && currentUrl.includes("procore.com")) {
+  // can be read in context. Both tests parse the URL rather than search it for a substring.
+  if (!isProcoreLoginUrl(currentUrl) && isProcoreHostUrl(currentUrl)) {
     await saveSession();
     log(`Login accepted but UNVERIFIED (no authenticated marker) - on URL: ${currentUrl}`, "playwright");
     return { success: true };
@@ -606,7 +632,8 @@ export async function logout(): Promise<void> {
       const logoutLink = await page.$('a:has-text("Log Out"), a:has-text("Sign Out")');
       if (logoutLink) {
         await logoutLink.click();
-        await page.waitForURL(/login/, { timeout: 10000 });
+        // Same single definition as everywhere else in this module.
+        await page.waitForURL((u) => isProcoreLoginUrl(u.toString()), { timeout: 10000 });
       }
     }
   } catch (error) {

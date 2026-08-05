@@ -94,6 +94,40 @@ describe("procore_login_alert_state DDL (runtime)", () => {
     expect((await readLoginAlertState(PROCORE_LOGIN_ALERT_SCOPE, db))!.state).toBe("ok");
   });
 
+  it("does not mark a Querier as ensured when the DDL fails — the next call retries and alerts", async () => {
+    // Needs a REAL database: with an in-memory fake the SELECT succeeds whether or not the table
+    // exists, so the bug (memoising before the DDL succeeded) is invisible. Here the second call
+    // would query a table that was never created, the outer catch would swallow it, and the outage
+    // would produce no email at all.
+    let failNextDdl = true;
+    const flaky = {
+      query: async (text: string, params?: any[]) => {
+        if (failNextDdl && text.includes("CREATE TABLE")) {
+          failNextDdl = false;
+          throw new Error("transient DB blip");
+        }
+        return db.query(text, params);
+      },
+    };
+    const send = vi.fn(async () => ({ success: true, provider: "gmail" }));
+    const args = {
+      outcome: { ok: false, reason: "credentials_rejected" as const, attempts: 3 },
+      realertMinutes: 60,
+      recipient: "ops@trock.test",
+    };
+
+    const blipped = await recordLoginOutcomeAndMaybeAlert({ ...args, now: NOW }, { db: flaky, send });
+    expect(blipped.action).toBe("none"); // swallowed — never crashes the automation
+    expect(send).not.toHaveBeenCalled();
+
+    const retried = await recordLoginOutcomeAndMaybeAlert(
+      { ...args, now: new Date(NOW.getTime() + MIN) },
+      { db: flaky, send }
+    );
+    expect(retried.action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("self-heals the missing table on the first call from a standalone entrypoint", async () => {
     // No ensure call, no boot migration — recordLoginOutcomeAndMaybeAlert must create it itself
     // rather than swallow the very first alert of an outage.
