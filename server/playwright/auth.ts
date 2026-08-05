@@ -187,10 +187,11 @@ export async function saveProcoreCredentials(
 //
 // Everything below asserts against the DOM, in a fixed order of evidence.
 
-/** Minimal structural view of a Playwright Page — lets the probes be unit-tested with plain fakes. */
+/** Minimal structural view of a Playwright Page — lets the probes be unit-tested with plain fakes.
+ *  `$` resolves to an element handle or null; only its truthiness is used here. */
 export interface AuthProbePage {
   url(): string;
-  $(selector: string): Promise<unknown | null>;
+  $(selector: string): Promise<unknown>;
 }
 
 const LOGIN_HOST_RE = /(^|\.)login(-sandbox)?\.procore\.com$/i;
