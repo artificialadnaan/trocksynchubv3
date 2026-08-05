@@ -169,6 +169,14 @@ httpServer.listen(
     console.error("[startup] BidBoard CRM push alert state table migration failed:", e);
   }
 
+  // Ensure procore_login_alert_state exists (backs the Procore sign-in failure/recovery alert debounce)
+  try {
+    const { ensureProcoreLoginAlertStateTable } = await import("./migrate-procore-login-alert");
+    await ensureProcoreLoginAlertStateTable();
+  } catch (e) {
+    console.error("[startup] Procore login alert state table migration failed:", e);
+  }
+
   // Seed default email templates if they don't exist
   try {
     await storage.seedEmailTemplates();

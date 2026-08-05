@@ -17,7 +17,7 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
-import { ensureLoggedIn } from "./auth";
+import { describeSelectorMiss, ensureLoggedIn, PROCORE_CREDENTIAL_REMEDIATION } from "./auth";
 import { randomDelay, takeScreenshot } from "./browser";
 import { PROCORE_SELECTORS } from "./selectors";
 import { log } from "../index";
@@ -114,9 +114,18 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
   const sandbox = await isSandbox();
   const bidBoardUrl = getBidBoardExportUrl(companyId, sandbox);
 
-  const { page, success, error } = await ensureLoggedIn({ targetUrl: bidBoardUrl });
+  const { page, success, error, reason } = await ensureLoggedIn({
+    targetUrl: bidBoardUrl,
+    blocking: "Bid Board stage sync (Excel export)",
+  });
   if (!success || !page) {
-    log(`BidBoard export failed: ${error || "Not logged in"}`, "playwright");
+    // Name the sign-in failure explicitly. This branch used to log a generic "export failed", which
+    // read like a scraping problem rather than the credential problem it is.
+    log(
+      `BidBoard export aborted — Procore sign-in failed (${reason ?? "unknown"}): ${error || "Not logged in"}. ` +
+        PROCORE_CREDENTIAL_REMEDIATION,
+      "playwright"
+    );
     return null;
   }
 
@@ -127,6 +136,10 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
   }
 
   try {
+    // A substring test is fine HERE, and only here: it asks "which tool page is this?", not "are we
+    // signed in?" — that question was already answered by ensureLoggedIn above, and is answered
+    // again by describeSelectorMiss below if the selectors miss. Sign-in decisions go through
+    // isProcoreLoginUrl / detectPageAuthState, never through text matching.
     if (!page.url().includes("/tools/bid-board")) {
       log("Navigating to Bid Board for export...", "playwright");
       await page.goto(bidBoardUrl, { waitUntil: "load", timeout: 60000 });
@@ -147,7 +160,10 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       await takeScreenshot(page, "bidboard-export-menu-not-found").catch((screenshotErr) => {
         log(`Could not capture menu-not-found screenshot: ${screenshotErr}`, "playwright");
       });
-      throw new Error("Export menu button not found. Procore UI may have changed.");
+      // "Procore UI may have changed" is only true of an AUTHENTICATED page. On 2026-08-03 this
+      // message was emitted every 19 minutes against a login form; the same selector found 10
+      // elements the moment the password was fixed.
+      throw await describeSelectorMiss(page, "Export menu button");
     }
     await randomDelay(1000, 2000);
 
@@ -187,7 +203,7 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       await takeScreenshot(page, "bidboard-export-link-not-found").catch((screenshotErr) => {
         log(`Could not capture export-link-not-found screenshot: ${screenshotErr}`, "playwright");
       });
-      throw new Error("Export Project List To Excel link not found. Procore UI may have changed.");
+      throw await describeSelectorMiss(page, "Export Project List To Excel link");
     }
 
     const download = await downloadPromise.catch(() => null);
