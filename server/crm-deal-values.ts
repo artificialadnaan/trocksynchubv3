@@ -26,8 +26,13 @@ import { fetchWithTimeout } from "./lib/fetch-with-timeout";
  */
 export const CRM_CURRENT_VALUES_MAX_DEAL_IDS = 500;
 
-/** Kept well under the report job's tolerance; a slow CRM must not stall the email. */
-const DEFAULT_TIMEOUT_MS = 10_000;
+/**
+ * Deliberately short. This hangs off getRfpReportList, which serves the interactive
+ * GET /api/reports/rfps list and the CSV/PDF export as well as the scheduled email — so the ceiling
+ * is set by what a user will sit through, not by what a cron job would tolerate. A CRM that has not
+ * answered in five seconds is not going to improve the report; the rows fall back to an em-dash.
+ */
+const DEFAULT_TIMEOUT_MS = 5_000;
 
 export interface CrmCurrentValueDeps {
   /** Injected in tests. Defaults to the timeout-wrapped global fetch. */
@@ -57,6 +62,8 @@ export async function fetchCrmCurrentDealAmounts(
 
   const baseUrl = (deps.baseUrl ?? process.env.TROCK_CRM_BASE_URL)?.trim().replace(/\/+$/, "");
   const secret = deps.secret ?? process.env.RFP_REQUEST_SYNC_SECRET;
+  // console rather than the app's `log()` helper: that lives in ./index, and importing it here
+  // would close a cycle (rfp-reports -> crm-deal-values -> index -> routes -> rfp-reports).
   const logger = deps.logger ?? ((message: string) => console.warn(message));
 
   if (!baseUrl || !secret) {
