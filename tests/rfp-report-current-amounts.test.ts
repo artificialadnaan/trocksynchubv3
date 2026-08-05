@@ -101,20 +101,18 @@ describe("resolveMissingAmountsFromCrm", () => {
     expect(rows[0].amountIsCurrent).toBe(false);
   });
 
-  it("leaves a reviewer's edit alone even when the reviewer CLEARED the amount", async () => {
-    // edited_fields = { amount: "" } — resolveRfpAmount reads that as null, but it is a deliberate
-    // human decision, not a missing snapshot. Refilling it from the CRM would silently undo them.
+  it("still backfills a row whose edited_fields merely carried a blank amount", async () => {
+    // resolveRfpAmount reads `edited_fields.amount === ""` as null, and there is no way to tell a
+    // deliberate clear from the approval form's own echo — processRfpApproval diffs every posted
+    // field against dealData with `!==`, so it writes keys nobody typed. Skipping these rows would
+    // fail CLOSED and silently suppress the very backfill this exists for. A blank is not a value.
     const rows = [blankCrmRow({ id: 7 })];
     const fetchAmounts = vi.fn(async () => new Map([["11111111-1111-4111-8111-111111111111", 248500]]));
 
-    await resolveMissingAmountsFromCrm(rows, {
-      fetchAmounts,
-      reviewerSetAmountRfpIds: new Set([7]),
-    });
+    await resolveMissingAmountsFromCrm(rows, { fetchAmounts });
 
-    expect(fetchAmounts).not.toHaveBeenCalled();
-    expect(rows[0].amount).toBeNull();
-    expect(rows[0].amountIsCurrent).toBe(false);
+    expect(rows[0].amount).toBe(248500);
+    expect(rows[0].amountIsCurrent).toBe(true);
   });
 
   it("ignores HubSpot-sourced rows — the CRM has nothing to say about them", async () => {
@@ -185,22 +183,20 @@ describe("resolveMissingAmountsFromCrm", () => {
 describe("precedence: reviewer edit > stored snapshot > live lookup", () => {
   it("applies exactly one source per row and only marks the live ones", async () => {
     const rows = [
-      // Reviewer edited to 4500 — resolveRfpAmount already put it in `amount`.
+      // Reviewer edited to 4500 — resolveRfpAmount already put it in `amount`, so it is not null
+      // and can never reach the lookup. That is the whole mechanism by which reviewer edits win.
       blankCrmRow({ id: 1, amount: 4500, sourceDealId: "11111111-1111-4111-8111-111111111111" }),
       // Stored snapshot had a real value at send time.
       blankCrmRow({ id: 2, amount: 88000, sourceDealId: "22222222-2222-4222-8222-222222222222" }),
-      // Blank snapshot, no reviewer edit — the only row eligible for a live value.
+      // Blank snapshot — the only row eligible for a live value.
       blankCrmRow({ id: 3, sourceDealId: "33333333-3333-4333-8333-333333333333" }),
     ];
     const fetchAmounts = vi.fn(async () => new Map([["33333333-3333-4333-8333-333333333333", 248500]]));
 
-    await resolveMissingAmountsFromCrm(rows, {
-      fetchAmounts,
-      reviewerSetAmountRfpIds: new Set([1]),
-    });
+    await resolveMissingAmountsFromCrm(rows, { fetchAmounts });
 
     expect(fetchAmounts).toHaveBeenCalledTimes(1);
-    // Only the blank row was ever asked about.
+    // Only the blank row was ever asked about — a reviewer edit is not even a candidate.
     expect(fetchAmounts.mock.calls[0][0]).toEqual(["33333333-3333-4333-8333-333333333333"]);
     expect(rows.map((r) => [r.amount, r.amountIsCurrent])).toEqual([
       [4500, false],
@@ -244,6 +240,45 @@ describe("fetchCrmCurrentDealAmounts", () => {
     expect(result.has("deal-a")).toBe(false);
     // 0 is a real answer and must survive.
     expect(result.get("deal-b")).toBe(0);
+  });
+
+  it("refuses values that only LOOK numeric once coerced", async () => {
+    // Number(""), Number([]) and Number(false) are all a finite 0. Coercing first would put a
+    // confident "$0 †" on a leadership email — strictly worse than the em-dash it replaced.
+    const fetchImpl = vi.fn(async () =>
+      okResponse({
+        values: [
+          { dealId: "blank", amount: "" },
+          { dealId: "whitespace", amount: "   " },
+          { dealId: "array", amount: [] },
+          { dealId: "bool", amount: false },
+          { dealId: "object", amount: {} },
+          { dealId: "words", amount: "not a number" },
+          { dealId: "missing" },
+          // Genuinely numeric, including a numeric string, must still get through.
+          { dealId: "num", amount: 248500 },
+          { dealId: "numeric-string", amount: "1234.5" },
+          { dealId: "real-zero", amount: 0 },
+        ],
+      })
+    );
+
+    const result = await fetchCrmCurrentDealAmounts(["x"], deps(fetchImpl));
+
+    expect([...result.keys()].sort()).toEqual(["num", "numeric-string", "real-zero"]);
+    expect(result.get("num")).toBe(248500);
+    expect(result.get("numeric-string")).toBe(1234.5);
+    expect(result.get("real-zero")).toBe(0);
+  });
+
+  it("lower-cases the keys it returns so the contract does not depend on the CRM", async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse({ values: [{ dealId: "11111111-1111-4111-8111-AAAAAAAAAAAA", amount: 248500 }] })
+    );
+
+    const result = await fetchCrmCurrentDealAmounts(["11111111-1111-4111-8111-aaaaaaaaaaaa"], deps(fetchImpl));
+
+    expect(result.get("11111111-1111-4111-8111-aaaaaaaaaaaa")).toBe(248500);
   });
 
   it("fails soft on a non-2xx CRM response without trusting its body", async () => {

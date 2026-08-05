@@ -51,9 +51,8 @@ export interface CrmCurrentValueDeps {
  * about, deals that exist but still have no value at all, and every failure mode alike are simply
  * absent — the caller cannot tell them apart and must not need to: all four render identically.
  *
- * Key casing: the CRM keys its answer on `deals.id`, which Postgres renders canonically lower-case
- * whatever casing it was asked with. Keys are passed through as received, so a caller holding a
- * differently-cased id must normalize on the lookup side (resolveMissingAmountsFromCrm does).
+ * Keys are always lower-cased, whatever the CRM sent — so a caller holding a differently-cased id
+ * only has to lower-case its own lookup for the two to meet.
  */
 export async function fetchCrmCurrentDealAmounts(
   dealIds: string[],
@@ -112,12 +111,22 @@ export async function fetchCrmCurrentDealAmounts(
 
     const resolved = new Map<string, number>();
     for (const entry of values) {
-      const dealId = String(entry?.dealId ?? "").trim();
+      // Lower-cased here, at the producer, so the invariant is local. The CRM keys its answer on
+      // `deals.id` and Postgres always renders that lower-case — but that is a promise made by
+      // another service across a network boundary, and if it ever stopped holding the only symptom
+      // would be a silent em-dash. Normalizing costs nothing and makes the contract ours to keep.
+      const dealId = String(entry?.dealId ?? "").trim().toLowerCase();
       if (!dealId) continue;
-      // `amount: null` means "the CRM has this deal and it is still worth nothing" — indistinguishable,
-      // for display, from not knowing. Leave it out so the row keeps its em-dash.
-      const amount = Number(entry?.amount);
-      if (entry?.amount === null || entry?.amount === undefined || !Number.isFinite(amount)) continue;
+
+      // Type-check BEFORE coercing. `Number("")`, `Number([])` and `Number(false)` are all a finite
+      // 0, so a lenient check would turn a blank or malformed amount into a "$0" marked as the deal's
+      // current value — a confidently wrong number in an email to leadership, which is strictly worse
+      // than the em-dash this exists to replace. `amount: null` (the CRM's "exists, worth nothing
+      // yet") must land here too: for display it is indistinguishable from not knowing.
+      const raw = entry?.amount;
+      if (typeof raw !== "number" && !(typeof raw === "string" && raw.trim() !== "")) continue;
+      const amount = Number(raw);
+      if (!Number.isFinite(amount)) continue;
       resolved.set(dealId, amount);
     }
     return resolved;

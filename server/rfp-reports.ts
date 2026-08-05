@@ -101,44 +101,41 @@ export function resolveRfpAmount(
  * Rather than leave those rows valueless, ask the CRM what each deal is worth now.
  *
  * Rules this MUST preserve:
- *  - a reviewer's `edited_fields.amount` already won inside resolveRfpAmount and is never overridden;
+ *  - a reviewer's `edited_fields.amount` wins — resolveRfpAmount already applied it, and a row that
+ *    carries a reviewer value is not null, so it never reaches the lookup at all;
  *  - a stored snapshot that has a value is never replaced — only nulls are filled;
  *  - the stored snapshot itself is not rewritten (display-time only);
  *  - ONE batch call for the whole report, and on any failure every row keeps its em-dash.
+ *
+ * A note on the reviewer case, because it was got wrong once. An earlier revision also skipped rows
+ * whose `edited_fields` merely CARRIED an `amount` key, on the theory that a reviewer who cleared the
+ * field to "" meant it. That guard is gone: it cannot tell a deliberate clear from the approval
+ * form's own echo (processRfpApproval diffs every posted field against dealData with `!==`, so it
+ * writes keys for type mismatches nobody typed), and it fails CLOSED — a false positive silently
+ * suppresses exactly the backfill this function exists to perform. A blank is not a value; filling it
+ * with a labelled current figure takes nothing away from the reviewer.
  *
  * Mutates `rows` in place and returns it.
  */
 export async function resolveMissingAmountsFromCrm(
   rows: RfpReportRow[],
   options: {
-    /**
-     * RFP ids whose `edited_fields` carried an `amount` key at all. A reviewer who deliberately
-     * CLEARED the amount left a key holding "" — resolveRfpAmount reads that as null, and without
-     * this set the live lookup would helpfully undo their edit. Reviewer edits win over everything,
-     * including over a value the CRM now has.
-     */
-    reviewerSetAmountRfpIds?: ReadonlySet<number>;
     /** Injected in tests. */
     fetchAmounts?: typeof fetchCrmCurrentDealAmounts;
   } = {}
 ): Promise<RfpReportRow[]> {
-  const reviewerSet = options.reviewerSetAmountRfpIds;
   const fetchAmounts = options.fetchAmounts ?? fetchCrmCurrentDealAmounts;
 
   const needing = rows.filter(
-    (row) =>
-      row.amount === null &&
-      row.sourceSystem === "trock_crm" &&
-      Boolean(row.sourceDealId) &&
-      !reviewerSet?.has(row.id)
+    (row) => row.amount === null && row.sourceSystem === "trock_crm" && Boolean(row.sourceDealId)
   );
   if (needing.length === 0) return rows;
 
   // fetchCrmCurrentDealAmounts already swallows every failure it can name, but this runs on the
   // scheduled-email path: a lookup must not be able to stop the report going out, not even via a
   // failure mode nobody anticipated. Rows keep their em-dash and the email sends.
-  // The CRM keys its answer on `row.id`, which Postgres renders canonically lower-case whatever
-  // casing it was asked with — so the READ below normalizes, and the request is sent as stored.
+  // fetchCrmCurrentDealAmounts lower-cases every key it returns, so the READ below lower-cases too
+  // and the two always meet. The request goes out with the id exactly as stored.
   let amounts: Map<string, number>;
   try {
     amounts = await fetchAmounts([...new Set(needing.map((row) => row.sourceDealId))]);
@@ -209,9 +206,20 @@ export interface RfpReportRow {
   crmUrl: string | null;
 }
 
-/** Get paginated RFP list with filters */
+/**
+ * Get paginated RFP list with filters.
+ *
+ * `resolveCurrentAmounts` opts into the live CRM backfill for blank amounts (see
+ * resolveMissingAmountsFromCrm). It is OFF by default and on only for the scheduled email, which is
+ * the sole surface that renders an amount — the dashboard table shows
+ * project/recipient/date/stage/status/changes, and the CSV and PDF exports use those same columns.
+ * Turning it on everywhere would make browsing and downloading the report wait on a live cross-service
+ * call for a number those paths throw away. Any surface that starts rendering `amount` should pass
+ * this flag rather than quietly diverge from the email.
+ */
 export async function getRfpReportList(
-  filters: RfpReportFilters
+  filters: RfpReportFilters,
+  options: { resolveCurrentAmounts?: boolean } = {}
 ): Promise<{ data: RfpReportRow[]; total: number }> {
   const limit = Math.min(filters.limit || 50, 100);
   const offset = ((filters.page || 1) - 1) * limit;
@@ -303,15 +311,9 @@ export async function getRfpReportList(
 
   const mappingByDeal = new Map(mappings.map((m) => [m.hubspotDealId, m]));
 
-  const reviewerSetAmountRfpIds = new Set<number>();
-
   let data: RfpReportRow[] = rfps.map((rfp) => {
     const dealData = (rfp.dealData as Record<string, unknown>) || {};
     const editedFields = (rfp.editedFields as Record<string, unknown> | null) || null;
-    // Key PRESENCE, not truthiness: a reviewer who cleared the field left `amount: ""`.
-    if (editedFields && Object.prototype.hasOwnProperty.call(editedFields, "amount")) {
-      reviewerSetAmountRfpIds.add(rfp.id);
-    }
     // Overlay reviewer-edited values (same precedence the amount already uses) so an approved
     // RFP's card reflects the final type/number/name, not the stale pre-edit dealData.
     // blankToUndef on the dealData reads so a present-but-blank dealname still falls through to
@@ -378,7 +380,7 @@ export async function getRfpReportList(
   });
 
   // ONE batch call for the whole page, after the rows exist — never inside the map above.
-  await resolveMissingAmountsFromCrm(data, { reviewerSetAmountRfpIds });
+  if (options.resolveCurrentAmounts) await resolveMissingAmountsFromCrm(data);
 
   return { data, total };
 }
@@ -884,12 +886,17 @@ async function getRfpsForPeriod(
   dateFrom: Date,
   dateTo: Date
 ): Promise<{ rfps: RfpReportRow[]; changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>; approvalSummary: { pending: number; approved: number; rejected: number } }> {
-  const { data: rfps } = await getRfpReportList({
-    dateFrom: dateFrom.toISOString().slice(0, 10),
-    dateTo: dateTo.toISOString().slice(0, 10),
-    limit: 500,
-    page: 1,
-  });
+  // The email is the ONE surface that renders an amount, so it is the one that opts into the live
+  // CRM backfill for blank snapshots. See getRfpReportList.
+  const { data: rfps } = await getRfpReportList(
+    {
+      dateFrom: dateFrom.toISOString().slice(0, 10),
+      dateTo: dateTo.toISOString().slice(0, 10),
+      limit: 500,
+      page: 1,
+    },
+    { resolveCurrentAmounts: true }
+  );
 
   const rfpIds = rfps.map((r) => r.id);
   const changeLogs =
