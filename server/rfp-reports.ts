@@ -884,7 +884,14 @@ export async function buildRfpReportEmailHtml(options: {
 /** Get RFPs and change data for a time period */
 async function getRfpsForPeriod(
   dateFrom: Date,
-  dateTo: Date
+  dateTo: Date,
+  /**
+   * Whether the email will actually render the RFP cards. Amounts appear ONLY inside those cards,
+   * so with the log switched off a report of stat chips and an approval summary would otherwise
+   * wait on the CRM — up to the full timeout, on a slow or unreachable one — for numbers it is
+   * never going to print.
+   */
+  includeRfpLog: boolean
 ): Promise<{ rfps: RfpReportRow[]; changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>; approvalSummary: { pending: number; approved: number; rejected: number } }> {
   // The email is the ONE surface that renders an amount, so it is the one that opts into the live
   // CRM backfill for blank snapshots. See getRfpReportList.
@@ -895,7 +902,7 @@ async function getRfpsForPeriod(
       limit: 500,
       page: 1,
     },
-    { resolveCurrentAmounts: true }
+    { resolveCurrentAmounts: includeRfpLog }
   );
 
   const rfpIds = rfps.map((r) => r.id);
@@ -995,9 +1002,14 @@ export async function sendScheduledRfpReport(
       periodLabel = "Last 7 Days";
   }
 
+  // Resolved BEFORE the query so getRfpsForPeriod can skip the CRM lookup when the cards — the only
+  // place an amount is rendered — are switched off.
+  const includeRfpLog = config?.includeRfpLog ?? cfg.includeRfpLog;
+
   const { rfps, changes, approvalSummary } = await getRfpsForPeriod(
     dateFrom,
-    dateTo
+    dateTo,
+    includeRfpLog
   );
 
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
@@ -1007,7 +1019,7 @@ export async function sendScheduledRfpReport(
     rfps,
     changes,
     approvalSummary,
-    includeRfpLog: config?.includeRfpLog ?? cfg.includeRfpLog,
+    includeRfpLog,
     includeApprovalSummary:
       config?.includeApprovalSummary ?? cfg.includeApprovalSummary,
     dashboardUrl: `${dashboardUrl}/settings`,
@@ -1043,7 +1055,8 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
   dateFrom.setDate(dateFrom.getDate() - 7);
   dateFrom.setHours(0, 0, 0, 0);
 
-  const { rfps, changes, approvalSummary } = await getRfpsForPeriod(dateFrom, now);
+  const includeRfpLog = cfg?.includeRfpLog ?? true;
+  const { rfps, changes, approvalSummary } = await getRfpsForPeriod(dateFrom, now, includeRfpLog);
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
   const html = await buildRfpReportEmailHtml({
@@ -1051,7 +1064,7 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
     rfps,
     changes,
     approvalSummary,
-    includeRfpLog: cfg?.includeRfpLog ?? true,
+    includeRfpLog,
     includeApprovalSummary: cfg?.includeApprovalSummary ?? true,
     dashboardUrl: `${dashboardUrl}/settings`,
   });

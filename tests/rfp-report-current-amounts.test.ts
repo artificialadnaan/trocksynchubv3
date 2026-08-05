@@ -305,9 +305,54 @@ describe("fetchCrmCurrentDealAmounts", () => {
 
   it("fails soft on a network error or timeout", async () => {
     const thrown = vi.fn(async () => {
-      throw new Error("Request to … timed out after 10000ms");
+      throw new Error("Request to … timed out after 5000ms");
     });
     await expect(fetchCrmCurrentDealAmounts(["deal-a"], deps(thrown))).resolves.toEqual(new Map());
+  });
+
+  it(
+    "bounds the BODY read, not just the headers",
+    async () => {
+      // A CRM (or proxy) that sends 200 OK and then stalls mid-JSON. The repo's fetchWithTimeout
+      // helper clears its abort timer the moment fetch() resolves — i.e. on headers — which would
+      // leave this response.json() completely unbounded and hang the scheduled email. The deadline
+      // has to still be armed here.
+      let aborted = false;
+      const stalled = vi.fn(async (_url: string, init: any) => {
+        init.signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return {
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init.signal.addEventListener("abort", () =>
+                reject(Object.assign(new Error("aborted"), { name: "AbortError" }))
+              );
+            }),
+        } as unknown as Response;
+      });
+
+      await expect(
+        fetchCrmCurrentDealAmounts(["deal-a"], deps(stalled, { timeoutMs: 50 }))
+      ).resolves.toEqual(new Map());
+      expect(aborted).toBe(true);
+    },
+    2000
+  );
+
+  it("clears its deadline on the happy path so the process can exit", async () => {
+    const fetchImpl = vi.fn(async (_url: string, init: any) => {
+      expect(init.signal.aborted).toBe(false);
+      return okResponse({ values: [{ dealId: "deal-a", amount: 1 }] });
+    });
+
+    const result = await fetchCrmCurrentDealAmounts(["deal-a"], deps(fetchImpl, { timeoutMs: 50 }));
+
+    expect(result.get("deal-a")).toBe(1);
+    // If the timer were left armed, this would still be pending 50ms from now.
+    await new Promise((r) => setTimeout(r, 80));
   });
 
   it("fails soft on a malformed response body", async () => {

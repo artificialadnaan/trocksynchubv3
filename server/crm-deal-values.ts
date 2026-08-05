@@ -16,7 +16,6 @@
  */
 
 import crypto from "crypto";
-import { fetchWithTimeout } from "./lib/fetch-with-timeout";
 
 /**
  * Ids per request. Mirrors the CRM's own cap on POST /api/internal/deals/current-values
@@ -27,16 +26,26 @@ import { fetchWithTimeout } from "./lib/fetch-with-timeout";
 export const CRM_CURRENT_VALUES_MAX_DEAL_IDS = 500;
 
 /**
- * Deliberately short. This hangs off getRfpReportList, which serves the interactive
- * GET /api/reports/rfps list and the CSV/PDF export as well as the scheduled email — so the ceiling
- * is set by what a user will sit through, not by what a cron job would tolerate. A CRM that has not
- * answered in five seconds is not going to improve the report; the rows fall back to an em-dash.
+ * Deliberately short, and it is a deadline for the WHOLE exchange — headers and body.
+ *
+ * A CRM that has not finished answering in five seconds is not going to improve the report. The
+ * ceiling is set by what a user will sit through rather than what a cron job would tolerate,
+ * because getRfpReportList also backs the interactive report surfaces.
  */
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 export interface CrmCurrentValueDeps {
-  /** Injected in tests. Defaults to the timeout-wrapped global fetch. */
-  fetchImpl?: (url: string, init: RequestInit, timeoutMs: number) => Promise<Response>;
+  /**
+   * Injected in tests. Defaults to the global `fetch`.
+   *
+   * NOT the repo's `fetchWithTimeout` helper, deliberately: that clears its abort timer in a
+   * `finally` as soon as `fetch()` resolves — which is when the response HEADERS arrive, not when
+   * the body has been read. A server (or proxy) that sends `200 OK` and then stalls mid-JSON would
+   * leave the subsequent `response.json()` completely unbounded, hanging the scheduled email
+   * instead of falling through to the em-dash. The deadline here stays armed until the body is
+   * fully parsed.
+   */
+  fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
   baseUrl?: string;
   secret?: string;
   timeoutMs?: number;
@@ -81,21 +90,24 @@ export async function fetchCrmCurrentDealAmounts(
 
   const rawBody = JSON.stringify({ dealIds: requested });
   const signature = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
-  const doFetch = deps.fetchImpl ?? fetchWithTimeout;
+  const doFetch = deps.fetchImpl ?? fetch;
+
+  // One deadline covering the request, the response headers AND the body read. It is cleared in the
+  // `finally` below — after `response.json()` has settled, never before it — so a stalled body
+  // aborts into the catch and the report keeps its em-dashes.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   try {
-    const response = await doFetch(
-      `${baseUrl}/api/internal/deals/current-values`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-rfp-request-signature": signature,
-        },
-        body: rawBody,
+    const response = await doFetch(`${baseUrl}/api/internal/deals/current-values`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-rfp-request-signature": signature,
       },
-      deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    );
+      body: rawBody,
+      signal: controller.signal,
+    });
 
     if (!response.ok) {
       logger(`[rfp-reports] CRM current-value lookup returned ${response.status}; rendering stored amounts only`);
@@ -131,9 +143,10 @@ export async function fetchCrmCurrentDealAmounts(
     }
     return resolved;
   } catch (error: any) {
-    logger(
-      `[rfp-reports] CRM current-value lookup failed (${error?.message || error}); rendering stored amounts only`
-    );
+    const reason = error?.name === "AbortError" ? `timed out after ${deps.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms` : error?.message || error;
+    logger(`[rfp-reports] CRM current-value lookup failed (${reason}); rendering stored amounts only`);
     return empty;
+  } finally {
+    clearTimeout(timer);
   }
 }
