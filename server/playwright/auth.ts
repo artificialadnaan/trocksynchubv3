@@ -212,14 +212,20 @@ export function isProcoreLoginUrl(rawUrl: string): boolean {
 /** Unambiguous "this is the sign-in screen" DOM. Checked BEFORE any positive marker. */
 const LOGIN_DOM_PROOF = PROCORE_SELECTORS.login.passwordInput;
 
-/** Weaker sign-in evidence — only consulted after the authenticated markers have all missed, so a
- *  real app page that happens to contain an email field is not misread as a login screen. */
+/** Weaker sign-in evidence — outranked by the STRONG authenticated markers (so a real app page that
+ *  happens to contain an email field is not misread as a login screen) but outranking the generic
+ *  page chrome below (which a sign-in screen can perfectly well have). */
 const LOGIN_DOM_HINTS = 'form[action*="login"], form[action*="session"], form[action*="sign_in"], #user_email';
 
-/** Elements that only exist once a session is established. Ordered strongest-first. */
-const AUTHENTICATED_DOM_MARKERS: { name: string; selector: string }[] = [
+/** Elements that exist ONLY once a session is established. */
+const STRONG_AUTHENTICATED_MARKERS: { name: string; selector: string }[] = [
   { name: "user-menu", selector: PROCORE_SELECTORS.nav.userMenu },
   { name: "bid-board-app-shell", selector: PROCORE_SELECTORS.bidboard.newUi.app },
+];
+
+/** Generic application chrome. Suggestive, not conclusive — a sign-in page can have a nav bar, which
+ *  is why these are only consulted once the sign-in evidence above has been ruled out. */
+const WEAK_AUTHENTICATED_MARKERS: { name: string; selector: string }[] = [
   { name: "app-navigation", selector: 'nav, [class*="navigation"], [class*="sidebar"]' },
   { name: "project-or-company-chrome", selector: '[class*="project"], [class*="company"]' },
 ];
@@ -235,11 +241,16 @@ export interface PageAuthState {
 }
 
 /**
- * Decide whether a page is authenticated, from the DOM. Order of evidence:
- *  1. a password field, or a sign-in URL  → login page, NOT authenticated (hard stop)
- *  2. an authenticated-only element       → authenticated
- *  3. weaker login-form evidence          → login page, NOT authenticated
- *  4. otherwise                           → not authenticated, not a recognisable login page
+ * Decide whether a page is authenticated, from the DOM. Order of evidence, strongest first:
+ *  1. a password field, or a sign-in URL   → login page, NOT authenticated (hard stop)
+ *  2. a session-only element               → authenticated
+ *  3. a sign-in form                       → login page, NOT authenticated
+ *  4. generic application chrome           → authenticated
+ *  5. otherwise                            → not authenticated, not a recognisable login page
+ *
+ * 3 sits above 4 because a sign-in screen can carry a nav bar, and below 2 because an application
+ * page can carry an email field. Rungs 4-5 preserve the pre-existing behaviour for pages that show
+ * neither kind of proof.
  */
 export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuthState> {
   let url = "";
@@ -257,7 +268,7 @@ export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuth
       return { authenticated: false, loginPage: true, evidence: "the page is on a Procore sign-in URL", url };
     }
 
-    for (const marker of AUTHENTICATED_DOM_MARKERS) {
+    for (const marker of STRONG_AUTHENTICATED_MARKERS) {
       if (await page.$(marker.selector)) {
         return { authenticated: true, loginPage: false, evidence: `authenticated marker '${marker.name}' found`, url };
       }
@@ -265,6 +276,12 @@ export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuth
 
     if (await page.$(LOGIN_DOM_HINTS)) {
       return { authenticated: false, loginPage: true, evidence: "a sign-in form is present", url };
+    }
+
+    for (const marker of WEAK_AUTHENTICATED_MARKERS) {
+      if (await page.$(marker.selector)) {
+        return { authenticated: true, loginPage: false, evidence: `application chrome '${marker.name}' found`, url };
+      }
     }
 
     return {

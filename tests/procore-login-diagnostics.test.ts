@@ -108,6 +108,22 @@ describe("detectPageAuthState", () => {
     expect(state.loginPage).toBe(true);
   });
 
+  it("does NOT call a sign-in form on an app URL authenticated just because it has a nav bar", async () => {
+    // No password field and no sign-in host — only the form itself gives it away, and a nav bar is
+    // not allowed to outrank it.
+    const inlineSignIn = fakePage(BID_BOARD_URL, [/#user_email/, /nav/, /class\*="company"/]);
+    const state = await detectPageAuthState(inlineSignIn);
+    expect(state.authenticated).toBe(false);
+    expect(state.loginPage).toBe(true);
+  });
+
+  it("lets a real session marker outrank an email field on the same page", async () => {
+    const appPageWithEmailField = fakePage(BID_BOARD_URL, [/spaContent/, /#user_email/]);
+    const state = await detectPageAuthState(appPageWithEmailField);
+    expect(state.authenticated).toBe(true);
+    expect(state.loginPage).toBe(false);
+  });
+
   it("reports an authenticated page as authenticated (the happy path still works)", async () => {
     const state = await detectPageAuthState(authenticatedBidBoardPage());
     expect(state.authenticated).toBe(true);
