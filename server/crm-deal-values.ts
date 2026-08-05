@@ -50,6 +50,10 @@ export interface CrmCurrentValueDeps {
  * A deal is present ONLY when the CRM returned a finite number for it. Deals the CRM does not know
  * about, deals that exist but still have no value at all, and every failure mode alike are simply
  * absent — the caller cannot tell them apart and must not need to: all four render identically.
+ *
+ * Key casing: the CRM keys its answer on `deals.id`, which Postgres renders canonically lower-case
+ * whatever casing it was asked with. Keys are passed through as received, so a caller holding a
+ * differently-cased id must normalize on the lookup side (resolveMissingAmountsFromCrm does).
  */
 export async function fetchCrmCurrentDealAmounts(
   dealIds: string[],
