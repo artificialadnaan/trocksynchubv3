@@ -125,6 +125,23 @@ export const bidboardCrmPushAlertState = pgTable("bidboard_crm_push_alert_state"
 
 export type BidboardCrmPushAlertState = typeof bidboardCrmPushAlertState.$inferSelect;
 
+// Procore browser sign-in failure/recovery alert debounce state. Same rationale and conventions as
+// bidboard_crm_push_alert_state above (raw DDL at boot for hosts where db:push is blocked, declared
+// here so drizzle-kit push --force manages it, timestamptz because the debounce compares instants).
+// last_reason lets a DIFFERENT failure (e.g. credential rejection → MFA prompt) re-alert immediately
+// instead of being swallowed as a repeat.
+export const procoreLoginAlertState = pgTable("procore_login_alert_state", {
+  scope: text("scope").primaryKey(),
+  state: text("state").notNull().default("ok"), // ok | failing
+  lastReason: text("last_reason"),
+  lastAlertedAt: timestamp("last_alerted_at", { withTimezone: true }),
+  lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ProcoreLoginAlertState = typeof procoreLoginAlertState.$inferSelect;
+
 // BidBoard automation logs
 export const bidboardAutomationLogs = pgTable("bidboard_automation_logs", {
   id: serial("id").primaryKey(),

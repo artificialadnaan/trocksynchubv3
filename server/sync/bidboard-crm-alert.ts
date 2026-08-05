@@ -30,17 +30,47 @@ export interface PushAlertDecision {
 }
 
 /**
- * Pure debounce decision. Alert on the transition INTO failing, then at most once per re-alert window
- * while still failing; one recovery alert on the transition back to ok.
+ * Neutral debounce core, shared by every "a background job keeps failing" alert in SyncHub (the
+ * Bid Board → CRM push, and the Procore browser-login alert in ./procore-login-alert). Alert on the
+ * transition INTO failing, then at most once per re-alert window while still failing; one recovery
+ * alert on the transition back to healthy.
+ *
+ * `signatureChanged` lets a caller treat a DIFFERENT failure as a new incident even inside the
+ * throttle window (e.g. a credential rejection turning into an MFA prompt) — the window only
+ * suppresses repeats of the *identical* failure. Defaults false, so callers that don't classify
+ * their failures get the original behaviour unchanged.
  */
-export function decidePushAlert(i: PushAlertDecisionInput): PushAlertDecision {
-  if (!i.pushOk) {
+export function decideAlertTransition(i: {
+  healthy: boolean;
+  prevState: PushAlertState | null;
+  lastAlertedAt: Date | null;
+  now: Date;
+  realertMinutes: number;
+  signatureChanged?: boolean;
+}): PushAlertDecision {
+  if (!i.healthy) {
     if (i.prevState !== "failing") return { action: "alert_failure", nextState: "failing" };
+    if (i.signatureChanged) return { action: "alert_failure", nextState: "failing" };
     const dueForRealert =
       i.lastAlertedAt === null || i.now.getTime() - i.lastAlertedAt.getTime() >= i.realertMinutes * 60_000;
     return { action: dueForRealert ? "alert_failure" : "none", nextState: "failing" };
   }
   return { action: i.prevState === "failing" ? "alert_recovered" : "none", nextState: "ok" };
+}
+
+/**
+ * Pure debounce decision for the CRM push. Thin wrapper over decideAlertTransition (which the
+ * Procore login alert shares) — the push has no failure-signature classification, so repeats are
+ * always throttled by the window alone.
+ */
+export function decidePushAlert(i: PushAlertDecisionInput): PushAlertDecision {
+  return decideAlertTransition({
+    healthy: i.pushOk,
+    prevState: i.prevState,
+    lastAlertedAt: i.lastAlertedAt,
+    now: i.now,
+    realertMinutes: i.realertMinutes,
+  });
 }
 
 /**
@@ -130,7 +160,8 @@ export function renderPushAlertEmail(e: PushAlertEmailInput): { subject: string;
   return { subject, htmlBody };
 }
 
-function escapeHtml(s: string): string {
+/** Shared with ./procore-login-alert so both ops emails escape body fields the same way. */
+export function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string);
 }
 

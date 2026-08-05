@@ -40,7 +40,7 @@
  */
 
 import { Locator, Page } from "playwright";
-import { ensureLoggedIn } from "./auth";
+import { detectPageAuthState, ensureLoggedIn } from "./auth";
 import { BIDBOARD_STAGE_TAB_LABELS, type BidBoardStageTabKind, PROCORE_SELECTORS, getBidBoardUrlNew } from "./selectors";
 import { randomDelay, takeScreenshot, withBrowserLock, withRetry, waitForNavigation } from "./browser";
 import { log } from "../index";
@@ -166,8 +166,17 @@ export async function navigateToBidBoard(
       // Re-read the URL after the reload: it could have redirected (e.g. session timeout → login),
       // and we must not trust the stale pre-reload URL captured above.
       if (page.url().includes("/tools/bid-board")) {
-        log("BidBoard URL confirmed, treating as loaded (selectors may have changed)", "playwright");
-        return true;
+        // The URL is still not proof of a session: Procore serves its sign-in screen on it. Trusting
+        // it here is how a dead password sent the create flow hunting for form selectors on a login
+        // form (2026-08-03). A positive sign-in detection vetoes; anything else keeps the original
+        // last-resort behaviour so callers that do their own waits aren't regressed.
+        const state = await detectPageAuthState(page);
+        if (state.loginPage) {
+          log(`BidBoard URL present but the page is a Procore sign-in screen (${state.evidence}) — not loaded`, "playwright");
+        } else {
+          log("BidBoard URL confirmed, treating as loaded (selectors may have changed)", "playwright");
+          return true;
+        }
       }
     }
   } catch (err: any) {
