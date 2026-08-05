@@ -25,6 +25,8 @@ function makeRow(overrides: Partial<RfpReportRow> = {}): RfpReportRow {
   return {
     id: 1,
     hubspotDealId: "555",
+    sourceSystem: "hubspot",
+    sourceDealId: "555",
     projectName: "Acme Tower Renovation",
     projectNumber: "DFW-4-15626-ab",
     projectType: "Service",
@@ -34,6 +36,7 @@ function makeRow(overrides: Partial<RfpReportRow> = {}): RfpReportRow {
     approvalStatus: "approved",
     changeCount: 3,
     amount: 125000,
+    amountIsCurrent: false,
     requestedBy: "Jane Owner",
     approvedBy: "churlling@trockgc.com",
     declinedBy: null,

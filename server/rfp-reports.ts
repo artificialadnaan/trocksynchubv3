@@ -15,6 +15,7 @@ import {
   syncMappings,
 } from "@shared/schema";
 import { sendEmail } from "./email-service";
+import { fetchCrmCurrentDealAmounts } from "./crm-deal-values";
 import { DEFAULT_PROCORE_COMPANY_ID, PROJECT_TYPES, parseProjectTypeFromNumber } from "./constants";
 import type { Request, Response } from "express";
 
@@ -92,6 +93,66 @@ export function resolveRfpAmount(
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Fills in a CURRENT deal value for the rows whose send-time snapshot is blank.
+ *
+ * ~78% of report rows render "—" (252 of 325 over 90 days) and almost none of them are missing data:
+ * the RFP goes out before the estimator writes the estimate, so SyncHub correctly stored nothing.
+ * Rather than leave those rows valueless, ask the CRM what each deal is worth now.
+ *
+ * Rules this MUST preserve:
+ *  - a reviewer's `edited_fields.amount` wins — resolveRfpAmount already applied it, and a row that
+ *    carries a reviewer value is not null, so it never reaches the lookup at all;
+ *  - a stored snapshot that has a value is never replaced — only nulls are filled;
+ *  - the stored snapshot itself is not rewritten (display-time only);
+ *  - ONE batch call for the whole report, and on any failure every row keeps its em-dash.
+ *
+ * A note on the reviewer case, because it was got wrong once. An earlier revision also skipped rows
+ * whose `edited_fields` merely CARRIED an `amount` key, on the theory that a reviewer who cleared the
+ * field to "" meant it. That guard is gone: it cannot tell a deliberate clear from the approval
+ * form's own echo (processRfpApproval diffs every posted field against dealData with `!==`, so it
+ * writes keys for type mismatches nobody typed), and it fails CLOSED — a false positive silently
+ * suppresses exactly the backfill this function exists to perform. A blank is not a value; filling it
+ * with a labelled current figure takes nothing away from the reviewer.
+ *
+ * Mutates `rows` in place and returns it.
+ */
+export async function resolveMissingAmountsFromCrm(
+  rows: RfpReportRow[],
+  options: {
+    /** Injected in tests. */
+    fetchAmounts?: typeof fetchCrmCurrentDealAmounts;
+  } = {}
+): Promise<RfpReportRow[]> {
+  const fetchAmounts = options.fetchAmounts ?? fetchCrmCurrentDealAmounts;
+
+  const needing = rows.filter(
+    (row) => row.amount === null && row.sourceSystem === "trock_crm" && Boolean(row.sourceDealId)
+  );
+  if (needing.length === 0) return rows;
+
+  // fetchCrmCurrentDealAmounts already swallows every failure it can name, but this runs on the
+  // scheduled-email path: a lookup must not be able to stop the report going out, not even via a
+  // failure mode nobody anticipated. Rows keep their em-dash and the email sends.
+  // fetchCrmCurrentDealAmounts lower-cases every key it returns, so the READ below lower-cases too
+  // and the two always meet. The request goes out with the id exactly as stored.
+  let amounts: Map<string, number>;
+  try {
+    amounts = await fetchAmounts([...new Set(needing.map((row) => row.sourceDealId))]);
+  } catch {
+    return rows;
+  }
+  if (amounts.size === 0) return rows;
+
+  for (const row of needing) {
+    const current = amounts.get(row.sourceDealId.toLowerCase());
+    if (current === undefined) continue;
+    row.amount = current;
+    row.amountIsCurrent = true;
+  }
+  return rows;
+}
+
 /** Format a number as USD for display (e.g. 1234.5 -> "$1,235"). Returns "—" when null. */
 export function formatRfpAmount(amount: number | null): string {
   if (amount === null) return "—";
@@ -111,6 +172,10 @@ export interface RfpReportFilters {
 export interface RfpReportRow {
   id: number;
   hubspotDealId: string;
+  /** 'hubspot' | 'trock_crm' — which system the deal lives in. */
+  sourceSystem: string;
+  /** The deal id in `sourceSystem`. For trock_crm this is the CRM deal UUID. */
+  sourceDealId: string;
   projectName: string;
   projectNumber: string;
   /** Human-readable project type (e.g. "Interior Renovation", "Service"); null when unknown. */
@@ -122,6 +187,13 @@ export interface RfpReportRow {
   changeCount: number;
   /** Actionable RFP amount (reviewer-edited value wins over original); null when absent. */
   amount: number | null;
+  /**
+   * True when `amount` is the deal's value AS OF NOW, looked up live from the CRM, rather than the
+   * value captured when the RFP was sent. Rows are marked so the email can say which it is — a
+   * present-tense number inside a report headed "Last 24 Hours" otherwise reads as "value at
+   * request", which it is not. See resolveMissingAmountsFromCrm.
+   */
+  amountIsCurrent: boolean;
   /** Person the RFP belongs to — the deal owner (name preferred, falls back to email). */
   requestedBy: string;
   /** Approver email, or null when the RFP is still pending. */
@@ -134,9 +206,20 @@ export interface RfpReportRow {
   crmUrl: string | null;
 }
 
-/** Get paginated RFP list with filters */
+/**
+ * Get paginated RFP list with filters.
+ *
+ * `resolveCurrentAmounts` opts into the live CRM backfill for blank amounts (see
+ * resolveMissingAmountsFromCrm). It is OFF by default and on only for the scheduled email, which is
+ * the sole surface that renders an amount — the dashboard table shows
+ * project/recipient/date/stage/status/changes, and the CSV and PDF exports use those same columns.
+ * Turning it on everywhere would make browsing and downloading the report wait on a live cross-service
+ * call for a number those paths throw away. Any surface that starts rendering `amount` should pass
+ * this flag rather than quietly diverge from the email.
+ */
 export async function getRfpReportList(
-  filters: RfpReportFilters
+  filters: RfpReportFilters,
+  options: { resolveCurrentAmounts?: boolean } = {}
 ): Promise<{ data: RfpReportRow[]; total: number }> {
   const limit = Math.min(filters.limit || 50, 100);
   const offset = ((filters.page || 1) - 1) * limit;
@@ -275,6 +358,8 @@ export async function getRfpReportList(
     return {
       id: rfp.id,
       hubspotDealId: rfp.hubspotDealId ?? "",
+      sourceSystem: rfp.sourceSystem ?? "hubspot",
+      sourceDealId: rfp.sourceDealId ?? "",
       projectName,
       projectNumber,
       projectType,
@@ -284,6 +369,8 @@ export async function getRfpReportList(
       approvalStatus,
       changeCount,
       amount,
+      // Flipped by resolveMissingAmountsFromCrm below when a blank snapshot is backfilled live.
+      amountIsCurrent: false,
       requestedBy,
       approvedBy,
       declinedBy,
@@ -291,6 +378,9 @@ export async function getRfpReportList(
       crmUrl,
     };
   });
+
+  // ONE batch call for the whole page, after the rows exist — never inside the map above.
+  if (options.resolveCurrentAmounts) await resolveMissingAmountsFromCrm(data);
 
   return { data, total };
 }
@@ -655,6 +745,15 @@ export async function buildRfpReportEmailHtml(options: {
     const linkButton = (href: string, label: string, bg: string) =>
       `<a href="${escapeHtml(href)}" target="_blank" style="display: inline-block; margin: 0 8px 0 0; padding: 11px 20px; background: ${bg}; color: #ffffff; font-size: 13px; font-weight: 600; text-decoration: none; border-radius: 6px; white-space: nowrap;">${label}</a>`;
 
+    // Amounts are normally the value captured when the RFP was SENT. A row whose snapshot was blank
+    // carries the deal's value AS OF NOW instead, and those two are not the same claim — inside a
+    // report headed "Last 24 Hours" an unmarked number reads as "value at request". Mark it.
+    const amountCell = (r: RfpReportRow): string => {
+      const text = escapeHtml(formatRfpAmount(r.amount));
+      if (!r.amountIsCurrent || r.amount === null) return text;
+      return `${text}<span style="font-size: 11px; font-weight: 600; color: #6b7280;">&nbsp;&dagger;</span>`;
+    };
+
     const card = (r: RfpReportRow): string => {
       const { date, time } = formatRfpDateTime(r.dateSent);
       const typeBadge = r.projectType
@@ -681,7 +780,7 @@ export async function buildRfpReportEmailHtml(options: {
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
                 <tr>
                   <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3; word-break: break-word;">${escapeHtml(r.projectName)}</td>
-                  <td align="right" style="font-size: 16px; font-weight: 700; color: #111214; white-space: nowrap; padding-left: 10px; vertical-align: top;">${escapeHtml(formatRfpAmount(r.amount))}</td>
+                  <td align="right" style="font-size: 16px; font-weight: 700; color: #111214; white-space: nowrap; padding-left: 10px; vertical-align: top;">${amountCell(r)}</td>
                 </tr>
               </table>
               <div style="margin-top: 5px; font-size: 12px; color: #6b7280;">${numberLine}</div>
@@ -700,10 +799,16 @@ export async function buildRfpReportEmailHtml(options: {
         </table>`;
     };
 
+    const shown = rfps.slice(0, 30);
+    // Only footnote the marker if a marker was actually rendered.
+    const currentAmountNote = shown.some((r) => r.amountIsCurrent && r.amount !== null)
+      ? `<p style="margin: 10px 0 0 0; font-size: 12px; color: #6b7280;">&dagger; Deal value as of today — no estimate existed when the RFP was sent.</p>`
+      : "";
+
     const body =
       rfps.length > 0
-        ? `${rfps.slice(0, 30).map(card).join("")}
-      ${rfps.length > 30 ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${rfps.length} RFPs. <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}`
+        ? `${shown.map(card).join("")}
+      ${rfps.length > 30 ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${rfps.length} RFPs. <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}${currentAmountNote}`
         : `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No RFPs in this period.</p>`;
 
     sections.push(`
@@ -779,14 +884,26 @@ export async function buildRfpReportEmailHtml(options: {
 /** Get RFPs and change data for a time period */
 async function getRfpsForPeriod(
   dateFrom: Date,
-  dateTo: Date
+  dateTo: Date,
+  /**
+   * Whether the email will actually render the RFP cards. Amounts appear ONLY inside those cards,
+   * so with the log switched off a report of stat chips and an approval summary would otherwise
+   * wait on the CRM — up to the full timeout, on a slow or unreachable one — for numbers it is
+   * never going to print.
+   */
+  includeRfpLog: boolean
 ): Promise<{ rfps: RfpReportRow[]; changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>; approvalSummary: { pending: number; approved: number; rejected: number } }> {
-  const { data: rfps } = await getRfpReportList({
-    dateFrom: dateFrom.toISOString().slice(0, 10),
-    dateTo: dateTo.toISOString().slice(0, 10),
-    limit: 500,
-    page: 1,
-  });
+  // The email is the ONE surface that renders an amount, so it is the one that opts into the live
+  // CRM backfill for blank snapshots. See getRfpReportList.
+  const { data: rfps } = await getRfpReportList(
+    {
+      dateFrom: dateFrom.toISOString().slice(0, 10),
+      dateTo: dateTo.toISOString().slice(0, 10),
+      limit: 500,
+      page: 1,
+    },
+    { resolveCurrentAmounts: includeRfpLog }
+  );
 
   const rfpIds = rfps.map((r) => r.id);
   const changeLogs =
@@ -885,9 +1002,14 @@ export async function sendScheduledRfpReport(
       periodLabel = "Last 7 Days";
   }
 
+  // Resolved BEFORE the query so getRfpsForPeriod can skip the CRM lookup when the cards — the only
+  // place an amount is rendered — are switched off.
+  const includeRfpLog = config?.includeRfpLog ?? cfg.includeRfpLog;
+
   const { rfps, changes, approvalSummary } = await getRfpsForPeriod(
     dateFrom,
-    dateTo
+    dateTo,
+    includeRfpLog
   );
 
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
@@ -897,7 +1019,7 @@ export async function sendScheduledRfpReport(
     rfps,
     changes,
     approvalSummary,
-    includeRfpLog: config?.includeRfpLog ?? cfg.includeRfpLog,
+    includeRfpLog,
     includeApprovalSummary:
       config?.includeApprovalSummary ?? cfg.includeApprovalSummary,
     dashboardUrl: `${dashboardUrl}/settings`,
@@ -933,7 +1055,8 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
   dateFrom.setDate(dateFrom.getDate() - 7);
   dateFrom.setHours(0, 0, 0, 0);
 
-  const { rfps, changes, approvalSummary } = await getRfpsForPeriod(dateFrom, now);
+  const includeRfpLog = cfg?.includeRfpLog ?? true;
+  const { rfps, changes, approvalSummary } = await getRfpsForPeriod(dateFrom, now, includeRfpLog);
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
   const html = await buildRfpReportEmailHtml({
@@ -941,7 +1064,7 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
     rfps,
     changes,
     approvalSummary,
-    includeRfpLog: cfg?.includeRfpLog ?? true,
+    includeRfpLog,
     includeApprovalSummary: cfg?.includeApprovalSummary ?? true,
     dashboardUrl: `${dashboardUrl}/settings`,
   });
