@@ -42,9 +42,8 @@ vi.mock("../server/sync/procore-login-alert.ts", async (importOriginal) => ({
   recordLoginOutcomeAndMaybeAlert: recordLoginOutcomeMock,
 }));
 
-const { detectPageAuthState, describeSelectorMiss, ensureLoggedIn, isProcoreLoginUrl } = await import(
-  "../server/playwright/auth.ts"
-);
+const { detectPageAuthState, describeSelectorMiss, encryptPassword, ensureLoggedIn, isProcoreLoginUrl } =
+  await import("../server/playwright/auth.ts");
 
 // ── Page fakes ───────────────────────────────────────────────────────────────
 
@@ -225,6 +224,72 @@ describe("ensureLoggedIn — target-URL fast path", () => {
     expect(recordLoginOutcomeMock.mock.calls.at(-1)![0]).toMatchObject({
       outcome: { ok: false, reason: "not_configured" },
     });
+  });
+});
+
+// ── 3b. A real credential rejection, end to end ─────────────────────────────
+
+describe("ensureLoggedIn — Procore rejects the stored password", () => {
+  const PROCORE_REJECTION = "The email address or password you entered is not valid.";
+
+  /** A fake that walks Procore's two-step login and then shows the rejection banner. */
+  function rejectingLoginPage() {
+    let url = "https://login.procore.com/";
+    const handle = { fill: vi.fn(async () => {}), click: vi.fn(async () => {}) };
+    return {
+      url: () => url,
+      goto: vi.fn(async (to: string) => {
+        url = to;
+      }),
+      waitForTimeout: vi.fn(async () => {}),
+      waitForURL: vi.fn(async () => {}),
+      waitForSelector: vi.fn(async () => handle),
+      $: vi.fn(async (selector: string) => {
+        if (/otp|inputmode="numeric"|mfa/.test(selector)) return null; // no MFA prompt
+        if (/alert-danger|role="alert"/.test(selector)) {
+          return { textContent: async () => PROCORE_REJECTION };
+        }
+        if (/password/i.test(selector)) return handle;
+        return null;
+      }),
+    };
+  }
+
+  it("returns a credentials_rejected login error and alerts with Procore's own words", async () => {
+    const prevKey = process.env.ENCRYPTION_KEY;
+    process.env.ENCRYPTION_KEY = "unit-test-key-not-a-secret";
+    vi.useFakeTimers();
+    try {
+      logMock.mockClear();
+      recordLoginOutcomeMock.mockClear();
+      getPageMock.mockResolvedValue(rejectingLoginPage());
+      getAutomationConfigMock.mockResolvedValue({
+        // A throwaway value purely so decryptPassword() succeeds; not a credential.
+        value: { email: "automation@example.invalid", encryptedPassword: encryptPassword("x"), sandbox: false },
+      });
+
+      const pending = ensureLoggedIn({ blocking: "Bid Board project creation" });
+      await vi.runAllTimersAsync(); // skip the 3s/6s inter-attempt backoff
+      const res = await pending;
+
+      expect(res.success).toBe(false);
+      expect(res.reason).toBe("credentials_rejected");
+      expect(res.error).toContain(PROCORE_REJECTION);
+      // Nothing anywhere claims the UI moved.
+      expect(logMock.mock.calls.map((c) => String(c[0])).join("\n")).not.toMatch(/UI may have changed/i);
+      expect(recordLoginOutcomeMock.mock.calls.at(-1)![0]).toMatchObject({
+        outcome: {
+          ok: false,
+          reason: "credentials_rejected",
+          attempts: 3,
+          blocking: "Bid Board project creation",
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
   });
 });
 
