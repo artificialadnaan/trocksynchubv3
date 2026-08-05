@@ -429,7 +429,7 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
   if (isProcoreLoginUrl(postLoginUrl)) {
     try {
       await Promise.race([
-        page.waitForURL((u) => !isProcoreLoginUrl(u.toString()) && u.hostname.endsWith("procore.com"), {
+        page.waitForURL((u) => !isProcoreLoginUrl(u.toString()) && isProcoreHostUrl(u.toString()), {
           timeout: 30000,
         }),
         page.waitForSelector(PROCORE_SELECTORS.login.errorMessage, { timeout: 30000 }),
