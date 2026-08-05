@@ -301,11 +301,21 @@ export async function recordLoginOutcomeAndMaybeAlert(
     // State + throttle anchor gated on a SUCCESSFUL send (same rules as the CRM push alert):
     //  - failure: advance last_alerted_at only when the email sent, else re-alert next cycle
     //  - recovered: only flip to 'ok' when the recovery email sent, else stay 'failing' and retry
+    // Nothing that an unsent email was supposed to communicate may be banked as communicated —
+    // that applies to the failure SIGNATURE just as much as to the throttle anchor.
     let persistedState: PushAlertState = decision.nextState;
     let lastAlertedAt: Date | null;
     let persistedReason: LoginFailureReason | null = reason;
     if (decision.action === "alert_failure") {
-      lastAlertedAt = sent ? now : (prior?.last_alerted_at ?? null);
+      if (sent) {
+        lastAlertedAt = now;
+      } else {
+        lastAlertedAt = prior?.last_alerted_at ?? null;
+        // Keep the PRIOR reason. Banking the new one here would clear signatureChanged for the next
+        // cycle, and the previous incident's still-live throttle window would then swallow the
+        // retry — the changed failure would never be reported at all.
+        persistedReason = prior?.last_reason ?? null;
+      }
     } else if (decision.action === "alert_recovered") {
       if (sent) {
         lastAlertedAt = null;

@@ -605,6 +605,27 @@ describe("recordLoginOutcomeAndMaybeAlert — dedupe", () => {
     expect(db.store.get("procore-browser-login").state).toBe("ok");
   });
 
+  it("does not bank an UNSENT failure signature — the changed failure retries next cycle", async () => {
+    // Codex P2. Reason changes inside the throttle window, and that immediate alert fails to send.
+    // Recording the new last_reason anyway clears signatureChanged for the next cycle, and the FIRST
+    // incident's still-live window then swallows the retry — the second failure is never reported.
+    const db = fakeDb();
+    await run(db, { ok: false, reason: "credentials_rejected", attempts: 3 }, NOW); // alert 1 sends
+    send.mockClear();
+    send.mockResolvedValueOnce({ success: false, provider: "gmail" }); // the signature-change alert FAILS
+
+    const failedSend = await run(db, { ok: false, reason: "mfa_required", attempts: 3 }, new Date(NOW.getTime() + 19 * MIN));
+    expect(failedSend.action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.store.get("procore-browser-login").last_reason).toBe("credentials_rejected");
+
+    send.mockClear();
+    const retry = await run(db, { ok: false, reason: "mfa_required", attempts: 3 }, new Date(NOW.getTime() + 38 * MIN));
+    expect(retry.action).toBe("alert_failure"); // still inside the first incident's 60-minute window
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.store.get("procore-browser-login").last_reason).toBe("mfa_required"); // banked once it sent
+  });
+
   it("still sends when the reason has no label — an alert path must not fail on unexpected input", async () => {
     // The union makes this unreachable for type-checked callers today, but the value crosses a
     // runtime boundary (it is read back out of last_reason). An unlabelled reason used to throw
