@@ -752,8 +752,12 @@ export async function buildRfpReportEmailHtml(options: {
   const totalChanges = changes.reduce((s, c) => s + c.items.length, 0);
 
   // ONE budget across both card sections — it is their SUM that Gmail clips.
+  //
+  // A section that will NOT render contributes nothing: with includeRfpLog off no RFP cards exist, and
+  // counting them anyway reserved half the budget for an invisible section, so a busy estimates list was
+  // trimmed to 15 while all 30 slots were free.
   const cardBudget = shareCardBudget(
-    rfps.length,
+    includeRfpLog ? rfps.length : 0,
     estimatesSent?.ok === true ? estimatesSent.deals.length : 0
   );
 
@@ -1184,16 +1188,23 @@ export async function sendScheduledRfpReport(
   // The estimates that went out to CLIENTS — the CRM's answer, since SyncHub has no read path into
   // deal_stage_history.
   //
-  // Asked for over an EXACT cadence window ending now, NOT the rounded dateFrom the RFP half uses.
+  // Asked for over the span SINCE THE LAST SUCCESSFUL SEND, not the rounded dateFrom the RFP half uses.
+  //
   // That one moves back by the cadence and then rounds down to midnight while dateTo keeps the current
   // time, so consecutive runs OVERLAP from midnight until send time: at the scheduler's default 08:00
-  // slot, an estimate sent at 04:00 lands in today's "Last 24 Hours" email and again in tomorrow's,
-  // counted twice across reports. An exact span is also what the label actually claims.
+  // slot an estimate sent at 04:00 lands in today's "Last 24 Hours" email and again in tomorrow's.
   //
-  // The two halves therefore cover slightly different ranges, which is a real cost and the lesser one:
-  // the alternative is to change the rounding for the RFP half too, and that is a behaviour change to a
-  // shipped report that nobody asked for and this PR should not smuggle in.
-  const estimatesFrom = new Date(dateTo.getTime() - cadenceMs);
+  // A fixed cadence duration fixes the overlap but is still wrong for MONTHLY, which fires on the first
+  // of each calendar month — so consecutive runs sit 28 to 31 days apart while a fixed 30 days omits a
+  // day after a long month and recounts one or two after February. `lastSentAt` is the boundary the
+  // scheduler itself keeps, so using it makes consecutive reports exactly contiguous for every cadence:
+  // no gap, no double count. The cadence duration remains the fallback for the first ever send, and for
+  // a stored value that is not usable.
+  const lastSent = cfg.lastSentAt ? new Date(cfg.lastSentAt) : null;
+  const estimatesFrom =
+    lastSent && !Number.isNaN(lastSent.getTime()) && lastSent.getTime() < dateTo.getTime()
+      ? lastSent
+      : new Date(dateTo.getTime() - cadenceMs);
   const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, dateTo);
 
   const html = await buildRfpReportEmailHtml({

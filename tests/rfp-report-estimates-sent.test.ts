@@ -468,4 +468,28 @@ describe("the shared card budget", () => {
     expect(split.rfp).toBe(3);
     expect(split.estimates).toBe(4);
   });
+
+  // A section that will not RENDER must not reserve anything. With includeRfpLog off there are no RFP
+  // cards at all, and counting them anyway trimmed a busy estimates list to half a budget that was
+  // entirely free.
+  it("gives the whole budget to estimates when the RFP log is switched off", async () => {
+    const html = await buildRfpReportEmailHtml({
+      periodLabel: "Last 24 Hours",
+      rfps: [],
+      changes: [],
+      approvalSummary: { pending: 0, approved: 0, rejected: 0 },
+      includeRfpLog: false,
+      includeApprovalSummary: false,
+      estimatesSent: {
+        ok: true,
+        deals: Array.from({ length: 40 }, (_, i) =>
+          deal({ dealId: `x-${i}`, enteredAt: new Date(Date.UTC(2026, 7, 1, 0, i)).toISOString() })
+        ),
+        total: 40,
+      },
+      dashboardUrl: "https://synchub.example.com/settings",
+    });
+
+    expect(html).toContain(`Showing ${EMAIL_CARD_BUDGET} of 40 estimates sent.`);
+  });
 });
