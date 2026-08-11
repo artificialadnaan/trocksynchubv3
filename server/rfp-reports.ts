@@ -1239,10 +1239,14 @@ export async function sendScheduledRfpReport(
   // scheduler itself keeps, so using it makes consecutive reports exactly contiguous for every cadence:
   // no gap, no double count. The cadence duration remains the fallback for the first ever send, and for
   // a stored value that is not usable.
-  const lastSent = cfg.lastSentAt ? new Date(cfg.lastSentAt) : null;
+  // The ESTIMATES checkpoint, not lastSentAt. They answer different questions and fail differently:
+  // lastSentAt records a delivery and drives the cadence guard, while this records how far the CRM
+  // lookup has successfully reached. Sharing one column meant either duplicate emails (gating it on the
+  // lookup) or permanently skipped intervals (advancing it regardless) — see the schema comment.
+  const coveredThrough = cfg.estimatesCoveredThrough ? new Date(cfg.estimatesCoveredThrough) : null;
   const estimatesFrom =
-    lastSent && !Number.isNaN(lastSent.getTime()) && lastSent.getTime() < dateTo.getTime()
-      ? lastSent
+    coveredThrough && !Number.isNaN(coveredThrough.getTime()) && coveredThrough.getTime() < dateTo.getTime()
+      ? coveredThrough
       : new Date(dateTo.getTime() - cadenceMs);
   const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, dateTo);
 
