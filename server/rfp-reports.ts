@@ -15,6 +15,13 @@ import {
   syncMappings,
 } from "@shared/schema";
 import { sendEmail } from "./email-service";
+import {
+  fetchCrmEstimatesSent,
+  formatEstimateAmount,
+  resendLabel,
+  MAX_ESTIMATES_SENT_ROWS,
+  type CrmEstimatesSentResult,
+} from "./crm-estimates-sent";
 import { fetchCrmCurrentDealAmounts } from "./crm-deal-values";
 import { DEFAULT_PROCORE_COMPANY_ID, PROJECT_TYPES, parseProjectTypeFromNumber } from "./constants";
 import type { Request, Response } from "express";
@@ -680,6 +687,13 @@ export async function buildRfpReportEmailHtml(options: {
    *  accepted for backward compatibility but ignored. `changes` is still used for the count stat. */
   includeChangeHistory?: boolean;
   includeApprovalSummary: boolean;
+  /**
+   * The estimates that went out to CLIENTS in the same window, from the CRM.
+   *
+   * A RESULT, not a list, so the email can tell a quiet day from a broken lookup. Omitted entirely by
+   * callers that do not fetch it (the CSV/PDF exports), which is different again from either.
+   */
+  estimatesSent?: CrmEstimatesSentResult;
   dashboardUrl: string;
 }): Promise<string> {
   const {
@@ -689,6 +703,7 @@ export async function buildRfpReportEmailHtml(options: {
     approvalSummary,
     includeRfpLog,
     includeApprovalSummary,
+    estimatesSent,
     dashboardUrl,
   } = options;
 
@@ -702,9 +717,22 @@ export async function buildRfpReportEmailHtml(options: {
   const statChip = (text: string, bg: string, color: string, accent = false) =>
     `<span style="display: inline-block; margin: 0 8px 8px 0; padding: 10px 16px; background: ${bg}; color: ${color}; border-radius: 6px; font-weight: 600; font-size: 13px;${accent ? " border-left: 3px solid #d11921;" : ""}">${text}</span>`;
 
+  // The estimates chip appears only when the lookup SUCCEEDED. A chip reading "0 Estimates Sent" after a
+  // failed call would be a confidently wrong number in an email to leadership; the section below says
+  // plainly that it could not be loaded instead.
+  const estimatesChip =
+    estimatesSent?.ok === true
+      ? statChip(
+          `${estimatesSent.deals.length} ${estimatesSent.deals.length === 1 ? "Estimate" : "Estimates"} Sent`,
+          "#1e2024",
+          "#ffffff",
+          true
+        )
+      : "";
+
   sections.push(`
     <tr><td class="mobile-pad" style="padding: 20px 32px 12px 32px;">
-      ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}
+      ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${estimatesChip}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}
     </td></tr>`);
 
   if (includeRfpLog) {
@@ -814,6 +842,90 @@ export async function buildRfpReportEmailHtml(options: {
     sections.push(`
     <tr><td class="mobile-pad" style="padding: 20px 32px;">
       <h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">RFP Activity — ${escapeHtml(periodLabel)}</h3>
+      ${body}
+    </td></tr>`);
+  }
+
+  // Estimates sent to CLIENTS — the other half of "what went out today", and the half SyncHub cannot
+  // see on its own. Rendered whenever the caller supplied a result, including a failed one: silence
+  // here would read as "nothing was sent", which is a false claim rather than a missing one.
+  if (estimatesSent) {
+    const sectionHeading = `<h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Estimates Sent to Client — ${escapeHtml(periodLabel)}</h3>`;
+
+    let body: string;
+    if (!estimatesSent.ok) {
+      // Says which of the two it is. "Not configured" is a deployment that never wired the CRM up and
+      // is not news; a genuine failure is. Both state plainly that the number is UNKNOWN rather than
+      // letting an absent section imply zero.
+      const message =
+        estimatesSent.reason === "not_configured"
+          ? "Not available — this Sync Hub is not connected to the CRM."
+          : "Could not be loaded from the CRM this run. The figure above covers RFPs only.";
+      body = `<p style="margin: 0; padding: 16px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-size: 14px; color: #92400e;">${escapeHtml(message)}</p>`;
+    } else if (estimatesSent.deals.length === 0) {
+      body = `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No estimates sent to clients in this period.</p>`;
+    } else {
+      const metaRow = (label: string, valueHtml: string) => `
+              <tr>
+                <td style="padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; width: 110px; vertical-align: top;">${label}</td>
+                <td style="padding: 4px 0; font-size: 14px; color: #1e293b; vertical-align: top;">${valueHtml}</td>
+              </tr>`;
+
+      const estimateCard = (deal: (typeof estimatesSent.deals)[number]): string => {
+        const { date, time } = formatRfpDateTime(deal.enteredAt);
+        const resend = resendLabel(deal.priorEntryCount);
+        // Only on a re-send. A badge on every card would be noise; this one carries information
+        // precisely because it is the exception — a revised estimate is not new business.
+        const resendBadge = resend
+          ? `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; white-space: nowrap;">${escapeHtml(resend)}</span>`
+          : "";
+        const identifier = deal.projectNumber || deal.dealNumber || "";
+        const numberLine = [escapeHtml(identifier), resendBadge].filter(Boolean).join("&nbsp;&nbsp;");
+        const owner = deal.ownerName || deal.ownerEmail || "—";
+
+        return `
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 12px; background: #ffffff;">
+          <tr>
+            <td style="padding: 16px 18px 0 18px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3; word-break: break-word;">${escapeHtml(deal.name || "(untitled deal)")}</td>
+                  <td align="right" style="font-size: 16px; font-weight: 700; color: #111214; white-space: nowrap; padding-left: 10px; vertical-align: top;">${escapeHtml(formatEstimateAmount(deal.amount))}</td>
+                </tr>
+              </table>
+              ${numberLine ? `<div style="margin-top: 5px; font-size: 12px; color: #6b7280;">${numberLine}</div>` : ""}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 12px 18px 16px 18px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                ${metaRow("Owner", `<span style="word-break: break-word;">${escapeHtml(owner)}</span>`)}
+                ${metaRow("Sent", `${escapeHtml(date)} · <span style="color: #6b7280;">${escapeHtml(time)}</span>`)}
+              </table>
+            </td>
+          </tr>
+        </table>`;
+      };
+
+      // Same 30-card ceiling as the RFP list, and the same honesty about it: the total is stated, so a
+      // truncated list never reads as the whole picture.
+      const shown = estimatesSent.deals.slice(0, 30);
+      const overflow =
+        estimatesSent.deals.length > 30
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${estimatesSent.deals.length} estimates sent.</p>`
+          : "";
+      // The CRM answers with at most MAX_ESTIMATES_SENT_ROWS; say so when we are at the ceiling rather
+      // than presenting a capped count as a complete one.
+      const capNote =
+        estimatesSent.deals.length >= MAX_ESTIMATES_SENT_ROWS
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">The CRM returns at most ${MAX_ESTIMATES_SENT_ROWS} rows per run, so this period may hold more.</p>`
+          : "";
+      body = `${shown.map(estimateCard).join("")}${overflow}${capNote}`;
+    }
+
+    sections.push(`
+    <tr><td class="mobile-pad" style="padding: 20px 32px;">
+      ${sectionHeading}
       ${body}
     </td></tr>`);
   }
@@ -1014,6 +1126,11 @@ export async function sendScheduledRfpReport(
 
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
+  // The estimates that went out to CLIENTS in the same window — the CRM's answer, since SyncHub has no
+  // read path into deal_stage_history. Fetched over the SAME window the RFP half uses, so the two
+  // sections of one email cannot describe two different periods.
+  const estimatesSent = await fetchCrmEstimatesSent(dateFrom, dateTo);
+
   const html = await buildRfpReportEmailHtml({
     periodLabel,
     rfps,
@@ -1022,6 +1139,7 @@ export async function sendScheduledRfpReport(
     includeRfpLog,
     includeApprovalSummary:
       config?.includeApprovalSummary ?? cfg.includeApprovalSummary,
+    estimatesSent,
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 
