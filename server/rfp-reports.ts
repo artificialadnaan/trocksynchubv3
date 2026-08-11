@@ -1293,7 +1293,15 @@ export async function sendScheduledRfpReport(
   // advancing it after a failed lookup permanently skips the interval the CRM did not answer for — the
   // email goes out, the section says "could not be loaded", and those estimates are never reported by
   // anything again. Leaving it where it is makes the next scheduled run cover both intervals.
-  return { sent, failed, windowEnd: dateTo, estimatesOk: estimatesSent.ok };
+  // COMPLETE, not merely ok. A catch-up longer than the request budget returns ok:true having covered
+  // only the recent portion, and advancing the checkpoint on that permanently skips
+  // [estimatesFrom, coveredFrom) — the very failure the two-checkpoint split exists to prevent, arrived
+  // at through the success path instead of the failure path. Leaving the checkpoint where it is makes
+  // the next run retry the uncovered stretch.
+  const estimatesComplete =
+    estimatesSent.ok && Date.parse(estimatesSent.coveredFrom) <= estimatesFrom.getTime();
+
+  return { sent, failed, windowEnd: dateTo, estimatesOk: estimatesComplete };
 }
 
 /** Send a one-off test email to a specific address using current config */

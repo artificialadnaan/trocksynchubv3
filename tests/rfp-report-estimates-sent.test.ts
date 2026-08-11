@@ -3,14 +3,37 @@ import { describe, expect, it, vi } from "vitest";
 
 // Same stubs as rfp-report-email.test.ts: rfp-reports.ts imports ./db (which throws without
 // DATABASE_URL), ./storage and ./email-service. The builder under test is pure.
-vi.mock("../server/db", () => ({ db: {}, pool: {} }));
+// A chainable drizzle stub that resolves to no rows, so the scheduler path can be exercised end to end
+// without a database. The estimates half is what these tests are about; the RFP half just has to run.
+vi.mock("../server/db", () => {
+  const chain: any = {};
+  for (const method of [
+    "select", "from", "where", "orderBy", "limit", "offset",
+    "innerJoin", "leftJoin", "groupBy", "having", "insert", "values", "update", "set",
+  ]) {
+    chain[method] = () => chain;
+  }
+  chain.then = (resolve: (rows: unknown[]) => unknown) => resolve([]);
+  return { db: chain, pool: {} };
+});
+const scheduleMocks = vi.hoisted(() => ({
+  config: { enabled: false, recipients: [] as string[] } as Record<string, unknown>,
+  upserted: [] as Record<string, unknown>[],
+}));
+
 vi.mock("../server/storage", () => ({
   storage: {
-    // Disabled config: sendScheduledRfpReport returns early, which is all the timestamp test needs.
-    getReportScheduleConfig: async () => ({ enabled: false, recipients: [] }),
+    getReportScheduleConfig: async () => scheduleMocks.config,
+    upsertReportScheduleConfig: async (next: Record<string, unknown>) => {
+      scheduleMocks.upserted.push(next);
+      return next;
+    },
   },
 }));
-vi.mock("../server/email-service", () => ({ sendEmail: vi.fn() }));
+vi.mock("../server/email-service", () => ({
+  sendEmail: vi.fn(async () => ({ success: true })),
+  renderTemplate: vi.fn(),
+}));
 
 import { buildRfpReportEmailHtml, sendScheduledRfpReport } from "../server/rfp-reports";
 import { EMAIL_CARD_BUDGET, shareCardBudget } from "../server/rfp-reports";
@@ -672,5 +695,94 @@ describe("the run timestamp", () => {
     const result = await sendScheduledRfpReport(undefined, runAt);
 
     expect(result.windowEnd.toISOString()).toBe(runAt.toISOString());
+  });
+});
+
+// The scheduler path proper, not just the disabled-config early return. Everything the two-checkpoint
+// split turns on lives here: which boundary the window starts from, and whether the run is allowed to
+// advance it.
+describe("the estimates checkpoint", () => {
+  const RUN_AT = new Date("2026-08-06T08:00:00.000Z");
+
+  function configure(over: Record<string, unknown> = {}) {
+    scheduleMocks.config = {
+      enabled: true,
+      recipients: ["ops@trockgc.com"],
+      frequency: "daily",
+      includeRfpLog: false,
+      includeApprovalSummary: false,
+      ...over,
+    };
+    scheduleMocks.upserted = [];
+  }
+
+  it("starts the window at estimatesCoveredThrough, not lastSentAt", async () => {
+    const covered = new Date("2026-08-04T08:00:00.000Z");
+    configure({
+      // Deliberately different: a checkpoint that read lastSentAt would ask for a 24h window.
+      lastSentAt: new Date("2026-08-05T08:00:00.000Z").toISOString(),
+      estimatesCoveredThrough: covered.toISOString(),
+    });
+
+    let asked: { from: string; to: string } | null = null;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      asked = JSON.parse(String(init?.body));
+      return { ok: true, status: 200, json: async () => ({ deals: [] }) } as unknown as Response;
+    }) as typeof fetch;
+    process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
+    process.env.RFP_REQUEST_SYNC_SECRET = "shhh";
+
+    await sendScheduledRfpReport(undefined, RUN_AT);
+
+    expect(asked).not.toBeNull();
+    expect(asked!.from).toBe(covered.toISOString());
+    expect(asked!.to).toBe(RUN_AT.toISOString());
+  });
+
+  it("falls back to the cadence when no checkpoint has been recorded yet", async () => {
+    configure({ estimatesCoveredThrough: null });
+
+    let asked: { from: string; to: string } | null = null;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      asked = JSON.parse(String(init?.body));
+      return { ok: true, status: 200, json: async () => ({ deals: [] }) } as unknown as Response;
+    }) as typeof fetch;
+
+    await sendScheduledRfpReport(undefined, RUN_AT);
+
+    expect(Date.parse(asked!.to) - Date.parse(asked!.from)).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it("reports the lookup as incomplete when it failed, so the checkpoint stays put", async () => {
+    configure({ estimatesCoveredThrough: new Date("2026-08-05T08:00:00.000Z").toISOString() });
+    globalThis.fetch = (async () =>
+      ({ ok: false, status: 500, json: async () => ({}) }) as unknown as Response) as typeof fetch;
+
+    const result = await sendScheduledRfpReport(undefined, RUN_AT);
+
+    expect(result.estimatesOk).toBe(false);
+  });
+
+  // The success-path version of the same permanent-skip: a catch-up longer than the request budget
+  // returns ok:true having covered only the recent portion.
+  it("reports a PARTIALLY covered catch-up as incomplete", async () => {
+    // A year back: far beyond MAX_ESTIMATES_SENT_REQUESTS x 31 days.
+    configure({ estimatesCoveredThrough: new Date("2025-08-06T08:00:00.000Z").toISOString() });
+    globalThis.fetch = (async () =>
+      ({ ok: true, status: 200, json: async () => ({ deals: [] }) }) as unknown as Response) as typeof fetch;
+
+    const result = await sendScheduledRfpReport(undefined, RUN_AT);
+
+    expect(result.estimatesOk, "an unreachable stretch must not be checkpointed past").toBe(false);
+  });
+
+  it("reports a fully covered lookup as complete", async () => {
+    configure({ estimatesCoveredThrough: new Date("2026-08-05T08:00:00.000Z").toISOString() });
+    globalThis.fetch = (async () =>
+      ({ ok: true, status: 200, json: async () => ({ deals: [] }) }) as unknown as Response) as typeof fetch;
+
+    const result = await sendScheduledRfpReport(undefined, RUN_AT);
+
+    expect(result.estimatesOk).toBe(true);
   });
 });
