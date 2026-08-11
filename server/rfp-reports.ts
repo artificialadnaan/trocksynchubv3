@@ -160,6 +160,47 @@ export async function resolveMissingAmountsFromCrm(
   return rows;
 }
 
+/**
+ * How many detail cards the whole email may render, across BOTH sections.
+ *
+ * Gmail clips an HTML message at roughly 102 KB and this service sends through Gmail. A 30-card RFP
+ * section is already about 98 KB; adding an independent 30 estimate cards took a measured build to about
+ * 155 KB, so the busiest reports — precisely the ones worth reading — lost most of the estimates section,
+ * the approval summary and the footer behind a "[Message clipped]" link.
+ *
+ * A SHARED budget rather than two independent ceilings, because the sections are not independent: it is
+ * the SUM that gets clipped. Set to 30 — the ceiling the RFP section already had — so an email with no
+ * estimates section renders exactly as it does today, and only the combined overflow is new.
+ */
+export const EMAIL_CARD_BUDGET = 30;
+
+/**
+ * Split the budget between the two sections.
+ *
+ * Each is guaranteed its half when it can fill it, and whatever the other does not need flows across —
+ * so a quiet RFP day still shows more estimates rather than wasting the headroom, and neither section can
+ * starve the other. Both sections state their own total, so a trimmed list is never mistaken for a
+ * complete one.
+ */
+export function shareCardBudget(
+  rfpCount: number,
+  estimateCount: number,
+  budget = EMAIL_CARD_BUDGET
+): { rfp: number; estimates: number } {
+  const half = Math.floor(budget / 2);
+  let rfp = Math.min(rfpCount, half);
+  let estimates = Math.min(estimateCount, half);
+
+  let spare = budget - rfp - estimates;
+  if (spare > 0) {
+    const rfpExtra = Math.min(spare, rfpCount - rfp);
+    rfp += rfpExtra;
+    spare -= rfpExtra;
+    estimates += Math.min(spare, estimateCount - estimates);
+  }
+  return { rfp, estimates };
+}
+
 /** Format a number as USD for display (e.g. 1234.5 -> "$1,235"). Returns "—" when null. */
 export function formatRfpAmount(amount: number | null): string {
   if (amount === null) return "—";
@@ -710,6 +751,12 @@ export async function buildRfpReportEmailHtml(options: {
   const totalRfps = rfps.length;
   const totalChanges = changes.reduce((s, c) => s + c.items.length, 0);
 
+  // ONE budget across both card sections — it is their SUM that Gmail clips.
+  const cardBudget = shareCardBudget(
+    rfps.length,
+    estimatesSent?.ok === true ? estimatesSent.deals.length : 0
+  );
+
   let sections: string[] = [];
 
   // Stat chips use inline-block so they sit side-by-side on desktop and wrap
@@ -832,7 +879,7 @@ export async function buildRfpReportEmailHtml(options: {
         </table>`;
     };
 
-    const shown = rfps.slice(0, 30);
+    const shown = rfps.slice(0, cardBudget.rfp);
     // Only footnote the marker if a marker was actually rendered.
     const currentAmountNote = shown.some((r) => r.amountIsCurrent && r.amount !== null)
       ? `<p style="margin: 10px 0 0 0; font-size: 12px; color: #6b7280;">&dagger; Deal value as of today — no estimate existed when the RFP was sent.</p>`
@@ -841,7 +888,7 @@ export async function buildRfpReportEmailHtml(options: {
     const body =
       rfps.length > 0
         ? `${shown.map(card).join("")}
-      ${rfps.length > 30 ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${rfps.length} RFPs. <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}${currentAmountNote}`
+      ${rfps.length > cardBudget.rfp ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing ${cardBudget.rfp} of ${rfps.length} RFPs. <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}${currentAmountNote}`
         : `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No RFPs in this period.</p>`;
 
     sections.push(`
@@ -908,11 +955,11 @@ export async function buildRfpReportEmailHtml(options: {
 
       // Same 30-card ceiling as the RFP list, and the same honesty about it: the total is stated, so a
       // truncated list never reads as the whole picture.
-      const shown = estimatesSent.deals.slice(0, 30);
-      // Stated against the TRUE total, not the capped list, so "Showing 30 of N" is the real N.
+      const shown = estimatesSent.deals.slice(0, cardBudget.estimates);
+      // Stated against the TRUE total, not the capped list, so the "of N" is the real N.
       const overflow =
-        estimatesSent.total > 30
-          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${estimatesSent.total} estimates sent.</p>`
+        estimatesSent.total > cardBudget.estimates
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing ${cardBudget.estimates} of ${estimatesSent.total} estimates sent.</p>`
           : "";
       // Only about the LIST. The count above is exact; what the cap limits is how many rows were carried
       // back, which matters only if someone expected to scroll all of them.
@@ -1082,36 +1129,44 @@ export async function sendScheduledRfpReport(
   const dateTo: Date = now;
   let periodLabel: string;
 
+  // The EXACT span the label promises, kept alongside the rounded one below. See estimatesFrom.
+  let cadenceMs: number;
+
   switch (cfg.frequency) {
     case "daily":
       dateFrom = new Date(now);
       dateFrom.setDate(dateFrom.getDate() - 1);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 24 Hours";
+      cadenceMs = 24 * 60 * 60 * 1000;
       break;
     case "weekly":
       dateFrom = new Date(now);
       dateFrom.setDate(dateFrom.getDate() - 7);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 7 Days";
+      cadenceMs = 7 * 24 * 60 * 60 * 1000;
       break;
     case "biweekly":
       dateFrom = new Date(now);
       dateFrom.setDate(dateFrom.getDate() - 14);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 14 Days";
+      cadenceMs = 14 * 24 * 60 * 60 * 1000;
       break;
     case "monthly":
       dateFrom = new Date(now);
       dateFrom.setMonth(dateFrom.getMonth() - 1);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 30 Days";
+      cadenceMs = 30 * 24 * 60 * 60 * 1000;
       break;
     default:
       dateFrom = new Date(now);
       dateFrom.setDate(dateFrom.getDate() - 7);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 7 Days";
+      cadenceMs = 7 * 24 * 60 * 60 * 1000;
   }
 
   // Resolved BEFORE the query so getRfpsForPeriod can skip the CRM lookup when the cards — the only
@@ -1126,10 +1181,20 @@ export async function sendScheduledRfpReport(
 
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
-  // The estimates that went out to CLIENTS in the same window — the CRM's answer, since SyncHub has no
-  // read path into deal_stage_history. Fetched over the SAME window the RFP half uses, so the two
-  // sections of one email cannot describe two different periods.
-  const estimatesSent = await fetchCrmEstimatesSent(dateFrom, dateTo);
+  // The estimates that went out to CLIENTS — the CRM's answer, since SyncHub has no read path into
+  // deal_stage_history.
+  //
+  // Asked for over an EXACT cadence window ending now, NOT the rounded dateFrom the RFP half uses.
+  // That one moves back by the cadence and then rounds down to midnight while dateTo keeps the current
+  // time, so consecutive runs OVERLAP from midnight until send time: at the scheduler's default 08:00
+  // slot, an estimate sent at 04:00 lands in today's "Last 24 Hours" email and again in tomorrow's,
+  // counted twice across reports. An exact span is also what the label actually claims.
+  //
+  // The two halves therefore cover slightly different ranges, which is a real cost and the lesser one:
+  // the alternative is to change the rounding for the RFP half too, and that is a behaviour change to a
+  // shipped report that nobody asked for and this PR should not smuggle in.
+  const estimatesFrom = new Date(dateTo.getTime() - cadenceMs);
+  const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, dateTo);
 
   const html = await buildRfpReportEmailHtml({
     periodLabel,

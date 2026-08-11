@@ -8,6 +8,7 @@ vi.mock("../server/storage", () => ({ storage: {} }));
 vi.mock("../server/email-service", () => ({ sendEmail: vi.fn() }));
 
 import { buildRfpReportEmailHtml } from "../server/rfp-reports";
+import { EMAIL_CARD_BUDGET, shareCardBudget } from "../server/rfp-reports";
 import {
   clampEstimatesSentWindow,
   fetchCrmEstimatesSent,
@@ -190,7 +191,7 @@ describe("the row cap and ordering the email relies on", () => {
     });
 
     expect(html).toContain(`${MAX_ESTIMATES_SENT_ROWS + 25} Estimates Sent`);
-    expect(html).toContain(`Showing 30 of ${MAX_ESTIMATES_SENT_ROWS + 25} estimates sent.`);
+    expect(html).toContain(`Showing ${EMAIL_CARD_BUDGET} of ${MAX_ESTIMATES_SENT_ROWS + 25} estimates sent.`);
     expect(html).toContain(`Only the ${MAX_ESTIMATES_SENT_ROWS} most recent are listed.`);
   });
 
@@ -201,12 +202,13 @@ describe("the row cap and ordering the email relies on", () => {
 
   it("renders the truncation note with the real total", async () => {
     const html = await render({ ok: true, deals: many(40), total: 40 });
-    expect(html).toContain("Showing 30 of 40 estimates sent.");
+    // With no RFPs competing for the budget, the estimates section gets the whole of it.
+    expect(html).toContain(`Showing ${EMAIL_CARD_BUDGET} of 40 estimates sent.`);
   });
 
   it("says nothing about truncation when everything fits", async () => {
     const html = await render({ ok: true, deals: many(5), total: 5 });
-    expect(html).not.toContain("Showing 30 of");
+    expect(html).not.toContain("estimates sent.");
   });
 });
 
@@ -430,5 +432,40 @@ describe("the CRM client", () => {
     });
 
     expect(result).toEqual({ ok: false, reason: "failed" });
+  });
+});
+
+
+// Gmail clips an HTML message at roughly 102 KB, and this service sends through Gmail. A 30-card RFP
+// section is already ~98 KB; an independent 30 estimate cards took a measured build to ~155 KB, so the
+// BUSIEST reports lost most of the estimates section, the approval summary and the footer behind a
+// "[Message clipped]" link. The two sections are not independent — it is their sum that gets clipped.
+describe("the shared card budget", () => {
+  it("never exceeds the budget, however busy both sections are", () => {
+    const split = shareCardBudget(500, 500);
+    expect(split.rfp + split.estimates).toBe(EMAIL_CARD_BUDGET);
+  });
+
+  it("guarantees each section its half when both can fill it", () => {
+    const split = shareCardBudget(100, 100);
+    expect(split.rfp).toBe(EMAIL_CARD_BUDGET / 2);
+    expect(split.estimates).toBe(EMAIL_CARD_BUDGET / 2);
+  });
+
+  // A quiet day on one side should not waste the headroom on the other.
+  it("lets one section use what the other does not need", () => {
+    expect(shareCardBudget(100, 0)).toEqual({ rfp: EMAIL_CARD_BUDGET, estimates: 0 });
+    expect(shareCardBudget(0, 100)).toEqual({ rfp: 0, estimates: EMAIL_CARD_BUDGET });
+    expect(shareCardBudget(2, 100)).toEqual({ rfp: 2, estimates: EMAIL_CARD_BUDGET - 2 });
+  });
+
+  it("asks for nothing when there is nothing to show", () => {
+    expect(shareCardBudget(0, 0)).toEqual({ rfp: 0, estimates: 0 });
+  });
+
+  it("never asks for more cards than a section actually has", () => {
+    const split = shareCardBudget(3, 4);
+    expect(split.rfp).toBe(3);
+    expect(split.estimates).toBe(4);
   });
 });
