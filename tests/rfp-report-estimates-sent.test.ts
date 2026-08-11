@@ -80,7 +80,7 @@ async function render(estimatesSent?: CrmEstimatesSentResult): Promise<string> {
 
 describe("the Estimates Sent to Client section", () => {
   it("lists each deal with its amount and owner", async () => {
-    const html = await render({ ok: true, deals: [deal()], total: 1, coveredFrom: "2026-08-01T00:00:00.000Z" });
+    const html = await render({ ok: true, deals: [deal()], total: 1, coveredFrom: "2026-08-01T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" });
 
     expect(html).toContain("Estimates Sent to Client — Last 24 Hours");
     expect(html).toContain("Elan at Bluffview");
@@ -96,12 +96,12 @@ describe("the Estimates Sent to Client section", () => {
   });
 
   it("uses the singular for exactly one", async () => {
-    const html = await render({ ok: true, deals: [deal()], total: 1, coveredFrom: "2026-08-01T00:00:00.000Z" });
+    const html = await render({ ok: true, deals: [deal()], total: 1, coveredFrom: "2026-08-01T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" });
     expect(html).toContain("1 Estimate Sent");
   });
 
   it("says plainly when nothing was sent", async () => {
-    const html = await render({ ok: true, deals: [], total: 0, coveredFrom: "2026-08-01T00:00:00.000Z" });
+    const html = await render({ ok: true, deals: [], total: 0, coveredFrom: "2026-08-01T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" });
 
     expect(html).toContain("No estimates sent to clients in this period.");
     expect(html).toContain("0 Estimates Sent");
@@ -225,18 +225,18 @@ describe("the row cap and ordering the email relies on", () => {
   });
 
   it("says nothing about the list cap when the total is under it", async () => {
-    const html = await render({ ok: true, deals: many(40), total: 40, coveredFrom: "2026-08-01T00:00:00.000Z" });
+    const html = await render({ ok: true, deals: many(40), total: 40, coveredFrom: "2026-08-01T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" });
     expect(html).not.toContain("most recent are listed");
   });
 
   it("renders the truncation note with the real total", async () => {
-    const html = await render({ ok: true, deals: many(40), total: 40, coveredFrom: "2026-08-01T00:00:00.000Z" });
+    const html = await render({ ok: true, deals: many(40), total: 40, coveredFrom: "2026-08-01T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" });
     // With no RFPs competing for the budget, the estimates section gets the whole of it.
     expect(html).toContain(`Showing ${EMAIL_CARD_BUDGET} of 40 estimates sent.`);
   });
 
   it("says nothing about truncation when everything fits", async () => {
-    const html = await render({ ok: true, deals: many(5), total: 5, coveredFrom: "2026-08-01T00:00:00.000Z" });
+    const html = await render({ ok: true, deals: many(5), total: 5, coveredFrom: "2026-08-01T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" });
     expect(html).not.toContain("estimates sent.");
   });
 });
@@ -310,6 +310,7 @@ describe("escaping", () => {
       deals: [deal({ name: `<script>alert(1)</script>`, ownerName: `A & B "Co"` })],
       total: 1,
       coveredFrom: "2026-08-01T00:00:00.000Z",
+      coveredThrough: "2026-08-06T00:00:00.000Z",
     });
 
     expect(html).not.toContain("<script>alert(1)</script>");
@@ -517,6 +518,7 @@ describe("the shared card budget", () => {
         ),
         total: 40,
         coveredFrom: "2026-08-01T00:00:00.000Z",
+        coveredThrough: "2026-08-06T00:00:00.000Z",
       },
       dashboardUrl: "https://synchub.example.com/settings",
     });
@@ -550,12 +552,15 @@ describe("covering a long catch-up interval", () => {
     });
 
     expect(seen.length).toBeGreaterThan(1);
-    // Contiguous, newest first: each chunk starts where the previous one ended.
+    // Contiguous and OLDEST FIRST: each chunk begins where the previous one ended. Working forward from
+    // the checkpoint is what lets a long catch-up converge instead of re-fetching the newest window.
     for (let i = 1; i < seen.length; i += 1) {
-      expect(seen[i]![1]).toBe(seen[i - 1]![0]);
+      expect(seen[i]![0]).toBe(seen[i - 1]![1]);
     }
+    expect(seen[0]![0]).toBe(from.toISOString());
     if (!result.ok) throw new Error("expected ok");
     expect(Date.parse(result.coveredFrom)).toBe(from.getTime());
+    expect(Date.parse(result.coveredThrough)).toBe(to.getTime());
   });
 
   it("makes ONE request for an ordinary window", async () => {
@@ -570,8 +575,9 @@ describe("covering a long catch-up interval", () => {
     expect(seen).toHaveLength(1);
   });
 
-  // Past the request budget the reach is stated rather than silently shortened.
-  it("reports how far back it actually reached when the gap exceeds the budget", async () => {
+  // Past the request budget, coverage starts at the OLDEST uncovered point and stops short of now —
+  // stated rather than silently shortened, and positioned so the next run continues from here.
+  it("covers the oldest stretch first and reports where it stopped", async () => {
     const to = new Date("2026-08-06T00:00:00Z");
     const from = new Date(to.getTime() - 400 * 24 * 60 * 60 * 1000);
 
@@ -583,10 +589,13 @@ describe("covering a long catch-up interval", () => {
     });
 
     if (!result.ok) throw new Error("expected ok");
-    expect(Date.parse(result.coveredFrom)).toBeGreaterThan(from.getTime());
-    expect(Date.parse(result.coveredFrom)).toBe(
-      to.getTime() - MAX_ESTIMATES_SENT_REQUESTS * 31 * 24 * 60 * 60 * 1000
+    // Begins exactly where it was asked to begin — nothing at the old end is skipped.
+    expect(Date.parse(result.coveredFrom)).toBe(from.getTime());
+    // …and stops one budget's worth later, which is the boundary the next run resumes from.
+    expect(Date.parse(result.coveredThrough)).toBe(
+      from.getTime() + MAX_ESTIMATES_SENT_REQUESTS * 31 * 24 * 60 * 60 * 1000
     );
+    expect(Date.parse(result.coveredThrough)).toBeLessThan(to.getTime());
   });
 });
 
@@ -635,7 +644,7 @@ describe("the section captions its own span", () => {
       approvalSummary: { pending: 0, approved: 0, rejected: 0 },
       includeRfpLog: true,
       includeApprovalSummary: false,
-      estimatesSent: { ok: true, deals: [deal()], total: 1, coveredFrom: "2026-07-16T00:00:00.000Z" },
+      estimatesSent: { ok: true, deals: [deal()], total: 1, coveredFrom: "2026-07-16T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" },
       estimatesPeriod: { from: new Date("2026-07-16T00:00:00Z"), to: new Date("2026-08-06T00:00:00Z") },
       dashboardUrl: "https://synchub.example.com/settings",
     });
@@ -659,7 +668,7 @@ describe("the section captions its own span", () => {
       includeRfpLog: true,
       includeApprovalSummary: false,
       // Asked for a year, only the most recent stretch was reachable.
-      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2026-04-06T00:00:00.000Z" },
+      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2026-04-06T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" },
       estimatesPeriod: { from: new Date("2025-08-06T00:00:00Z"), to: new Date("2026-08-06T00:00:00Z") },
       dashboardUrl: "https://synchub.example.com/settings",
     });
@@ -676,7 +685,7 @@ describe("the section captions its own span", () => {
       approvalSummary: { pending: 0, approved: 0, rejected: 0 },
       includeRfpLog: true,
       includeApprovalSummary: false,
-      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2026-08-05T00:00:00.000Z" },
+      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2026-08-05T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" },
       estimatesPeriod: { from: new Date("2026-08-05T00:00:00Z"), to: new Date("2026-08-06T00:00:00Z") },
       dashboardUrl: "https://synchub.example.com/settings",
     });
@@ -760,12 +769,12 @@ describe("the estimates checkpoint", () => {
 
     const result = await sendScheduledRfpReport(undefined, RUN_AT);
 
-    expect(result.estimatesOk).toBe(false);
+    expect(result.estimatesCoveredThrough).toBeNull();
   });
 
-  // The success-path version of the same permanent-skip: a catch-up longer than the request budget
-  // returns ok:true having covered only the recent portion.
-  it("reports a PARTIALLY covered catch-up as incomplete", async () => {
+  // A catch-up too long for the request budget must still MOVE the boundary, or the next run asks for
+  // the same window again — recent estimates repeating in every email while older ones are never reached.
+  it("advances the checkpoint to the end of the stretch a long catch-up covered", async () => {
     // A year back: far beyond MAX_ESTIMATES_SENT_REQUESTS x 31 days.
     configure({ estimatesCoveredThrough: new Date("2025-08-06T08:00:00.000Z").toISOString() });
     globalThis.fetch = (async () =>
@@ -773,16 +782,20 @@ describe("the estimates checkpoint", () => {
 
     const result = await sendScheduledRfpReport(undefined, RUN_AT);
 
-    expect(result.estimatesOk, "an unreachable stretch must not be checkpointed past").toBe(false);
+    const covered = result.estimatesCoveredThrough!;
+    expect(covered, "a partial catch-up must still advance").not.toBeNull();
+    // Forward of the old checkpoint, and short of now — progress without claiming the whole interval.
+    expect(covered.getTime()).toBeGreaterThan(Date.parse("2025-08-06T08:00:00.000Z"));
+    expect(covered.getTime()).toBeLessThan(RUN_AT.getTime());
   });
 
-  it("reports a fully covered lookup as complete", async () => {
+  it("checkpoints the whole window when the lookup covered it", async () => {
     configure({ estimatesCoveredThrough: new Date("2026-08-05T08:00:00.000Z").toISOString() });
     globalThis.fetch = (async () =>
       ({ ok: true, status: 200, json: async () => ({ deals: [] }) }) as unknown as Response) as typeof fetch;
 
     const result = await sendScheduledRfpReport(undefined, RUN_AT);
 
-    expect(result.estimatesOk).toBe(true);
+    expect(result.estimatesCoveredThrough?.toISOString()).toBe(RUN_AT.toISOString());
   });
 });

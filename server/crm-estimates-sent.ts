@@ -66,6 +66,15 @@ export type CrmEstimatesSentResult =
        * report, so the section states its real reach instead.
        */
       coveredFrom: string;
+      /**
+       * The newest instant this run actually covered.
+       *
+       * Equals the requested `to` for an ordinary window. For a catch-up too long for the request budget
+       * it is the end of the oldest-first stretch that WAS covered, and it is what the scheduler
+       * checkpoints — so each run drains a little more of the backlog instead of re-fetching the same
+       * window forever.
+       */
+      coveredThrough: string;
     }
   | { ok: false; reason: "not_configured" | "failed" };
 
@@ -136,24 +145,33 @@ export async function fetchCrmEstimatesSent(
 
   const doFetch = deps.fetchImpl ?? fetch;
 
-  // COVER THE WHOLE INTERVAL, newest chunk first, in endpoint-sized requests.
+  // COVER THE WHOLE INTERVAL in endpoint-sized requests, OLDEST FIRST.
   //
-  // A single clamped request silently dropped everything older than 31 days — and because the scheduler
-  // advances lastSentAt on a successful send, those estimates would never appear in any later report
-  // either. A catch-up after a disabled schedule or a long outage simply lost them, while the email said
-  // ok. Chunking preserves them; `coveredFrom` states the reach when even the chunk budget runs out.
+  // A single clamped request silently dropped everything older than 31 days — and because the checkpoint
+  // advances on a successful send, those estimates would never appear in any later report either. A
+  // catch-up after a disabled schedule or a long outage simply lost them, while the email said ok.
+  //
+  // Oldest-first is what makes a long catch-up CONVERGE. Newest-first spent the whole request budget on
+  // the most recent chunks, the run was then marked incomplete so the checkpoint stayed put, and the
+  // next run fetched almost exactly the same recent window again — recent estimates repeating in every
+  // email while the older ones were never reached at all. Working forward from the checkpoint means each
+  // run covers a new stretch and `coveredThrough` can advance, so the backlog drains.
   const windows: Array<{ from: Date; to: Date }> = [];
-  let cursorTo = to;
-  while (cursorTo.getTime() > from.getTime() && windows.length < MAX_ESTIMATES_SENT_REQUESTS) {
-    const chunk = clampEstimatesSentWindow(from, cursorTo);
-    windows.push(chunk);
-    cursorTo = chunk.from;
+  let cursorFrom = from;
+  const chunkMs = MAX_ESTIMATES_SENT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  while (cursorFrom.getTime() < to.getTime() && windows.length < MAX_ESTIMATES_SENT_REQUESTS) {
+    const chunkTo = new Date(Math.min(cursorFrom.getTime() + chunkMs, to.getTime()));
+    windows.push({ from: cursorFrom, to: chunkTo });
+    cursorFrom = chunkTo;
   }
   if (windows.length === 0) windows.push(clampEstimatesSentWindow(from, to));
 
   const collected: CrmEstimateSent[] = [];
   let totalMalformed = 0;
-  const coveredFrom = windows[windows.length - 1]!.from;
+  // Where this run's coverage STARTS (the oldest bound asked for) and where it ENDS — the latter is the
+  // boundary the scheduler checkpoints, so a partial catch-up still moves forward.
+  const coveredFrom = windows[0]!.from;
+  const coveredThrough = windows[windows.length - 1]!.to;
 
   for (const window of windows) {
     const outcome = await fetchOneWindow(window, { baseUrl, secret, doFetch, deps, logger });
@@ -179,6 +197,7 @@ export async function fetchCrmEstimatesSent(
     deals: collected.slice(0, MAX_ESTIMATES_SENT_ROWS),
     total: collected.length,
     coveredFrom: coveredFrom.toISOString(),
+    coveredThrough: coveredThrough.toISOString(),
   };
 }
 

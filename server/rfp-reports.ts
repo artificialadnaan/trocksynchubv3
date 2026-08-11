@@ -1157,7 +1157,17 @@ export async function sendScheduledRfpReport(
    * there is no later retry, so a daily report would have sent every OTHER day.
    */
   runAt?: Date
-): Promise<{ sent: number; failed: number; windowEnd: Date; estimatesOk: boolean }> {
+): Promise<{
+  sent: number;
+  failed: number;
+  windowEnd: Date;
+  /**
+   * How far the estimates lookup successfully covered, for the scheduler to checkpoint — or null when it
+   * did not answer at all. On a catch-up too long for the request budget this is the end of the stretch
+   * that WAS covered, so each run drains a little more of the backlog rather than repeating one window.
+   */
+  estimatesCoveredThrough: Date | null;
+}> {
   // Resolved BEFORE the config read, so every exit reports the SAME instant this run is for — a fresh
   // sample on the early-return path would hand the scheduler a checkpoint later than the run it
   // describes, which is the drift this parameter exists to remove.
@@ -1165,7 +1175,7 @@ export async function sendScheduledRfpReport(
 
   const cfg = await storage.getReportScheduleConfig();
   if (!cfg?.enabled || !cfg.recipients?.length) {
-    return { sent: 0, failed: 0, windowEnd: now, estimatesOk: true };
+    return { sent: 0, failed: 0, windowEnd: now, estimatesCoveredThrough: null };
   }
 
   let dateFrom: Date;
@@ -1293,15 +1303,15 @@ export async function sendScheduledRfpReport(
   // advancing it after a failed lookup permanently skips the interval the CRM did not answer for — the
   // email goes out, the section says "could not be loaded", and those estimates are never reported by
   // anything again. Leaving it where it is makes the next scheduled run cover both intervals.
-  // COMPLETE, not merely ok. A catch-up longer than the request budget returns ok:true having covered
-  // only the recent portion, and advancing the checkpoint on that permanently skips
-  // [estimatesFrom, coveredFrom) — the very failure the two-checkpoint split exists to prevent, arrived
-  // at through the success path instead of the failure path. Leaving the checkpoint where it is makes
-  // the next run retry the uncovered stretch.
-  const estimatesComplete =
-    estimatesSent.ok && Date.parse(estimatesSent.coveredFrom) <= estimatesFrom.getTime();
-
-  return { sent, failed, windowEnd: dateTo, estimatesOk: estimatesComplete };
+  // The boundary this run actually reached, rather than a boolean. A catch-up too long for the request
+  // budget covers its oldest stretch and stops; checkpointing THAT lets the next run start where this one
+  // finished, so the backlog drains. A lookup that did not answer checkpoints nothing.
+  return {
+    sent,
+    failed,
+    windowEnd: dateTo,
+    estimatesCoveredThrough: estimatesSent.ok ? new Date(estimatesSent.coveredThrough) : null,
+  };
 }
 
 /** Send a one-off test email to a specific address using current config */

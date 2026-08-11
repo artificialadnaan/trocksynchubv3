@@ -107,21 +107,22 @@ export function startRfpReportScheduler() {
       // the report sampled its own, the checkpoint landed later than this `now` by the query duration,
       // and the next day's guard below (`now - lastSentAt < windowMs`) then returned early — with only a
       // 15-minute matching slot and no later retry, a daily report would have sent every other day.
-      const { sent, windowEnd, estimatesOk } = await sendScheduledRfpReport(undefined, now);
+      const { sent, windowEnd, estimatesCoveredThrough } = await sendScheduledRfpReport(undefined, now);
       // TWO checkpoints, because they answer different questions and fail independently.
       //
       // lastSentAt records the DELIVERY and drives the cadence guard above, so it advances whenever an
       // email actually went out — otherwise two eligible slots inside one cadence (the fall DST repeat,
       // or an admin moving the send time later) would each send a duplicate.
       //
-      // estimatesCoveredThrough records how far the CRM lookup REACHED, so it advances only when the
-      // lookup answered — otherwise the interval the CRM failed to provide is skipped forever, since the
-      // next window would start after it.
+      // estimatesCoveredThrough records how far the CRM lookup REACHED, so it advances to the boundary
+      // the lookup actually returned — the full window normally, the end of the covered stretch on a long
+      // catch-up, and not at all when the lookup did not answer. Anything else either skips the interval
+      // the CRM failed to provide, or never drains a backlog.
       if (sent > 0) {
         await storage.upsertReportScheduleConfig({
           ...config,
           lastSentAt: windowEnd ?? now,
-          ...(estimatesOk ? { estimatesCoveredThrough: windowEnd ?? now } : {}),
+          ...(estimatesCoveredThrough ? { estimatesCoveredThrough } : {}),
         });
         console.log(`[RFP Report] Sent scheduled report to ${sent} recipient(s)`);
       }
