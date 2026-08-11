@@ -1145,14 +1145,29 @@ async function getRfpsForPeriod(
 
 /** Send scheduled RFP report email */
 export async function sendScheduledRfpReport(
-  config?: { recipients?: string[]; includeRfpLog?: boolean; includeApprovalSummary?: boolean }
+  config?: { recipients?: string[]; includeRfpLog?: boolean; includeApprovalSummary?: boolean },
+  /**
+   * The instant this run is FOR — the scheduler's own `now`, passed down rather than resampled here.
+   *
+   * One timestamp, used as the query's upper bound AND as the checkpoint the scheduler persists. Two
+   * samples caused both of the problems this parameter closes: the earlier one re-reported anything
+   * created between them, and sampling the LATER one for the checkpoint pushed lastSentAt forward by
+   * the query duration on every run — enough for the next day's cadence guard
+   * (`now - lastSentAt < windowMs`) to return early, and since the slot matches for only 15 minutes
+   * there is no later retry, so a daily report would have sent every OTHER day.
+   */
+  runAt?: Date
 ): Promise<{ sent: number; failed: number; windowEnd: Date; estimatesOk: boolean }> {
+  // Resolved BEFORE the config read, so every exit reports the SAME instant this run is for — a fresh
+  // sample on the early-return path would hand the scheduler a checkpoint later than the run it
+  // describes, which is the drift this parameter exists to remove.
+  const now = runAt ?? new Date();
+
   const cfg = await storage.getReportScheduleConfig();
   if (!cfg?.enabled || !cfg.recipients?.length) {
-    return { sent: 0, failed: 0, windowEnd: new Date(), estimatesOk: true };
+    return { sent: 0, failed: 0, windowEnd: now, estimatesOk: true };
   }
 
-  const now = new Date();
   let dateFrom: Date;
   const dateTo: Date = now;
   let periodLabel: string;

@@ -4,10 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 // Same stubs as rfp-report-email.test.ts: rfp-reports.ts imports ./db (which throws without
 // DATABASE_URL), ./storage and ./email-service. The builder under test is pure.
 vi.mock("../server/db", () => ({ db: {}, pool: {} }));
-vi.mock("../server/storage", () => ({ storage: {} }));
+vi.mock("../server/storage", () => ({
+  storage: {
+    // Disabled config: sendScheduledRfpReport returns early, which is all the timestamp test needs.
+    getReportScheduleConfig: async () => ({ enabled: false, recipients: [] }),
+  },
+}));
 vi.mock("../server/email-service", () => ({ sendEmail: vi.fn() }));
 
-import { buildRfpReportEmailHtml } from "../server/rfp-reports";
+import { buildRfpReportEmailHtml, sendScheduledRfpReport } from "../server/rfp-reports";
 import { EMAIL_CARD_BUDGET, shareCardBudget } from "../server/rfp-reports";
 import {
   clampEstimatesSentWindow,
@@ -654,5 +659,18 @@ describe("the section captions its own span", () => {
     });
 
     expect(html).not.toContain("earlier ones in this interval were not");
+  });
+});
+
+// The scheduler's cadence guard is `now - lastSentAt < windowMs`, and the slot matches for only 15
+// minutes with no later retry. So a checkpoint that drifts even slightly LATER than the run's nominal
+// instant makes the next day's guard return early — and a daily report sends every other day. Passing
+// the scheduler's own `now` down means the query bound and the checkpoint are the same instant.
+describe("the run timestamp", () => {
+  it("uses the instant it was given as the window end, not a fresh sample", async () => {
+    const runAt = new Date("2026-08-06T08:00:00.000Z");
+    const result = await sendScheduledRfpReport(undefined, runAt);
+
+    expect(result.windowEnd.toISOString()).toBe(runAt.toISOString());
   });
 });

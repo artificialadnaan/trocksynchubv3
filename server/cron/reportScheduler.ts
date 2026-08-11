@@ -103,7 +103,11 @@ export function startRfpReportScheduler() {
       // Persist the boundary the report ACTUALLY queried to, not this loop's earlier `now`. The two are
       // different clock samples, and starting the next window from the earlier one re-reports everything
       // entered in between.
-      const { sent, windowEnd, estimatesOk } = await sendScheduledRfpReport();
+      // `now` is handed down so the report's upper bound and this checkpoint are the SAME instant. When
+      // the report sampled its own, the checkpoint landed later than this `now` by the query duration,
+      // and the next day's guard below (`now - lastSentAt < windowMs`) then returned early — with only a
+      // 15-minute matching slot and no later retry, a daily report would have sent every other day.
+      const { sent, windowEnd, estimatesOk } = await sendScheduledRfpReport(undefined, now);
       // Checkpoint only when the estimates lookup ACTUALLY answered. lastSentAt is the lower bound of the
       // next estimates window, so advancing it after a failed lookup permanently skips the interval the
       // CRM did not provide: the email goes out saying the section could not be loaded, and nothing ever
