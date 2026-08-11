@@ -595,3 +595,64 @@ describe("a malformed resend count", () => {
     expect(result.ok).toBe(true);
   });
 });
+
+// After a pause or an outage the estimates window is the whole catch-up interval, so captioning it with
+// the report's cadence label ("Last 7 Days") over a three-week count is a false statement about the data.
+describe("the section captions its own span", () => {
+  it("labels the estimates section with the interval it actually queried", async () => {
+    const html = await buildRfpReportEmailHtml({
+      periodLabel: "Last 7 Days",
+      rfps: [],
+      changes: [],
+      approvalSummary: { pending: 0, approved: 0, rejected: 0 },
+      includeRfpLog: true,
+      includeApprovalSummary: false,
+      estimatesSent: { ok: true, deals: [deal()], total: 1, coveredFrom: "2026-07-16T00:00:00.000Z" },
+      estimatesPeriod: { from: new Date("2026-07-16T00:00:00Z"), to: new Date("2026-08-06T00:00:00Z") },
+      dashboardUrl: "https://synchub.example.com/settings",
+    });
+
+    // The RFP half keeps the cadence label; the estimates half states its real span.
+    //
+    // Rendered in CENTRAL time, like every other timestamp in this email, so a UTC-midnight bound shows
+    // as the previous Central day. Asserted as the Central rendering rather than the UTC one, because
+    // Central is what the reader sees everywhere else in the message.
+    expect(html).toContain("RFP Activity — Last 7 Days");
+    expect(html).toContain("Estimates Sent to Client — Jul 15, 2026 – Aug 5, 2026");
+  });
+
+  // A zero over a PARTIALLY covered interval is not a whole-period zero.
+  it("warns about partial coverage even when the covered portion is empty", async () => {
+    const html = await buildRfpReportEmailHtml({
+      periodLabel: "Last 7 Days",
+      rfps: [],
+      changes: [],
+      approvalSummary: { pending: 0, approved: 0, rejected: 0 },
+      includeRfpLog: true,
+      includeApprovalSummary: false,
+      // Asked for a year, only the most recent stretch was reachable.
+      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2026-04-06T00:00:00.000Z" },
+      estimatesPeriod: { from: new Date("2025-08-06T00:00:00Z"), to: new Date("2026-08-06T00:00:00Z") },
+      dashboardUrl: "https://synchub.example.com/settings",
+    });
+
+    expect(html).toContain("No estimates sent to clients in this period.");
+    expect(html).toContain("were checked — earlier ones in this interval were not");
+  });
+
+  it("says nothing about partial coverage when the whole interval was covered", async () => {
+    const html = await buildRfpReportEmailHtml({
+      periodLabel: "Last 24 Hours",
+      rfps: [],
+      changes: [],
+      approvalSummary: { pending: 0, approved: 0, rejected: 0 },
+      includeRfpLog: true,
+      includeApprovalSummary: false,
+      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2026-08-05T00:00:00.000Z" },
+      estimatesPeriod: { from: new Date("2026-08-05T00:00:00Z"), to: new Date("2026-08-06T00:00:00Z") },
+      dashboardUrl: "https://synchub.example.com/settings",
+    });
+
+    expect(html).not.toContain("earlier ones in this interval were not");
+  });
+});

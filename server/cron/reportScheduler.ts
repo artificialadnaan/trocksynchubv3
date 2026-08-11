@@ -103,8 +103,13 @@ export function startRfpReportScheduler() {
       // Persist the boundary the report ACTUALLY queried to, not this loop's earlier `now`. The two are
       // different clock samples, and starting the next window from the earlier one re-reports everything
       // entered in between.
-      const { sent, windowEnd } = await sendScheduledRfpReport();
-      if (sent > 0) {
+      const { sent, windowEnd, estimatesOk } = await sendScheduledRfpReport();
+      // Checkpoint only when the estimates lookup ACTUALLY answered. lastSentAt is the lower bound of the
+      // next estimates window, so advancing it after a failed lookup permanently skips the interval the
+      // CRM did not provide: the email goes out saying the section could not be loaded, and nothing ever
+      // reports those estimates again. Leaving it put makes the next scheduled run cover both intervals —
+      // the report still sends on its own slot either way, so this cannot cause a double send.
+      if (sent > 0 && estimatesOk !== false) {
         await storage.upsertReportScheduleConfig({ ...config, lastSentAt: windowEnd ?? now });
         console.log(`[RFP Report] Sent scheduled report to ${sent} recipient(s)`);
       }

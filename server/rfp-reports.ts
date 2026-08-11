@@ -728,6 +728,8 @@ export async function buildRfpReportEmailHtml(options: {
    *  accepted for backward compatibility but ignored. `changes` is still used for the count stat. */
   includeChangeHistory?: boolean;
   includeApprovalSummary: boolean;
+  /** The span the estimates lookup actually asked for, so the section can caption itself honestly. */
+  estimatesPeriod?: { from: Date; to: Date };
   /**
    * The estimates that went out to CLIENTS in the same window, from the CRM.
    *
@@ -745,6 +747,7 @@ export async function buildRfpReportEmailHtml(options: {
     includeRfpLog,
     includeApprovalSummary,
     estimatesSent,
+    estimatesPeriod,
     dashboardUrl,
   } = options;
 
@@ -906,7 +909,14 @@ export async function buildRfpReportEmailHtml(options: {
   // see on its own. Rendered whenever the caller supplied a result, including a failed one: silence
   // here would read as "nothing was sent", which is a false claim rather than a missing one.
   if (estimatesSent) {
-    const sectionHeading = `<h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Estimates Sent to Client — ${escapeHtml(periodLabel)}</h3>`;
+    // The section states ITS OWN span, not the report's cadence label. After a pause or an outage the
+    // estimates window is the whole catch-up interval, so a heading reading "Last 7 Days" over a
+    // three-week count is simply a false caption.
+    const estimatesPeriodLabel =
+      estimatesSent.ok && estimatesPeriod
+        ? `${formatRfpDateTime(estimatesPeriod.from.toISOString()).date} – ${formatRfpDateTime(estimatesPeriod.to.toISOString()).date}`
+        : periodLabel;
+    const sectionHeading = `<h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Estimates Sent to Client — ${escapeHtml(estimatesPeriodLabel)}</h3>`;
 
     let body: string;
     if (!estimatesSent.ok) {
@@ -919,7 +929,15 @@ export async function buildRfpReportEmailHtml(options: {
           : "Could not be loaded from the CRM this run. The figure above covers RFPs only.";
       body = `<p style="margin: 0; padding: 16px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-size: 14px; color: #92400e;">${escapeHtml(message)}</p>`;
     } else if (estimatesSent.deals.length === 0) {
-      body = `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No estimates sent to clients in this period.</p>`;
+      // A zero from a PARTIALLY covered interval is not a whole-period zero. Without the reach note the
+      // reader is told nothing went out over a span the report never actually queried.
+      const emptyReach =
+        estimatesPeriod && Date.parse(estimatesSent.coveredFrom) > estimatesPeriod.from.getTime()
+          ? `<p style="margin: 8px 0 0 0; font-size: 12px; color: #6b7280;">Only estimates sent since ${escapeHtml(
+              formatRfpDateTime(estimatesSent.coveredFrom).date
+            )} were checked — earlier ones in this interval were not.</p>`
+          : "";
+      body = `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No estimates sent to clients in this period.</p>${emptyReach}`;
     } else {
       const estimateCard = (deal: (typeof estimatesSent.deals)[number]): string => {
         const { date, time } = formatRfpDateTime(deal.enteredAt);
@@ -1128,10 +1146,10 @@ async function getRfpsForPeriod(
 /** Send scheduled RFP report email */
 export async function sendScheduledRfpReport(
   config?: { recipients?: string[]; includeRfpLog?: boolean; includeApprovalSummary?: boolean }
-): Promise<{ sent: number; failed: number; windowEnd: Date }> {
+): Promise<{ sent: number; failed: number; windowEnd: Date; estimatesOk: boolean }> {
   const cfg = await storage.getReportScheduleConfig();
   if (!cfg?.enabled || !cfg.recipients?.length) {
-    return { sent: 0, failed: 0, windowEnd: new Date() };
+    return { sent: 0, failed: 0, windowEnd: new Date(), estimatesOk: true };
   }
 
   const now = new Date();
@@ -1222,6 +1240,7 @@ export async function sendScheduledRfpReport(
     includeApprovalSummary:
       config?.includeApprovalSummary ?? cfg.includeApprovalSummary,
     estimatesSent,
+    estimatesPeriod: { from: estimatesFrom, to: dateTo },
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 
@@ -1251,7 +1270,11 @@ export async function sendScheduledRfpReport(
   // AND inside the next run's, because the next run started from the earlier stored value. Milliseconds
   // usually, but a slow config read or a stalled event loop widens it. Handing back the real boundary is
   // what makes consecutive windows genuinely abut.
-  return { sent, failed, windowEnd: dateTo };
+  // `estimatesOk` gates the checkpoint. lastSentAt is the lower bound of the NEXT estimates window, so
+  // advancing it after a failed lookup permanently skips the interval the CRM did not answer for — the
+  // email goes out, the section says "could not be loaded", and those estimates are never reported by
+  // anything again. Leaving it where it is makes the next scheduled run cover both intervals.
+  return { sent, failed, windowEnd: dateTo, estimatesOk: estimatesSent.ok };
 }
 
 /** Send a one-off test email to a specific address using current config */
