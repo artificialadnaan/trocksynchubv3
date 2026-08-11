@@ -45,7 +45,19 @@ export interface CrmEstimateSent {
  * point of the discriminator is that the email can tell a quiet day from a broken lookup.
  */
 export type CrmEstimatesSentResult =
-  | { ok: true; deals: CrmEstimateSent[] }
+  | {
+      ok: true;
+      /** At most MAX_ESTIMATES_SENT_ROWS, newest first. */
+      deals: CrmEstimateSent[];
+      /**
+       * How many were actually sent, BEFORE the row cap.
+       *
+       * Carried separately because `deals.length` stops being the answer the moment the cap bites: at
+       * the ceiling the email would otherwise print an exact-looking "500 Estimates Sent" for a period
+       * that held more. The CRM caps the WINDOW, not the row count, so this is the true figure.
+       */
+      total: number;
+    }
   | { ok: false; reason: "not_configured" | "failed" };
 
 /** Same 5s whole-exchange deadline as the current-values lookup, and for the same reason. */
@@ -72,10 +84,11 @@ export const MAX_ESTIMATES_SENT_WINDOW_DAYS = 31;
 /** The widest window the CRM will accept, ending at `to`. */
 export function clampEstimatesSentWindow(from: Date, to: Date): { from: Date; to: Date } {
   const widest = MAX_ESTIMATES_SENT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  // Strictly inside the bound: the CRM rejects `> 31 days`, and an exactly-31-day window that gains a
-  // millisecond to clock skew on the way over would be refused for a reason nobody could see.
-  if (to.getTime() - from.getTime() <= widest - 1000) return { from, to };
-  return { from: new Date(to.getTime() - (widest - 1000)), to };
+  // Exactly 31 days is ACCEPTED — the CRM rejects only `> 31 days`, and the bounds travel as serialized
+  // timestamps, so nothing drifts in transit. An earlier version shaved a second off as a margin against
+  // clock skew that cannot occur, and so dropped the first second of every clamped window.
+  if (to.getTime() - from.getTime() <= widest) return { from, to };
+  return { from: new Date(to.getTime() - widest), to };
 }
 
 export interface CrmEstimatesSentDeps {
@@ -188,7 +201,7 @@ export async function fetchCrmEstimatesSent(
       return delta !== 0 ? delta : a.dealId.localeCompare(b.dealId);
     });
 
-    return { ok: true, deals: parsed.slice(0, MAX_ESTIMATES_SENT_ROWS) };
+    return { ok: true, deals: parsed.slice(0, MAX_ESTIMATES_SENT_ROWS), total: parsed.length };
   } catch (error: any) {
     const reason =
       error?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : error?.message || error;

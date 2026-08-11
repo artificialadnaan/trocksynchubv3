@@ -50,7 +50,7 @@ async function render(estimatesSent?: CrmEstimatesSentResult): Promise<string> {
 
 describe("the Estimates Sent to Client section", () => {
   it("lists each deal with its amount and owner", async () => {
-    const html = await render({ ok: true, deals: [deal()] });
+    const html = await render({ ok: true, deals: [deal()], total: 1 });
 
     expect(html).toContain("Estimates Sent to Client — Last 24 Hours");
     expect(html).toContain("Elan at Bluffview");
@@ -61,17 +61,17 @@ describe("the Estimates Sent to Client section", () => {
   });
 
   it("counts the section in the stat chips", async () => {
-    const html = await render({ ok: true, deals: [deal(), deal({ dealId: "d-2" })] });
+    const html = await render({ ok: true, deals: [deal(), deal({ dealId: "d-2" })], total: 2 });
     expect(html).toContain("2 Estimates Sent");
   });
 
   it("uses the singular for exactly one", async () => {
-    const html = await render({ ok: true, deals: [deal()] });
+    const html = await render({ ok: true, deals: [deal()], total: 1 });
     expect(html).toContain("1 Estimate Sent");
   });
 
   it("says plainly when nothing was sent", async () => {
-    const html = await render({ ok: true, deals: [] });
+    const html = await render({ ok: true, deals: [], total: 0 });
 
     expect(html).toContain("No estimates sent to clients in this period.");
     expect(html).toContain("0 Estimates Sent");
@@ -116,12 +116,12 @@ describe("when the CRM lookup does not answer", () => {
 
 describe("the re-send annotation", () => {
   it("marks a deal that has been sent before", async () => {
-    const html = await render({ ok: true, deals: [deal({ priorEntryCount: 1 })] });
+    const html = await render({ ok: true, deals: [deal({ priorEntryCount: 1 })], total: 1 });
     expect(html).toContain("2nd time sent");
   });
 
   it("says nothing on a first send", async () => {
-    const html = await render({ ok: true, deals: [deal({ priorEntryCount: 0 })] });
+    const html = await render({ ok: true, deals: [deal({ priorEntryCount: 0 })], total: 1 });
     expect(html).not.toContain("time sent");
   });
 
@@ -177,15 +177,35 @@ describe("the row cap and ordering the email relies on", () => {
 
     if (!result.ok) throw new Error("expected ok");
     expect(result.deals).toHaveLength(MAX_ESTIMATES_SENT_ROWS);
+    // …and the TRUE total survives the cap, so the email never prints an exact-looking 500 for a
+    // period that held more.
+    expect(result.total).toBe(MAX_ESTIMATES_SENT_ROWS + 25);
+  });
+
+  it("counts the real total in the chip, and says only the list is capped", async () => {
+    const html = await render({
+      ok: true,
+      deals: many(MAX_ESTIMATES_SENT_ROWS),
+      total: MAX_ESTIMATES_SENT_ROWS + 25,
+    });
+
+    expect(html).toContain(`${MAX_ESTIMATES_SENT_ROWS + 25} Estimates Sent`);
+    expect(html).toContain(`Showing 30 of ${MAX_ESTIMATES_SENT_ROWS + 25} estimates sent.`);
+    expect(html).toContain(`Only the ${MAX_ESTIMATES_SENT_ROWS} most recent are listed.`);
+  });
+
+  it("says nothing about the list cap when the total is under it", async () => {
+    const html = await render({ ok: true, deals: many(40), total: 40 });
+    expect(html).not.toContain("most recent are listed");
   });
 
   it("renders the truncation note with the real total", async () => {
-    const html = await render({ ok: true, deals: many(40) });
+    const html = await render({ ok: true, deals: many(40), total: 40 });
     expect(html).toContain("Showing 30 of 40 estimates sent.");
   });
 
   it("says nothing about truncation when everything fits", async () => {
-    const html = await render({ ok: true, deals: many(5) });
+    const html = await render({ ok: true, deals: many(5), total: 5 });
     expect(html).not.toContain("Showing 30 of");
   });
 });
@@ -200,6 +220,15 @@ describe("the request window", () => {
     expect(clampEstimatesSentWindow(from, to)).toEqual({ from, to });
   });
 
+  it("keeps an EXACTLY 31-day window intact", () => {
+    // The CRM rejects only `> 31 days`, and the bounds travel as serialized timestamps — nothing drifts
+    // in transit. An earlier version shaved a second off as a margin against skew that cannot happen,
+    // and so silently dropped the first second of every clamped window.
+    const to = new Date("2026-08-06T08:00:00Z");
+    const from = new Date(to.getTime() - 31 * 24 * 60 * 60 * 1000);
+    expect(clampEstimatesSentWindow(from, to)).toEqual({ from, to });
+  });
+
   it("clamps a monthly window that midnight-rounding pushed over the limit", () => {
     // 31 days back, rounded to midnight, from a 08:00 send.
     const to = new Date("2026-08-06T08:00:00Z");
@@ -208,7 +237,7 @@ describe("the request window", () => {
 
     const clamped = clampEstimatesSentWindow(from, to);
     expect(clamped.to).toEqual(to);
-    expect(clamped.to.getTime() - clamped.from.getTime()).toBeLessThan(31 * 24 * 60 * 60 * 1000);
+    expect(clamped.to.getTime() - clamped.from.getTime()).toBe(31 * 24 * 60 * 60 * 1000);
   });
 
   it("sends the clamped window, not the requested one", async () => {
@@ -224,7 +253,7 @@ describe("the request window", () => {
     });
 
     const sent = JSON.parse(body) as { from: string; to: string };
-    expect(Date.parse(sent.to) - Date.parse(sent.from)).toBeLessThan(31 * 24 * 60 * 60 * 1000);
+    expect(Date.parse(sent.to) - Date.parse(sent.from)).toBeLessThanOrEqual(31 * 24 * 60 * 60 * 1000);
   });
 });
 
@@ -248,6 +277,7 @@ describe("escaping", () => {
     const html = await render({
       ok: true,
       deals: [deal({ name: `<script>alert(1)</script>`, ownerName: `A & B "Co"` })],
+      total: 1,
     });
 
     expect(html).not.toContain("<script>alert(1)</script>");
@@ -363,7 +393,10 @@ describe("the CRM client", () => {
     });
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.deals).toHaveLength(2);
+    if (result.ok) {
+      expect(result.deals).toHaveLength(2);
+      expect(result.total).toBe(2);
+    }
   });
 
   // The exact-decimal choice made on the CRM side is undone if this coerces to a number.

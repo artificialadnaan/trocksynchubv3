@@ -723,7 +723,9 @@ export async function buildRfpReportEmailHtml(options: {
   const estimatesChip =
     estimatesSent?.ok === true
       ? statChip(
-          `${estimatesSent.deals.length} ${estimatesSent.deals.length === 1 ? "Estimate" : "Estimates"} Sent`,
+          // The PRE-CAP total, so the ceiling never turns into an exact-looking figure for a period that
+          // held more.
+          `${estimatesSent.total} ${estimatesSent.total === 1 ? "Estimate" : "Estimates"} Sent`,
           "#1e2024",
           "#ffffff",
           true
@@ -907,16 +909,16 @@ export async function buildRfpReportEmailHtml(options: {
       // Same 30-card ceiling as the RFP list, and the same honesty about it: the total is stated, so a
       // truncated list never reads as the whole picture.
       const shown = estimatesSent.deals.slice(0, 30);
+      // Stated against the TRUE total, not the capped list, so "Showing 30 of N" is the real N.
       const overflow =
-        estimatesSent.deals.length > 30
-          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${estimatesSent.deals.length} estimates sent.</p>`
+        estimatesSent.total > 30
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${estimatesSent.total} estimates sent.</p>`
           : "";
-      // The cap is applied CLIENT-side (crm-estimates-sent trims to MAX_ESTIMATES_SENT_ROWS after
-      // ordering), so at the ceiling the count is a floor rather than a total — say so, instead of
-      // presenting a capped number as a complete one.
+      // Only about the LIST. The count above is exact; what the cap limits is how many rows were carried
+      // back, which matters only if someone expected to scroll all of them.
       const capNote =
-        estimatesSent.deals.length >= MAX_ESTIMATES_SENT_ROWS
-          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">This report reads at most ${MAX_ESTIMATES_SENT_ROWS} estimates per run, so this period may hold more.</p>`
+        estimatesSent.total > MAX_ESTIMATES_SENT_ROWS
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Only the ${MAX_ESTIMATES_SENT_ROWS} most recent are listed.</p>`
           : "";
       body = `${shown.map(estimateCard).join("")}${overflow}${capNote}`;
     }
