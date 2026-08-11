@@ -58,6 +58,26 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  */
 export const MAX_ESTIMATES_SENT_ROWS = 500;
 
+/**
+ * The CRM refuses a window longer than this, so the client clamps rather than letting the section fail.
+ *
+ * The monthly report is the case that made this necessary: dateFrom is set to MIDNIGHT one month back
+ * while dateTo keeps the current time, so after a 31-day month the span is 31 days PLUS however long
+ * the report has been running that morning — over the limit, a 422, and "could not be loaded" every
+ * single month. Clamping keeps the most recent 31 days, which is the part of the month a daily-cadence
+ * reader has not already seen.
+ */
+export const MAX_ESTIMATES_SENT_WINDOW_DAYS = 31;
+
+/** The widest window the CRM will accept, ending at `to`. */
+export function clampEstimatesSentWindow(from: Date, to: Date): { from: Date; to: Date } {
+  const widest = MAX_ESTIMATES_SENT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  // Strictly inside the bound: the CRM rejects `> 31 days`, and an exactly-31-day window that gains a
+  // millisecond to clock skew on the way over would be refused for a reason nobody could see.
+  if (to.getTime() - from.getTime() <= widest - 1000) return { from, to };
+  return { from: new Date(to.getTime() - (widest - 1000)), to };
+}
+
 export interface CrmEstimatesSentDeps {
   /** Injected in tests. Defaults to the global `fetch`. Not fetchWithTimeout — see crm-deal-values.ts. */
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
@@ -83,7 +103,8 @@ export async function fetchCrmEstimatesSent(
     return { ok: false, reason: "not_configured" };
   }
 
-  const rawBody = JSON.stringify({ from: from.toISOString(), to: to.toISOString() });
+  const window = clampEstimatesSentWindow(from, to);
+  const rawBody = JSON.stringify({ from: window.from.toISOString(), to: window.to.toISOString() });
   const signature = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
   const doFetch = deps.fetchImpl ?? fetch;
 
@@ -118,12 +139,19 @@ export async function fetchCrmEstimatesSent(
     }
 
     const parsed: CrmEstimateSent[] = [];
+    let malformed = 0;
     for (const entry of deals) {
       const dealId = String(entry?.dealId ?? "").trim();
       const enteredAt = String(entry?.enteredAt ?? "").trim();
-      // A row with no id or no timestamp cannot be rendered or ordered. Dropped rather than shown
-      // half-built — the count the email prints comes from what survived, so the two agree.
-      if (!dealId || !enteredAt || Number.isNaN(Date.parse(enteredAt))) continue;
+      // A row with no id or no timestamp cannot be rendered or ordered — but it also cannot be quietly
+      // dropped. Presenting the survivors as a complete answer is precisely what the result
+      // discriminator exists to prevent: under schema drift or partial bad data leadership would read
+      // an understated count, or "No estimates sent" when every row was malformed. Counted, and turned
+      // into a stated failure below.
+      if (!dealId || !enteredAt || Number.isNaN(Date.parse(enteredAt))) {
+        malformed += 1;
+        continue;
+      }
 
       parsed.push({
         dealId,
@@ -146,7 +174,21 @@ export async function fetchCrmEstimatesSent(
       });
     }
 
-    return { ok: true, deals: parsed };
+    if (malformed > 0) {
+      logger(`[rfp-reports] CRM estimates-sent returned ${malformed} unusable row(s); reporting the section as unavailable`);
+      return { ok: false, reason: "failed" };
+    }
+
+    // NEWEST FIRST, then capped — the email slices the first 30 and prints "Showing 30 of N", which is
+    // only true of an ordered list. The CRM already orders its response, but this module states the
+    // guarantee the renderer relies on, so a change on the other side of the wire cannot quietly turn
+    // "the 30 newest" into "30 arbitrary rows".
+    parsed.sort((a, b) => {
+      const delta = Date.parse(b.enteredAt) - Date.parse(a.enteredAt);
+      return delta !== 0 ? delta : a.dealId.localeCompare(b.dealId);
+    });
+
+    return { ok: true, deals: parsed.slice(0, MAX_ESTIMATES_SENT_ROWS) };
   } catch (error: any) {
     const reason =
       error?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : error?.message || error;

@@ -735,6 +735,15 @@ export async function buildRfpReportEmailHtml(options: {
       ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${estimatesChip}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}
     </td></tr>`);
 
+  // ONE label/value row helper for every card in this email. It was defined identically in the RFP
+  // branch and again in the estimates branch; two copies in one function drift the moment the card
+  // styling changes.
+  const metaRow = (label: string, valueHtml: string) => `
+              <tr>
+                <td style="padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; width: 110px; vertical-align: top;">${label}</td>
+                <td style="padding: 4px 0; font-size: 14px; color: #1e293b; vertical-align: top;">${valueHtml}</td>
+              </tr>`;
+
   if (includeRfpLog) {
     // Status-aware approver value: approver email, rejection, cancellation, or pending.
     const pill = (text: string, bg: string, color: string, after = "") =>
@@ -762,12 +771,6 @@ export async function buildRfpReportEmailHtml(options: {
       return pill(escapeHtml(label), "#e5e7eb", "#374151");
     };
 
-    // One label/value row inside a card.
-    const metaRow = (label: string, valueHtml: string) => `
-              <tr>
-                <td style="padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; width: 110px; vertical-align: top;">${label}</td>
-                <td style="padding: 4px 0; font-size: 14px; color: #1e293b; vertical-align: top;">${valueHtml}</td>
-              </tr>`;
 
     // Tappable link buttons — each rendered only when its URL exists (absolute URLs).
     const linkButton = (href: string, label: string, bg: string) =>
@@ -865,12 +868,6 @@ export async function buildRfpReportEmailHtml(options: {
     } else if (estimatesSent.deals.length === 0) {
       body = `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No estimates sent to clients in this period.</p>`;
     } else {
-      const metaRow = (label: string, valueHtml: string) => `
-              <tr>
-                <td style="padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; width: 110px; vertical-align: top;">${label}</td>
-                <td style="padding: 4px 0; font-size: 14px; color: #1e293b; vertical-align: top;">${valueHtml}</td>
-              </tr>`;
-
       const estimateCard = (deal: (typeof estimatesSent.deals)[number]): string => {
         const { date, time } = formatRfpDateTime(deal.enteredAt);
         const resend = resendLabel(deal.priorEntryCount);
@@ -914,11 +911,12 @@ export async function buildRfpReportEmailHtml(options: {
         estimatesSent.deals.length > 30
           ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${estimatesSent.deals.length} estimates sent.</p>`
           : "";
-      // The CRM answers with at most MAX_ESTIMATES_SENT_ROWS; say so when we are at the ceiling rather
-      // than presenting a capped count as a complete one.
+      // The cap is applied CLIENT-side (crm-estimates-sent trims to MAX_ESTIMATES_SENT_ROWS after
+      // ordering), so at the ceiling the count is a floor rather than a total — say so, instead of
+      // presenting a capped number as a complete one.
       const capNote =
         estimatesSent.deals.length >= MAX_ESTIMATES_SENT_ROWS
-          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">The CRM returns at most ${MAX_ESTIMATES_SENT_ROWS} rows per run, so this period may hold more.</p>`
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">This report reads at most ${MAX_ESTIMATES_SENT_ROWS} estimates per run, so this period may hold more.</p>`
           : "";
       body = `${shown.map(estimateCard).join("")}${overflow}${capNote}`;
     }
@@ -1177,6 +1175,12 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
   const { rfps, changes, approvalSummary } = await getRfpsForPeriod(dateFrom, now, includeRfpLog);
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
+  // The SAME lookup the scheduled path makes, over this path's own window. Without it "Send Test Email"
+  // was the one route that omitted the estimates section — so the Settings action could neither preview
+  // the cards nor reveal a broken CRM connection, which is most of what a test send is FOR: the next
+  // scheduled email would have carried both.
+  const estimatesSent = await fetchCrmEstimatesSent(dateFrom, now);
+
   const html = await buildRfpReportEmailHtml({
     periodLabel: "Test Report (Last 7 Days)",
     rfps,
@@ -1184,6 +1188,7 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
     approvalSummary,
     includeRfpLog,
     includeApprovalSummary: cfg?.includeApprovalSummary ?? true,
+    estimatesSent,
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 

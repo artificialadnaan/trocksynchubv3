@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { describe, expect, it, vi } from "vitest";
 
 // Same stubs as rfp-report-email.test.ts: rfp-reports.ts imports ./db (which throws without
@@ -8,8 +9,10 @@ vi.mock("../server/email-service", () => ({ sendEmail: vi.fn() }));
 
 import { buildRfpReportEmailHtml } from "../server/rfp-reports";
 import {
+  clampEstimatesSentWindow,
   fetchCrmEstimatesSent,
   formatEstimateAmount,
+  MAX_ESTIMATES_SENT_ROWS,
   resendLabel,
   type CrmEstimateSent,
   type CrmEstimatesSentResult,
@@ -140,6 +143,91 @@ describe("the re-send annotation", () => {
   });
 });
 
+describe("the row cap and ordering the email relies on", () => {
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      deal({
+        dealId: `d-${String(i).padStart(4, "0")}`,
+        // Deliberately ASCENDING, so an unsorted client would hand the renderer the OLDEST 30.
+        enteredAt: new Date(Date.UTC(2026, 7, 1, 0, i % 1000)).toISOString(),
+      })
+    );
+
+  it("returns rows newest first, so the email's first 30 really are the newest", async () => {
+    const result = await fetchCrmEstimatesSent(new Date("2026-08-01T00:00:00Z"), new Date("2026-08-07T00:00:00Z"), {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ deals: many(50) }) }) as unknown as Response,
+      logger: () => {},
+    });
+
+    if (!result.ok) throw new Error("expected ok");
+    const times = result.deals.map((d) => Date.parse(d.enteredAt));
+    expect(times).toEqual([...times].sort((a, b) => b - a));
+  });
+
+  it("enforces the declared cap instead of documenting one it never applied", async () => {
+    const result = await fetchCrmEstimatesSent(new Date("2026-08-01T00:00:00Z"), new Date("2026-08-07T00:00:00Z"), {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: async () =>
+        ({ ok: true, status: 200, json: async () => ({ deals: many(MAX_ESTIMATES_SENT_ROWS + 25) }) }) as unknown as Response,
+      logger: () => {},
+    });
+
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.deals).toHaveLength(MAX_ESTIMATES_SENT_ROWS);
+  });
+
+  it("renders the truncation note with the real total", async () => {
+    const html = await render({ ok: true, deals: many(40) });
+    expect(html).toContain("Showing 30 of 40 estimates sent.");
+  });
+
+  it("says nothing about truncation when everything fits", async () => {
+    const html = await render({ ok: true, deals: many(5) });
+    expect(html).not.toContain("Showing 30 of");
+  });
+});
+
+// A monthly run sets dateFrom to MIDNIGHT one month back while dateTo keeps the current time, so after a
+// 31-day month the span exceeds the CRM's 31-day limit by however long the report has been running —
+// a 422, and "could not be loaded" every single month.
+describe("the request window", () => {
+  it("leaves an ordinary window alone", () => {
+    const from = new Date("2026-08-06T00:00:00Z");
+    const to = new Date("2026-08-07T00:00:00Z");
+    expect(clampEstimatesSentWindow(from, to)).toEqual({ from, to });
+  });
+
+  it("clamps a monthly window that midnight-rounding pushed over the limit", () => {
+    // 31 days back, rounded to midnight, from a 08:00 send.
+    const to = new Date("2026-08-06T08:00:00Z");
+    const from = new Date("2026-07-06T00:00:00Z");
+    expect(to.getTime() - from.getTime()).toBeGreaterThan(31 * 24 * 60 * 60 * 1000);
+
+    const clamped = clampEstimatesSentWindow(from, to);
+    expect(clamped.to).toEqual(to);
+    expect(clamped.to.getTime() - clamped.from.getTime()).toBeLessThan(31 * 24 * 60 * 60 * 1000);
+  });
+
+  it("sends the clamped window, not the requested one", async () => {
+    let body = "";
+    await fetchCrmEstimatesSent(new Date("2026-07-06T00:00:00Z"), new Date("2026-08-06T08:00:00Z"), {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: async (_url, init) => {
+        body = String(init?.body);
+        return { ok: true, status: 200, json: async () => ({ deals: [] }) } as unknown as Response;
+      },
+      logger: () => {},
+    });
+
+    const sent = JSON.parse(body) as { from: string; to: string };
+    expect(Date.parse(sent.to) - Date.parse(sent.from)).toBeLessThan(31 * 24 * 60 * 60 * 1000);
+  });
+});
+
 describe("amount formatting", () => {
   it("rounds the exact decimal string for display", () => {
     expect(formatEstimateAmount("120000.55")).toBe("$120,001");
@@ -203,8 +291,12 @@ describe("the CRM client", () => {
     expect(String(seen.init?.body)).toBe(
       JSON.stringify({ from: WINDOW_FROM.toISOString(), to: WINDOW_TO.toISOString() })
     );
+    // The DIGEST, not its shape. Any HMAC over any input is 64 hex characters, so a format check passes
+    // even if the module signed the wrong payload, used the wrong secret, or signed a re-serialised body
+    // whose key order differs from the one actually sent. Signature correctness is the whole boundary.
     const header = (seen.init?.headers as Record<string, string>)["x-rfp-request-signature"];
-    expect(header).toMatch(/^sha256=[0-9a-f]{64}$/);
+    const expected = `sha256=${crypto.createHmac("sha256", "shhh").update(String(seen.init?.body)).digest("hex")}`;
+    expect(header).toBe(expected);
   });
 
   it("reports a failure on a non-2xx, rather than an empty day", async () => {
@@ -242,7 +334,10 @@ describe("the CRM client", () => {
     expect(result).toEqual({ ok: false, reason: "failed" });
   });
 
-  it("drops a row it cannot render or order, and counts only what survived", async () => {
+  // Dropping the bad rows and returning ok:true presented the survivors as a COMPLETE answer — an
+  // understated count, or "No estimates sent" if every row was affected. That defeats the discriminator
+  // during schema drift, which is exactly when it matters.
+  it("reports a failure rather than presenting the surviving rows as the whole answer", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
       secret: "shhh",
@@ -256,11 +351,19 @@ describe("the CRM client", () => {
       logger: () => {},
     });
 
+    expect(result).toEqual({ ok: false, reason: "failed" });
+  });
+
+  it("still succeeds when every row is well-formed", async () => {
+    const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: ok({ deals: [deal({ dealId: "a" }), deal({ dealId: "b" })] }),
+      logger: () => {},
+    });
+
     expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.deals).toHaveLength(1);
-      expect(result.deals[0]!.dealId).toBe("keeps");
-    }
+    if (result.ok) expect(result.deals).toHaveLength(2);
   });
 
   // The exact-decimal choice made on the CRM side is undone if this coerces to a number.
