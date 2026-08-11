@@ -971,7 +971,13 @@ export async function buildRfpReportEmailHtml(options: {
         estimatesSent.total > MAX_ESTIMATES_SENT_ROWS
           ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Only the ${MAX_ESTIMATES_SENT_ROWS} most recent are listed.</p>`
           : "";
-      body = `${shown.map(estimateCard).join("")}${overflow}${capNote}`;
+      // How far back this run actually reached. Later than the period start only after a long gap in
+      // sending, and worth saying: the scheduler advances lastSentAt regardless, so anything outside
+      // this reach will not appear in a later report either.
+      const reachNote = `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent since ${escapeHtml(
+        formatRfpDateTime(estimatesSent.coveredFrom).date
+      )}.</p>`;
+      body = `${shown.map(estimateCard).join("")}${overflow}${capNote}${reachNote}`;
     }
 
     sections.push(`
@@ -1122,10 +1128,10 @@ async function getRfpsForPeriod(
 /** Send scheduled RFP report email */
 export async function sendScheduledRfpReport(
   config?: { recipients?: string[]; includeRfpLog?: boolean; includeApprovalSummary?: boolean }
-): Promise<{ sent: number; failed: number }> {
+): Promise<{ sent: number; failed: number; windowEnd: Date }> {
   const cfg = await storage.getReportScheduleConfig();
   if (!cfg?.enabled || !cfg.recipients?.length) {
-    return { sent: 0, failed: 0 };
+    return { sent: 0, failed: 0, windowEnd: new Date() };
   }
 
   const now = new Date();
@@ -1238,7 +1244,14 @@ export async function sendScheduledRfpReport(
     }
   }
 
-  return { sent, failed };
+  // The EXACT upper bound this run queried, for the scheduler to persist as lastSentAt.
+  //
+  // The scheduler used to persist its own `now`, sampled BEFORE calling this — an earlier instant than
+  // the dateTo used here. Every estimate entered between the two samples fell inside this report's window
+  // AND inside the next run's, because the next run started from the earlier stored value. Milliseconds
+  // usually, but a slow config read or a stalled event loop widens it. Handing back the real boundary is
+  // what makes consecutive windows genuinely abut.
+  return { sent, failed, windowEnd: dateTo };
 }
 
 /** Send a one-off test email to a specific address using current config */

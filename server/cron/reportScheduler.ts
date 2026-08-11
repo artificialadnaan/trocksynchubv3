@@ -100,9 +100,12 @@ export function startRfpReportScheduler() {
       )
         return;
 
-      const { sent } = await sendScheduledRfpReport();
+      // Persist the boundary the report ACTUALLY queried to, not this loop's earlier `now`. The two are
+      // different clock samples, and starting the next window from the earlier one re-reports everything
+      // entered in between.
+      const { sent, windowEnd } = await sendScheduledRfpReport();
       if (sent > 0) {
-        await storage.upsertReportScheduleConfig({ ...config, lastSentAt: now });
+        await storage.upsertReportScheduleConfig({ ...config, lastSentAt: windowEnd ?? now });
         console.log(`[RFP Report] Sent scheduled report to ${sent} recipient(s)`);
       }
     } catch (e: unknown) {

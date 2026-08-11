@@ -14,6 +14,7 @@ import {
   fetchCrmEstimatesSent,
   formatEstimateAmount,
   MAX_ESTIMATES_SENT_ROWS,
+  MAX_ESTIMATES_SENT_REQUESTS,
   resendLabel,
   type CrmEstimateSent,
   type CrmEstimatesSentResult,
@@ -51,7 +52,7 @@ async function render(estimatesSent?: CrmEstimatesSentResult): Promise<string> {
 
 describe("the Estimates Sent to Client section", () => {
   it("lists each deal with its amount and owner", async () => {
-    const html = await render({ ok: true, deals: [deal()], total: 1 });
+    const html = await render({ ok: true, deals: [deal()], total: 1, coveredFrom: "2026-08-01T00:00:00.000Z" });
 
     expect(html).toContain("Estimates Sent to Client — Last 24 Hours");
     expect(html).toContain("Elan at Bluffview");
@@ -67,12 +68,12 @@ describe("the Estimates Sent to Client section", () => {
   });
 
   it("uses the singular for exactly one", async () => {
-    const html = await render({ ok: true, deals: [deal()], total: 1 });
+    const html = await render({ ok: true, deals: [deal()], total: 1, coveredFrom: "2026-08-01T00:00:00.000Z" });
     expect(html).toContain("1 Estimate Sent");
   });
 
   it("says plainly when nothing was sent", async () => {
-    const html = await render({ ok: true, deals: [], total: 0 });
+    const html = await render({ ok: true, deals: [], total: 0, coveredFrom: "2026-08-01T00:00:00.000Z" });
 
     expect(html).toContain("No estimates sent to clients in this period.");
     expect(html).toContain("0 Estimates Sent");
@@ -196,18 +197,18 @@ describe("the row cap and ordering the email relies on", () => {
   });
 
   it("says nothing about the list cap when the total is under it", async () => {
-    const html = await render({ ok: true, deals: many(40), total: 40 });
+    const html = await render({ ok: true, deals: many(40), total: 40, coveredFrom: "2026-08-01T00:00:00.000Z" });
     expect(html).not.toContain("most recent are listed");
   });
 
   it("renders the truncation note with the real total", async () => {
-    const html = await render({ ok: true, deals: many(40), total: 40 });
+    const html = await render({ ok: true, deals: many(40), total: 40, coveredFrom: "2026-08-01T00:00:00.000Z" });
     // With no RFPs competing for the budget, the estimates section gets the whole of it.
     expect(html).toContain(`Showing ${EMAIL_CARD_BUDGET} of 40 estimates sent.`);
   });
 
   it("says nothing about truncation when everything fits", async () => {
-    const html = await render({ ok: true, deals: many(5), total: 5 });
+    const html = await render({ ok: true, deals: many(5), total: 5, coveredFrom: "2026-08-01T00:00:00.000Z" });
     expect(html).not.toContain("estimates sent.");
   });
 });
@@ -280,6 +281,7 @@ describe("escaping", () => {
       ok: true,
       deals: [deal({ name: `<script>alert(1)</script>`, ownerName: `A & B "Co"` })],
       total: 1,
+      coveredFrom: "2026-08-01T00:00:00.000Z",
     });
 
     expect(html).not.toContain("<script>alert(1)</script>");
@@ -486,10 +488,110 @@ describe("the shared card budget", () => {
           deal({ dealId: `x-${i}`, enteredAt: new Date(Date.UTC(2026, 7, 1, 0, i)).toISOString() })
         ),
         total: 40,
+        coveredFrom: "2026-08-01T00:00:00.000Z",
       },
       dashboardUrl: "https://synchub.example.com/settings",
     });
 
     expect(html).toContain(`Showing ${EMAIL_CARD_BUDGET} of 40 estimates sent.`);
+  });
+});
+
+// A catch-up after a disabled schedule or a long outage used to lose everything older than 31 days —
+// and because the scheduler advances lastSentAt on a successful send, those estimates would never have
+// appeared in ANY later report either, while the lookup reported ok.
+describe("covering a long catch-up interval", () => {
+  function countingFetch(seen: string[][]) {
+    return async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { from: string; to: string };
+      seen.push([body.from, body.to]);
+      return { ok: true, status: 200, json: async () => ({ deals: [] }) } as unknown as Response;
+    };
+  }
+
+  it("splits a 90-day gap into endpoint-sized requests instead of dropping the oldest 59 days", async () => {
+    const seen: string[][] = [];
+    const to = new Date("2026-08-06T00:00:00Z");
+    const from = new Date(to.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+    const result = await fetchCrmEstimatesSent(from, to, {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: countingFetch(seen),
+      logger: () => {},
+    });
+
+    expect(seen.length).toBeGreaterThan(1);
+    // Contiguous, newest first: each chunk starts where the previous one ended.
+    for (let i = 1; i < seen.length; i += 1) {
+      expect(seen[i]![1]).toBe(seen[i - 1]![0]);
+    }
+    if (!result.ok) throw new Error("expected ok");
+    expect(Date.parse(result.coveredFrom)).toBe(from.getTime());
+  });
+
+  it("makes ONE request for an ordinary window", async () => {
+    const seen: string[][] = [];
+    await fetchCrmEstimatesSent(new Date("2026-08-05T00:00:00Z"), new Date("2026-08-06T00:00:00Z"), {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: countingFetch(seen),
+      logger: () => {},
+    });
+
+    expect(seen).toHaveLength(1);
+  });
+
+  // Past the request budget the reach is stated rather than silently shortened.
+  it("reports how far back it actually reached when the gap exceeds the budget", async () => {
+    const to = new Date("2026-08-06T00:00:00Z");
+    const from = new Date(to.getTime() - 400 * 24 * 60 * 60 * 1000);
+
+    const result = await fetchCrmEstimatesSent(from, to, {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: countingFetch([]),
+      logger: () => {},
+    });
+
+    if (!result.ok) throw new Error("expected ok");
+    expect(Date.parse(result.coveredFrom)).toBeGreaterThan(from.getTime());
+    expect(Date.parse(result.coveredFrom)).toBe(
+      to.getTime() - MAX_ESTIMATES_SENT_REQUESTS * 31 * 24 * 60 * 60 * 1000
+    );
+  });
+});
+
+// priorEntryCount drives the re-send badge. Coercing a missing or malformed value to 0 does not degrade
+// gracefully — it presents a revised estimate as new business, the one thing the annotation prevents.
+describe("a malformed resend count", () => {
+  it("makes the row unusable rather than silently reading as a first send", async () => {
+    for (const bad of [undefined, null, "2", -1, 1.5, Number.NaN]) {
+      const result = await fetchCrmEstimatesSent(new Date("2026-08-05T00:00:00Z"), new Date("2026-08-06T00:00:00Z"), {
+        baseUrl: "https://crm.example.com",
+        secret: "shhh",
+        fetchImpl: async () =>
+          ({
+            ok: true,
+            status: 200,
+            json: async () => ({ deals: [{ ...deal(), priorEntryCount: bad }] }),
+          }) as unknown as Response,
+        logger: () => {},
+      });
+
+      expect(result, `priorEntryCount=${String(bad)}`).toEqual({ ok: false, reason: "failed" });
+    }
+  });
+
+  it("accepts a genuine zero", async () => {
+    const result = await fetchCrmEstimatesSent(new Date("2026-08-05T00:00:00Z"), new Date("2026-08-06T00:00:00Z"), {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: async () =>
+        ({ ok: true, status: 200, json: async () => ({ deals: [deal({ priorEntryCount: 0 })] }) }) as unknown as Response,
+      logger: () => {},
+    });
+
+    expect(result.ok).toBe(true);
   });
 });

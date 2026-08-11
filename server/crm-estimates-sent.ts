@@ -57,6 +57,15 @@ export type CrmEstimatesSentResult =
        * that held more. The CRM caps the WINDOW, not the row count, so this is the true figure.
        */
       total: number;
+      /**
+       * The earliest instant actually covered.
+       *
+       * Later than the requested `from` when the interval was too long to cover in
+       * MAX_ESTIMATES_SENT_REQUESTS endpoint-sized requests. It matters because the scheduler advances
+       * lastSentAt on a successful send: anything silently dropped here would never appear in ANY later
+       * report, so the section states its real reach instead.
+       */
+      coveredFrom: string;
     }
   | { ok: false; reason: "not_configured" | "failed" };
 
@@ -80,6 +89,15 @@ export const MAX_ESTIMATES_SENT_ROWS = 500;
  * reader has not already seen.
  */
 export const MAX_ESTIMATES_SENT_WINDOW_DAYS = 31;
+
+/**
+ * How many endpoint-sized requests one run may make to cover a long catch-up interval.
+ *
+ * 4 x 31 days is about four months — generous for a scheduler that was disabled, a process that was
+ * down, or a stretch where every delivery failed. Beyond that the email is not a catch-up tool, and the
+ * section says how far back it actually reached rather than pretending.
+ */
+export const MAX_ESTIMATES_SENT_REQUESTS = 4;
 
 /** The widest window the CRM will accept, ending at `to`. */
 export function clampEstimatesSentWindow(from: Date, to: Date): { from: Date; to: Date } {
@@ -116,10 +134,68 @@ export async function fetchCrmEstimatesSent(
     return { ok: false, reason: "not_configured" };
   }
 
-  const window = clampEstimatesSentWindow(from, to);
+  const doFetch = deps.fetchImpl ?? fetch;
+
+  // COVER THE WHOLE INTERVAL, newest chunk first, in endpoint-sized requests.
+  //
+  // A single clamped request silently dropped everything older than 31 days — and because the scheduler
+  // advances lastSentAt on a successful send, those estimates would never appear in any later report
+  // either. A catch-up after a disabled schedule or a long outage simply lost them, while the email said
+  // ok. Chunking preserves them; `coveredFrom` states the reach when even the chunk budget runs out.
+  const windows: Array<{ from: Date; to: Date }> = [];
+  let cursorTo = to;
+  while (cursorTo.getTime() > from.getTime() && windows.length < MAX_ESTIMATES_SENT_REQUESTS) {
+    const chunk = clampEstimatesSentWindow(from, cursorTo);
+    windows.push(chunk);
+    cursorTo = chunk.from;
+  }
+  if (windows.length === 0) windows.push(clampEstimatesSentWindow(from, to));
+
+  const collected: CrmEstimateSent[] = [];
+  let totalMalformed = 0;
+  const coveredFrom = windows[windows.length - 1]!.from;
+
+  for (const window of windows) {
+    const outcome = await fetchOneWindow(window, { baseUrl, secret, doFetch, deps, logger });
+    if (!outcome.ok) return outcome;
+    collected.push(...outcome.deals);
+    totalMalformed += outcome.malformed;
+  }
+
+  if (totalMalformed > 0) {
+    logger(`[rfp-reports] CRM estimates-sent returned ${totalMalformed} unusable row(s); reporting the section as unavailable`);
+    return { ok: false, reason: "failed" };
+  }
+
+  // NEWEST FIRST, then capped — the email slices its budget off the front and states the total, which is
+  // only meaningful for an ordered list. Sorted across chunks, since each covers its own span.
+  collected.sort((a, b) => {
+    const delta = Date.parse(b.enteredAt) - Date.parse(a.enteredAt);
+    return delta !== 0 ? delta : a.dealId.localeCompare(b.dealId);
+  });
+
+  return {
+    ok: true,
+    deals: collected.slice(0, MAX_ESTIMATES_SENT_ROWS),
+    total: collected.length,
+    coveredFrom: coveredFrom.toISOString(),
+  };
+}
+
+/** One endpoint-sized request. Returns the parsed rows, or the failure the caller should surface. */
+async function fetchOneWindow(
+  window: { from: Date; to: Date },
+  ctx: {
+    baseUrl: string;
+    secret: string;
+    doFetch: (url: string, init: RequestInit) => Promise<Response>;
+    deps: CrmEstimatesSentDeps;
+    logger: (message: string) => void;
+  }
+): Promise<{ ok: true; deals: CrmEstimateSent[]; malformed: number } | { ok: false; reason: "failed" }> {
+  const { baseUrl, secret, doFetch, deps, logger } = ctx;
   const rawBody = JSON.stringify({ from: window.from.toISOString(), to: window.to.toISOString() });
   const signature = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
-  const doFetch = deps.fetchImpl ?? fetch;
 
   // One deadline covering the request, the response headers AND the body read — cleared only after
   // response.json() has settled, so a server that sends 200 and then stalls mid-JSON aborts into the
@@ -161,7 +237,17 @@ export async function fetchCrmEstimatesSent(
       // discriminator exists to prevent: under schema drift or partial bad data leadership would read
       // an understated count, or "No estimates sent" when every row was malformed. Counted, and turned
       // into a stated failure below.
-      if (!dealId || !enteredAt || Number.isNaN(Date.parse(enteredAt))) {
+      // priorEntryCount is SEMANTICALLY REQUIRED: it drives the re-send badge, and coercing a missing or
+      // malformed value to 0 does not degrade gracefully — it presents a revised estimate as new business,
+      // which is the one thing the annotation exists to prevent. Treated as an unusable row, like a
+      // missing id or timestamp.
+      const priorEntryCount = entry?.priorEntryCount;
+      const priorEntryCountValid =
+        typeof priorEntryCount === "number" &&
+        Number.isInteger(priorEntryCount) &&
+        priorEntryCount >= 0;
+
+      if (!dealId || !enteredAt || Number.isNaN(Date.parse(enteredAt)) || !priorEntryCountValid) {
         malformed += 1;
         continue;
       }
@@ -181,27 +267,11 @@ export async function fetchCrmEstimatesSent(
           : "0",
         ownerName: typeof entry?.ownerName === "string" ? entry.ownerName : null,
         ownerEmail: typeof entry?.ownerEmail === "string" ? entry.ownerEmail : null,
-        priorEntryCount: Number.isFinite(Number(entry?.priorEntryCount))
-          ? Math.max(0, Math.trunc(Number(entry.priorEntryCount)))
-          : 0,
+        priorEntryCount,
       });
     }
 
-    if (malformed > 0) {
-      logger(`[rfp-reports] CRM estimates-sent returned ${malformed} unusable row(s); reporting the section as unavailable`);
-      return { ok: false, reason: "failed" };
-    }
-
-    // NEWEST FIRST, then capped — the email slices the first 30 and prints "Showing 30 of N", which is
-    // only true of an ordered list. The CRM already orders its response, but this module states the
-    // guarantee the renderer relies on, so a change on the other side of the wire cannot quietly turn
-    // "the 30 newest" into "30 arbitrary rows".
-    parsed.sort((a, b) => {
-      const delta = Date.parse(b.enteredAt) - Date.parse(a.enteredAt);
-      return delta !== 0 ? delta : a.dealId.localeCompare(b.dealId);
-    });
-
-    return { ok: true, deals: parsed.slice(0, MAX_ESTIMATES_SENT_ROWS), total: parsed.length };
+    return { ok: true, deals: parsed, malformed };
   } catch (error: any) {
     const reason =
       error?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : error?.message || error;
