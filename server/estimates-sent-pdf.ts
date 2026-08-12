@@ -120,23 +120,16 @@ export function totalEstimateCents(deals: CrmEstimateSent[]): number {
 export function formatCentsUsd(cents: number): string {
   const negative = cents < 0;
   const abs = Math.abs(cents);
-  const body = `$${Math.round(abs / 100).toLocaleString("en-US")}`;
+  // Below a dollar the cents are shown, for the same reason `formatEstimateAmount` shows them: rounding
+  // a real sub-dollar net to "$0" — or "-$0" — states the document totals nothing while a row directly
+  // above it reads "-$0.25". The footer's whole job is to agree with the rows it sums. Exactly zero
+  // still reads "$0": there it is the true total, not a value rounded out of existence.
+  const dollars = abs / 100;
+  const body =
+    abs > 0 && Math.round(dollars) === 0
+      ? `$${dollars.toFixed(2)}`
+      : `$${Math.round(dollars).toLocaleString("en-US")}`;
   return negative ? `-${body}` : body;
-}
-
-/**
- * Signed currency for the PDF's own rows.
- *
- * `formatEstimateAmount` — which the email cards use — returns an em dash for any value <= 0, so a
- * deductive change order rendered as "—" while this document's footer quietly subtracted it: a row that
- * shows nothing and a total that moved. The complete record has to show the number it is summing.
- * Zero and unparseable values keep the shared formatter's em dash, which is what the email shows too.
- */
-export function formatSignedEstimateAmount(amount: string): string {
-  const value = Number(amount);
-  if (!Number.isFinite(value) || value === 0) return "—";
-  if (value > 0) return formatEstimateAmount(amount);
-  return `-$${Math.round(Math.abs(value)).toLocaleString("en-US")}`;
 }
 
 
@@ -166,6 +159,15 @@ export interface EstimatesSentPdfInput {
    * 500-row cap bites. Defaults to the row count for callers that have no separate total.
    */
   total?: number;
+  /**
+   * Emit uncompressed content streams. Production leaves this alone.
+   *
+   * pdfkit compresses page content by default, so what the document SAYS cannot be read back out of the
+   * buffer — a test asserting on rendered text silently matches nothing and passes for the wrong reason.
+   * Turning compression off makes the text assertable, which is the only way to prove a row renders the
+   * amount it is supposed to.
+   */
+  compress?: boolean;
 }
 
 /** Builds the attachment. Callers must treat a rejection as "send without the attachment". */
@@ -174,6 +176,7 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
     size: "LETTER",
     layout: "landscape",
     margins: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN },
+    compress: input.compress ?? true,
     // pdfkit otherwise emits its first page before the header is drawn, leaving a blank leading sheet.
     autoFirstPage: false,
   });
@@ -216,7 +219,7 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
     doc.fillColor(BRAND_DARK).fontSize(9).font("Helvetica");
     doc.text(identifier, columnX(0) + 8, y + 6, { width: COLUMNS[0]!.width - 16, lineBreak: false, ellipsis: true });
     doc.text(name, columnX(1) + 8, y + 6, { width: COLUMNS[1]!.width - 16 });
-    doc.font("Helvetica-Bold").text(formatSignedEstimateAmount(deal.amount), columnX(2) + 8, y + 6, {
+    doc.font("Helvetica-Bold").text(formatEstimateAmount(deal.amount), columnX(2) + 8, y + 6, {
       width: COLUMNS[2]!.width - 16,
       align: "right",
       lineBreak: false,

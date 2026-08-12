@@ -29,11 +29,10 @@ import {
   estimatesSentPdfFilename,
   formatCentsUsd,
   estimatesTotalLabel,
-  formatSignedEstimateAmount,
   totalEstimateCents,
 } from "../server/estimates-sent-pdf";
 import { buildEstimatesAttachment, buildRfpReportEmailHtml } from "../server/rfp-reports";
-import type { CrmEstimateSent, CrmEstimatesSentResult } from "../server/crm-estimates-sent";
+import { formatEstimateAmount, type CrmEstimateSent, type CrmEstimatesSentResult } from "../server/crm-estimates-sent";
 
 function deal(overrides: Partial<CrmEstimateSent> = {}): CrmEstimateSent {
   return {
@@ -50,6 +49,19 @@ function deal(overrides: Partial<CrmEstimateSent> = {}): CrmEstimateSent {
     priorEntryCount: 0,
     ...overrides,
   };
+}
+
+/**
+ * The text a PDF actually RENDERS.
+ *
+ * pdfkit emits text as hex-encoded glyph runs inside `[ … ] TJ`, not as literal ASCII, so searching the
+ * raw buffer for a rendered string silently finds nothing and the assertion passes vacuously. Callers
+ * must build with `compress: false`, since the content stream is otherwise deflated.
+ */
+function pdfText(buf: Buffer): string {
+  return (buf.toString("latin1").match(/<[0-9a-fA-F]+>/g) || [])
+    .map((h) => Buffer.from(h.slice(1, -1), "hex").toString("latin1"))
+    .join("");
 }
 
 function okResult(deals: CrmEstimateSent[]): CrmEstimatesSentResult {
@@ -98,6 +110,20 @@ describe("formatCentsUsd", () => {
 
   it("keeps a negative total signed rather than showing it as positive", () => {
     expect(formatCentsUsd(-2550)).toBe("-$26");
+  });
+
+  it("keeps the cents on a sub-dollar total instead of rounding it away to $0", () => {
+    // The footer sums the very rows the document lists, so whole-dollar rounding made it contradict
+    // them: a lone -$0.25 row under a "-$0" total. That is the same contradiction the row formatter
+    // just stopped producing, one line further down the page.
+    expect(formatCentsUsd(-25)).toBe("-$0.25");
+    expect(formatCentsUsd(25)).toBe("$0.25");
+    expect(formatCentsUsd(-49)).toBe("-$0.49");
+    // Half a dollar is no longer sub-dollar once rounded, so the whole-dollar form resumes here.
+    expect(formatCentsUsd(50)).toBe("$1");
+    expect(formatCentsUsd(-50)).toBe("-$1");
+    // Exactly zero is a true total, not a missing value: the footer states it as a number.
+    expect(formatCentsUsd(0)).toBe("$0");
   });
 });
 
@@ -260,20 +286,43 @@ describe("when the endpoint capped the rows", () => {
   });
 });
 
-// A deductive change order is a real, signed number. Showing an em dash in the row while the footer
-// subtracts it makes the document disagree with itself.
-describe("formatSignedEstimateAmount", () => {
-  it("renders a negative amount signed rather than as an em dash", () => {
-    expect(formatSignedEstimateAmount("-25.50")).toBe("-$26");
+// A deductive change order is a real, signed number. The PDF now uses the SHARED formatter — the
+// PDF-local signed variant is gone — so the row and the footer can no longer disagree, and neither can
+// the PDF and the email.
+describe("the PDF renders amounts with the shared formatter", () => {
+  it("shows a negative amount signed, matching what the footer subtracts", () => {
+    expect(formatEstimateAmount("-25.50")).toBe("-$26");
+    expect(totalEstimateCents([deal({ amount: "-25.50" })])).toBe(-2550);
   });
 
-  it("matches the email formatter for positive amounts", () => {
-    expect(formatSignedEstimateAmount("1000.00")).toBe("$1,000");
+  // Through the BUILDER, not just the formatter — otherwise nothing catches the row reverting to a
+  // positive-only formatter. pdfkit writes text as hex-encoded glyph runs, so the rendered string has to
+  // be decoded back out; asserting on the raw buffer matches nothing and passes for the wrong reason.
+  it("renders the signed amount in the document itself", async () => {
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Deductive CO", amount: "-25.50" })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    });
+    // ADJACENCY, not two independent substrings: the amount cell follows the name cell directly in the
+    // decoded run, so this fails if the row reverts to the em dash it used to print. Asserting
+    // `not.toContain("Deductive CO—")` would NOT — pdfText decodes glyphs as latin1 and an em dash never
+    // survives that as "—", so the negative can never fail and proves nothing.
+    expect(pdfText(pdf)).toContain("Deductive CO-$26");
   });
 
-  it("keeps the em dash for zero and for unparseable input", () => {
-    expect(formatSignedEstimateAmount("0.00")).toBe("—");
-    expect(formatSignedEstimateAmount("oops")).toBe("—");
+  it("renders a sub-dollar deduction with cents rather than -$0, footer included", async () => {
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Tiny deduction", amount: "-0.25" })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    });
+    const rendered = pdfText(pdf);
+    expect(rendered).toContain("Tiny deduction-$0.25");
+    // The footer sums this one row, so it has to agree with it. The whole sentence is asserted rather
+    // than the money alone: a bare toContain("-$0.25") is already satisfied by the ROW above, and would
+    // pass with a footer still rounding to "-$0".
+    expect(rendered).toContain("1 estimate · -$0.25");
   });
 });
 
