@@ -28,6 +28,8 @@ import {
   buildEstimatesSentPdf,
   estimatesSentPdfFilename,
   formatCentsUsd,
+  estimatesTotalLabel,
+  formatSignedEstimateAmount,
   totalEstimateCents,
 } from "../server/estimates-sent-pdf";
 import { buildEstimatesAttachment, buildRfpReportEmailHtml } from "../server/rfp-reports";
@@ -147,9 +149,10 @@ describe("buildEstimatesSentPdf", () => {
 
 describe("buildEstimatesAttachment", () => {
   const runAt = new Date("2026-08-12T13:00:00.000Z");
+  const PERIOD = { from: new Date("2026-08-05T13:00:00Z"), to: new Date("2026-08-12T13:00:00Z") };
 
   it("attaches the full list when there are estimates", async () => {
-    const attachment = await buildEstimatesAttachment(okResult([deal(), deal({ dealId: "d2" })]), "Aug 5 – Aug 12", runAt);
+    const attachment = await buildEstimatesAttachment(okResult([deal(), deal({ dealId: "d2" })]), PERIOD, "Aug 5 – Aug 12", runAt);
     expect(attachment).not.toBeNull();
     expect(attachment!.filename).toBe("estimates-sent-2026-08-12.pdf");
     expect(attachment!.contentType).toBe("application/pdf");
@@ -157,15 +160,15 @@ describe("buildEstimatesAttachment", () => {
   });
 
   it("attaches nothing on a quiet day", async () => {
-    expect(await buildEstimatesAttachment(okResult([]), "Aug 5 – Aug 12", runAt)).toBeNull();
+    expect(await buildEstimatesAttachment(okResult([]), PERIOD, "Aug 5 – Aug 12", runAt)).toBeNull();
   });
 
   it("attaches nothing when the lookup did not answer", async () => {
     expect(
-      await buildEstimatesAttachment({ ok: false, reason: "failed" } as CrmEstimatesSentResult, "x", runAt)
+      await buildEstimatesAttachment({ ok: false, reason: "failed" } as CrmEstimatesSentResult, PERIOD, "x", runAt)
     ).toBeNull();
     expect(
-      await buildEstimatesAttachment({ ok: false, reason: "not_configured" } as CrmEstimatesSentResult, "x", runAt)
+      await buildEstimatesAttachment({ ok: false, reason: "not_configured" } as CrmEstimatesSentResult, PERIOD, "x", runAt)
     ).toBeNull();
   });
 });
@@ -213,5 +216,103 @@ describe("the attachment note in the email body", () => {
     } as any);
     expect(html).toContain("of 40 estimates sent.");
     expect(html).toContain("Full list of 40 attached as");
+  });
+});
+
+// ── Codex review fixes ────────────────────────────────────────────────────────
+
+// The endpoint caps its rows at MAX_ESTIMATES_SENT_ROWS while still reporting the true total, so past
+// that the attachment holds the newest N — and must not be described as the complete list.
+describe("when the endpoint capped the rows", () => {
+  const cappedResult = (shown: number, total: number): CrmEstimatesSentResult =>
+    ({
+      ok: true,
+      deals: Array.from({ length: shown }, (_, i) => deal({ dealId: `c${i}` })),
+      total,
+      coveredFrom: "2026-08-05T13:00:00.000Z",
+      coveredThrough: "2026-08-12T13:00:00.000Z",
+    }) as CrmEstimatesSentResult;
+
+  it("the PDF footer says how many of how many, not a total it did not sum", () => {
+    const four = Array.from({ length: 4 }, (_, i) => deal({ dealId: `c${i}`, amount: "10.00" }));
+    // Truncated: names both numbers, and the money is what these four rows actually sum to.
+    expect(estimatesTotalLabel(four, 900)).toBe("Most recent 4 of 900 estimates · $40 shown");
+    // Not truncated: the plain form.
+    expect(estimatesTotalLabel(four, 4)).toBe("4 estimates · $40");
+    expect(estimatesTotalLabel([deal({ amount: "10.00" })], 1)).toBe("1 estimate · $10");
+  });
+
+  it("the email says 'most recent N of M', never 'full list'", async () => {
+    const html = await buildRfpReportEmailHtml({
+      periodLabel: "Last 24 Hours",
+      rfps: [],
+      changes: [],
+      approvalSummary: { pending: 0, approved: 0, rejected: 0 },
+      includeRfpLog: true,
+      includeApprovalSummary: true,
+      estimatesPeriod: { from: new Date("2026-08-05T13:00:00Z"), to: new Date("2026-08-12T13:00:00Z") },
+      dashboardUrl: "https://example.test/settings",
+      estimatesSent: cappedResult(500, 900),
+      estimatesPdfFilename: "estimates-sent-2026-08-12.pdf",
+    } as any);
+    expect(html).toContain("Most recent 500 of 900 attached as");
+    expect(html).not.toContain("Full list of");
+  });
+});
+
+// A deductive change order is a real, signed number. Showing an em dash in the row while the footer
+// subtracts it makes the document disagree with itself.
+describe("formatSignedEstimateAmount", () => {
+  it("renders a negative amount signed rather than as an em dash", () => {
+    expect(formatSignedEstimateAmount("-25.50")).toBe("-$26");
+  });
+
+  it("matches the email formatter for positive amounts", () => {
+    expect(formatSignedEstimateAmount("1000.00")).toBe("$1,000");
+  });
+
+  it("keeps the em dash for zero and for unparseable input", () => {
+    expect(formatSignedEstimateAmount("0.00")).toBe("—");
+    expect(formatSignedEstimateAmount("oops")).toBe("—");
+  });
+});
+
+// The scheduler picks its slot in the configured timezone, so slicing the UTC date named an evening run
+// for the next calendar day — the one thing the date in the filename exists to pin down.
+describe("estimatesSentPdfFilename timezone", () => {
+  it("uses the report timezone, not UTC", () => {
+    // 2026-08-12T01:00Z is still Aug 11 in Chicago.
+    expect(estimatesSentPdfFilename(new Date("2026-08-12T01:00:00.000Z"))).toBe(
+      "estimates-sent-2026-08-11.pdf"
+    );
+  });
+
+  it("honours a different configured zone", () => {
+    expect(estimatesSentPdfFilename(new Date("2026-08-12T01:00:00.000Z"), "UTC")).toBe(
+      "estimates-sent-2026-08-12.pdf"
+    );
+  });
+
+  it("falls back to UTC rather than throwing on an unknown zone", () => {
+    expect(estimatesSentPdfFilename(new Date("2026-08-12T13:00:00.000Z"), "Not/AZone")).toBe(
+      "estimates-sent-2026-08-12.pdf"
+    );
+  });
+});
+
+// The badge sits below the deal name; if its line is not reserved it crosses the row rule onto the
+// next row, and the page-break test is short by the same amount.
+describe("re-send badge row height", () => {
+  it("reserves space for the badge instead of overlapping the next row", async () => {
+    const withBadge = await buildEstimatesSentPdf({
+      deals: Array.from({ length: 20 }, (_, i) => deal({ dealId: `b${i}`, priorEntryCount: 2 })),
+      periodLabel: "Aug 5 – Aug 12",
+    });
+    const withoutBadge = await buildEstimatesSentPdf({
+      deals: Array.from({ length: 20 }, (_, i) => deal({ dealId: `n${i}`, priorEntryCount: 0 })),
+      periodLabel: "Aug 5 – Aug 12",
+    });
+    // Taller rows for the same row count means the badge line was actually reserved.
+    expect(withBadge.length).toBeGreaterThan(withoutBadge.length);
   });
 });

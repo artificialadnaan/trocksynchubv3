@@ -924,10 +924,7 @@ export async function buildRfpReportEmailHtml(options: {
     // three-week count is simply a false caption.
     // Captioned with what was actually COVERED, which after an oldest-first catch-up stops short of the
     // period end. Naming the requested end would caption the section with a stretch it never queried.
-    const estimatesPeriodLabel =
-      estimatesSent.ok && estimatesPeriod
-        ? `${formatRfpDateTime(estimatesPeriod.from.toISOString()).date} – ${formatRfpDateTime(estimatesSent.coveredThrough).date}`
-        : periodLabel;
+    const estimatesPeriodLabel = estimatesCoverageLabel(estimatesSent, estimatesPeriod, periodLabel);
     const sectionHeading = `<h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Estimates Sent to Client — ${escapeHtml(estimatesPeriodLabel)}</h3>`;
 
     let body: string;
@@ -1006,10 +1003,16 @@ export async function buildRfpReportEmailHtml(options: {
       // An attachment that appears silently on busy days and vanishes on quiet ones reads as a glitch;
       // the body should always account for what is clipped to the message. Conditional on the PDF having
       // been BUILT — see estimatesPdfFilename — so a failed generation never leaves a false promise.
+      // "Full list" ONLY when the attachment really is one. The endpoint caps its rows at
+      // MAX_ESTIMATES_SENT_ROWS while still reporting the true total, so past that the PDF holds the
+      // newest N and saying otherwise would be a false claim printed next to an accurate count.
+      const attachedCount = estimatesSent.deals.length;
       const attachmentNote = estimatesPdfFilename
-        ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Full list of ${estimatesSent.total} attached as <strong>${escapeHtml(
-            estimatesPdfFilename
-          )}</strong>.</p>`
+        ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">${
+            estimatesSent.total > attachedCount
+              ? `Most recent ${attachedCount} of ${estimatesSent.total} attached as`
+              : `Full list of ${estimatesSent.total} attached as`
+          } <strong>${escapeHtml(estimatesPdfFilename)}</strong>.</p>`
         : "";
       // Only about the LIST. The count above is exact; what the cap limits is how many rows were carried
       // back, which matters only if someone expected to scroll all of them.
@@ -1176,6 +1179,25 @@ async function getRfpsForPeriod(
 }
 
 /**
+ * The span the estimates actually cover, as both the section heading and the PDF caption print it.
+ *
+ * ONE definition for both surfaces. The cadence label ("Last 24 Hours") is only right when the lookup
+ * covered exactly one cadence: after a pause or an outage the estimates window is the whole catch-up
+ * interval, so captioning weeks of rows "Last 24 Hours" is a false statement, not a rounding. The email
+ * already derived the real range; the attachment was handed the cadence label and printed it verbatim.
+ */
+export function estimatesCoverageLabel(
+  estimatesSent: CrmEstimatesSentResult | undefined,
+  estimatesPeriod: { from: Date; to: Date } | undefined,
+  fallback: string
+): string {
+  if (!estimatesSent?.ok || !estimatesPeriod) return fallback;
+  return `${formatRfpDateTime(estimatesPeriod.from.toISOString()).date} – ${
+    formatRfpDateTime(estimatesSent.coveredThrough).date
+  }`;
+}
+
+/**
  * Build the full-list PDF attachment, or null when there is nothing to attach.
  *
  * NEVER throws. The attachment is a convenience on top of a report that must go out regardless — a
@@ -1185,14 +1207,22 @@ async function getRfpsForPeriod(
  */
 export async function buildEstimatesAttachment(
   estimatesSent: CrmEstimatesSentResult,
-  periodLabel: string,
-  runAt: Date
+  estimatesPeriod: { from: Date; to: Date } | undefined,
+  fallbackLabel: string,
+  runAt: Date,
+  timezone?: string
 ): Promise<EmailAttachment | null> {
   if (!estimatesSent.ok || estimatesSent.deals.length === 0) return null;
   try {
-    const content = await buildEstimatesSentPdf({ deals: estimatesSent.deals, periodLabel });
+    const content = await buildEstimatesSentPdf({
+      deals: estimatesSent.deals,
+      // The TRUE count, which is not deals.length once the endpoint's 500-row cap bites. The PDF says
+      // so on its face rather than presenting the newest 500 as everything.
+      total: estimatesSent.total,
+      periodLabel: estimatesCoverageLabel(estimatesSent, estimatesPeriod, fallbackLabel),
+    });
     return {
-      filename: estimatesSentPdfFilename(runAt),
+      filename: estimatesSentPdfFilename(runAt, timezone),
       content,
       contentType: "application/pdf",
     };
@@ -1323,7 +1353,13 @@ export async function sendScheduledRfpReport(
 
   // BEFORE the HTML: the body names the attachment, so the file has to exist before the sentence
   // claiming it does. Built once and reused for every recipient rather than per send.
-  const estimatesAttachment = await buildEstimatesAttachment(estimatesSent, periodLabel, dateTo);
+  const estimatesAttachment = await buildEstimatesAttachment(
+    estimatesSent,
+    { from: estimatesFrom, to: dateTo },
+    periodLabel,
+    dateTo,
+    cfg.timezone ?? undefined
+  );
 
   const html = await buildRfpReportEmailHtml({
     periodLabel,
@@ -1408,8 +1444,10 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
   // build, which is now one of the things a test send is FOR.
   const estimatesAttachment = await buildEstimatesAttachment(
     estimatesSent,
+    { from: estimatesFrom, to: now },
     "Test Report (Last 7 Days)",
-    now
+    now,
+    cfg?.timezone ?? undefined
   );
 
   const html = await buildRfpReportEmailHtml({

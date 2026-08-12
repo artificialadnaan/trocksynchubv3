@@ -124,10 +124,48 @@ export function formatCentsUsd(cents: number): string {
   return negative ? `-${body}` : body;
 }
 
+/**
+ * Signed currency for the PDF's own rows.
+ *
+ * `formatEstimateAmount` — which the email cards use — returns an em dash for any value <= 0, so a
+ * deductive change order rendered as "—" while this document's footer quietly subtracted it: a row that
+ * shows nothing and a total that moved. The complete record has to show the number it is summing.
+ * Zero and unparseable values keep the shared formatter's em dash, which is what the email shows too.
+ */
+export function formatSignedEstimateAmount(amount: string): string {
+  const value = Number(amount);
+  if (!Number.isFinite(value) || value === 0) return "—";
+  if (value > 0) return formatEstimateAmount(amount);
+  return `-$${Math.round(Math.abs(value)).toLocaleString("en-US")}`;
+}
+
+
+/**
+ * The footer line: what this DOCUMENT contains, and — when the endpoint capped the rows — that it is
+ * not all of them.
+ *
+ * Printing the true total beside a sum of only the newest 500 would be a footer that does not add up;
+ * printing the row count alone would present a truncated list as complete. Pure and exported because
+ * pdfkit compresses its content streams, so this sentence cannot be asserted from the rendered bytes.
+ */
+export function estimatesTotalLabel(deals: CrmEstimateSent[], total?: number): string {
+  const trueTotal = total ?? deals.length;
+  const money = formatCentsUsd(totalEstimateCents(deals));
+  if (trueTotal > deals.length) {
+    return `Most recent ${deals.length} of ${trueTotal} estimates · ${money} shown`;
+  }
+  return `${deals.length} estimate${deals.length === 1 ? "" : "s"} · ${money}`;
+}
+
 export interface EstimatesSentPdfInput {
   deals: CrmEstimateSent[];
   /** The span the list actually covers, rendered verbatim under the title. */
   periodLabel: string;
+  /**
+   * The TRUE number of estimates in the window, which exceeds `deals.length` once the endpoint's
+   * 500-row cap bites. Defaults to the row count for callers that have no separate total.
+   */
+  total?: number;
 }
 
 /** Builds the attachment. Callers must treat a rejection as "send without the attachment". */
@@ -158,7 +196,12 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
     const nameHeight = doc.fontSize(9).font("Helvetica").heightOfString(name, {
       width: COLUMNS[1]!.width - 16,
     });
-    const rowHeight = Math.max(22, nameHeight + 12);
+    // The re-send badge sits BELOW the name, so its line has to be reserved too. Without it the badge
+    // started at y + 6 + nameHeight with only six points left in the row, crossed the row rule and
+    // could land on the following row — and the page-break test was short by the same amount.
+    const badgeHeight = resend ? doc.fontSize(7.5).heightOfString(resend, { width: COLUMNS[1]!.width - 16 }) : 0;
+    doc.fontSize(9);
+    const rowHeight = Math.max(22, nameHeight + badgeHeight + 12);
 
     if (y + rowHeight > pageBottom) {
       doc.addPage();
@@ -173,7 +216,7 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
     doc.fillColor(BRAND_DARK).fontSize(9).font("Helvetica");
     doc.text(identifier, columnX(0) + 8, y + 6, { width: COLUMNS[0]!.width - 16, lineBreak: false, ellipsis: true });
     doc.text(name, columnX(1) + 8, y + 6, { width: COLUMNS[1]!.width - 16 });
-    doc.font("Helvetica-Bold").text(formatEstimateAmount(deal.amount), columnX(2) + 8, y + 6, {
+    doc.font("Helvetica-Bold").text(formatSignedEstimateAmount(deal.amount), columnX(2) + 8, y + 6, {
       width: COLUMNS[2]!.width - 16,
       align: "right",
       lineBreak: false,
@@ -195,9 +238,7 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
     doc.moveTo(MARGIN, y).lineTo(MARGIN + CONTENT_WIDTH, y).strokeColor(RULE).lineWidth(0.5).stroke();
   }
 
-  const totalLabel = `${input.deals.length} estimate${input.deals.length === 1 ? "" : "s"} · ${formatCentsUsd(
-    totalEstimateCents(input.deals)
-  )}`;
+  const totalLabel = estimatesTotalLabel(input.deals, input.total);
   if (y + 30 > pageBottom) {
     doc.addPage();
     y = drawPageChrome(doc, input.periodLabel, false);
@@ -211,7 +252,26 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
   return bufferFromDoc(doc);
 }
 
-/** `estimates-sent-2026-08-12.pdf` — dated so a forwarded copy still says which run it came from. */
-export function estimatesSentPdfFilename(runAt: Date): string {
-  return `estimates-sent-${runAt.toISOString().slice(0, 10)}.pdf`;
+/**
+ * `estimates-sent-2026-08-12.pdf` — dated so a forwarded copy still says which run it came from.
+ *
+ * In the REPORT's timezone, not UTC. The scheduler picks its slot in the configured zone, so an 8pm
+ * Chicago run slicing the UTC date named itself for the next calendar day — the one thing the date in
+ * the filename is there to pin down.
+ */
+export function estimatesSentPdfFilename(runAt: Date, timezone = "America/Chicago"): string {
+  let stamp: string;
+  try {
+    // en-CA gives ISO-ordered YYYY-MM-DD directly.
+    stamp = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(runAt);
+  } catch {
+    // An unknown zone from config must not cost the attachment its name.
+    stamp = runAt.toISOString().slice(0, 10);
+  }
+  return `estimates-sent-${stamp}.pdf`;
 }
