@@ -1186,7 +1186,21 @@ export const reportScheduleConfig = pgTable("report_schedule_config", {
   includeRfpLog: boolean("include_rfp_log").notNull().default(true),
   includeChangeHistory: boolean("include_change_history").notNull().default(true),
   includeApprovalSummary: boolean("include_approval_summary").notNull().default(true),
+  /**
+   * When a report was last DELIVERED. Powers the scheduler's cadence guard, i.e. delivery
+   * deduplication — advanced on any successful send.
+   */
   lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
+  /**
+   * How far the ESTIMATES lookup has successfully covered, and the lower bound of the next one.
+   *
+   * Separate from lastSentAt because the two answer different questions and fail differently. Gating
+   * lastSentAt on the CRM lookup broke delivery dedup — two eligible slots inside one cadence (the fall
+   * DST repeat, or an admin moving the send time later) would each send. Advancing it regardless
+   * permanently skipped whatever interval the CRM failed to answer for. One checkpoint could not do
+   * both, so there are two.
+   */
+  estimatesCoveredThrough: timestamp("estimates_covered_through", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 export type ReportScheduleConfig = typeof reportScheduleConfig.$inferSelect;

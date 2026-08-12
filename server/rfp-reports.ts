@@ -15,6 +15,13 @@ import {
   syncMappings,
 } from "@shared/schema";
 import { sendEmail } from "./email-service";
+import {
+  fetchCrmEstimatesSent,
+  formatEstimateAmount,
+  resendLabel,
+  MAX_ESTIMATES_SENT_ROWS,
+  type CrmEstimatesSentResult,
+} from "./crm-estimates-sent";
 import { fetchCrmCurrentDealAmounts } from "./crm-deal-values";
 import { DEFAULT_PROCORE_COMPANY_ID, PROJECT_TYPES, parseProjectTypeFromNumber } from "./constants";
 import type { Request, Response } from "express";
@@ -151,6 +158,47 @@ export async function resolveMissingAmountsFromCrm(
     row.amountIsCurrent = true;
   }
   return rows;
+}
+
+/**
+ * How many detail cards the whole email may render, across BOTH sections.
+ *
+ * Gmail clips an HTML message at roughly 102 KB and this service sends through Gmail. A 30-card RFP
+ * section is already about 98 KB; adding an independent 30 estimate cards took a measured build to about
+ * 155 KB, so the busiest reports — precisely the ones worth reading — lost most of the estimates section,
+ * the approval summary and the footer behind a "[Message clipped]" link.
+ *
+ * A SHARED budget rather than two independent ceilings, because the sections are not independent: it is
+ * the SUM that gets clipped. Set to 30 — the ceiling the RFP section already had — so an email with no
+ * estimates section renders exactly as it does today, and only the combined overflow is new.
+ */
+export const EMAIL_CARD_BUDGET = 30;
+
+/**
+ * Split the budget between the two sections.
+ *
+ * Each is guaranteed its half when it can fill it, and whatever the other does not need flows across —
+ * so a quiet RFP day still shows more estimates rather than wasting the headroom, and neither section can
+ * starve the other. Both sections state their own total, so a trimmed list is never mistaken for a
+ * complete one.
+ */
+export function shareCardBudget(
+  rfpCount: number,
+  estimateCount: number,
+  budget = EMAIL_CARD_BUDGET
+): { rfp: number; estimates: number } {
+  const half = Math.floor(budget / 2);
+  let rfp = Math.min(rfpCount, half);
+  let estimates = Math.min(estimateCount, half);
+
+  let spare = budget - rfp - estimates;
+  if (spare > 0) {
+    const rfpExtra = Math.min(spare, rfpCount - rfp);
+    rfp += rfpExtra;
+    spare -= rfpExtra;
+    estimates += Math.min(spare, estimateCount - estimates);
+  }
+  return { rfp, estimates };
 }
 
 /** Format a number as USD for display (e.g. 1234.5 -> "$1,235"). Returns "—" when null. */
@@ -680,6 +728,15 @@ export async function buildRfpReportEmailHtml(options: {
    *  accepted for backward compatibility but ignored. `changes` is still used for the count stat. */
   includeChangeHistory?: boolean;
   includeApprovalSummary: boolean;
+  /** The span the estimates lookup actually asked for, so the section can caption itself honestly. */
+  estimatesPeriod?: { from: Date; to: Date };
+  /**
+   * The estimates that went out to CLIENTS in the same window, from the CRM.
+   *
+   * A RESULT, not a list, so the email can tell a quiet day from a broken lookup. Omitted entirely by
+   * callers that do not fetch it (the CSV/PDF exports), which is different again from either.
+   */
+  estimatesSent?: CrmEstimatesSentResult;
   dashboardUrl: string;
 }): Promise<string> {
   const {
@@ -689,11 +746,23 @@ export async function buildRfpReportEmailHtml(options: {
     approvalSummary,
     includeRfpLog,
     includeApprovalSummary,
+    estimatesSent,
+    estimatesPeriod,
     dashboardUrl,
   } = options;
 
   const totalRfps = rfps.length;
   const totalChanges = changes.reduce((s, c) => s + c.items.length, 0);
+
+  // ONE budget across both card sections — it is their SUM that Gmail clips.
+  //
+  // A section that will NOT render contributes nothing: with includeRfpLog off no RFP cards exist, and
+  // counting them anyway reserved half the budget for an invisible section, so a busy estimates list was
+  // trimmed to 15 while all 30 slots were free.
+  const cardBudget = shareCardBudget(
+    includeRfpLog ? rfps.length : 0,
+    estimatesSent?.ok === true ? estimatesSent.deals.length : 0
+  );
 
   let sections: string[] = [];
 
@@ -702,10 +771,34 @@ export async function buildRfpReportEmailHtml(options: {
   const statChip = (text: string, bg: string, color: string, accent = false) =>
     `<span style="display: inline-block; margin: 0 8px 8px 0; padding: 10px 16px; background: ${bg}; color: ${color}; border-radius: 6px; font-weight: 600; font-size: 13px;${accent ? " border-left: 3px solid #d11921;" : ""}">${text}</span>`;
 
+  // The estimates chip appears only when the lookup SUCCEEDED. A chip reading "0 Estimates Sent" after a
+  // failed call would be a confidently wrong number in an email to leadership; the section below says
+  // plainly that it could not be loaded instead.
+  const estimatesChip =
+    estimatesSent?.ok === true
+      ? statChip(
+          // The PRE-CAP total, so the ceiling never turns into an exact-looking figure for a period that
+          // held more.
+          `${estimatesSent.total} ${estimatesSent.total === 1 ? "Estimate" : "Estimates"} Sent`,
+          "#1e2024",
+          "#ffffff",
+          true
+        )
+      : "";
+
   sections.push(`
     <tr><td class="mobile-pad" style="padding: 20px 32px 12px 32px;">
-      ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}
+      ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${estimatesChip}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}
     </td></tr>`);
+
+  // ONE label/value row helper for every card in this email. It was defined identically in the RFP
+  // branch and again in the estimates branch; two copies in one function drift the moment the card
+  // styling changes.
+  const metaRow = (label: string, valueHtml: string) => `
+              <tr>
+                <td style="padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; width: 110px; vertical-align: top;">${label}</td>
+                <td style="padding: 4px 0; font-size: 14px; color: #1e293b; vertical-align: top;">${valueHtml}</td>
+              </tr>`;
 
   if (includeRfpLog) {
     // Status-aware approver value: approver email, rejection, cancellation, or pending.
@@ -734,12 +827,6 @@ export async function buildRfpReportEmailHtml(options: {
       return pill(escapeHtml(label), "#e5e7eb", "#374151");
     };
 
-    // One label/value row inside a card.
-    const metaRow = (label: string, valueHtml: string) => `
-              <tr>
-                <td style="padding: 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; width: 110px; vertical-align: top;">${label}</td>
-                <td style="padding: 4px 0; font-size: 14px; color: #1e293b; vertical-align: top;">${valueHtml}</td>
-              </tr>`;
 
     // Tappable link buttons — each rendered only when its URL exists (absolute URLs).
     const linkButton = (href: string, label: string, bg: string) =>
@@ -799,7 +886,7 @@ export async function buildRfpReportEmailHtml(options: {
         </table>`;
     };
 
-    const shown = rfps.slice(0, 30);
+    const shown = rfps.slice(0, cardBudget.rfp);
     // Only footnote the marker if a marker was actually rendered.
     const currentAmountNote = shown.some((r) => r.amountIsCurrent && r.amount !== null)
       ? `<p style="margin: 10px 0 0 0; font-size: 12px; color: #6b7280;">&dagger; Deal value as of today — no estimate existed when the RFP was sent.</p>`
@@ -808,12 +895,120 @@ export async function buildRfpReportEmailHtml(options: {
     const body =
       rfps.length > 0
         ? `${shown.map(card).join("")}
-      ${rfps.length > 30 ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing 30 of ${rfps.length} RFPs. <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}${currentAmountNote}`
+      ${rfps.length > cardBudget.rfp ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing ${cardBudget.rfp} of ${rfps.length} RFPs. <a href="${escapeHtml(dashboardUrl)}" style="color: #d11921; text-decoration: none;">View full report</a></p>` : ""}${currentAmountNote}`
         : `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No RFPs in this period.</p>`;
 
     sections.push(`
     <tr><td class="mobile-pad" style="padding: 20px 32px;">
       <h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">RFP Activity — ${escapeHtml(periodLabel)}</h3>
+      ${body}
+    </td></tr>`);
+  }
+
+  // Estimates sent to CLIENTS — the other half of "what went out today", and the half SyncHub cannot
+  // see on its own. Rendered whenever the caller supplied a result, including a failed one: silence
+  // here would read as "nothing was sent", which is a false claim rather than a missing one.
+  if (estimatesSent) {
+    // The section states ITS OWN span, not the report's cadence label. After a pause or an outage the
+    // estimates window is the whole catch-up interval, so a heading reading "Last 7 Days" over a
+    // three-week count is simply a false caption.
+    // Captioned with what was actually COVERED, which after an oldest-first catch-up stops short of the
+    // period end. Naming the requested end would caption the section with a stretch it never queried.
+    const estimatesPeriodLabel =
+      estimatesSent.ok && estimatesPeriod
+        ? `${formatRfpDateTime(estimatesPeriod.from.toISOString()).date} – ${formatRfpDateTime(estimatesSent.coveredThrough).date}`
+        : periodLabel;
+    const sectionHeading = `<h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Estimates Sent to Client — ${escapeHtml(estimatesPeriodLabel)}</h3>`;
+
+    let body: string;
+    if (!estimatesSent.ok) {
+      // Says which of the two it is. "Not configured" is a deployment that never wired the CRM up and
+      // is not news; a genuine failure is. Both state plainly that the number is UNKNOWN rather than
+      // letting an absent section imply zero.
+      const message =
+        estimatesSent.reason === "not_configured"
+          ? "Not available — this Sync Hub is not connected to the CRM."
+          : "Could not be loaded from the CRM this run. The figure above covers RFPs only.";
+      body = `<p style="margin: 0; padding: 16px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-size: 14px; color: #92400e;">${escapeHtml(message)}</p>`;
+    } else if (estimatesSent.deals.length === 0) {
+      // A zero from a PARTIALLY covered interval is not a whole-period zero. Without the reach note the
+      // reader is told nothing went out over a span the report never actually queried.
+      // The gap is at the NEWER end now. Oldest-first batching always starts exactly where it was asked
+      // to, so coveredFrom can no longer reveal a shortfall — coveredThrough is what does.
+      const emptyReach =
+        estimatesPeriod && Date.parse(estimatesSent.coveredThrough) < estimatesPeriod.to.getTime()
+          ? `<p style="margin: 8px 0 0 0; font-size: 12px; color: #6b7280;">Only estimates sent up to ${escapeHtml(
+              formatRfpDateTime(estimatesSent.coveredThrough).date
+            )} were checked — later ones in this interval were not, and will be covered by the next report.</p>`
+          : "";
+      body = `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No estimates sent to clients in this period.</p>${emptyReach}`;
+    } else {
+      const estimateCard = (deal: (typeof estimatesSent.deals)[number]): string => {
+        const { date, time } = formatRfpDateTime(deal.enteredAt);
+        const resend = resendLabel(deal.priorEntryCount);
+        // Only on a re-send. A badge on every card would be noise; this one carries information
+        // precisely because it is the exception — a revised estimate is not new business.
+        const resendBadge = resend
+          ? `<span style="display: inline-block; padding: 2px 8px; border-radius: 999px; background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; white-space: nowrap;">${escapeHtml(resend)}</span>`
+          : "";
+        const identifier = deal.projectNumber || deal.dealNumber || "";
+        const numberLine = [escapeHtml(identifier), resendBadge].filter(Boolean).join("&nbsp;&nbsp;");
+        const owner = deal.ownerName || deal.ownerEmail || "—";
+
+        return `
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 12px; background: #ffffff;">
+          <tr>
+            <td style="padding: 16px 18px 0 18px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3; word-break: break-word;">${escapeHtml(deal.name || "(untitled deal)")}</td>
+                  <td align="right" style="font-size: 16px; font-weight: 700; color: #111214; white-space: nowrap; padding-left: 10px; vertical-align: top;">${escapeHtml(formatEstimateAmount(deal.amount))}</td>
+                </tr>
+              </table>
+              ${numberLine ? `<div style="margin-top: 5px; font-size: 12px; color: #6b7280;">${numberLine}</div>` : ""}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 12px 18px 16px 18px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                ${metaRow("Owner", `<span style="word-break: break-word;">${escapeHtml(owner)}</span>`)}
+                ${metaRow("Sent", `${escapeHtml(date)} · <span style="color: #6b7280;">${escapeHtml(time)}</span>`)}
+              </table>
+            </td>
+          </tr>
+        </table>`;
+      };
+
+      // Same 30-card ceiling as the RFP list, and the same honesty about it: the total is stated, so a
+      // truncated list never reads as the whole picture.
+      const shown = estimatesSent.deals.slice(0, cardBudget.estimates);
+      // Stated against the TRUE total, not the capped list, so the "of N" is the real N.
+      const overflow =
+        estimatesSent.total > cardBudget.estimates
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing ${cardBudget.estimates} of ${estimatesSent.total} estimates sent.</p>`
+          : "";
+      // Only about the LIST. The count above is exact; what the cap limits is how many rows were carried
+      // back, which matters only if someone expected to scroll all of them.
+      const capNote =
+        estimatesSent.total > MAX_ESTIMATES_SENT_ROWS
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Only the ${MAX_ESTIMATES_SENT_ROWS} most recent are listed.</p>`
+          : "";
+      // What this run covered. After a long gap the batching works forward from the checkpoint and stops
+      // short of now, so the note names the end it reached and says the rest is coming.
+      const reachNote =
+        estimatesPeriod && Date.parse(estimatesSent.coveredThrough) < estimatesPeriod.to.getTime()
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent up to ${escapeHtml(
+              formatRfpDateTime(estimatesSent.coveredThrough).date
+            )} — the remainder of this catch-up follows in the next report.</p>`
+          : `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent since ${escapeHtml(
+              formatRfpDateTime(estimatesSent.coveredFrom).date
+            )}.</p>`;
+      body = `${shown.map(estimateCard).join("")}${overflow}${capNote}${reachNote}`;
+    }
+
+    sections.push(`
+    <tr><td class="mobile-pad" style="padding: 20px 32px;">
+      ${sectionHeading}
       ${body}
     </td></tr>`);
   }
@@ -958,17 +1153,45 @@ async function getRfpsForPeriod(
 
 /** Send scheduled RFP report email */
 export async function sendScheduledRfpReport(
-  config?: { recipients?: string[]; includeRfpLog?: boolean; includeApprovalSummary?: boolean }
-): Promise<{ sent: number; failed: number }> {
+  config?: { recipients?: string[]; includeRfpLog?: boolean; includeApprovalSummary?: boolean },
+  /**
+   * The instant this run is FOR — the scheduler's own `now`, passed down rather than resampled here.
+   *
+   * One timestamp, used as the query's upper bound AND as the checkpoint the scheduler persists. Two
+   * samples caused both of the problems this parameter closes: the earlier one re-reported anything
+   * created between them, and sampling the LATER one for the checkpoint pushed lastSentAt forward by
+   * the query duration on every run — enough for the next day's cadence guard
+   * (`now - lastSentAt < windowMs`) to return early, and since the slot matches for only 15 minutes
+   * there is no later retry, so a daily report would have sent every OTHER day.
+   */
+  runAt?: Date
+): Promise<{
+  sent: number;
+  failed: number;
+  windowEnd: Date;
+  /**
+   * How far the estimates lookup successfully covered, for the scheduler to checkpoint — or null when it
+   * did not answer at all. On a catch-up too long for the request budget this is the end of the stretch
+   * that WAS covered, so each run drains a little more of the backlog rather than repeating one window.
+   */
+  estimatesCoveredThrough: Date | null;
+}> {
+  // Resolved BEFORE the config read, so every exit reports the SAME instant this run is for — a fresh
+  // sample on the early-return path would hand the scheduler a checkpoint later than the run it
+  // describes, which is the drift this parameter exists to remove.
+  const now = runAt ?? new Date();
+
   const cfg = await storage.getReportScheduleConfig();
   if (!cfg?.enabled || !cfg.recipients?.length) {
-    return { sent: 0, failed: 0 };
+    return { sent: 0, failed: 0, windowEnd: now, estimatesCoveredThrough: null };
   }
 
-  const now = new Date();
   let dateFrom: Date;
   const dateTo: Date = now;
   let periodLabel: string;
+
+  // The EXACT span the label promises, kept alongside the rounded one below. See estimatesFrom.
+  let cadenceMs: number;
 
   switch (cfg.frequency) {
     case "daily":
@@ -976,30 +1199,35 @@ export async function sendScheduledRfpReport(
       dateFrom.setDate(dateFrom.getDate() - 1);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 24 Hours";
+      cadenceMs = 24 * 60 * 60 * 1000;
       break;
     case "weekly":
       dateFrom = new Date(now);
       dateFrom.setDate(dateFrom.getDate() - 7);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 7 Days";
+      cadenceMs = 7 * 24 * 60 * 60 * 1000;
       break;
     case "biweekly":
       dateFrom = new Date(now);
       dateFrom.setDate(dateFrom.getDate() - 14);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 14 Days";
+      cadenceMs = 14 * 24 * 60 * 60 * 1000;
       break;
     case "monthly":
       dateFrom = new Date(now);
       dateFrom.setMonth(dateFrom.getMonth() - 1);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 30 Days";
+      cadenceMs = 30 * 24 * 60 * 60 * 1000;
       break;
     default:
       dateFrom = new Date(now);
       dateFrom.setDate(dateFrom.getDate() - 7);
       dateFrom.setHours(0, 0, 0, 0);
       periodLabel = "Last 7 Days";
+      cadenceMs = 7 * 24 * 60 * 60 * 1000;
   }
 
   // Resolved BEFORE the query so getRfpsForPeriod can skip the CRM lookup when the cards — the only
@@ -1014,6 +1242,32 @@ export async function sendScheduledRfpReport(
 
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
+  // The estimates that went out to CLIENTS — the CRM's answer, since SyncHub has no read path into
+  // deal_stage_history.
+  //
+  // Asked for over the span SINCE THE LAST SUCCESSFUL SEND, not the rounded dateFrom the RFP half uses.
+  //
+  // That one moves back by the cadence and then rounds down to midnight while dateTo keeps the current
+  // time, so consecutive runs OVERLAP from midnight until send time: at the scheduler's default 08:00
+  // slot an estimate sent at 04:00 lands in today's "Last 24 Hours" email and again in tomorrow's.
+  //
+  // A fixed cadence duration fixes the overlap but is still wrong for MONTHLY, which fires on the first
+  // of each calendar month — so consecutive runs sit 28 to 31 days apart while a fixed 30 days omits a
+  // day after a long month and recounts one or two after February. `lastSentAt` is the boundary the
+  // scheduler itself keeps, so using it makes consecutive reports exactly contiguous for every cadence:
+  // no gap, no double count. The cadence duration remains the fallback for the first ever send, and for
+  // a stored value that is not usable.
+  // The ESTIMATES checkpoint, not lastSentAt. They answer different questions and fail differently:
+  // lastSentAt records a delivery and drives the cadence guard, while this records how far the CRM
+  // lookup has successfully reached. Sharing one column meant either duplicate emails (gating it on the
+  // lookup) or permanently skipped intervals (advancing it regardless) — see the schema comment.
+  const coveredThrough = cfg.estimatesCoveredThrough ? new Date(cfg.estimatesCoveredThrough) : null;
+  const estimatesFrom =
+    coveredThrough && !Number.isNaN(coveredThrough.getTime()) && coveredThrough.getTime() < dateTo.getTime()
+      ? coveredThrough
+      : new Date(dateTo.getTime() - cadenceMs);
+  const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, dateTo);
+
   const html = await buildRfpReportEmailHtml({
     periodLabel,
     rfps,
@@ -1022,6 +1276,8 @@ export async function sendScheduledRfpReport(
     includeRfpLog,
     includeApprovalSummary:
       config?.includeApprovalSummary ?? cfg.includeApprovalSummary,
+    estimatesSent,
+    estimatesPeriod: { from: estimatesFrom, to: dateTo },
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 
@@ -1044,7 +1300,26 @@ export async function sendScheduledRfpReport(
     }
   }
 
-  return { sent, failed };
+  // The EXACT upper bound this run queried, for the scheduler to persist as lastSentAt.
+  //
+  // The scheduler used to persist its own `now`, sampled BEFORE calling this — an earlier instant than
+  // the dateTo used here. Every estimate entered between the two samples fell inside this report's window
+  // AND inside the next run's, because the next run started from the earlier stored value. Milliseconds
+  // usually, but a slow config read or a stalled event loop widens it. Handing back the real boundary is
+  // what makes consecutive windows genuinely abut.
+  // `estimatesOk` gates the checkpoint. lastSentAt is the lower bound of the NEXT estimates window, so
+  // advancing it after a failed lookup permanently skips the interval the CRM did not answer for — the
+  // email goes out, the section says "could not be loaded", and those estimates are never reported by
+  // anything again. Leaving it where it is makes the next scheduled run cover both intervals.
+  // The boundary this run actually reached, rather than a boolean. A catch-up too long for the request
+  // budget covers its oldest stretch and stops; checkpointing THAT lets the next run start where this one
+  // finished, so the backlog drains. A lookup that did not answer checkpoints nothing.
+  return {
+    sent,
+    failed,
+    windowEnd: dateTo,
+    estimatesCoveredThrough: estimatesSent.ok ? new Date(estimatesSent.coveredThrough) : null,
+  };
 }
 
 /** Send a one-off test email to a specific address using current config */
@@ -1059,6 +1334,17 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
   const { rfps, changes, approvalSummary } = await getRfpsForPeriod(dateFrom, now, includeRfpLog);
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
+  // The SAME lookup the scheduled path makes. Without it "Send Test Email" was the one route that omitted
+  // the estimates section — so the Settings action could neither preview the cards nor reveal a broken CRM
+  // connection, which is most of what a test send is FOR.
+  //
+  // Over an EXACT seven days, not the rounded dateFrom above. That one is set to midnight seven calendar
+  // days back while `now` keeps the current time, so a test sent at 08:00 covered 7 days 8 hours under a
+  // heading reading "Last 7 Days" — and could show estimates the corresponding production report, which
+  // uses an exact boundary, would not.
+  const estimatesFrom = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, now);
+
   const html = await buildRfpReportEmailHtml({
     periodLabel: "Test Report (Last 7 Days)",
     rfps,
@@ -1066,6 +1352,8 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
     approvalSummary,
     includeRfpLog,
     includeApprovalSummary: cfg?.includeApprovalSummary ?? true,
+    estimatesSent,
+    estimatesPeriod: { from: estimatesFrom, to: now },
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 
