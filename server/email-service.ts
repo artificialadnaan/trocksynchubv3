@@ -128,6 +128,16 @@ function buildFinalCcList(to: string, cc?: string[]): string[] {
   return Array.from(ccSet);
 }
 
+/**
+ * A file to attach. `content` is the raw bytes; each provider encodes it its own way (Graph wants
+ * base64 in JSON, Gmail wants a base64 MIME part), so callers never encode.
+ */
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+}
+
 export async function sendEmail(params: {
   to: string;
   subject: string;
@@ -138,6 +148,8 @@ export async function sendEmail(params: {
   /** Skip the hardcoded GLOBAL_CC recipients (for ops/system alerts that must go only to `to`+`cc`).
    *  Defaults false → unchanged behavior for all existing callers. */
   bypassGlobalCc?: boolean;
+  /** Files to attach. Carried through BOTH providers, so a fallback send keeps them. */
+  attachments?: EmailAttachment[];
 }): Promise<{ success: boolean; messageId?: string; error?: string; provider: string; to?: string; cc?: string[] }> {
   const config = await getEmailConfig();
   const provider = params.provider || config.activeProvider;

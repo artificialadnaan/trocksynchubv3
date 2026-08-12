@@ -115,7 +115,11 @@ describe("when the CRM lookup does not answer", () => {
   it("says the section could not be loaded rather than showing nothing", async () => {
     const html = await render({ ok: false, reason: "failed" });
 
-    expect(html).toContain("Estimates Sent to Client");
+    // The SECTION HEADING, not the bare phrase. The email is titled "RFP & Estimates Sent to Client",
+    // so a bare substring check passes on the <title> alone and would keep passing if this section
+    // disappeared entirely — the exact failure this test exists to catch. The heading is the only place
+    // the phrase is followed by a period caption.
+    expect(html).toContain(">Estimates Sent to Client — ");
     expect(html).toContain("Could not be loaded from the CRM this run");
     expect(html).not.toContain("No estimates sent to clients in this period.");
   });
@@ -139,7 +143,9 @@ describe("when the CRM lookup does not answer", () => {
   it("omits the section entirely for callers that never fetched it", async () => {
     const html = await render(undefined);
 
-    expect(html).not.toContain("Estimates Sent to Client");
+    // Keyed on the heading for the same reason as above, inverted: the phrase now legitimately appears
+    // in the email's own title, so asserting its total absence would fail on a correctly-omitted section.
+    expect(html).not.toContain(">Estimates Sent to Client — ");
     expect(html).toContain("RFP Activity");
   });
 });
