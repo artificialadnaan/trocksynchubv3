@@ -258,9 +258,40 @@ export async function getGmailConnectionStatus(): Promise<{ connected: boolean; 
 }
 
 /** MIME-encode subject for UTF-8 (emoji, em dash, etc.) to prevent Gmail garbling */
-function encodeSubject(subject: string): string {
+/**
+ * RFC 2047 caps a single encoded-word at 75 characters INCLUDING the `=?UTF-8?B?` … `?=` wrapper, and a
+ * longer one may be shown raw or garbled by a strict client.
+ *
+ * The old one-word form fitted only because the subjects were short: "T-Rock RFP Report — Last 24 Hours"
+ * encodes to 60. Renaming the report to "RFP & Estimates Sent to Client" pushed the scheduled subject to
+ * 88 and the test subject to 76 — both over. So longer values are split across several encoded-words
+ * joined by folding whitespace, which RFC 2047 defines as concatenating on decode.
+ *
+ * 75 - 12 characters of wrapper leaves 63 base64 characters; rounded down to a multiple of 4 that is 60,
+ * which is exactly 45 input bytes.
+ */
+const ENCODED_WORD_MAX_INPUT_BYTES = 45;
+
+export function encodeSubject(subject: string): string {
   if (!/[^\x00-\x7F]/.test(subject)) return subject;
-  return `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`;
+
+  const bytes = Buffer.from(subject, 'utf-8');
+  const words: string[] = [];
+  let offset = 0;
+
+  while (offset < bytes.length) {
+    let end = Math.min(offset + ENCODED_WORD_MAX_INPUT_BYTES, bytes.length);
+    // Each encoded-word must decode on its OWN, so a chunk boundary can never fall inside a multi-byte
+    // character — split mid-character and both halves decode to replacement characters. Back off any
+    // UTF-8 continuation byte (10xxxxxx) until the boundary sits on a real character start.
+    while (end > offset + 1 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+    words.push(`=?UTF-8?B?${bytes.subarray(offset, end).toString('base64')}?=`);
+    offset = end;
+  }
+
+  // Folding whitespace: a continuation line in a header starts with a space, and adjacent encoded-words
+  // separated by it are joined without the separator on decode.
+  return words.join('\r\n ');
 }
 
 /** RFC 2045 caps a base64 line at 76 characters; an unwrapped blob is rejected or silently mangled. */
