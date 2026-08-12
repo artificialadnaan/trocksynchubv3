@@ -8,7 +8,7 @@ vi.mock("../server/storage", () => ({
   },
 }));
 
-import { buildRawEmail } from "../server/gmail";
+import { buildRawEmail, encodeSubject } from "../server/gmail";
 
 function decode(raw: string): string {
   return Buffer.from(raw, "base64url").toString("utf8");
@@ -87,5 +87,55 @@ describe("buildRawEmail with attachments", () => {
     expect(mime.trimEnd().endsWith(`--${boundary}--`)).toBe(true);
     // Opening delimiter for the body part, one for the attachment, then the closing one.
     expect(mime.split(`--${boundary}`).length - 1).toBe(3);
+  });
+});
+
+// RFC 2047 caps an encoded-word at 75 chars including the wrapper. The rename pushed the scheduled
+// subject to 88 and the test subject to 76, so both had to start folding.
+describe("encodeSubject", () => {
+  const words = (s: string) => s.split("\r\n ");
+  const decode = (s: string) =>
+    Buffer.concat(
+      words(s).map((w) => Buffer.from(w.replace(/^=\?UTF-8\?B\?/, "").replace(/\?=$/, ""), "base64"))
+    ).toString("utf8");
+
+  it("leaves a pure-ASCII subject completely alone", () => {
+    expect(encodeSubject("Plain ASCII subject")).toBe("Plain ASCII subject");
+  });
+
+  it("keeps every encoded-word within the 75-character limit", () => {
+    for (const subject of [
+      "T-Rock RFP & Estimates Sent to Client — Last 24 Hours",
+      "T-Rock RFP & Estimates Sent to Client — Test",
+      "T-Rock RFP & Estimates Sent to Client — Jul 15, 2026 – Aug 5, 2026",
+    ]) {
+      for (const word of words(encodeSubject(subject))) {
+        expect(word.length).toBeLessThanOrEqual(75);
+      }
+    }
+  });
+
+  it("round-trips the subject exactly", () => {
+    const subject = "T-Rock RFP & Estimates Sent to Client — Last 24 Hours";
+    expect(decode(encodeSubject(subject))).toBe(subject);
+  });
+
+  it("never splits a multi-byte character across encoded-words", () => {
+    // The single leading ASCII byte is load-bearing. 45 is divisible by 3, so a subject of ONLY 3-byte
+    // characters happens to split cleanly and would exercise nothing — the offset shifts the character
+    // starts to 1, 4, 7 … so the 45-byte boundary falls INSIDE an em dash and the guard has to back off.
+    const subject = `x${"—".repeat(40)} tail`;
+    const encoded = encodeSubject(subject);
+    expect(decode(encoded)).toBe(subject);
+    expect(decode(encoded)).not.toContain("�");
+    // Each word must also decode on its own — that is what "encoded-word" means.
+    for (const word of words(encoded)) {
+      const raw = Buffer.from(word.replace(/^=\?UTF-8\?B\?/, "").replace(/\?=$/, ""), "base64");
+      expect(raw.toString("utf8")).not.toContain("�");
+    }
+  });
+
+  it("still emits a single word when one is enough", () => {
+    expect(words(encodeSubject("Short — subject")).length).toBe(1);
   });
 });
