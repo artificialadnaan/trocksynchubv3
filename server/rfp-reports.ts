@@ -912,9 +912,11 @@ export async function buildRfpReportEmailHtml(options: {
     // The section states ITS OWN span, not the report's cadence label. After a pause or an outage the
     // estimates window is the whole catch-up interval, so a heading reading "Last 7 Days" over a
     // three-week count is simply a false caption.
+    // Captioned with what was actually COVERED, which after an oldest-first catch-up stops short of the
+    // period end. Naming the requested end would caption the section with a stretch it never queried.
     const estimatesPeriodLabel =
       estimatesSent.ok && estimatesPeriod
-        ? `${formatRfpDateTime(estimatesPeriod.from.toISOString()).date} – ${formatRfpDateTime(estimatesPeriod.to.toISOString()).date}`
+        ? `${formatRfpDateTime(estimatesPeriod.from.toISOString()).date} – ${formatRfpDateTime(estimatesSent.coveredThrough).date}`
         : periodLabel;
     const sectionHeading = `<h3 style="margin: 0 0 14px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Estimates Sent to Client — ${escapeHtml(estimatesPeriodLabel)}</h3>`;
 
@@ -931,11 +933,13 @@ export async function buildRfpReportEmailHtml(options: {
     } else if (estimatesSent.deals.length === 0) {
       // A zero from a PARTIALLY covered interval is not a whole-period zero. Without the reach note the
       // reader is told nothing went out over a span the report never actually queried.
+      // The gap is at the NEWER end now. Oldest-first batching always starts exactly where it was asked
+      // to, so coveredFrom can no longer reveal a shortfall — coveredThrough is what does.
       const emptyReach =
-        estimatesPeriod && Date.parse(estimatesSent.coveredFrom) > estimatesPeriod.from.getTime()
-          ? `<p style="margin: 8px 0 0 0; font-size: 12px; color: #6b7280;">Only estimates sent since ${escapeHtml(
-              formatRfpDateTime(estimatesSent.coveredFrom).date
-            )} were checked — earlier ones in this interval were not.</p>`
+        estimatesPeriod && Date.parse(estimatesSent.coveredThrough) < estimatesPeriod.to.getTime()
+          ? `<p style="margin: 8px 0 0 0; font-size: 12px; color: #6b7280;">Only estimates sent up to ${escapeHtml(
+              formatRfpDateTime(estimatesSent.coveredThrough).date
+            )} were checked — later ones in this interval were not, and will be covered by the next report.</p>`
           : "";
       body = `<p style="margin: 0; padding: 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 14px; color: #6b7280; text-align: center;">No estimates sent to clients in this period.</p>${emptyReach}`;
     } else {
@@ -989,12 +993,16 @@ export async function buildRfpReportEmailHtml(options: {
         estimatesSent.total > MAX_ESTIMATES_SENT_ROWS
           ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Only the ${MAX_ESTIMATES_SENT_ROWS} most recent are listed.</p>`
           : "";
-      // How far back this run actually reached. Later than the period start only after a long gap in
-      // sending, and worth saying: the scheduler advances lastSentAt regardless, so anything outside
-      // this reach will not appear in a later report either.
-      const reachNote = `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent since ${escapeHtml(
-        formatRfpDateTime(estimatesSent.coveredFrom).date
-      )}.</p>`;
+      // What this run covered. After a long gap the batching works forward from the checkpoint and stops
+      // short of now, so the note names the end it reached and says the rest is coming.
+      const reachNote =
+        estimatesPeriod && Date.parse(estimatesSent.coveredThrough) < estimatesPeriod.to.getTime()
+          ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent up to ${escapeHtml(
+              formatRfpDateTime(estimatesSent.coveredThrough).date
+            )} — the remainder of this catch-up follows in the next report.</p>`
+          : `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent since ${escapeHtml(
+              formatRfpDateTime(estimatesSent.coveredFrom).date
+            )}.</p>`;
       body = `${shown.map(estimateCard).join("")}${overflow}${capNote}${reachNote}`;
     }
 

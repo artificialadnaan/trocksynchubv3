@@ -667,14 +667,15 @@ describe("the section captions its own span", () => {
       approvalSummary: { pending: 0, approved: 0, rejected: 0 },
       includeRfpLog: true,
       includeApprovalSummary: false,
-      // Asked for a year, only the most recent stretch was reachable.
-      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2026-04-06T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" },
+      // Asked for a year; oldest-first covered only the first stretch, so the shortfall is at the NEWER
+      // end — coveredFrom equals the request start and reveals nothing.
+      estimatesSent: { ok: true, deals: [], total: 0, coveredFrom: "2025-08-06T00:00:00.000Z", coveredThrough: "2025-12-06T00:00:00.000Z" },
       estimatesPeriod: { from: new Date("2025-08-06T00:00:00Z"), to: new Date("2026-08-06T00:00:00Z") },
       dashboardUrl: "https://synchub.example.com/settings",
     });
 
     expect(html).toContain("No estimates sent to clients in this period.");
-    expect(html).toContain("were checked — earlier ones in this interval were not");
+    expect(html).toContain("were checked — later ones in this interval were not");
   });
 
   it("says nothing about partial coverage when the whole interval was covered", async () => {
@@ -690,7 +691,7 @@ describe("the section captions its own span", () => {
       dashboardUrl: "https://synchub.example.com/settings",
     });
 
-    expect(html).not.toContain("earlier ones in this interval were not");
+    expect(html).not.toContain("later ones in this interval were not");
   });
 });
 
