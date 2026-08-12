@@ -120,7 +120,15 @@ export function totalEstimateCents(deals: CrmEstimateSent[]): number {
 export function formatCentsUsd(cents: number): string {
   const negative = cents < 0;
   const abs = Math.abs(cents);
-  const body = `$${Math.round(abs / 100).toLocaleString("en-US")}`;
+  // Below a dollar the cents are shown, for the same reason `formatEstimateAmount` shows them: rounding
+  // a real sub-dollar net to "$0" — or "-$0" — states the document totals nothing while a row directly
+  // above it reads "-$0.25". The footer's whole job is to agree with the rows it sums. Exactly zero
+  // still reads "$0": there it is the true total, not a value rounded out of existence.
+  const dollars = abs / 100;
+  const body =
+    abs > 0 && Math.round(dollars) === 0
+      ? `$${dollars.toFixed(2)}`
+      : `$${Math.round(dollars).toLocaleString("en-US")}`;
   return negative ? `-${body}` : body;
 }
 
