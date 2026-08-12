@@ -151,6 +151,15 @@ export interface EstimatesSentPdfInput {
    * 500-row cap bites. Defaults to the row count for callers that have no separate total.
    */
   total?: number;
+  /**
+   * Emit uncompressed content streams. Production leaves this alone.
+   *
+   * pdfkit compresses page content by default, so what the document SAYS cannot be read back out of the
+   * buffer — a test asserting on rendered text silently matches nothing and passes for the wrong reason.
+   * Turning compression off makes the text assertable, which is the only way to prove a row renders the
+   * amount it is supposed to.
+   */
+  compress?: boolean;
 }
 
 /** Builds the attachment. Callers must treat a rejection as "send without the attachment". */
@@ -159,6 +168,7 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
     size: "LETTER",
     layout: "landscape",
     margins: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN },
+    compress: input.compress ?? true,
     // pdfkit otherwise emits its first page before the header is drawn, leaving a blank leading sheet.
     autoFirstPage: false,
   });

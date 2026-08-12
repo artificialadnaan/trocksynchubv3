@@ -51,6 +51,19 @@ function deal(overrides: Partial<CrmEstimateSent> = {}): CrmEstimateSent {
   };
 }
 
+/**
+ * The text a PDF actually RENDERS.
+ *
+ * pdfkit emits text as hex-encoded glyph runs inside `[ … ] TJ`, not as literal ASCII, so searching the
+ * raw buffer for a rendered string silently finds nothing and the assertion passes vacuously. Callers
+ * must build with `compress: false`, since the content stream is otherwise deflated.
+ */
+function pdfText(buf: Buffer): string {
+  return (buf.toString("latin1").match(/<[0-9a-fA-F]+>/g) || [])
+    .map((h) => Buffer.from(h.slice(1, -1), "hex").toString("latin1"))
+    .join("");
+}
+
 function okResult(deals: CrmEstimateSent[]): CrmEstimatesSentResult {
   return {
     ok: true,
@@ -266,6 +279,31 @@ describe("the PDF renders amounts with the shared formatter", () => {
   it("shows a negative amount signed, matching what the footer subtracts", () => {
     expect(formatEstimateAmount("-25.50")).toBe("-$26");
     expect(totalEstimateCents([deal({ amount: "-25.50" })])).toBe(-2550);
+  });
+
+  // Through the BUILDER, not just the formatter — otherwise nothing catches the row reverting to a
+  // positive-only formatter. pdfkit writes text as hex-encoded glyph runs, so the rendered string has to
+  // be decoded back out; asserting on the raw buffer matches nothing and passes for the wrong reason.
+  it("renders the signed amount in the document itself", async () => {
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Deductive CO", amount: "-25.50" })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    });
+    const rendered = pdfText(pdf);
+    expect(rendered).toContain("Deductive CO");
+    expect(rendered).toContain("-$26");
+    // The em dash is what this replaced; it must not be what the row shows.
+    expect(rendered).not.toContain("Deductive CO—");
+  });
+
+  it("renders a sub-dollar deduction with cents rather than -$0", async () => {
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Tiny deduction", amount: "-0.25" })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    });
+    expect(pdfText(pdf)).toContain("-$0.25");
   });
 });
 

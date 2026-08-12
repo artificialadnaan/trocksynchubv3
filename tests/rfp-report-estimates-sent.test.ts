@@ -330,6 +330,17 @@ describe("amount formatting", () => {
     expect(formatEstimateAmount("-25000.00")).toBe("-$25,000");
     expect(formatEstimateAmount("-0.60")).toBe("-$1");
   });
+
+  // "-$0" is neither the amount nor the em dash that means "nothing set" — it reads as zero while every
+  // total still counts the real value. Sub-dollar magnitudes keep their cents, either sign.
+  it("never rounds a real sub-dollar amount away to $0", () => {
+    expect(formatEstimateAmount("-0.25")).toBe("-$0.25");
+    expect(formatEstimateAmount("-0.49")).toBe("-$0.49");
+    expect(formatEstimateAmount("0.40")).toBe("$0.40");
+    expect(formatEstimateAmount("0.01")).toBe("$0.01");
+    // Zero itself still means "nothing set".
+    expect(formatEstimateAmount("0.00")).toBe("—");
+  });
 });
 
 describe("escaping", () => {

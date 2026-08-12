@@ -310,8 +310,17 @@ export function formatEstimateAmount(amount: string): string {
   // old `value <= 0` test lumped them in with "no value set" and printed an em dash. The report then
   // showed a row with no amount while every total that included it moved by that amount: a document
   // that disagrees with itself. Zero keeps the em dash, because zero really does mean nothing is set.
-  const rounded = Math.round(Math.abs(value)).toLocaleString("en-US");
-  return value < 0 ? `-$${rounded}` : `$${rounded}`;
+  const magnitude = Math.abs(value);
+  // A sub-dollar amount must not round away to "$0" / "-$0". Zero is the ONE value that means "nothing
+  // is set" here, and printing it for a real 40-cent estimate says the deal is worth nothing while every
+  // total still counts it — the same class of contradiction as the em dash this function just stopped
+  // printing for deductions. Below a dollar the cents are shown instead; everything else still rounds,
+  // because whole dollars are what the report reads in.
+  const rendered =
+    Math.round(magnitude) === 0
+      ? magnitude.toFixed(2)
+      : Math.round(magnitude).toLocaleString("en-US");
+  return value < 0 ? `-$${rendered}` : `$${rendered}`;
 }
 
 /**
