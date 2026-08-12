@@ -236,6 +236,7 @@ export async function sendOutlookEmail(params: {
   htmlBody: string;
   fromName?: string;
   cc?: string[];
+  attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
 }): Promise<{ success: boolean; messageId?: string; error?: string }> {
   try {
     const tokens = await getMicrosoftTokens();
@@ -262,6 +263,26 @@ export async function sendOutlookEmail(params: {
       message.ccRecipients = params.cc.map((email) => ({
         emailAddress: { address: email },
       }));
+    }
+
+    if (params.attachments && params.attachments.length > 0) {
+      // Graph's SIMPLE attachment path, which /sendMail caps at a 4 MB request. Everything sent this way
+      // is a generated report of a few hundred KB at most, so the chunked upload-session dance is not
+      // warranted — but a caller that ever exceeds it should get a clear error rather than a puzzling
+      // Graph rejection, so the limit is checked here against the encoded size that actually travels.
+      const encoded = params.attachments.map((attachment) => ({
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: attachment.filename,
+        contentType: attachment.contentType,
+        contentBytes: attachment.content.toString('base64'),
+      }));
+      const totalBytes = encoded.reduce((sum, a) => sum + a.contentBytes.length, 0);
+      if (totalBytes > 4 * 1024 * 1024) {
+        throw new Error(
+          `Attachments total ${Math.round(totalBytes / 1024)} KB encoded, over Graph's 4 MB sendMail limit`
+        );
+      }
+      message.attachments = encoded;
     }
 
     const response = await fetchWithTimeout(`${GRAPH_API_URL}/me/sendMail`, {

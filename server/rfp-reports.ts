@@ -14,7 +14,8 @@ import {
   reportScheduleConfig,
   syncMappings,
 } from "@shared/schema";
-import { sendEmail } from "./email-service";
+import { sendEmail, type EmailAttachment } from "./email-service";
+import { buildEstimatesSentPdf, estimatesSentPdfFilename } from "./estimates-sent-pdf";
 import {
   fetchCrmEstimatesSent,
   formatEstimateAmount,
@@ -737,6 +738,14 @@ export async function buildRfpReportEmailHtml(options: {
    * callers that do not fetch it (the CSV/PDF exports), which is different again from either.
    */
   estimatesSent?: CrmEstimatesSentResult;
+  /**
+   * Filename of the attached full-list PDF, or null when there is none.
+   *
+   * Passed in rather than inferred, and the caller sets it only AFTER the PDF is actually built: the
+   * overflow note tells the reader where the rest of the list is, and a body promising an attachment
+   * that failed to generate is worse than one that never mentioned it.
+   */
+  estimatesPdfFilename?: string | null;
   dashboardUrl: string;
 }): Promise<string> {
   const {
@@ -748,6 +757,7 @@ export async function buildRfpReportEmailHtml(options: {
     includeApprovalSummary,
     estimatesSent,
     estimatesPeriod,
+    estimatesPdfFilename,
     dashboardUrl,
   } = options;
 
@@ -983,10 +993,24 @@ export async function buildRfpReportEmailHtml(options: {
       // truncated list never reads as the whole picture.
       const shown = estimatesSent.deals.slice(0, cardBudget.estimates);
       // Stated against the TRUE total, not the capped list, so the "of N" is the real N.
+      //
+      // When the full list rode along as a PDF the note SAYS SO — the cap is what made the section look
+      // like the whole picture when it was not, and naming the attachment is what turns a dead end into
+      // somewhere to go. Conditional on the file having actually been produced, never on the intent to
+      // produce one.
       const overflow =
         estimatesSent.total > cardBudget.estimates
           ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Showing ${cardBudget.estimates} of ${estimatesSent.total} estimates sent.</p>`
           : "";
+      // Its OWN note, rendered whenever the file exists rather than only when the list was trimmed.
+      // An attachment that appears silently on busy days and vanishes on quiet ones reads as a glitch;
+      // the body should always account for what is clipped to the message. Conditional on the PDF having
+      // been BUILT — see estimatesPdfFilename — so a failed generation never leaves a false promise.
+      const attachmentNote = estimatesPdfFilename
+        ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Full list of ${estimatesSent.total} attached as <strong>${escapeHtml(
+            estimatesPdfFilename
+          )}</strong>.</p>`
+        : "";
       // Only about the LIST. The count above is exact; what the cap limits is how many rows were carried
       // back, which matters only if someone expected to scroll all of them.
       const capNote =
@@ -1003,7 +1027,7 @@ export async function buildRfpReportEmailHtml(options: {
           : `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent since ${escapeHtml(
               formatRfpDateTime(estimatesSent.coveredFrom).date
             )}.</p>`;
-      body = `${shown.map(estimateCard).join("")}${overflow}${capNote}${reachNote}`;
+      body = `${shown.map(estimateCard).join("")}${overflow}${attachmentNote}${capNote}${reachNote}`;
     }
 
     sections.push(`
@@ -1028,7 +1052,7 @@ export async function buildRfpReportEmailHtml(options: {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="x-apple-disable-message-reformatting">
-  <title>RFP Report — T-Rock Construction</title>
+  <title>RFP &amp; Estimates Sent to Client — T-Rock Construction</title>
   <style>
     /* Mobile tightening — supported by Gmail/Apple Mail; ignored safely elsewhere. */
     @media only screen and (max-width: 480px) {
@@ -1056,7 +1080,7 @@ export async function buildRfpReportEmailHtml(options: {
           <!-- Title -->
           <tr>
             <td class="mobile-pad" style="padding: 28px 32px 20px 32px;">
-              <h1 style="margin: 0 0 6px 0; font-size: 20px; font-weight: 700; color: #111214; letter-spacing: -0.02em;">RFP Report</h1>
+              <h1 style="margin: 0 0 6px 0; font-size: 20px; font-weight: 700; color: #111214; letter-spacing: -0.02em;">RFP &amp; Estimates Sent to Client</h1>
               <p style="margin: 0 0 4px 0; font-size: 13px; color: #6b7280;">${escapeHtml(periodLabel)}</p>
               <p style="margin: 0; font-size: 11px; color: #9ca3af;">${new Date().toLocaleString()}</p>
             </td>
@@ -1149,6 +1173,35 @@ async function getRfpsForPeriod(
   };
 
   return { rfps, changes, approvalSummary };
+}
+
+/**
+ * Build the full-list PDF attachment, or null when there is nothing to attach.
+ *
+ * NEVER throws. The attachment is a convenience on top of a report that must go out regardless — a
+ * pdfkit failure or a surprise row shape should cost the reader the appendix, not the whole email. The
+ * null return is what the body keys its "attached as …" line off, so a failure here silently degrades to
+ * the pre-attachment email rather than promising a file that is not there.
+ */
+export async function buildEstimatesAttachment(
+  estimatesSent: CrmEstimatesSentResult,
+  periodLabel: string,
+  runAt: Date
+): Promise<EmailAttachment | null> {
+  if (!estimatesSent.ok || estimatesSent.deals.length === 0) return null;
+  try {
+    const content = await buildEstimatesSentPdf({ deals: estimatesSent.deals, periodLabel });
+    return {
+      filename: estimatesSentPdfFilename(runAt),
+      content,
+      contentType: "application/pdf",
+    };
+  } catch (error: any) {
+    console.warn(
+      `[rfp-reports] estimates PDF could not be generated, sending without it: ${error?.message ?? error}`
+    );
+    return null;
+  }
 }
 
 /** Send scheduled RFP report email */
@@ -1268,6 +1321,10 @@ export async function sendScheduledRfpReport(
       : new Date(dateTo.getTime() - cadenceMs);
   const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, dateTo);
 
+  // BEFORE the HTML: the body names the attachment, so the file has to exist before the sentence
+  // claiming it does. Built once and reused for every recipient rather than per send.
+  const estimatesAttachment = await buildEstimatesAttachment(estimatesSent, periodLabel, dateTo);
+
   const html = await buildRfpReportEmailHtml({
     periodLabel,
     rfps,
@@ -1278,6 +1335,7 @@ export async function sendScheduledRfpReport(
       config?.includeApprovalSummary ?? cfg.includeApprovalSummary,
     estimatesSent,
     estimatesPeriod: { from: estimatesFrom, to: dateTo },
+    estimatesPdfFilename: estimatesAttachment?.filename ?? null,
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 
@@ -1289,9 +1347,10 @@ export async function sendScheduledRfpReport(
     try {
       const result = await sendEmail({
         to,
-        subject: `T-Rock RFP Report — ${periodLabel}`,
+        subject: `T-Rock RFP & Estimates Sent to Client — ${periodLabel}`,
         htmlBody: html,
         fromName: "T-Rock Sync Hub",
+        attachments: estimatesAttachment ? [estimatesAttachment] : undefined,
       });
       if (result.success) sent++;
       else failed++;
@@ -1345,6 +1404,14 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
   const estimatesFrom = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, now);
 
+  // The test send carries the attachment too — a test that omitted it could not reveal a broken PDF
+  // build, which is now one of the things a test send is FOR.
+  const estimatesAttachment = await buildEstimatesAttachment(
+    estimatesSent,
+    "Test Report (Last 7 Days)",
+    now
+  );
+
   const html = await buildRfpReportEmailHtml({
     periodLabel: "Test Report (Last 7 Days)",
     rfps,
@@ -1354,14 +1421,16 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
     includeApprovalSummary: cfg?.includeApprovalSummary ?? true,
     estimatesSent,
     estimatesPeriod: { from: estimatesFrom, to: now },
+    estimatesPdfFilename: estimatesAttachment?.filename ?? null,
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 
   const result = await sendEmail({
     to,
-    subject: "T-Rock RFP Report — Test",
+    subject: "T-Rock RFP & Estimates Sent to Client — Test",
     htmlBody: html,
     fromName: "T-Rock Sync Hub",
+    attachments: estimatesAttachment ? [estimatesAttachment] : undefined,
   });
 
   return result.success ? { success: true } : { success: false, error: result.error };

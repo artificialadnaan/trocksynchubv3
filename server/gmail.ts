@@ -263,30 +263,64 @@ function encodeSubject(subject: string): string {
   return `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`;
 }
 
-function buildRawEmail(
+/** RFC 2045 caps a base64 line at 76 characters; an unwrapped blob is rejected or silently mangled. */
+function wrapBase64(value: string): string {
+  return (value.match(/.{1,76}/g) ?? []).join('\r\n');
+}
+
+/** Exported for tests: the MIME structure is the whole risk of attachment support. */
+export function buildRawEmail(
   to: string,
   subject: string,
   htmlBody: string,
   fromName?: string,
-  cc?: string[]
+  cc?: string[],
+  attachments?: Array<{ filename: string; content: Buffer; contentType: string }>
 ): string {
   const boundary = `boundary_${Date.now()}`;
-  const lines = [
+  const header = [
     `From: ${fromName ? `${fromName} <me>` : 'me'}`,
     `To: ${to}`,
     ...(cc && cc.length > 0 ? [`Cc: ${cc.join(', ')}`] : []),
     `Subject: ${encodeSubject(subject)}`,
     `MIME-Version: 1.0`,
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    ``,
-    `--${boundary}`,
+  ];
+
+  const htmlPart = [
     `Content-Type: text/html; charset="UTF-8"`,
     `Content-Transfer-Encoding: 7bit`,
     ``,
     htmlBody,
     ``,
-    `--${boundary}--`,
   ];
+
+  // multipart/ALTERNATIVE says "these parts are the same message in different formats", so a reader is
+  // free to display one INSTEAD of the others — an attachment declared there can legitimately be dropped.
+  // multipart/MIXED is the structure that means "body plus files". Kept as alternative when there is
+  // nothing to attach so the no-attachment path emits exactly the bytes it always has.
+  const contentType = attachments?.length ? 'multipart/mixed' : 'multipart/alternative';
+
+  const lines = [
+    ...header,
+    `Content-Type: ${contentType}; boundary="${boundary}"`,
+    ``,
+    `--${boundary}`,
+    ...htmlPart,
+  ];
+
+  for (const attachment of attachments ?? []) {
+    lines.push(
+      `--${boundary}`,
+      `Content-Type: ${attachment.contentType}; name="${attachment.filename}"`,
+      `Content-Disposition: attachment; filename="${attachment.filename}"`,
+      `Content-Transfer-Encoding: base64`,
+      ``,
+      wrapBase64(attachment.content.toString('base64')),
+      ``
+    );
+  }
+
+  lines.push(`--${boundary}--`);
   const rawEmail = lines.join('\r\n');
   return Buffer.from(rawEmail).toString('base64url');
 }
@@ -297,6 +331,7 @@ export async function sendEmail(params: {
   htmlBody: string;
   fromName?: string;
   cc?: string[];
+  attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
 }): Promise<{ success: boolean; messageId?: string; error?: string; to?: string; cc?: string[] }> {
   try {
     const gmail = await getUncachableGmailClient();
@@ -305,7 +340,8 @@ export async function sendEmail(params: {
       params.subject,
       params.htmlBody,
       params.fromName,
-      params.cc
+      params.cc,
+      params.attachments
     );
     const result = await gmail.users.messages.send({
       userId: 'me',
