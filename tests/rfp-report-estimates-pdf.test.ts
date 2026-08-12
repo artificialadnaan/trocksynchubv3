@@ -29,11 +29,10 @@ import {
   estimatesSentPdfFilename,
   formatCentsUsd,
   estimatesTotalLabel,
-  formatSignedEstimateAmount,
   totalEstimateCents,
 } from "../server/estimates-sent-pdf";
 import { buildEstimatesAttachment, buildRfpReportEmailHtml } from "../server/rfp-reports";
-import type { CrmEstimateSent, CrmEstimatesSentResult } from "../server/crm-estimates-sent";
+import { formatEstimateAmount, type CrmEstimateSent, type CrmEstimatesSentResult } from "../server/crm-estimates-sent";
 
 function deal(overrides: Partial<CrmEstimateSent> = {}): CrmEstimateSent {
   return {
@@ -260,20 +259,13 @@ describe("when the endpoint capped the rows", () => {
   });
 });
 
-// A deductive change order is a real, signed number. Showing an em dash in the row while the footer
-// subtracts it makes the document disagree with itself.
-describe("formatSignedEstimateAmount", () => {
-  it("renders a negative amount signed rather than as an em dash", () => {
-    expect(formatSignedEstimateAmount("-25.50")).toBe("-$26");
-  });
-
-  it("matches the email formatter for positive amounts", () => {
-    expect(formatSignedEstimateAmount("1000.00")).toBe("$1,000");
-  });
-
-  it("keeps the em dash for zero and for unparseable input", () => {
-    expect(formatSignedEstimateAmount("0.00")).toBe("—");
-    expect(formatSignedEstimateAmount("oops")).toBe("—");
+// A deductive change order is a real, signed number. The PDF now uses the SHARED formatter — the
+// PDF-local signed variant is gone — so the row and the footer can no longer disagree, and neither can
+// the PDF and the email.
+describe("the PDF renders amounts with the shared formatter", () => {
+  it("shows a negative amount signed, matching what the footer subtracts", () => {
+    expect(formatEstimateAmount("-25.50")).toBe("-$26");
+    expect(totalEstimateCents([deal({ amount: "-25.50" })])).toBe(-2550);
   });
 });
 

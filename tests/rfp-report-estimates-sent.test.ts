@@ -100,6 +100,22 @@ describe("the Estimates Sent to Client section", () => {
     expect(html).toContain("1 Estimate Sent");
   });
 
+  // The user-visible half of the deduction fix: the CARD, not just the formatter. A deductive change
+  // order used to render as an em dash here while the section's own count and every downstream total
+  // still included it.
+  it("shows a deductive change order as a signed amount on the card", async () => {
+    const html = await render({
+      ok: true,
+      deals: [deal({ amount: "-25000.00", name: "Deductive CO" })],
+      total: 1,
+      coveredFrom: "2026-08-01T00:00:00.000Z",
+      coveredThrough: "2026-08-06T00:00:00.000Z",
+    });
+
+    expect(html).toContain("-$25,000");
+    expect(html).toContain("Deductive CO");
+  });
+
   it("says plainly when nothing was sent", async () => {
     const html = await render({ ok: true, deals: [], total: 0, coveredFrom: "2026-08-01T00:00:00.000Z", coveredThrough: "2026-08-06T00:00:00.000Z" });
 
@@ -306,6 +322,13 @@ describe("amount formatting", () => {
     expect(formatEstimateAmount("0")).toBe("—");
     expect(formatEstimateAmount("")).toBe("—");
     expect(formatEstimateAmount("not-a-number")).toBe("—");
+  });
+
+  // A deduction is a real number, not an absent one. This used to fall into the `<= 0` branch and print
+  // an em dash, so the row showed nothing while every total containing it moved by that amount.
+  it("renders a deductive change order as a signed amount, not an em-dash", () => {
+    expect(formatEstimateAmount("-25000.00")).toBe("-$25,000");
+    expect(formatEstimateAmount("-0.60")).toBe("-$1");
   });
 });
 

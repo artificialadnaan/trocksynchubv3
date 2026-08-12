@@ -304,8 +304,14 @@ async function fetchOneWindow(
 /** "$1,235" from the CRM's exact decimal string. Mirrors formatRfpAmount, which takes a number. */
 export function formatEstimateAmount(amount: string): string {
   const value = Number(amount);
-  if (!Number.isFinite(value) || value <= 0) return "—";
-  return `$${Math.round(value).toLocaleString("en-US")}`;
+  if (!Number.isFinite(value) || value === 0) return "—";
+  // A NEGATIVE amount is a real number, not an absent one. Deductive change orders carry one — the CRM
+  // resolves a change order's value from awarded_amount, which goes negative for a deduction — and the
+  // old `value <= 0` test lumped them in with "no value set" and printed an em dash. The report then
+  // showed a row with no amount while every total that included it moved by that amount: a document
+  // that disagrees with itself. Zero keeps the em dash, because zero really does mean nothing is set.
+  const rounded = Math.round(Math.abs(value)).toLocaleString("en-US");
+  return value < 0 ? `-$${rounded}` : `$${rounded}`;
 }
 
 /**
