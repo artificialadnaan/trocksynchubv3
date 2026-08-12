@@ -1334,11 +1334,16 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
   const { rfps, changes, approvalSummary } = await getRfpsForPeriod(dateFrom, now, includeRfpLog);
   const dashboardUrl = process.env.APP_URL || "http://localhost:5000";
 
-  // The SAME lookup the scheduled path makes, over this path's own window. Without it "Send Test Email"
-  // was the one route that omitted the estimates section — so the Settings action could neither preview
-  // the cards nor reveal a broken CRM connection, which is most of what a test send is FOR: the next
-  // scheduled email would have carried both.
-  const estimatesSent = await fetchCrmEstimatesSent(dateFrom, now);
+  // The SAME lookup the scheduled path makes. Without it "Send Test Email" was the one route that omitted
+  // the estimates section — so the Settings action could neither preview the cards nor reveal a broken CRM
+  // connection, which is most of what a test send is FOR.
+  //
+  // Over an EXACT seven days, not the rounded dateFrom above. That one is set to midnight seven calendar
+  // days back while `now` keeps the current time, so a test sent at 08:00 covered 7 days 8 hours under a
+  // heading reading "Last 7 Days" — and could show estimates the corresponding production report, which
+  // uses an exact boundary, would not.
+  const estimatesFrom = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const estimatesSent = await fetchCrmEstimatesSent(estimatesFrom, now);
 
   const html = await buildRfpReportEmailHtml({
     periodLabel: "Test Report (Last 7 Days)",
@@ -1348,6 +1353,7 @@ export async function sendTestRfpReportEmail(to: string): Promise<{ success: boo
     includeRfpLog,
     includeApprovalSummary: cfg?.includeApprovalSummary ?? true,
     estimatesSent,
+    estimatesPeriod: { from: estimatesFrom, to: now },
     dashboardUrl: `${dashboardUrl}/settings`,
   });
 
