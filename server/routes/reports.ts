@@ -81,10 +81,13 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
     // occurrence is still owed, and answers "Due now" for the rest of every eligible day — including hours
     // after the report actually landed.
     const persisted = await storage.getReportScheduleConfig();
+    const parsedDayOfWeek = Number.parseInt(String(req.query.dayOfWeek ?? ""), 10);
     const config = {
       enabled,
       frequency: (req.query.frequency as string) || "weekly",
-      dayOfWeek: req.query.dayOfWeek != null ? parseInt(String(req.query.dayOfWeek), 10) : 1,
+      // parseInt returns NaN for a non-numeric query value, and NaN never equals a weekday — the preview
+      // then scanned all 8,640 candidate slots and reported "No run in next 90 days" for a valid draft.
+      dayOfWeek: Number.isInteger(parsedDayOfWeek) ? parsedDayOfWeek : 1,
       timeOfDay: (req.query.timeOfDay as string) || "08:00",
       timezone: (req.query.timezone as string) || "America/Chicago",
       recipients: (req.query.recipients as string)?.split(",").filter(Boolean) ?? [],

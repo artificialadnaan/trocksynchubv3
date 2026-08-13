@@ -254,18 +254,22 @@ describe("resolveScheduledSend — biweekly phase for an evening schedule", () =
   };
 
   it("matches the phase the old tick-based form produced", () => {
-    for (const wednesday of ["2026-08-05", "2026-08-12", "2026-08-19", "2026-08-26"]) {
-      // The instant the schedule actually fires: 20:00 Chicago = 01:00 UTC the next calendar day.
-      const scheduledInstant = new Date(`${wednesday}T20:00:00-05:00`);
-      const oldParity =
-        Math.floor(scheduledInstant.getTime() / (7 * 24 * 60 * 60 * 1000)) % 2 === 0;
+    // PINNED DATES, not a recomputation of the formula. The first draft derived the expectation from the
+    // same expression isSendDay uses, so it compared the implementation against itself and would have held
+    // for an inverted anchor too — it could not catch the phase shift its own comment describes.
+    //
+    // These are the Wednesdays the OLD tick-based form bucketed as eligible for a 20:00 Chicago schedule
+    // (01:00 UTC Thursday). If a change flips the phase, this fails.
+    const eligible: string[] = [];
+    for (const wednesday of ["2026-08-05", "2026-08-12", "2026-08-19", "2026-08-26", "2026-09-02"]) {
       const decision = resolveScheduledSend({
-        now: scheduledInstant,
+        now: new Date(`${wednesday}T20:00:00-05:00`),
         lastSentAt: null,
         ...eveningBiweekly,
       });
-      expect(decision.send).toBe(oldParity);
+      if (decision.send) eligible.push(wednesday);
     }
+    expect(eligible).toEqual(["2026-08-12", "2026-08-26"]);
   });
 
   it("keeps that answer stable across the UTC week boundary within one occurrence", () => {

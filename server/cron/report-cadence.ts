@@ -28,9 +28,23 @@ export interface ScheduledSendInput {
   timezone: string;
 }
 
+/**
+ * A STABLE discriminator. `reason` is prose for a log line; both consumers were reading it structurally —
+ * the scheduler branched on its prefix and the preview rendered it to admins — so rewording a log message
+ * would have changed control flow and UI text. Branch on this instead.
+ */
+export type ScheduledSendOutcome =
+  | "due"
+  | "catch-up"
+  | "already-sent"
+  | "before-scheduled-time"
+  | "not-a-send-day"
+  | "invalid-config";
+
 export interface ScheduledSendDecision {
   send: boolean;
-  /** Always populated, and always logged by the caller — a silent skip is what hid the original bug. */
+  outcome: ScheduledSendOutcome;
+  /** Prose, for logs only. Never branch on it and never show it to a user — see ScheduledSendOutcome. */
   reason: string;
   /** The local calendar date this decision is about (YYYY-MM-DD), or null when today is not a send day. */
   occurrenceDate: string | null;
@@ -163,6 +177,7 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
     local = localParts(now, "UTC");
     return {
       send: false,
+      outcome: "invalid-config",
       reason: `unknown timezone "${timezone}" — refusing to guess the send time`,
       occurrenceDate: null,
     };
@@ -174,11 +189,21 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
   const configHour = Number.parseInt(rawHour, 10);
   const configMinute = Number.parseInt(rawMinute ?? "0", 10);
   if (!Number.isFinite(configHour) || !Number.isFinite(configMinute)) {
-    return { send: false, reason: `unusable timeOfDay "${timeOfDay}"`, occurrenceDate: null };
+    return {
+      send: false,
+      outcome: "invalid-config",
+      reason: `unusable timeOfDay "${timeOfDay}"`,
+      occurrenceDate: null,
+    };
   }
 
   if (!isSendDay(local, frequency, dayOfWeek, configHour, configMinute, timezone)) {
-    return { send: false, reason: `not a ${frequency} send day (${local.date})`, occurrenceDate: null };
+    return {
+      send: false,
+      outcome: "not-a-send-day",
+      reason: `not a ${frequency} send day (${local.date})`,
+      occurrenceDate: null,
+    };
   }
 
   const nowMinutes = local.hour * 60 + local.minute;
@@ -191,6 +216,7 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
   if (nowMinutes < dueMinutes) {
     return {
       send: false,
+      outcome: "before-scheduled-time",
       reason: `before the scheduled time (${local.date} ${local.hour}:${String(local.minute).padStart(2, "0")} < ${timeOfDay})`,
       occurrenceDate: local.date,
     };
@@ -202,16 +228,23 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
   if (lastSentAt && !Number.isNaN(lastSentAt.getTime())) {
     const lastLocal = localParts(lastSentAt, timezone);
     if (lastLocal.date >= local.date) {
-      return { send: false, reason: `already sent for ${local.date}`, occurrenceDate: local.date };
+      return {
+        send: false,
+        outcome: "already-sent",
+        reason: `already sent for ${local.date}`,
+        occurrenceDate: local.date,
+      };
     }
   }
 
   // Late but eligible. Worth naming in the log: a run that reports catch-up is evidence the scheduled tick
   // was missed, which is otherwise invisible.
   const lateBy = nowMinutes - dueMinutes;
+  const late = lateBy > 15;
   return {
     send: true,
-    reason: lateBy > 15 ? `catch-up for ${local.date} (${lateBy} min after ${timeOfDay})` : `due for ${local.date}`,
+    outcome: late ? "catch-up" : "due",
+    reason: late ? `catch-up for ${local.date} (${lateBy} min after ${timeOfDay})` : `due for ${local.date}`,
     occurrenceDate: local.date,
   };
 }
@@ -240,4 +273,13 @@ export function isOccurrenceDay(args: {
   } catch {
     return false;
   }
+}
+
+/**
+ * The YYYY-MM-DD an instant falls on in `timeZone` — the unit this module treats as one occurrence.
+ * Exported so callers key off the same shape; this PR removed duplicated recurrence logic and a private
+ * copy of the key format would reintroduce exactly that.
+ */
+export function localOccurrenceDate(instant: Date, timeZone: string): string {
+  return localParts(instant, timeZone).date;
 }

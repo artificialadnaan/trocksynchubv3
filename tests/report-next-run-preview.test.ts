@@ -40,9 +40,20 @@ describe("computeNextRun — outstanding occurrences", () => {
     // and walked straight into the hour12:false quirk the implementation itself documents: between 00:00
     // and 00:59 Node returns "24", so it took the >= 8 branch and demanded "Due now" while the code
     // correctly previewed the future 08:00 run. A predictable daily CI failure.
-    vi.setSystemTime(new Date("2026-08-13T14:00:00Z")); // 09:00 in Chicago — past the 08:00 slot
     const yesterday = new Date("2026-08-12T13:00:00.162Z");
+
+    // On time: within the slot, so the preview says it is due.
+    vi.setSystemTime(new Date("2026-08-13T13:05:00Z")); // 08:05 Chicago
     expect(computeNextRun({ ...BASE, lastSentAt: yesterday })).toContain("Due now");
+
+    // An hour late: the outcome is a catch-up, and the wording says so rather than pretending it is on
+    // schedule. Both strings come from the OUTCOME, not from the scheduler's log prose.
+    vi.setSystemTime(new Date("2026-08-13T14:00:00Z")); // 09:00 Chicago
+    const late = computeNextRun({ ...BASE, lastSentAt: yesterday });
+    expect(late).toContain("Overdue");
+    // The diagnostic wording from `reason` must never reach the UI.
+    expect(late).not.toContain("min after");
+    expect(late).not.toContain("catch-up for");
   });
 
   it("does not read as due during the midnight hour, when Intl reports hour 24", () => {

@@ -61,7 +61,7 @@ export function startRfpReportScheduler() {
         // Config-level problems would otherwise keep the schedule silent forever with nothing to see. The
         // routine skips (not a send day, before the time, already sent today) stay quiet — at four ticks an
         // hour they would bury everything else.
-        if (decision.occurrenceDate === null && !decision.reason.startsWith("not a")) {
+        if (decision.outcome === "invalid-config") {
           console.warn(`[RFP Report] Not scheduling: ${decision.reason}`);
         }
         return;

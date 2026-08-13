@@ -7,7 +7,7 @@
 import { eq, desc, and, gte, lte, sql, inArray } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { isOccurrenceDay, resolveScheduledSend } from "./cron/report-cadence";
+import { isOccurrenceDay, localOccurrenceDate, resolveScheduledSend } from "./cron/report-cadence";
 import {
   rfpApprovalRequests,
   rfpChangeLog,
@@ -493,17 +493,6 @@ const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
 const DOW_MAP: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 /** Compute next scheduled report run (timezone-aware, no Date-from-locale-string) */
-/** The YYYY-MM-DD a given instant falls on in `timeZone` — the unit both the scheduler and this preview
- * treat as one occurrence. */
-function localDateIn(instant: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(instant);
-}
-
 export function computeNextRun(config: {
   enabled?: boolean;
   frequency?: string;
@@ -551,7 +540,11 @@ export function computeNextRun(config: {
     timezone: tz,
   });
   if (outstanding.send) {
-    return `Due now — ${outstanding.reason} (${tzLabel}) to ${recipientCount} recipient${recipientCount !== 1 ? "s" : ""}`;
+    // Composed from the OUTCOME, never from `reason`. That string is an unlocalised log line carrying
+    // diagnostics like "(65 min after 08:00)" — showing it to an admin makes the UI change whenever the
+    // cadence module rewords a log.
+    const lead = outstanding.outcome === "catch-up" ? "Overdue — sending shortly" : "Due now";
+    return `${lead} (${tzLabel}) to ${recipientCount} recipient${recipientCount !== 1 ? "s" : ""}`;
   }
   // Today is SPENT once a send is recorded against this local date, and the forward scan below cannot see
   // that — it only matches slots. Without this, moving the time later on a day that already sent (sent at
@@ -559,7 +552,7 @@ export function computeNextRun(config: {
   // because the date is already marked. The preview would have promised a run that cannot happen.
   const alreadySentToday =
     lastSent && !Number.isNaN(lastSent.getTime())
-      ? localDateIn(lastSent, tz) === localDateIn(now, tz)
+      ? localOccurrenceDate(lastSent, tz) === localOccurrenceDate(now, tz)
       : false;
 
   const getParts = (d: Date) => {
@@ -614,7 +607,7 @@ export function computeNextRun(config: {
   const maxSlots = 90 * 24 * 4;
   for (let i = 1; i <= maxSlots; i++) {
     const candidate = new Date(now.getTime() + i * 15 * 60 * 1000);
-    if (alreadySentToday && localDateIn(candidate, tz) === localDateIn(now, tz)) continue;
+    if (alreadySentToday && localOccurrenceDate(candidate, tz) === localOccurrenceDate(now, tz)) continue;
     if (isRunDay(candidate)) {
       return formatDisplay(candidate);
     }
