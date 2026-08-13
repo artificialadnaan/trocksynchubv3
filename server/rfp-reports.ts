@@ -7,6 +7,7 @@
 import { eq, desc, and, gte, lte, sql, inArray } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
+import { isOccurrenceDay, localOccurrenceDate, resolveScheduledSend } from "./cron/report-cadence";
 import {
   rfpApprovalRequests,
   rfpChangeLog,
@@ -499,6 +500,8 @@ export function computeNextRun(config: {
   timeOfDay?: string;
   timezone?: string;
   recipients?: string[];
+  /** Read so the preview can see an occurrence the scheduler still owes — see the catch-up branch below. */
+  lastSentAt?: Date | string | null;
 }): string {
   if (!config?.enabled || !config.recipients?.length) return "Not scheduled";
   const tz = config.timezone || "America/Chicago";
@@ -523,6 +526,35 @@ export function computeNextRun(config: {
 
   const now = new Date();
 
+  // An OUTSTANDING occurrence is the next run, and saying otherwise misinforms the person reading it. The
+  // scheduler catches up on any tick past the scheduled time that has not already sent, so after a missed
+  // tick this preview would scan forward and answer "tomorrow" — moments before a catch-up email arrives.
+  // Asked of the same function the scheduler uses, so the two cannot drift apart.
+  const lastSent = config.lastSentAt ? new Date(config.lastSentAt) : null;
+  const outstanding = resolveScheduledSend({
+    now,
+    lastSentAt: lastSent && !Number.isNaN(lastSent.getTime()) ? lastSent : null,
+    frequency: freq,
+    dayOfWeek: config.dayOfWeek ?? null,
+    timeOfDay: timeStr,
+    timezone: tz,
+  });
+  if (outstanding.send) {
+    // Composed from the OUTCOME, never from `reason`. That string is an unlocalised log line carrying
+    // diagnostics like "(65 min after 08:00)" — showing it to an admin makes the UI change whenever the
+    // cadence module rewords a log.
+    const lead = outstanding.outcome === "catch-up" ? "Overdue — sending shortly" : "Due now";
+    return `${lead} (${tzLabel}) to ${recipientCount} recipient${recipientCount !== 1 ? "s" : ""}`;
+  }
+  // Today is SPENT once a send is recorded against this local date, and the forward scan below cannot see
+  // that — it only matches slots. Without this, moving the time later on a day that already sent (sent at
+  // 08:00, changed to 10:00 at 09:00) previewed today's 10:00 run, which the scheduler will suppress
+  // because the date is already marked. The preview would have promised a run that cannot happen.
+  const alreadySentToday =
+    lastSent && !Number.isNaN(lastSent.getTime())
+      ? localOccurrenceDate(lastSent, tz) === localOccurrenceDate(now, tz)
+      : false;
+
   const getParts = (d: Date) => {
     const parts = formatter.formatToParts(d);
     return {
@@ -543,20 +575,17 @@ export function computeNextRun(config: {
 
     if (slot !== targetSlot) return false;
 
-    switch (freq) {
-      case "daily":
-        return true;
-      case "weekly":
-        return currentDow === targetDow;
-      case "biweekly": {
-        const weekNum = Math.floor(d.getTime() / (7 * 24 * 60 * 60 * 1000));
-        return currentDow === targetDow && weekNum % 2 === 0;
-      }
-      case "monthly":
-        return day === 1;
-      default:
-        return currentDow === targetDow;
-    }
+    // WHICH DAYS the schedule fires on is the sender's question, so it is asked of the sender's own
+    // predicate rather than reimplemented here. Two copies disagreed twice — on biweekly eligibility, then
+    // on the parity anchor — each time because a fix landed on one of them. The slot check above stays
+    // local, because that is this preview's own concern: finding the candidate instant to display.
+    return isOccurrenceDay({
+      instant: d,
+      frequency: freq,
+      dayOfWeek: config.dayOfWeek ?? null,
+      timeOfDay: timeStr,
+      timezone: tz,
+    });
   };
 
   const formatDisplay = (d: Date): string => {
@@ -578,6 +607,7 @@ export function computeNextRun(config: {
   const maxSlots = 90 * 24 * 4;
   for (let i = 1; i <= maxSlots; i++) {
     const candidate = new Date(now.getTime() + i * 15 * 60 * 1000);
+    if (alreadySentToday && localOccurrenceDate(candidate, tz) === localOccurrenceDate(now, tz)) continue;
     if (isRunDay(candidate)) {
       return formatDisplay(candidate);
     }
