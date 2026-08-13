@@ -365,3 +365,67 @@ describe("re-send badge row height", () => {
     expect(withBadge.length).toBeGreaterThan(withoutBadge.length);
   });
 });
+
+/**
+ * A PDF link is an ANNOTATION, not styled text. pdfText() decodes glyph runs, so it can prove the label is
+ * on the page and nothing at all about whether it is clickable — asserting on the text would pass for a
+ * plain-text row. These read the /Annots URI entries out of the uncompressed document instead.
+ */
+function pdfLinkTargets(buf: Buffer): string[] {
+  return (buf.toString("latin1").match(/\/URI\s*\(([^)]*)\)/g) || []).map((m) =>
+    m.replace(/^\/URI\s*\(/, "").replace(/\)$/, "")
+  );
+}
+
+describe("the PDF links each project to the CRM and the Bid Board", () => {
+  const linked = {
+    dealUrl: "https://trockcrm.com/deals/abc-123?officeId=44444444-4444-4444-4444-444444440001",
+    bidBoardUrl:
+      "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/562949955993364/details",
+  };
+
+  it("writes real link annotations for both destinations", async () => {
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Tobias Place", ...linked })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    } as any);
+    const targets = pdfLinkTargets(pdf);
+    expect(targets).toContain(linked.dealUrl);
+    expect(targets).toContain(linked.bidBoardUrl);
+  });
+
+  it("leaves a deal with no Bid Board record unlinked rather than writing a dead URL", async () => {
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Direct Service Job", dealUrl: linked.dealUrl, bidBoardUrl: null })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    } as any);
+    const targets = pdfLinkTargets(pdf);
+    expect(targets).toContain(linked.dealUrl);
+    expect(targets.some((t) => t.includes("procore"))).toBe(false);
+  });
+
+  it("writes no annotations at all when the CRM sent no links", async () => {
+    // A report composed against a CRM predating this feature must still render — as plain text.
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Legacy Row" })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    } as any);
+    expect(pdfLinkTargets(pdf)).toEqual([]);
+    // …and the row is still THERE, just not clickable.
+    expect(pdfText(pdf)).toContain("Legacy Row");
+  });
+
+  it("refuses a non-http scheme rather than embedding it", async () => {
+    const pdf = await buildEstimatesSentPdf({
+      deals: [deal({ name: "Hostile", dealUrl: "javascript:alert(1)", bidBoardUrl: "data:text/html,x" })],
+      periodLabel: "Aug 5 – Aug 12",
+      compress: false,
+    } as any);
+    const raw = pdf.toString("latin1");
+    expect(raw).not.toContain("javascript:");
+    expect(raw).not.toContain("data:text/html");
+  });
+});

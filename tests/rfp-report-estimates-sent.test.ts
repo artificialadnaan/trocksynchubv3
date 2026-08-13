@@ -840,3 +840,115 @@ describe("the estimates checkpoint", () => {
     expect(result.estimatesCoveredThrough?.toISOString()).toBe(RUN_AT.toISOString());
   });
 });
+
+describe("the email links each project", () => {
+  const linked = {
+    dealUrl: "https://trockcrm.com/deals/abc-123?officeId=44444444-4444-4444-4444-444444440001",
+    bidBoardUrl:
+      "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/562949955993364/details",
+  };
+
+  it("makes the project name open the CRM deal and offers the Bid Board", async () => {
+    const html = await render({ ok: true, deals: [deal({ name: "Tobias Place", ...linked })], total: 1 });
+    expect(html).toContain(`href="${linked.dealUrl}"`);
+    expect(html).toContain(`href="${linked.bidBoardUrl}"`);
+    expect(html).toContain("Open in Procore");
+  });
+
+  it("omits the Bid Board row entirely when the deal has no record", async () => {
+    const html = await render({
+      ok: true,
+      deals: [deal({ name: "Direct Service Job", dealUrl: linked.dealUrl, bidBoardUrl: null })],
+      total: 1,
+    });
+    expect(html).toContain(`href="${linked.dealUrl}"`);
+    // No dead link and no empty row. About half of all historical estimate-sent deals have no Bid Board
+    // record — almost entirely one import batch, but the branch has to render cleanly regardless.
+    expect(html).not.toContain("Open in Procore");
+    expect(html).not.toContain("Bid Board");
+  });
+
+  it("renders plain text, not a broken anchor, when the CRM sent no links", async () => {
+    // A report composed against a CRM that predates this field must still render.
+    const html = await render({ ok: true, deals: [deal({ name: "Legacy Row" })], total: 1 });
+    expect(html).toContain("Legacy Row");
+    expect(html).not.toContain('href="undefined"');
+    expect(html).not.toContain('href="null"');
+  });
+
+  it("does not emit a javascript: href", async () => {
+    // These strings arrive over the wire and go straight into an href.
+    const html = await render({
+      ok: true,
+      deals: [deal({ name: "Hostile", dealUrl: "javascript:alert(1)", bidBoardUrl: "data:text/html,x" })],
+      total: 1,
+    });
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("data:text/html");
+    expect(html).toContain("Hostile");
+  });
+});
+
+/**
+ * THROUGH THE WIRE, not around it.
+ *
+ * The link tests above build CrmEstimateSent objects and hand them to the renderers, which skips
+ * fetchOneWindow entirely — the very place the fields have to survive. They all passed while production
+ * dropped both links on the floor and rendered plain text (Codex P1 on #70). These go through
+ * fetchCrmEstimatesSent with a stubbed response, so the parser is what is under test.
+ */
+describe("the links survive parsing the CRM response", () => {
+  const wireRow = {
+    dealId: "d-1",
+    officeSlug: "dallas",
+    name: "Tobias Place",
+    dealNumber: "DFW-1",
+    projectNumber: "DFW-4-22426-af",
+    stageSlug: "estimate_sent_to_client",
+    enteredAt: "2026-08-12T14:00:00.000Z",
+    amount: "11225.00",
+    ownerName: "Andrew Green",
+    ownerEmail: null,
+    priorEntryCount: 0,
+  };
+
+  const fetchWith = (deals: unknown[]) =>
+    fetchCrmEstimatesSent(new Date("2026-08-12T00:00:00Z"), new Date("2026-08-13T00:00:00Z"), {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ deals }) }) as unknown as Response,
+      logger: () => {},
+    });
+
+  it("carries dealUrl and bidBoardUrl off the wire and onto the deal", async () => {
+    const result = await fetchWith([
+      {
+        ...wireRow,
+        dealUrl: "https://trockcrm.com/deals/abc?officeId=4444",
+        bidBoardUrl:
+          "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/562949955993364/details",
+      },
+    ]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.deals[0]!.dealUrl).toBe("https://trockcrm.com/deals/abc?officeId=4444");
+    expect(result.deals[0]!.bidBoardUrl).toContain("/tools/bid-board/project/562949955993364/details");
+  });
+
+  it("nulls a link the CRM omitted rather than carrying undefined into a renderer", async () => {
+    const result = await fetchWith([wireRow]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.deals[0]!.dealUrl).toBeNull();
+    expect(result.deals[0]!.bidBoardUrl).toBeNull();
+  });
+
+  it("drops a hostile URL at the boundary, so it never reaches a renderer", async () => {
+    const result = await fetchWith([
+      { ...wireRow, dealUrl: "javascript:alert(1)", bidBoardUrl: "data:text/html,x" },
+    ]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.deals[0]!.dealUrl).toBeNull();
+    expect(result.deals[0]!.bidBoardUrl).toBeNull();
+    // The row itself still survives — a bad link is not a reason to drop a real estimate.
+    expect(result.deals[0]!.name).toBe("Tobias Place");
+  });
+});

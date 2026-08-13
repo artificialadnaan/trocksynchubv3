@@ -38,6 +38,32 @@ export interface CrmEstimateSent {
   ownerEmail: string | null;
   /** Sends of this deal strictly before this one: 0 on a first send, 2 on a third. */
   priorEntryCount: number;
+  /**
+   * Absolute CRM deal link, built by the CRM because only it knows the office id the deal page needs.
+   *
+   * OPTIONAL on the wire: a report composed against a CRM that predates this field must still render, and
+   * degrade to plain text rather than to a broken link.
+   */
+  dealUrl?: string | null;
+  /** Absolute Procore Bid Board link, or null when this deal has no Bid Board record. */
+  bidBoardUrl?: string | null;
+}
+
+/**
+ * Only http(s), and only when present.
+ *
+ * These strings arrive over the wire and are interpolated into an href. A javascript: or data: URL in an
+ * email is inert in most clients and dangerous in the ones that aren't, and the check costs nothing.
+ */
+export function safeLinkUrl(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -287,6 +313,12 @@ async function fetchOneWindow(
         ownerName: typeof entry?.ownerName === "string" ? entry.ownerName : null,
         ownerEmail: typeof entry?.ownerEmail === "string" ? entry.ownerEmail : null,
         priorEntryCount,
+        // VALIDATED AT THE BOUNDARY, not at render time. Everything below this line is wire data; running
+        // it through safeLinkUrl here means a hostile or malformed URL never enters a CrmEstimateSent at
+        // all, rather than being caught by whichever renderer happens to remember. Both are optional: a
+        // CRM predating these fields sends neither, and the report must still compose.
+        dealUrl: safeLinkUrl(entry?.dealUrl),
+        bidBoardUrl: safeLinkUrl(entry?.bidBoardUrl),
       });
     }
 
