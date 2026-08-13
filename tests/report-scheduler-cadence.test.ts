@@ -193,3 +193,93 @@ describe("resolveScheduledSend — biweekly parity is anchored to the occurrence
     expect(eligible).not.toEqual(wednesdays);
   });
 });
+
+describe("resolveScheduledSend — schedules that fall between ticks", () => {
+  // Codex P1 on #69 round 3. The cron only fires at :00/:15/:30/:45, so a time configured at 23:50 has no
+  // tick between its due moment and midnight: the next callback lands at 00:00 on a NEW local date, where
+  // a daily schedule is before the new due time and a weekly one may not even be a send day. The
+  // occurrence became permanently ineligible. The old slot matcher fired during the 23:45 slot.
+  const lateNight = {
+    frequency: "daily",
+    dayOfWeek: null,
+    timeOfDay: "23:50:00",
+    timezone: "America/Chicago",
+  };
+
+  it("fires on the tick whose slot contains a late-night scheduled time", () => {
+    // 04:45Z is 23:45 Chicago — the last tick of the local day, and the slot holding 23:50.
+    const decision = resolveScheduledSend({
+      now: new Date("2026-08-14T04:45:00Z"),
+      lastSentAt: new Date("2026-08-13T04:45:00.162Z"),
+      ...lateNight,
+    });
+    expect(decision.send).toBe(true);
+  });
+
+  it("still refuses earlier ticks on that day", () => {
+    // 04:30Z is 23:30 Chicago — an earlier slot, genuinely before the schedule.
+    const decision = resolveScheduledSend({
+      now: new Date("2026-08-14T04:30:00Z"),
+      lastSentAt: new Date("2026-08-13T04:45:00.162Z"),
+      ...lateNight,
+    });
+    expect(decision.send).toBe(false);
+    expect(decision.reason).toContain("before");
+  });
+
+  it("delivers a 23:50 schedule every day rather than never", () => {
+    let lastSentAt: Date | null = null;
+    const sent: string[] = [];
+    for (let day = 11; day <= 14; day++) {
+      const now = new Date(`2026-08-${day}T04:45:00Z`); // 23:45 Chicago the previous local day
+      const d = resolveScheduledSend({ now, lastSentAt, ...lateNight });
+      if (d.send) {
+        sent.push(d.occurrenceDate!);
+        lastSentAt = new Date(now.getTime() + 162);
+      }
+    }
+    expect(sent.length).toBe(4);
+  });
+});
+
+describe("resolveScheduledSend — biweekly phase for an evening schedule", () => {
+  // Codex P2 on #69 round 3: week buckets break on Thursday 00:00 UTC, so 20:00 Chicago on a Wednesday
+  // (01:00 UTC Thursday) sits in a DIFFERENT bucket from that Wednesday's local midnight. Keying parity
+  // off midnight would have shifted an existing evening schedule's phase on deploy.
+  const eveningBiweekly = {
+    frequency: "biweekly",
+    dayOfWeek: 3, // Wednesday
+    timeOfDay: "20:00:00",
+    timezone: "America/Chicago",
+  };
+
+  it("matches the phase the old tick-based form produced", () => {
+    for (const wednesday of ["2026-08-05", "2026-08-12", "2026-08-19", "2026-08-26"]) {
+      // The instant the schedule actually fires: 20:00 Chicago = 01:00 UTC the next calendar day.
+      const scheduledInstant = new Date(`${wednesday}T20:00:00-05:00`);
+      const oldParity =
+        Math.floor(scheduledInstant.getTime() / (7 * 24 * 60 * 60 * 1000)) % 2 === 0;
+      const decision = resolveScheduledSend({
+        now: scheduledInstant,
+        lastSentAt: null,
+        ...eveningBiweekly,
+      });
+      expect(decision.send).toBe(oldParity);
+    }
+  });
+
+  it("keeps that answer stable across the UTC week boundary within one occurrence", () => {
+    // 19:00 and 23:00 local on the same Wednesday straddle 00:00 UTC.
+    const early = resolveScheduledSend({
+      now: new Date("2026-08-12T20:00:00-05:00"),
+      lastSentAt: null,
+      ...eveningBiweekly,
+    });
+    const late = resolveScheduledSend({
+      now: new Date("2026-08-12T23:30:00-05:00"),
+      lastSentAt: null,
+      ...eveningBiweekly,
+    });
+    expect(late.send).toBe(early.send);
+  });
+});

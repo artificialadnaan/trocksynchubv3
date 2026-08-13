@@ -94,7 +94,14 @@ function localParts(instant: Date, timezone: string): LocalParts {
 }
 
 /** Is this local day one the schedule fires on at all? */
-function isSendDay(local: LocalParts, frequency: ScheduleFrequency, dayOfWeek: number | null): boolean {
+function isSendDay(
+  local: LocalParts,
+  frequency: ScheduleFrequency,
+  dayOfWeek: number | null,
+  scheduledHour: number,
+  scheduledMinute: number,
+  timezone: string
+): boolean {
   const targetDow = dayOfWeek ?? 1;
   switch (frequency) {
     case "daily":
@@ -111,14 +118,38 @@ function isSendDay(local: LocalParts, frequency: ScheduleFrequency, dayOfWeek: n
       // Days-since-epoch of the local date keeps the same phase as the old tick-based form for daytime
       // schedules (both bucket on the Thursday 00:00 UTC boundary), so an existing biweekly schedule does
       // not invert on deploy.
-      const daysSinceEpoch = Date.UTC(local.year, local.month - 1, local.day) / (24 * 60 * 60 * 1000);
-      return local.weekday === targetDow && Math.floor(daysSinceEpoch / 7) % 2 === 0;
+      // From the occurrence's SCHEDULED INSTANT — the configured local time resolved to UTC — not from
+      // local midnight. Week buckets break on Thursday 00:00 UTC, so an evening schedule (20:00 Chicago is
+      // 01:00 UTC Thursday) sits in the NEXT bucket from its own local midnight: keying off midnight would
+      // have shifted such a schedule's phase on deploy, sending twice one week or opening a three-week gap.
+      // The scheduled instant is what the old tick-based form effectively bucketed, so phase is preserved,
+      // and being fixed per occurrence it cannot drift during catch-up.
+      const scheduled = zonedInstant(local, scheduledHour, scheduledMinute, timezone);
+      return local.weekday === targetDow && Math.floor(scheduled.getTime() / (7 * 24 * 60 * 60 * 1000)) % 2 === 0;
     }
     case "monthly":
       return local.day === 1;
     default:
       return local.weekday === targetDow;
   }
+}
+
+/**
+ * The UTC instant a local wall-clock time denotes. Two passes: guess the instant as if the reading were
+ * UTC, see what that guess reads as locally, and correct by the difference — the standard trick for doing
+ * this without a timezone library.
+ */
+function zonedInstant(local: LocalParts, hour: number, minute: number, timezone: string): Date {
+  const guess = Date.UTC(local.year, local.month - 1, local.day, hour, minute);
+  const readBack = localParts(new Date(guess), timezone);
+  const readBackAsUtc = Date.UTC(
+    readBack.year,
+    readBack.month - 1,
+    readBack.day,
+    readBack.hour,
+    readBack.minute
+  );
+  return new Date(guess - (readBackAsUtc - guess));
 }
 
 export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDecision {
@@ -137,10 +168,8 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
     };
   }
 
-  if (!isSendDay(local, frequency, dayOfWeek)) {
-    return { send: false, reason: `not a ${frequency} send day (${local.date})`, occurrenceDate: null };
-  }
-
+  // Parsed BEFORE the send-day test, which needs the configured time: a biweekly schedule's parity is
+  // anchored to the occurrence's scheduled instant, and that instant is only knowable once the time is.
   const [rawHour, rawMinute] = String(timeOfDay || "08:00").split(":");
   const configHour = Number.parseInt(rawHour, 10);
   const configMinute = Number.parseInt(rawMinute ?? "0", 10);
@@ -148,8 +177,17 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
     return { send: false, reason: `unusable timeOfDay "${timeOfDay}"`, occurrenceDate: null };
   }
 
+  if (!isSendDay(local, frequency, dayOfWeek, configHour, configMinute, timezone)) {
+    return { send: false, reason: `not a ${frequency} send day (${local.date})`, occurrenceDate: null };
+  }
+
   const nowMinutes = local.hour * 60 + local.minute;
-  const dueMinutes = configHour * 60 + configMinute;
+  // Floored to the 15-minute tick grid the cron actually fires on. A schedule set to 23:50 has NO tick
+  // between its due time and midnight — the next callback lands at 00:00 on a new local date, where a
+  // daily schedule is before the new due time and a weekly one may not even be a send day, so the
+  // occurrence was never eligible at all. The previous slot matcher fired during the 23:45 slot, so
+  // flooring both preserves that behaviour exactly rather than inventing a new one.
+  const dueMinutes = Math.floor((configHour * 60 + configMinute) / 15) * 15;
   if (nowMinutes < dueMinutes) {
     return {
       send: false,
