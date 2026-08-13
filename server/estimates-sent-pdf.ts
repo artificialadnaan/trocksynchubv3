@@ -14,12 +14,14 @@
  * Row order and content mirror the email exactly, so the two never disagree about what was sent.
  */
 import PDFDocument from "pdfkit";
-import { type CrmEstimateSent, formatEstimateAmount, resendLabel } from "./crm-estimates-sent";
+import { type CrmEstimateSent, formatEstimateAmount, resendLabel, safeLinkUrl } from "./crm-estimates-sent";
 
 const BRAND_RED = "#d11921";
 const BRAND_DARK = "#111214";
 const BRAND_MUTED = "#6b7280";
 const BRAND_WHITE = "#ffffff";
+/** Distinct from BRAND_DARK so a linked cell reads as clickable in print as well as on screen. */
+const LINK_COLOR = "#1d4ed8";
 const ROW_ALT = "#f9fafb";
 const RULE = "#e5e7eb";
 
@@ -217,8 +219,27 @@ export async function buildEstimatesSentPdf(input: EstimatesSentPdfInput): Promi
     alt = !alt;
 
     doc.fillColor(BRAND_DARK).fontSize(9).font("Helvetica");
-    doc.text(identifier, columnX(0) + 8, y + 6, { width: COLUMNS[0]!.width - 16, lineBreak: false, ellipsis: true });
-    doc.text(name, columnX(1) + 8, y + 6, { width: COLUMNS[1]!.width - 16 });
+    // The PROJECT # opens the Bid Board and the DEAL NAME opens the CRM — two destinations, so each gets
+    // the cell whose content already names it, rather than stacking both on one string. pdfkit's `link`
+    // writes a real annotation, so these are clickable in the saved file, not just blue text.
+    const dealLink = safeLinkUrl(deal.dealUrl);
+    const bidBoardLink = safeLinkUrl(deal.bidBoardUrl);
+    doc
+      .fillColor(bidBoardLink ? LINK_COLOR : BRAND_DARK)
+      .text(identifier, columnX(0) + 8, y + 6, {
+        width: COLUMNS[0]!.width - 16,
+        lineBreak: false,
+        ellipsis: true,
+        ...(bidBoardLink ? { link: bidBoardLink, underline: true } : {}),
+      });
+    doc
+      .fillColor(dealLink ? LINK_COLOR : BRAND_DARK)
+      .text(name, columnX(1) + 8, y + 6, {
+        width: COLUMNS[1]!.width - 16,
+        ...(dealLink ? { link: dealLink, underline: true } : {}),
+      });
+    // Reset, or every later cell in this row inherits the link colour AND pdfkit's still-open annotation.
+    doc.fillColor(BRAND_DARK);
     doc.font("Helvetica-Bold").text(formatEstimateAmount(deal.amount), columnX(2) + 8, y + 6, {
       width: COLUMNS[2]!.width - 16,
       align: "right",

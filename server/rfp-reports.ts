@@ -23,6 +23,7 @@ import {
   resendLabel,
   MAX_ESTIMATES_SENT_ROWS,
   type CrmEstimatesSentResult,
+  safeLinkUrl,
 } from "./crm-estimates-sent";
 import { fetchCrmCurrentDealAmounts } from "./crm-deal-values";
 import { DEFAULT_PROCORE_COMPANY_ID, PROJECT_TYPES, parseProjectTypeFromNumber } from "./constants";
@@ -991,6 +992,9 @@ export async function buildRfpReportEmailHtml(options: {
         const identifier = deal.projectNumber || deal.dealNumber || "";
         const numberLine = [escapeHtml(identifier), resendBadge].filter(Boolean).join("&nbsp;&nbsp;");
         const owner = deal.ownerName || deal.ownerEmail || "—";
+        // Validated rather than trusted: these arrive over the wire and go straight into an href.
+        const dealLink = safeLinkUrl(deal.dealUrl);
+        const bidBoardLink = safeLinkUrl(deal.bidBoardUrl);
 
         return `
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 12px; background: #ffffff;">
@@ -998,7 +1002,9 @@ export async function buildRfpReportEmailHtml(options: {
             <td style="padding: 16px 18px 0 18px;">
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
                 <tr>
-                  <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3; word-break: break-word;">${escapeHtml(deal.name || "(untitled deal)")}</td>
+                  <td style="font-size: 16px; font-weight: 700; color: #111214; line-height: 1.3; word-break: break-word;">${dealLink
+                    ? `<a href="${escapeHtml(dealLink)}" style="color: #111214; text-decoration: underline;">${escapeHtml(deal.name || "(untitled deal)")}</a>`
+                    : escapeHtml(deal.name || "(untitled deal)")}</td>
                   <td align="right" style="font-size: 16px; font-weight: 700; color: #111214; white-space: nowrap; padding-left: 10px; vertical-align: top;">${escapeHtml(formatEstimateAmount(deal.amount))}</td>
                 </tr>
               </table>
@@ -1010,6 +1016,12 @@ export async function buildRfpReportEmailHtml(options: {
               <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
                 ${metaRow("Owner", `<span style="word-break: break-word;">${escapeHtml(owner)}</span>`)}
                 ${metaRow("Sent", `${escapeHtml(date)} · <span style="color: #6b7280;">${escapeHtml(time)}</span>`)}
+                ${bidBoardLink
+                  ? metaRow(
+                      "Bid Board",
+                      `<a href="${escapeHtml(bidBoardLink)}" style="color: #b91c1c; text-decoration: underline;">Open in Procore</a>`
+                    )
+                  : ""}
               </table>
             </td>
           </tr>

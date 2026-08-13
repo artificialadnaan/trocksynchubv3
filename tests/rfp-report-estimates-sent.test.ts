@@ -840,3 +840,51 @@ describe("the estimates checkpoint", () => {
     expect(result.estimatesCoveredThrough?.toISOString()).toBe(RUN_AT.toISOString());
   });
 });
+
+describe("the email links each project", () => {
+  const linked = {
+    dealUrl: "https://trockcrm.com/deals/abc-123?officeId=44444444-4444-4444-4444-444444440001",
+    bidBoardUrl:
+      "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/562949955993364/details",
+  };
+
+  it("makes the project name open the CRM deal and offers the Bid Board", async () => {
+    const html = await render({ ok: true, deals: [deal({ name: "Tobias Place", ...linked })], total: 1 });
+    expect(html).toContain(`href="${linked.dealUrl}"`);
+    expect(html).toContain(`href="${linked.bidBoardUrl}"`);
+    expect(html).toContain("Open in Procore");
+  });
+
+  it("omits the Bid Board row entirely when the deal has no record", async () => {
+    const html = await render({
+      ok: true,
+      deals: [deal({ name: "Direct Service Job", dealUrl: linked.dealUrl, bidBoardUrl: null })],
+      total: 1,
+    });
+    expect(html).toContain(`href="${linked.dealUrl}"`);
+    // No dead link and no empty row. About half of all historical estimate-sent deals have no Bid Board
+    // record — almost entirely one import batch, but the branch has to render cleanly regardless.
+    expect(html).not.toContain("Open in Procore");
+    expect(html).not.toContain("Bid Board");
+  });
+
+  it("renders plain text, not a broken anchor, when the CRM sent no links", async () => {
+    // A report composed against a CRM that predates this field must still render.
+    const html = await render({ ok: true, deals: [deal({ name: "Legacy Row" })], total: 1 });
+    expect(html).toContain("Legacy Row");
+    expect(html).not.toContain('href="undefined"');
+    expect(html).not.toContain('href="null"');
+  });
+
+  it("does not emit a javascript: href", async () => {
+    // These strings arrive over the wire and go straight into an href.
+    const html = await render({
+      ok: true,
+      deals: [deal({ name: "Hostile", dealUrl: "javascript:alert(1)", bidBoardUrl: "data:text/html,x" })],
+      total: 1,
+    });
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("data:text/html");
+    expect(html).toContain("Hostile");
+  });
+});
