@@ -148,3 +148,48 @@ describe("resolveScheduledSend — other cadences", () => {
     expect(decision.send).toBe(false);
   });
 });
+
+describe("resolveScheduledSend — biweekly parity is anchored to the occurrence", () => {
+  // Codex P1 on #69. Deriving parity from the TICK was safe only while eligibility was one 15-minute
+  // slot. With catch-up, the UTC week boundary falls during the local evening in US timezones, so parity
+  // flipped mid-occurrence: an alternate-week Wednesday correctly ineligible at 08:00 became eligible
+  // after 00:00 UTC, and a biweekly report went out every week.
+  const biweekly = {
+    frequency: "biweekly",
+    dayOfWeek: 3, // Wednesday
+    timeOfDay: "08:00:00",
+    timezone: "America/Chicago",
+  };
+
+  it("gives the same answer all day, either side of the UTC week boundary", () => {
+    // 2026-08-12 is a Wednesday. 13:00Z is 08:00 local; 04:00Z the next day is still 23:00 local the SAME
+    // Wednesday — but a different UTC week bucket.
+    const atSchedule = resolveScheduledSend({
+      now: new Date("2026-08-12T13:00:00Z"),
+      lastSentAt: null,
+      ...biweekly,
+    });
+    const lateSameLocalDay = resolveScheduledSend({
+      now: new Date("2026-08-13T04:00:00Z"),
+      lastSentAt: null,
+      ...biweekly,
+    });
+    expect(lateSameLocalDay.send).toBe(atSchedule.send);
+    expect(lateSameLocalDay.occurrenceDate).toBe(atSchedule.occurrenceDate);
+  });
+
+  it("still alternates weeks rather than sending every Wednesday", () => {
+    const wednesdays = ["2026-08-05", "2026-08-12", "2026-08-19", "2026-08-26"];
+    const eligible = wednesdays.filter(
+      (d) =>
+        resolveScheduledSend({
+          now: new Date(`${d}T13:00:00Z`),
+          lastSentAt: null,
+          ...biweekly,
+        }).send
+    );
+    // Every OTHER Wednesday — the defining property of a biweekly schedule.
+    expect(eligible.length).toBe(2);
+    expect(eligible).not.toEqual(wednesdays);
+  });
+});

@@ -94,7 +94,7 @@ function localParts(instant: Date, timezone: string): LocalParts {
 }
 
 /** Is this local day one the schedule fires on at all? */
-function isSendDay(local: LocalParts, frequency: ScheduleFrequency, dayOfWeek: number | null, now: Date): boolean {
+function isSendDay(local: LocalParts, frequency: ScheduleFrequency, dayOfWeek: number | null): boolean {
   const targetDow = dayOfWeek ?? 1;
   switch (frequency) {
     case "daily":
@@ -102,10 +102,17 @@ function isSendDay(local: LocalParts, frequency: ScheduleFrequency, dayOfWeek: n
     case "weekly":
       return local.weekday === targetDow;
     case "biweekly": {
-      // Weeks since the epoch, matching the previous implementation so an existing biweekly schedule keeps
-      // firing on the same weeks rather than inverting its phase on deploy.
-      const weekNum = Math.floor(now.getTime() / (7 * 24 * 60 * 60 * 1000));
-      return local.weekday === targetDow && weekNum % 2 === 0;
+      // Parity is anchored to the local occurrence DATE, never to the tick. Deriving it from `now` was safe
+      // only while eligibility was a single 15-minute slot: with catch-up spanning hours, the UTC week
+      // boundary falls during the local evening in US timezones, so parity FLIPPED mid-occurrence. An
+      // alternate-week Wednesday correctly ineligible at 08:00 became eligible after 00:00 UTC, and the
+      // biweekly report went out every week — alternating between its configured time and the evening.
+      //
+      // Days-since-epoch of the local date keeps the same phase as the old tick-based form for daytime
+      // schedules (both bucket on the Thursday 00:00 UTC boundary), so an existing biweekly schedule does
+      // not invert on deploy.
+      const daysSinceEpoch = Date.UTC(local.year, local.month - 1, local.day) / (24 * 60 * 60 * 1000);
+      return local.weekday === targetDow && Math.floor(daysSinceEpoch / 7) % 2 === 0;
     }
     case "monthly":
       return local.day === 1;
@@ -130,7 +137,7 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
     };
   }
 
-  if (!isSendDay(local, frequency, dayOfWeek, now)) {
+  if (!isSendDay(local, frequency, dayOfWeek)) {
     return { send: false, reason: `not a ${frequency} send day (${local.date})`, occurrenceDate: null };
   }
 

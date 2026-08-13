@@ -7,6 +7,7 @@
 import { eq, desc, and, gte, lte, sql, inArray } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
+import { resolveScheduledSend } from "./cron/report-cadence";
 import {
   rfpApprovalRequests,
   rfpChangeLog,
@@ -499,6 +500,8 @@ export function computeNextRun(config: {
   timeOfDay?: string;
   timezone?: string;
   recipients?: string[];
+  /** Read so the preview can see an occurrence the scheduler still owes — see the catch-up branch below. */
+  lastSentAt?: Date | string | null;
 }): string {
   if (!config?.enabled || !config.recipients?.length) return "Not scheduled";
   const tz = config.timezone || "America/Chicago";
@@ -522,6 +525,23 @@ export function computeNextRun(config: {
   });
 
   const now = new Date();
+
+  // An OUTSTANDING occurrence is the next run, and saying otherwise misinforms the person reading it. The
+  // scheduler catches up on any tick past the scheduled time that has not already sent, so after a missed
+  // tick this preview would scan forward and answer "tomorrow" — moments before a catch-up email arrives.
+  // Asked of the same function the scheduler uses, so the two cannot drift apart.
+  const lastSent = config.lastSentAt ? new Date(config.lastSentAt) : null;
+  const outstanding = resolveScheduledSend({
+    now,
+    lastSentAt: lastSent && !Number.isNaN(lastSent.getTime()) ? lastSent : null,
+    frequency: freq,
+    dayOfWeek: config.dayOfWeek ?? null,
+    timeOfDay: timeStr,
+    timezone: tz,
+  });
+  if (outstanding.send) {
+    return `Due now — ${outstanding.reason} (${tzLabel}) to ${recipientCount} recipient${recipientCount !== 1 ? "s" : ""}`;
+  }
 
   const getParts = (d: Date) => {
     const parts = formatter.formatToParts(d);
@@ -549,8 +569,11 @@ export function computeNextRun(config: {
       case "weekly":
         return currentDow === targetDow;
       case "biweekly": {
-        const weekNum = Math.floor(d.getTime() / (7 * 24 * 60 * 60 * 1000));
-        return currentDow === targetDow && weekNum % 2 === 0;
+        // Same anchoring as the scheduler (report-cadence.ts): parity from the local occurrence date, not
+        // the candidate instant, or the preview and the sender disagree about which weeks are eligible.
+        const { year, month, day: dayOfMonth } = getParts(d);
+        const daysSinceEpoch = Date.UTC(year, month - 1, dayOfMonth) / (24 * 60 * 60 * 1000);
+        return currentDow === targetDow && Math.floor(daysSinceEpoch / 7) % 2 === 0;
       }
       case "monthly":
         return day === 1;

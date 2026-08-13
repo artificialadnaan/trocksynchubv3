@@ -12,10 +12,27 @@ import { sendScheduledRfpReport } from "../rfp-reports";
 import { resolveScheduledSend } from "./report-cadence";
 
 let cronTask: ReturnType<typeof cron.schedule> | null = null;
+/**
+ * One send at a time.
+ *
+ * node-cron does not prevent overlap, and catch-up removed the protection the old single-slot design gave
+ * by accident: every tick past the scheduled time now returns send:true until `lastSentAt` is written, so a
+ * run outlasting its 15-minute tick — a slow CRM lookup, or the sequential per-recipient email loop — let
+ * the next tick read the stale checkpoint and send the SAME report to the same people again.
+ *
+ * Process-local, which is the honest scope: it serialises this service's own ticks. Were the service ever
+ * run with more than one replica, this would need an atomic claim on the occurrence in the database
+ * instead — worth knowing before scaling it out.
+ */
+let sendInFlight = false;
 
 export function startRfpReportScheduler() {
   stopRfpReportScheduler();
   cronTask = cron.schedule("*/15 * * * *", async () => {
+    if (sendInFlight) {
+      console.warn("[RFP Report] Previous run still in flight — skipping this tick to avoid a duplicate send");
+      return;
+    }
     try {
       const config = await storage.getReportScheduleConfig();
       if (!config?.enabled || !config.recipients?.length) return;
@@ -45,6 +62,9 @@ export function startRfpReportScheduler() {
         return;
       }
 
+      // Claimed HERE rather than at the top of the tick: a routine skip must not mark the scheduler busy,
+      // and everything above this line is a cheap read.
+      sendInFlight = true;
       // Persist the boundary the report ACTUALLY queried to, not this loop's earlier `now`. The two are
       // different clock samples, and starting the next window from the earlier one re-reports everything
       // entered in between.
@@ -81,6 +101,8 @@ export function startRfpReportScheduler() {
       }
     } catch (e: unknown) {
       console.error("[RFP Report] Scheduler error:", e instanceof Error ? e.message : e);
+    } finally {
+      sendInFlight = false;
     }
   });
   console.log("[RFP Report] Scheduler started (checks every 15 min)");
