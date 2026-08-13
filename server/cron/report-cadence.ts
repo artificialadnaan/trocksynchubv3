@@ -215,3 +215,29 @@ export function resolveScheduledSend(input: ScheduledSendInput): ScheduledSendDe
     occurrenceDate: local.date,
   };
 }
+
+/**
+ * Is the local day containing `instant` one this schedule fires on?
+ *
+ * Exported so the settings preview asks the SAME question the sender does. Two copies of this logic have
+ * now disagreed twice — first on which weeks a biweekly schedule is eligible, then again on the parity
+ * anchor — because each fix landed on one copy. There is one copy.
+ */
+export function isOccurrenceDay(args: {
+  instant: Date;
+  frequency: ScheduleFrequency;
+  dayOfWeek: number | null;
+  timeOfDay: string;
+  timezone: string;
+}): boolean {
+  const [rawHour, rawMinute] = String(args.timeOfDay || "08:00").split(":");
+  const hour = Number.parseInt(rawHour, 10);
+  const minute = Number.parseInt(rawMinute ?? "0", 10);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
+  try {
+    const local = localParts(args.instant, args.timezone);
+    return isSendDay(local, args.frequency, args.dayOfWeek, hour, minute, args.timezone);
+  } catch {
+    return false;
+  }
+}

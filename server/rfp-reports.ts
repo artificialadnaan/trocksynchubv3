@@ -7,7 +7,7 @@
 import { eq, desc, and, gte, lte, sql, inArray } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { resolveScheduledSend } from "./cron/report-cadence";
+import { isOccurrenceDay, resolveScheduledSend } from "./cron/report-cadence";
 import {
   rfpApprovalRequests,
   rfpChangeLog,
@@ -582,23 +582,17 @@ export function computeNextRun(config: {
 
     if (slot !== targetSlot) return false;
 
-    switch (freq) {
-      case "daily":
-        return true;
-      case "weekly":
-        return currentDow === targetDow;
-      case "biweekly": {
-        // Same anchoring as the scheduler (report-cadence.ts): parity from the local occurrence date, not
-        // the candidate instant, or the preview and the sender disagree about which weeks are eligible.
-        const { year, month, day: dayOfMonth } = getParts(d);
-        const daysSinceEpoch = Date.UTC(year, month - 1, dayOfMonth) / (24 * 60 * 60 * 1000);
-        return currentDow === targetDow && Math.floor(daysSinceEpoch / 7) % 2 === 0;
-      }
-      case "monthly":
-        return day === 1;
-      default:
-        return currentDow === targetDow;
-    }
+    // WHICH DAYS the schedule fires on is the sender's question, so it is asked of the sender's own
+    // predicate rather than reimplemented here. Two copies disagreed twice — on biweekly eligibility, then
+    // on the parity anchor — each time because a fix landed on one of them. The slot check above stays
+    // local, because that is this preview's own concern: finding the candidate instant to display.
+    return isOccurrenceDay({
+      instant: d,
+      frequency: freq,
+      dayOfWeek: config.dayOfWeek ?? null,
+      timeOfDay: timeStr,
+      timezone: tz,
+    });
   };
 
   const formatDisplay = (d: Date): string => {

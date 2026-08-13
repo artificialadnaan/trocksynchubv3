@@ -7,6 +7,7 @@ vi.mock("../server/storage", () => ({ storage: {} }));
 vi.mock("../server/email-service", () => ({ sendEmail: vi.fn() }));
 
 const { computeNextRun } = await import("../server/rfp-reports");
+const { resolveScheduledSend } = await import("../server/cron/report-cadence");
 
 /**
  * The preview must agree with the sender.
@@ -83,5 +84,40 @@ describe("computeNextRun — outstanding occurrences", () => {
     // A brand new schedule whose time has not arrived today must not read as overdue.
     const early = { ...BASE, timeOfDay: "23:59", lastSentAt: null };
     expect(computeNextRun(early)).toContain("recipient");
+  });
+});
+
+describe("computeNextRun agrees with the sender", () => {
+  // Codex, three rounds running, on the same class: the preview carried its own copy of the eligibility
+  // maths, so each fix landed on one copy and the two drifted. An evening biweekly schedule is where they
+  // diverged last — 20:00 Chicago on a Wednesday is 01:00 UTC Thursday, the next week bucket.
+  const eveningBiweekly = {
+    enabled: true,
+    frequency: "biweekly",
+    dayOfWeek: 3, // Wednesday
+    timeOfDay: "20:00",
+    timezone: "America/Chicago",
+    recipients: ["a@example.test"],
+    lastSentAt: null,
+  };
+
+  it("previews a week the scheduler would actually send in", () => {
+    // Stand just before an eligible Wednesday evening and read what the preview promises.
+    vi.setSystemTime(new Date("2026-08-10T12:00:00Z"));
+    const preview = computeNextRun(eveningBiweekly);
+
+    // Whichever Wednesday it names, the sender must agree that day is eligible.
+    const match = preview.match(/Aug (\d+)/);
+    expect(match).not.toBeNull();
+    const day = Number(match![1]);
+    const senderSaysEligible = resolveScheduledSend({
+      now: new Date(`2026-08-${String(day).padStart(2, "0")}T20:00:00-05:00`),
+      lastSentAt: null,
+      frequency: "biweekly",
+      dayOfWeek: 3,
+      timeOfDay: "20:00",
+      timezone: "America/Chicago",
+    }).send;
+    expect(senderSaysEligible).toBe(true);
   });
 });
