@@ -888,3 +888,67 @@ describe("the email links each project", () => {
     expect(html).toContain("Hostile");
   });
 });
+
+/**
+ * THROUGH THE WIRE, not around it.
+ *
+ * The link tests above build CrmEstimateSent objects and hand them to the renderers, which skips
+ * fetchOneWindow entirely — the very place the fields have to survive. They all passed while production
+ * dropped both links on the floor and rendered plain text (Codex P1 on #70). These go through
+ * fetchCrmEstimatesSent with a stubbed response, so the parser is what is under test.
+ */
+describe("the links survive parsing the CRM response", () => {
+  const wireRow = {
+    dealId: "d-1",
+    officeSlug: "dallas",
+    name: "Tobias Place",
+    dealNumber: "DFW-1",
+    projectNumber: "DFW-4-22426-af",
+    stageSlug: "estimate_sent_to_client",
+    enteredAt: "2026-08-12T14:00:00.000Z",
+    amount: "11225.00",
+    ownerName: "Andrew Green",
+    ownerEmail: null,
+    priorEntryCount: 0,
+  };
+
+  const fetchWith = (deals: unknown[]) =>
+    fetchCrmEstimatesSent(new Date("2026-08-12T00:00:00Z"), new Date("2026-08-13T00:00:00Z"), {
+      baseUrl: "https://crm.example.com",
+      secret: "shhh",
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ deals }) }) as unknown as Response,
+      logger: () => {},
+    });
+
+  it("carries dealUrl and bidBoardUrl off the wire and onto the deal", async () => {
+    const result = await fetchWith([
+      {
+        ...wireRow,
+        dealUrl: "https://trockcrm.com/deals/abc?officeId=4444",
+        bidBoardUrl:
+          "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/562949955993364/details",
+      },
+    ]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.deals[0]!.dealUrl).toBe("https://trockcrm.com/deals/abc?officeId=4444");
+    expect(result.deals[0]!.bidBoardUrl).toContain("/tools/bid-board/project/562949955993364/details");
+  });
+
+  it("nulls a link the CRM omitted rather than carrying undefined into a renderer", async () => {
+    const result = await fetchWith([wireRow]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.deals[0]!.dealUrl).toBeNull();
+    expect(result.deals[0]!.bidBoardUrl).toBeNull();
+  });
+
+  it("drops a hostile URL at the boundary, so it never reaches a renderer", async () => {
+    const result = await fetchWith([
+      { ...wireRow, dealUrl: "javascript:alert(1)", bidBoardUrl: "data:text/html,x" },
+    ]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.deals[0]!.dealUrl).toBeNull();
+    expect(result.deals[0]!.bidBoardUrl).toBeNull();
+    // The row itself still survives — a bad link is not a reason to drop a real estimate.
+    expect(result.deals[0]!.name).toBe("Tobias Place");
+  });
+});

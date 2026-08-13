@@ -313,6 +313,12 @@ async function fetchOneWindow(
         ownerName: typeof entry?.ownerName === "string" ? entry.ownerName : null,
         ownerEmail: typeof entry?.ownerEmail === "string" ? entry.ownerEmail : null,
         priorEntryCount,
+        // VALIDATED AT THE BOUNDARY, not at render time. Everything below this line is wire data; running
+        // it through safeLinkUrl here means a hostile or malformed URL never enters a CrmEstimateSent at
+        // all, rather than being caught by whichever renderer happens to remember. Both are optional: a
+        // CRM predating these fields sends neither, and the report must still compose.
+        dealUrl: safeLinkUrl(entry?.dealUrl),
+        bidBoardUrl: safeLinkUrl(entry?.bidBoardUrl),
       });
     }
 
