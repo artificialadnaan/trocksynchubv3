@@ -9,74 +9,9 @@
 import cron from "node-cron";
 import { storage } from "../storage";
 import { sendScheduledRfpReport } from "../rfp-reports";
+import { resolveScheduledSend } from "./report-cadence";
 
 let cronTask: ReturnType<typeof cron.schedule> | null = null;
-
-function getFrequencyWindowMs(frequency: string): number {
-  const dayMs = 24 * 60 * 60 * 1000;
-  switch (frequency) {
-    case "daily":
-      return dayMs;
-    case "weekly":
-      return 7 * dayMs;
-    case "biweekly":
-      return 14 * dayMs;
-    case "monthly":
-      return 28 * dayMs;
-    default:
-      return 7 * dayMs;
-  }
-}
-
-function shouldSendReport(config: {
-  frequency: string;
-  dayOfWeek: number | null;
-  timeOfDay: string;
-  timezone: string;
-}): boolean {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: config.timezone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    weekday: "short",
-    day: "numeric",
-    month: "numeric",
-    year: "numeric",
-  });
-  const parts = formatter.formatToParts(now);
-  const hour = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10);
-  const minute = parseInt(parts.find((p) => p.type === "minute")?.value ?? "0", 10);
-  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
-  const day = parseInt(parts.find((p) => p.type === "day")?.value ?? "0", 10);
-  const month = parseInt(parts.find((p) => p.type === "month")?.value ?? "0", 10);
-
-  const [configHour, configMin] = (config.timeOfDay || "08:00").toString().split(":").map(Number);
-  const targetDow = config.dayOfWeek ?? 1;
-  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-  const currentDow = dayMap[weekday] ?? 0;
-
-  const currentSlot = hour * 4 + Math.floor(minute / 15);
-  const configSlot = configHour * 4 + Math.floor((configMin || 0) / 15);
-  if (currentSlot !== configSlot) return false;
-
-  switch (config.frequency) {
-    case "daily":
-      return true;
-    case "weekly":
-      return currentDow === targetDow;
-    case "biweekly": {
-      // Use weeks since Unix epoch for consistent two-week cycles (not per-month)
-      const weekNum = Math.floor(now.getTime() / (7 * 24 * 60 * 60 * 1000));
-      return currentDow === targetDow && weekNum % 2 === 0;
-    }
-    case "monthly":
-      return day === 1;
-    default:
-      return currentDow === targetDow;
-  }
-}
 
 export function startRfpReportScheduler() {
   stopRfpReportScheduler();
@@ -87,18 +22,28 @@ export function startRfpReportScheduler() {
 
       const lastSentAt = config.lastSentAt ? new Date(config.lastSentAt) : null;
       const now = new Date();
-      const windowMs = getFrequencyWindowMs(config.frequency);
-      if (lastSentAt && now.getTime() - lastSentAt.getTime() < windowMs) return;
 
-      if (
-        !shouldSendReport({
-          frequency: config.frequency,
-          dayOfWeek: config.dayOfWeek,
-          timeOfDay: String(config.timeOfDay),
-          timezone: config.timezone,
-        })
-      )
+      // Occurrence-keyed, NOT elapsed-time. The previous form asked "has 24h passed since lastSentAt",
+      // comparing two independently jittered clock samples against an exact boundary — so a tick landing
+      // milliseconds early returned silently, and with one 15-minute slot and no retry that lost the whole
+      // day. It alternated: 3 sends a week instead of 7. See report-cadence.ts.
+      const decision = resolveScheduledSend({
+        now,
+        lastSentAt,
+        frequency: config.frequency,
+        dayOfWeek: config.dayOfWeek,
+        timeOfDay: String(config.timeOfDay),
+        timezone: config.timezone,
+      });
+      if (!decision.send) {
+        // Config-level problems would otherwise keep the schedule silent forever with nothing to see. The
+        // routine skips (not a send day, before the time, already sent today) stay quiet — at four ticks an
+        // hour they would bury everything else.
+        if (decision.occurrenceDate === null && !decision.reason.startsWith("not a")) {
+          console.warn(`[RFP Report] Not scheduling: ${decision.reason}`);
+        }
         return;
+      }
 
       // Persist the boundary the report ACTUALLY queried to, not this loop's earlier `now`. The two are
       // different clock samples, and starting the next window from the earlier one re-reports everything
@@ -124,7 +69,15 @@ export function startRfpReportScheduler() {
           lastSentAt: windowEnd ?? now,
           ...(estimatesCoveredThrough ? { estimatesCoveredThrough } : {}),
         });
-        console.log(`[RFP Report] Sent scheduled report to ${sent} recipient(s)`);
+        console.log(`[RFP Report] Sent scheduled report to ${sent} recipient(s) — ${decision.reason}`);
+      } else {
+        // sendEmail reports failure by returning { success: false } rather than throwing, so a provider
+        // outage produced sent=0, no checkpoint write and NO LOG AT ALL — indistinguishable from the
+        // scheduler never having run. Diagnosing the 2026-08-13 miss needed the CRM's logs and the
+        // database to tell those two apart; this line is so the next one does not.
+        console.error(
+          `[RFP Report] Attempted ${decision.reason} but delivered to 0 recipients — checkpoint NOT advanced, will retry on the next tick`
+        );
       }
     } catch (e: unknown) {
       console.error("[RFP Report] Scheduler error:", e instanceof Error ? e.message : e);
