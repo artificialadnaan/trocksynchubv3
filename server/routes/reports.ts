@@ -76,6 +76,11 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
 
   app.get("/api/reports/schedule/next-run", requireAuth, asyncHandler(async (req, res) => {
     const enabled = req.query.enabled !== "false";
+    // The DRAFT comes from the query string, but the checkpoint is a fact about what has already gone out
+    // and belongs to the saved schedule. Without it the preview sees no send on record, decides today's
+    // occurrence is still owed, and answers "Due now" for the rest of every eligible day — including hours
+    // after the report actually landed.
+    const persisted = await storage.getReportScheduleConfig();
     const config = {
       enabled,
       frequency: (req.query.frequency as string) || "weekly",
@@ -83,6 +88,7 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
       timeOfDay: (req.query.timeOfDay as string) || "08:00",
       timezone: (req.query.timezone as string) || "America/Chicago",
       recipients: (req.query.recipients as string)?.split(",").filter(Boolean) ?? [],
+      lastSentAt: persisted?.lastSentAt ?? null,
     };
     const nextRun = computeNextRun(config);
     res.json({ nextRun });

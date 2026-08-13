@@ -29,10 +29,15 @@ let sendInFlight = false;
 export function startRfpReportScheduler() {
   stopRfpReportScheduler();
   cronTask = cron.schedule("*/15 * * * *", async () => {
+    // Claimed BEFORE the first await, and released in `finally`. Node runs this callback to its first
+    // suspension point without interleaving, so check-then-set here is atomic; claiming it after the
+    // config read (as an earlier revision did) left a window where a slow database let two ticks both pass
+    // this check, both finish their read, and both send the same uncheckpointed occurrence.
     if (sendInFlight) {
       console.warn("[RFP Report] Previous run still in flight — skipping this tick to avoid a duplicate send");
       return;
     }
+    sendInFlight = true;
     try {
       const config = await storage.getReportScheduleConfig();
       if (!config?.enabled || !config.recipients?.length) return;
@@ -62,9 +67,6 @@ export function startRfpReportScheduler() {
         return;
       }
 
-      // Claimed HERE rather than at the top of the tick: a routine skip must not mark the scheduler busy,
-      // and everything above this line is a cheap read.
-      sendInFlight = true;
       // Persist the boundary the report ACTUALLY queried to, not this loop's earlier `now`. The two are
       // different clock samples, and starting the next window from the earlier one re-reports everything
       // entered in between.
