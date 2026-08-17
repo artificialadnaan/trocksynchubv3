@@ -480,7 +480,23 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     const { ensureLoggedIn } = await import("../playwright/auth");
     const { withBrowserLock, takeScreenshot } = await import("../playwright/browser");
     const { navigateToProject } = await import("../playwright/bidboard");
-    const { findVisibleMatch } = await import("../playwright/bidboard-notes");
+    // Every decision this route reports is made by the SAME function production uses. Its whole value
+    // is telling a human which selectors are real; a parallel rule here means validating hooks
+    // production would never use, or reporting working ones as absent — and that decision then ships
+    // into an automation touching live Procore projects.
+    const {
+      findVisibleMatch,
+      findVisibleRoleMatch,
+      resolveNotesSection,
+      resolveEditorScopes,
+      actableCandidates,
+      readNoteTexts,
+      hasMarkerNote,
+      isForbiddenFillTarget,
+      cancelEditor,
+      CREATE_BUTTON_ROLE,
+      ROLE_MATCH_LABEL,
+    } = await import("../playwright/bidboard-notes");
     const { PROCORE_SELECTORS } = await import("../playwright/selectors");
 
     const NOTES = PROCORE_SELECTORS.bidboard.newUi.notes;
@@ -508,7 +524,15 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       // cascade is (or isn't) carrying each step, instead of a single yes/no for a CSS union. The tier
       // is reported because it decides what the automation is ALLOWED to do: it acts on precise
       // (any scope) and scopedOnly (inside a validated container only), and never on loose.
-      type ProbeRow = { selector: string; tier: string; count: number; visible: boolean; visibleIndex: number | null };
+      type ProbeRow = {
+        selector: string;
+        tier: string;
+        /** Whether the AUTOMATION would act on this selector — from actableCandidates(), not a local rule. */
+        actable: boolean;
+        count: number;
+        visible: boolean;
+        visibleIndex: number | null;
+      };
       const probe = async (
         tiers: { precise: string[]; scopedOnly?: string[]; loose?: string[] } | string[],
         scope: { locator: (s: string) => any } = page,
@@ -516,19 +540,41 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         const groups: Array<[string, string[]]> = Array.isArray(tiers)
           ? [["flat", tiers]]
           : [["precise", tiers.precise], ["scopedOnly", tiers.scopedOnly ?? []], ["loose", tiers.loose ?? []]];
+        // The actable set comes from the shared function so "would the automation use this?" cannot
+        // drift from what the automation actually does (it used to be a local `tier !== "loose"`).
+        const actableSet = new Set(Array.isArray(tiers) ? tiers : actableCandidates(tiers));
         const rows: ProbeRow[] = [];
         for (const [tier, candidateList] of groups) {
           for (const selector of candidateList) {
             const count = await scope.locator(selector).count().catch(() => -1);
             // The SAME visible-match walk the automation uses. Probing `.first()` here would report
             // visible:false for a selector whose first match is a hidden responsive/template duplicate
-            // — a selector the automation happily uses — and this report is what a human reads to
-            // decide which hooks are real. visibleIndex > 0 is itself the signal: earlier ones are hidden.
+            // — a selector the automation happily uses. visibleIndex > 0 is itself the signal.
             const hit = count > 0 ? await findVisibleMatch(scope as any, selector) : null;
-            rows.push({ selector, tier, count, visible: hit !== null, visibleIndex: hit?.index ?? null });
+            rows.push({
+              selector,
+              tier,
+              actable: actableSet.has(selector),
+              count,
+              visible: hit !== null,
+              visibleIndex: hit?.index ?? null,
+            });
           }
         }
         return rows;
+      };
+
+      /** The Create button's role fallback, probed exactly as production resolves it. */
+      const probeCreateRole = async (scope: { locator: (s: string) => any }): Promise<ProbeRow> => {
+        const hit = await findVisibleRoleMatch(scope as any, CREATE_BUTTON_ROLE);
+        return {
+          selector: ROLE_MATCH_LABEL,
+          tier: "roleFallback",
+          actable: true,
+          count: hit ? hit.index + 1 : 0,
+          visible: hit !== null,
+          visibleIndex: hit?.index ?? null,
+        };
       };
 
       const candidates: Record<string, ProbeRow[]> = {
@@ -541,26 +587,23 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         createButton: await probe(NOTES.createButton),
       };
 
-      // The automation only acts on a PRECISE section match, so report that separately from "something
-      // matched" — a page where only the loose candidates hit is a page where the note will refuse.
-      const matchedSection = candidates.section.find((row) => row.visible && row.tier === "precise")?.selector ?? null;
-      const looseSectionOnly = !matchedSection && candidates.section.some((row) => row.visible);
-      // Resolve the section ONCE through the same visible-match walk and reuse that locator below.
-      // Re-deriving it with `.first()` could land on a DIFFERENT (hidden) node than the one the probe
-      // reported, so the HTML dump and the contamination verdict would describe an element the
-      // automation never touches.
-      const sectionLocator = matchedSection ? (await findVisibleMatch(page as any, matchedSection))?.locator ?? null : null;
-      // Does the container the automation would use actually look like the Notes card, or is it a
-      // page-level wrapper that also holds the description field / Create New Project?
-      const sectionContaminated = sectionLocator
-        ? (await sectionLocator.locator(NOTES.sectionContamination).count().catch(() => -1)) !== 0
-        : null;
+      // THE verdict — section resolution, the precise-only rule, the loose-only refusal and the
+      // contamination check all come from resolveNotesSection, the same call production makes. This
+      // replaced four parallel re-implementations that agreed only by coincidence.
+      const sectionResolution = await resolveNotesSection(page as any, { projectLabel: projectId });
+      const sectionLocator = sectionResolution.ok ? sectionResolution.locator : null;
+      const matchedSection = sectionResolution.ok ? sectionResolution.selector : null;
+      const looseSectionOnly = !sectionResolution.ok && sectionResolution.reason === "loose-only";
+      const sectionContaminated = !sectionResolution.ok && sectionResolution.reason === "contaminated";
       const sectionHtml = sectionLocator
         ? ((await sectionLocator.evaluate((el: Element) => el.outerHTML).catch(() => "")) || "").slice(0, MAX_HTML_CHARS)
         : null;
-      const noteTexts = sectionLocator
-        ? await sectionLocator.allTextContents().catch(() => [] as string[])
-        : [];
+      // readNoteTexts, not allTextContents: the idempotency guard reads the union of the item
+      // selectors AND the container's own text, so anything else would report texts the guard never sees.
+      const noteTexts = sectionLocator ? await readNoteTexts(sectionLocator) : [];
+      // Would production SKIP this project as already-noted? That is the single most consequential
+      // thing this route can tell an operator, and it was previously not reported at all.
+      const markerAlreadyPresent = sectionLocator ? hasMarkerNote(noteTexts) : null;
 
       // When no section matched, dump every button on the page so the operator can spot the real add
       // control (its label/aria-label/class is what the selectors need to become).
@@ -593,23 +636,50 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       // was found, which is the very situation this route exists to diagnose — and then report that
       // unrelated widget's textbox and Create button as a successful selector validation. Wrong
       // validation is worse than none, because it is acted on.
-      const sectionScope = sectionContaminated === false ? sectionLocator : null;
+      const sectionScope = sectionLocator;
       candidates.addButtonInSection = sectionScope ? await probe(NOTES.addButton, sectionScope) : [];
-      const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible && row.tier !== "loose")?.selector ?? null;
+      // `actable` comes from the shared tier rule, so this matches what the automation would click.
+      const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible && row.actable)?.selector ?? null;
+      let editorScopeLabels: string[] = [];
+      let inputWouldBeRefused: boolean | null = null;
       if (dryRun && openEditor && sectionScope && matchedAddButton) {
         // Click the node the WALK found, not `.first()` — same reason as above.
         const addTarget = await findVisibleMatch(sectionScope as any, matchedAddButton);
         await addTarget?.locator.click({ timeout: 10000 }).catch(() => {});
         await page.waitForTimeout(2000);
-        const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
-        const dialogOpen = await dialog.isVisible().catch(() => false);
-        const editorScope = dialogOpen ? dialog : sectionScope;
-        candidates.inputAfterAdd = await probe(NOTES.input, editorScope);
-        candidates.createButtonAfterAdd = await probe(NOTES.createButton, editorScope);
-        editorOpened = candidates.inputAfterAdd.some((row) => row.visible);
+
+        // resolveEditorScopes applies production's dialog rule: visible AND uncontaminated, with the
+        // section retained as a second scope. Probing a dialog production would REJECT (or skipping
+        // the inline section because a dialog happens to be visible) is the exact inverse of this
+        // route's purpose.
+        const editorScopes = await resolveEditorScopes(page as any, sectionScope as any);
+        editorScopeLabels = editorScopes.map((scope) => scope.label);
+        candidates.inputAfterAdd = [];
+        candidates.createButtonAfterAdd = [];
+        for (const { label, scope } of editorScopes) {
+          const inputRows = (await probe(NOTES.input, scope as any)).map((row) => ({ ...row, scope: label }));
+          const createRows = [
+            ...(await probe(NOTES.createButton, scope as any)),
+            await probeCreateRole(scope as any),
+          ].map((row) => ({ ...row, scope: label }));
+          candidates.inputAfterAdd.push(...inputRows);
+          candidates.createButtonAfterAdd.push(...createRows);
+        }
+        editorOpened = candidates.inputAfterAdd.some((row) => row.visible && row.actable);
+
+        // Would the fill be refused by the description guard? Report it rather than leaving the
+        // operator to discover it only when a real post declines.
+        const resolvedInput = candidates.inputAfterAdd.find((row) => row.visible && row.actable);
+        if (resolvedInput) {
+          const scopeForInput = editorScopes.find((scope) => scope.label === (resolvedInput as any).scope);
+          const inputHit = scopeForInput ? await findVisibleMatch(scopeForInput.scope as any, resolvedInput.selector) : null;
+          inputWouldBeRefused = inputHit ? await isForbiddenFillTarget(inputHit.locator) : null;
+        }
+
         editorScreenshotPath = await takeScreenshot(page, `bidboard-project-note-editor-${safeProjectId}`).catch(() => null);
-        // Leave the page clean for whatever runs next under the browser lock.
-        await page.keyboard.press("Escape").catch(() => {});
+        // Leave the page clean for whatever runs next under the browser lock — same helper production
+        // uses on every post-fill exit.
+        await cancelEditor(page);
       }
 
       let postResult: unknown = null;
@@ -625,22 +695,27 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         overviewTabVisible,
         url: page.url(),
         matchedSection,
+        // The shared resolver's verdict verbatim — the same string production would log.
+        sectionVerdict: sectionResolution.ok
+          ? { ok: true, selector: sectionResolution.selector }
+          : { ok: false, reason: sectionResolution.reason, selector: sectionResolution.selector, message: sectionResolution.message },
         looseSectionOnly,
         sectionContaminated,
+        markerAlreadyPresent,
+        editorScopeLabels,
+        inputWouldBeRefused,
         matchedAddButton,
         // Why the editor probe did nothing, so a "no input/Create rows" report is never read as "those
         // selectors are broken" when the truth is "we refused to click anything".
         editorProbeSkippedReason: !dryRun || !openEditor
           ? null
-          : !matchedSection
-            ? (looseSectionOnly
-                ? "only the loose (text-shaped) Notes-section candidates matched — refusing to click anything; the automation would refuse here too"
-                : "no Notes section matched")
-            : sectionContaminated
-              ? "the resolved Notes section also contains the Project Description or Create New Project — refusing to click inside a page-level wrapper"
-              : !matchedAddButton
-                ? "no add control matched INSIDE the resolved Notes section"
-                : null,
+          : !sectionResolution.ok
+            // Verbatim from the shared resolver, so the reason the prober declines is word-for-word
+            // the reason production would decline.
+            ? `${sectionResolution.message} (the automation would refuse here too)`
+            : !matchedAddButton
+              ? "no add control matched INSIDE the resolved Notes section"
+              : null,
         editorOpened,
         candidates,
         sectionHtml,

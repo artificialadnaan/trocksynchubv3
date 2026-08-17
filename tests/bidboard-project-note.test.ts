@@ -19,6 +19,11 @@ const {
   CRM_ACTIVITY_NOTE_MARKER,
   NOTE_HARD_CHAR_CAP,
   MIN_NAVIGATION_BUDGET_MS,
+  resolveNotesSection,
+  resolveEditorScopes,
+  findVisibleRoleMatch,
+  actableCandidates,
+  CREATE_BUTTON_ROLE,
 } = await import("../server/playwright/bidboard-notes.ts");
 
 const NOTE = [
@@ -588,6 +593,24 @@ describe("postBidBoardProjectNote", () => {
     expect(navigateToProjectMock).not.toHaveBeenCalled();
   });
 
+  it("submits via the role fallback even when a hidden Create precedes the visible one", async () => {
+    // The note is ALREADY TYPED by the time the Create button is resolved, so a role fallback that
+    // inspects only `.first()` and lands on a hidden responsive/template copy does not merely decline —
+    // it cancels a composed note instead of submitting it.
+    const dom = notesFixture({
+      createButtonRoleOnly: true,
+      extra: [{ id: "hiddenCreate", parent: "notesSection", matches: [], role: "button", name: "Create", hidden: true }],
+    });
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    expect(result.matched?.createButton).toMatch(/role=button/);
+    expect(dom.actions).toContain("click:createBtn");
+    expect(dom.actions).not.toContain("click:hiddenCreate");
+    expect(dom.keys).not.toContain("Escape"); // the composed note was submitted, not cancelled
+  });
+
   it("clamps post-save verification to the overall deadline, not a fresh window", async () => {
     // A fresh verify window would hold the GLOBAL browser lock for another full period on top of an
     // already-spent budget (e.g. after a slow navigation). Timing assertion with a wide margin: with
@@ -629,5 +652,93 @@ describe("postBidBoardProjectNote", () => {
     const result = await postBidBoardProjectNote(makePage(notesFixture()), "9001", "   ", "DFW-2-12345-ab", FAST);
     expect(result).toMatchObject({ posted: false, skipped: true });
     expect(navigateToProjectMock).not.toHaveBeenCalled();
+  });
+});
+
+// These cover the functions the prober and the production path now SHARE. Testing them directly is the
+// point: three review rounds running, the defects were "path A got the rule, path B didn't", so the rule
+// is tested once at the shared implementation rather than twice at each caller.
+describe("shared resolvers (production and prober call these same functions)", () => {
+  const FAST_SECTION = { timeoutMs: 20 };
+
+  describe("resolveNotesSection", () => {
+    it("resolves a precise, uncontaminated Notes card", async () => {
+      const result = await resolveNotesSection(makePage(notesFixture()), FAST_SECTION);
+      expect(result).toMatchObject({ ok: true, selector: "div.aid-notes" });
+    });
+
+    it("reports not-found when nothing matches", async () => {
+      const result = await resolveNotesSection(makePage(notesFixture({ withoutSection: true })), FAST_SECTION);
+      expect(result).toMatchObject({ ok: false, reason: "not-found", selector: null });
+    });
+
+    it("reports loose-only when just the text-shaped guesses match", async () => {
+      // `:has-text()` returns the OUTERMOST ancestor, so this is a refusal, but the operator needs to
+      // know the difference between "nothing there" and "only the docs-shaped guess is there".
+      const dom = notesFixture({ withoutSection: true });
+      dom.nodes.push({ id: "looseSection", parent: "page", matches: ['section:has-text("Notes")'], text: "Notes" });
+      const result = await resolveNotesSection(makePage(dom), FAST_SECTION);
+      expect(result).toMatchObject({ ok: false, reason: "loose-only", selector: 'section:has-text("Notes")' });
+    });
+
+    it("reports contaminated when the card also holds the Project Description", async () => {
+      const result = await resolveNotesSection(makePage(notesFixture({ contaminatedSection: true })), FAST_SECTION);
+      expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+      expect((result as any).message).toMatch(/page-level wrapper/i);
+    });
+  });
+
+  describe("resolveEditorScopes", () => {
+    const sectionOf = (dom: FakeDom) => makePage(dom).locator("div.aid-notes").first();
+
+    it("uses the section alone when no dialog is open", async () => {
+      const dom = notesFixture();
+      const scopes = await resolveEditorScopes(makePage(dom), sectionOf(dom));
+      expect(scopes.map((s: any) => s.label)).toEqual(["section"]);
+    });
+
+    it("prefers a clean dialog but KEEPS the section as a fallback scope", async () => {
+      const dom = notesFixture();
+      dom.nodes.push({ id: "dialog", parent: "page", matches: ['[role="dialog"]'], text: "Add note" });
+      const scopes = await resolveEditorScopes(makePage(dom), sectionOf(dom));
+      expect(scopes.map((s: any) => s.label)).toEqual(["dialog", "section"]);
+    });
+
+    it("REJECTS a contaminated dialog and falls back to the section", async () => {
+      // Production applies isPlausibleNotesSection to the dialog too; the prober used to scope purely
+      // on "the dialog is visible", so it could validate selectors production would never use.
+      const dom = notesFixture();
+      dom.nodes.push({ id: "dialog", parent: "page", matches: ['[role="dialog"]'], text: "Some other modal" });
+      dom.nodes.push({
+        id: "dialogDescription",
+        parent: "dialog",
+        matches: ['textarea[name="description"]', '[name*="description" i]'],
+        attrs: { name: "description" },
+      });
+      const scopes = await resolveEditorScopes(makePage(dom), sectionOf(dom));
+      expect(scopes.map((s: any) => s.label)).toEqual(["section"]);
+    });
+  });
+
+  describe("findVisibleRoleMatch", () => {
+    it("walks past a hidden role match to the visible one", async () => {
+      const dom = notesFixture();
+      dom.nodes.push({ id: "hiddenCreate", parent: "notesSection", matches: [], role: "button", name: "Create", hidden: true });
+      dom.nodes.push({ id: "realCreate", parent: "notesSection", matches: [], role: "button", name: "Create" });
+      const hit = await findVisibleRoleMatch(makePage(dom), CREATE_BUTTON_ROLE);
+      expect(hit?.index).toBe(1);
+    });
+
+    it("returns null when the scope cannot do role queries", async () => {
+      const hit = await findVisibleRoleMatch({ locator: () => ({}) } as any, CREATE_BUTTON_ROLE);
+      expect(hit).toBeNull();
+    });
+  });
+
+  describe("actableCandidates", () => {
+    it("includes precise and scopedOnly, never loose", () => {
+      const tiers = { precise: ["a"], scopedOnly: ["b"], loose: ["c"] };
+      expect(actableCandidates(tiers)).toEqual(["a", "b"]);
+    });
   });
 });

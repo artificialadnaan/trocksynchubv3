@@ -143,19 +143,8 @@ type CandidateTiers = { precise: string[]; scopedOnly?: string[]; loose?: string
  * Notes section or an open dialog that passed the same check). That invariant replaced the old
  * page-wide fallback; if a lookup ever gains a page-wide scope again, this function's contract breaks.
  */
-function actableCandidates(tiers: CandidateTiers): string[] {
+export function actableCandidates(tiers: CandidateTiers): string[] {
   return [...tiers.precise, ...(tiers.scopedOnly ?? [])];
-}
-
-async function isVisible(locator: Locator, timeoutMs: number): Promise<boolean> {
-  // waitFor() gives the SPA time to render; isVisible() alone is a zero-wait snapshot and races the
-  // Procore client-side render that navigateToProject only waits a couple of seconds for.
-  const appeared = await locator
-    .waitFor({ state: "visible", timeout: timeoutMs })
-    .then(() => true)
-    .catch(() => false);
-  if (appeared) return true;
-  return locator.isVisible().catch(() => false);
 }
 
 /**
@@ -205,20 +194,77 @@ export async function findVisibleMatch(
  * turn. One cheap pass over all candidates, repeated until the deadline, gives the SPA time to render
  * without either failure mode.
  */
-async function firstVisibleAcross(
-  attempts: Array<{ scope: Scope; candidates: string[] }>,
+/**
+ * The accessible-name match used for the Create button when no CSS candidate hits. Anchored, so unlike
+ * `button:has-text("Create")` it cannot match "Create New Project" / "Create New Customer". Exported so
+ * the prober reports whether THIS fallback would fire, not just the CSS tiers.
+ */
+export const CREATE_BUTTON_ROLE = { role: "button" as const, name: /^create$/i };
+
+/** How the shared resolver reports a role match, so callers can label it in `matched`. */
+export const ROLE_MATCH_LABEL = "role=button[name=/^create$/i]";
+
+export type ResolveAttempt = {
+  scope: Scope;
+  candidates?: string[];
+  /** Role fallback for this scope, tried after the CSS candidates on every poll pass. */
+  role?: { role: "button"; name: RegExp };
+};
+
+/**
+ * First VISIBLE match by accessible role/name — the role-fallback twin of findVisibleMatch.
+ *
+ * Same walk, same reason: `.first()` here would wait on a hidden responsive/template copy of "Create"
+ * and reject the fallback, and by that point the note is ALREADY TYPED — so the outcome is that we
+ * cancel a composed note instead of submitting it.
+ */
+export async function findVisibleRoleMatch(
+  scope: Scope,
+  role: { role: "button"; name: RegExp },
+): Promise<{ locator: Locator; index: number } | null> {
+  if (typeof scope.getByRole !== "function") return null;
+  let all: Locator;
+  try {
+    all = scope.getByRole(role.role, { name: role.name });
+  } catch {
+    return null;
+  }
+  const count = await all.count().catch(() => 0);
+  for (let index = 0; index < Math.min(count, MAX_NODES_PER_SELECTOR); index++) {
+    const node = all.nth(index);
+    if (await node.isVisible().catch(() => false)) return { locator: node, index };
+  }
+  return null;
+}
+
+/**
+ * Try each attempt in order and return the first VISIBLE match, polling until `timeoutMs`.
+ *
+ * Polls the whole attempt list rather than waiting on a union of it: the union wait had the same
+ * hidden-first-node blind spot as `.first()` (it would sit on a hidden node for the full timeout and
+ * then report nothing), and a per-candidate wait would spend the whole timeout on every wrong guess in
+ * turn. One cheap pass over everything, repeated until the deadline, gives the SPA time to render
+ * without either failure mode. The role fallback rides in the SAME loop so it gets the same polling
+ * and the same visible-match walk as the CSS candidates.
+ */
+export async function firstVisibleAcross(
+  attempts: ResolveAttempt[],
   timeoutMs: number,
 ): Promise<{ locator: Locator; selector: string; attemptIndex: number } | null> {
-  if (attempts.every((attempt) => attempt.candidates.length === 0)) return null;
+  if (attempts.every((attempt) => (attempt.candidates?.length ?? 0) === 0 && !attempt.role)) return null;
   const deadline = Date.now() + Math.max(0, timeoutMs);
   do {
     // All attempts are tried on EVERY pass, in preference order. Exhausting the whole timeout on the
     // preferred scope before even looking at the fallback would burn the budget waiting for something
     // that is never going to appear there (and, with the overall deadline, starve the later steps).
     for (const [attemptIndex, attempt] of attempts.entries()) {
-      for (const selector of attempt.candidates) {
+      for (const selector of attempt.candidates ?? []) {
         const hit = await findVisibleMatch(attempt.scope, selector);
         if (hit) return { locator: hit.locator, selector, attemptIndex };
+      }
+      if (attempt.role) {
+        const hit = await findVisibleRoleMatch(attempt.scope, attempt.role);
+        if (hit) return { locator: hit.locator, selector: ROLE_MATCH_LABEL, attemptIndex };
       }
     }
     if (Date.now() >= deadline) break;
@@ -244,7 +290,7 @@ async function firstVisible(
  * hiding an existing note and posting a duplicate. Union means a wrong `item` match can only add
  * noise, and the marker is still found through the container's text.
  */
-async function readNoteTexts(section: Locator): Promise<string[]> {
+export async function readNoteTexts(section: Locator): Promise<string[]> {
   const texts: string[] = [];
   for (const selector of PROCORE_SELECTORS.bidboard.newUi.notes.item) {
     const items = section.locator(selector);
@@ -272,10 +318,81 @@ async function isPlausibleNotesSection(section: Locator): Promise<boolean> {
 }
 
 /**
+ * The ONE place that decides whether a usable Notes container exists, and why not when it doesn't.
+ *
+ * Shared with the prober deliberately. The prober's entire value is telling a human which selectors are
+ * real; if it resolved the section by a parallel rule it could validate hooks production would never
+ * use, or report a working inline selector as absent — in either direction the human then substitutes
+ * the wrong hooks into an automation that touches live Procore projects. One implementation, one
+ * verdict.
+ */
+export type NotesSectionResolution =
+  | { ok: true; locator: Locator; selector: string }
+  | { ok: false; reason: "not-found" | "loose-only" | "contaminated"; selector: string | null; message: string };
+
+export async function resolveNotesSection(
+  page: Scope,
+  options?: { timeoutMs?: number; projectLabel?: string },
+): Promise<NotesSectionResolution> {
+  const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
+  const where = options?.projectLabel ? ` on project ${options.projectLabel}` : "";
+  const precise = await firstVisible(page, selectors.section.precise, options?.timeoutMs ?? SECTION_TIMEOUT_MS);
+  if (!precise) {
+    // Distinguish "nothing matched" from "only the loose text-shaped guesses matched". Production
+    // refuses either way, but the operator needs to know which — the second means the docs-shaped
+    // guess is on the page and a real structural hook has to be found to replace it.
+    const loose = await firstVisibleAcross([{ scope: page, candidates: selectors.section.loose ?? [] }], 0);
+    if (loose) {
+      return {
+        ok: false,
+        reason: "loose-only",
+        selector: loose.selector,
+        message: `Only the loose (text-shaped) Notes-section candidates matched${where} — refusing to act, because \`:has-text()\` returns the OUTERMOST ancestor, which can be most of the page`,
+      };
+    }
+    return {
+      ok: false,
+      reason: "not-found",
+      selector: null,
+      message: `Notes section not found${where} — no structural (aid-*/data-qa) match; the selectors need validating with the prober before this can run`,
+    };
+  }
+  if (!(await isPlausibleNotesSection(precise.locator))) {
+    return {
+      ok: false,
+      reason: "contaminated",
+      selector: precise.selector,
+      message: `Resolved "Notes section"${where} (${precise.selector}) also contains the Project Description or a Create New Project button — refusing to act inside a page-level wrapper`,
+    };
+  }
+  return { ok: true, locator: precise.locator, selector: precise.selector };
+}
+
+/**
+ * The ONE place that decides which containers the editor may be looked for in, and in what order.
+ *
+ * A dialog is accepted only when it is visible AND passes the same contamination check as the section;
+ * an unrelated modal (or a mis-resolved one wrapping the page) would otherwise re-open every scoping
+ * hazard the section check just closed. When a dialog is usable the section stays as a second scope,
+ * because the editor may still be inline. Shared with the prober so it probes exactly the scopes
+ * production would use — probing a dialog production would reject is worse than not probing at all.
+ */
+export async function resolveEditorScopes(
+  page: Scope,
+  section: Locator,
+): Promise<Array<{ label: string; scope: Scope }>> {
+  const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
+  const dialogUsable = (await dialog.isVisible().catch(() => false)) && (await isPlausibleNotesSection(dialog));
+  return dialogUsable
+    ? [{ label: "dialog", scope: dialog }, { label: "section", scope: section }]
+    : [{ label: "section", scope: section }];
+}
+
+/**
  * Last line of defence before typing: refuse any element whose own attributes say "description".
  * Independent of which selector matched, so it still holds if a candidate is edited carelessly later.
  */
-async function isForbiddenFillTarget(locator: Locator): Promise<boolean> {
+export async function isForbiddenFillTarget(locator: Locator): Promise<boolean> {
   const attrs = await Promise.all(
     ["name", "id", "aria-label", "placeholder", "data-qa"].map((attr) =>
       locator.getAttribute(attr).catch(() => null),
@@ -295,7 +412,7 @@ export const MIN_NAVIGATION_BUDGET_MS = 1000;
  * Close a half-typed editor. The page is shared with the document sync that runs next under the same
  * browser lock, so an abandoned 8 KB draft must never be left sitting in it.
  */
-async function cancelEditor(page: Page): Promise<void> {
+export async function cancelEditor(page: Page): Promise<void> {
   try {
     await page.keyboard.press("Escape");
     await randomDelay(300, 600);
@@ -376,19 +493,16 @@ export async function postBidBoardProjectNote(
 
     if (outOfTime()) return await fail(`Timed out before locating the Notes section on project ${projectId}`);
 
-    // ONLY the precise tier. When the text-shaped guesses are all that match we refuse: `.first()` on
-    // `section:has-text("Notes")` returns the outermost ancestor, which can be most of the page.
-    const section = await find(page, selectors.section.precise, SECTION_TIMEOUT_MS);
-    if (!section) {
+    // Section resolution, contamination and the loose-only refusal all live in resolveNotesSection, so
+    // the prober reaches the identical verdict by calling the same function.
+    const section = await resolveNotesSection(page, {
+      timeoutMs: stepBudget(SECTION_TIMEOUT_MS),
+      projectLabel: projectId,
+    });
+    if (!section.ok) {
       return await fail(
-        `Notes section not found on project ${projectId} — no structural (aid-*/data-qa) match; the selectors need validating with the prober before this can run`,
-        "bidboard-note-section-not-found",
-      );
-    }
-    if (!(await isPlausibleNotesSection(section.locator))) {
-      return await fail(
-        `Resolved "Notes section" on project ${projectId} (${section.selector}) also contains the Project Description or a Create New Project button — refusing to act inside a page-level wrapper`,
-        "bidboard-note-section-implausible",
+        section.message,
+        section.reason === "contaminated" ? "bidboard-note-section-implausible" : "bidboard-note-section-not-found",
       );
     }
     matched.section = section.selector;
@@ -412,17 +526,11 @@ export async function postBidBoardProjectNote(
     await addButton.locator.click({ timeout: CONTROL_TIMEOUT_MS });
     await randomDelay(800, 1500);
 
-    // The editor may open inline in the Notes section or in a dialog. Prefer a dialog when one is open
-    // (that also scopes the Create button away from the rest of the page), else stay inside the section.
-    const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
-    // A dialog is only trusted as a scope if it passes the same contamination check as the section —
-    // an unrelated modal (or a mis-resolved one wrapping the page) would otherwise re-open every
-    // scoping hazard the section check just closed.
-    const dialogOpen = (await dialog.isVisible().catch(() => false)) && (await isPlausibleNotesSection(dialog));
+    // The editor may open inline in the Notes section or in a dialog. resolveEditorScopes decides which
+    // containers are usable and in what order — shared with the prober so it probes the same ones.
     //
-    // The editor is looked for ONLY inside validated containers: the open dialog (when one is present
-    // and passed the contamination check) and the Notes section. There is deliberately NO page-wide
-    // fallback.
+    // The editor is looked for ONLY inside those validated containers. There is deliberately NO
+    // page-wide fallback.
     //
     // ⚠️ DO NOT ADD ONE. A page-wide scope is the single root cause behind a whole class of hazards:
     // the anchored `getByRole('button', { name: /^create$/i })` fallback below bypasses the selector
@@ -436,9 +544,7 @@ export async function postBidBoardProjectNote(
     // loose-only sections, contaminated containers, cross-deal mappings and deadline exhaustion — and
     // a note that doesn't post is a non-event, while filling the wrong field on a live Procore project
     // is not.
-    const editorScopes: Array<{ label: string; scope: Scope }> = dialogOpen
-      ? [{ label: "dialog", scope: dialog }, { label: "section", scope: section.locator }]
-      : [{ label: "section", scope: section.locator }];
+    const editorScopes = await resolveEditorScopes(page, section.locator);
     const input = await firstVisibleAcross(
       editorScopes.map(({ scope }) => ({ scope, candidates: actableCandidates(selectors.input) })),
       stepBudget(CONTROL_TIMEOUT_MS),
@@ -475,15 +581,13 @@ export async function postBidBoardProjectNote(
     await input.locator.fill(clamped, { timeout: CONTROL_TIMEOUT_MS });
     await randomDelay(300, 700);
 
-    let createButton = await find(editorScope, actableCandidates(selectors.createButton), CONTROL_TIMEOUT_MS);
-    if (!createButton && typeof editorScope.getByRole === "function") {
-      // Role/text fallback, anchored /^create$/i. This bypasses the selector tiers, so it is only safe
-      // because `editorScope` is always a validated container — never the page.
-      const byRole = editorScope.getByRole("button", { name: /^create$/i }).first();
-      if (await isVisible(byRole, CONTROL_TIMEOUT_MS)) {
-        createButton = { locator: byRole, selector: 'role=button[name=/^create$/i]' };
-      }
-    }
+    // CSS candidates AND the anchored role fallback go through the one resolver, so both get the same
+    // polling and the same visible-match walk. The role fallback bypasses the selector tiers, so it is
+    // safe only because `editorScope` is always a validated container — never the page.
+    const createButton = await firstVisibleAcross(
+      [{ scope: editorScope, candidates: actableCandidates(selectors.createButton), role: CREATE_BUTTON_ROLE }],
+      stepBudget(CONTROL_TIMEOUT_MS),
+    );
     if (!createButton) {
       return await fail(
         `Note Create button not found on project ${projectId} (selectors may need updating)`,
