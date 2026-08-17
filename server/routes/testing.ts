@@ -444,6 +444,178 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     res.json(result);
   }));
 
+  /**
+   * Notes-section prober for a Bid Board project — the validation vehicle for the CRM activity note.
+   *
+   * The selectors in PROCORE_SELECTORS.bidboard.newUi.notes are written from Procore's PUBLISHED docs,
+   * not from observed DOM (nobody can open prod Procore from CI). This route is how a human validates
+   * them against a real project before the automation ships: it reports, per candidate selector, how
+   * many elements matched and whether any is visible, dumps the matched Notes section's HTML, and saves
+   * a screenshot.
+   *
+   * Body: { projectId, projectNumber?, note?, dryRun?, openEditor? }. dryRun DEFAULTS TO TRUE — this
+   * route can post a real note to a real Procore project, so posting must be opted into explicitly with
+   * dryRun:false plus a note. On a dry run it also clicks the "+" control by default (openEditor, safe:
+   * only the Create button commits a note) because the editor and Create selectors do not exist in the
+   * DOM until it is open, so without that click half the cascade could not be validated at all.
+   *
+   * Unlike the older probers here it drives the SHARED session (ensureLoggedIn) inside withBrowserLock
+   * rather than launching its own Chromium: the probe must observe the same page the real automation
+   * will drive, and it must not run concurrently with a live RFP create that holds the browser.
+   */
+  app.post("/api/testing/playwright/bidboard-project-note", requireAuth, asyncHandler(async (req, res) => {
+    const projectId = String(req.body?.projectId ?? "").trim();
+    const projectNumber = req.body?.projectNumber ? String(req.body.projectNumber).trim() : undefined;
+    const note = typeof req.body?.note === "string" ? req.body.note : undefined;
+    const dryRun = req.body?.dryRun !== false;
+    const openEditor = req.body?.openEditor !== false;
+
+    if (!projectId) {
+      return res.status(400).json({ error: "projectId is required" });
+    }
+    if (!dryRun && !note?.trim()) {
+      return res.status(400).json({ error: "note is required when dryRun is false" });
+    }
+
+    const { ensureLoggedIn } = await import("../playwright/auth");
+    const { withBrowserLock, takeScreenshot } = await import("../playwright/browser");
+    const { navigateToProject } = await import("../playwright/bidboard");
+    const { PROCORE_SELECTORS } = await import("../playwright/selectors");
+
+    const NOTES = PROCORE_SELECTORS.bidboard.newUi.notes;
+    const MAX_HTML_CHARS = 20000;
+
+    const outcome = await withBrowserLock("testing-bidboard-project-note", async () => {
+      const { page, success: loggedIn } = await ensureLoggedIn();
+      if (!loggedIn || !page) {
+        return { ok: false as const, error: "Failed to log in to Procore" };
+      }
+
+      const navigated = await navigateToProject(page, projectId);
+      if (!navigated) {
+        return { ok: false as const, error: `Could not navigate to Bid Board project ${projectId}` };
+      }
+
+      const overviewTab = page.locator(PROCORE_SELECTORS.bidboard.projectOverviewTab).first();
+      const overviewTabVisible = await overviewTab.isVisible().catch(() => false);
+      if (overviewTabVisible) {
+        await overviewTab.click({ timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+      }
+
+      // Per-candidate match report: this is the whole point of the route — it says WHICH layer of the
+      // cascade is (or isn't) carrying each step, instead of a single yes/no for a CSS union.
+      const probe = async (candidates: string[], scope: { locator: (s: string) => any } = page) => {
+        const rows: Array<{ selector: string; count: number; visible: boolean }> = [];
+        for (const selector of candidates) {
+          const locator = scope.locator(selector);
+          const count = await locator.count().catch(() => -1);
+          const visible = count > 0 ? await locator.first().isVisible().catch(() => false) : false;
+          rows.push({ selector, count, visible });
+        }
+        return rows;
+      };
+
+      const candidates: Record<string, Array<{ selector: string; count: number; visible: boolean }>> = {
+        section: await probe(NOTES.section),
+        addButton: await probe(NOTES.addButton),
+        item: await probe(NOTES.item),
+        // Probed page-wide BEFORE the editor is open, so these two are expected to be empty/irrelevant
+        // here; the meaningful numbers are the *AfterAdd variants below.
+        input: await probe(NOTES.input),
+        createButton: await probe(NOTES.createButton),
+      };
+
+      const matchedSection = candidates.section.find((row) => row.visible)?.selector ?? null;
+      const sectionHtml = matchedSection
+        ? ((await page.locator(matchedSection).first().evaluate((el) => el.outerHTML).catch(() => "")) || "").slice(0, MAX_HTML_CHARS)
+        : null;
+      const noteTexts = matchedSection
+        ? await page.locator(matchedSection).first().allTextContents().catch(() => [] as string[])
+        : [];
+
+      // When no section matched, dump every button on the page so the operator can spot the real add
+      // control (its label/aria-label/class is what the selectors need to become).
+      const buttons = matchedSection
+        ? []
+        : await page
+            .locator("button")
+            .evaluateAll((els) =>
+              els.slice(0, 120).map((el) => ({
+                text: (el.textContent || "").trim().slice(0, 60),
+                ariaLabel: el.getAttribute("aria-label"),
+                className: (el.getAttribute("class") || "").slice(0, 160),
+                dataQa: el.getAttribute("data-qa"),
+              })),
+            )
+            .catch(() => [] as Array<Record<string, unknown>>);
+
+      // takeScreenshot() interpolates the name straight into a file path, so keep the caller-supplied
+      // id out of it as anything but [A-Za-z0-9_-].
+      const safeProjectId = projectId.replace(/[^A-Za-z0-9_-]/g, "");
+      const screenshotPath = await takeScreenshot(page, `bidboard-project-note-probe-${safeProjectId}`).catch(() => null);
+
+      // Open the editor (but never commit) so the input/Create selectors — which don't exist until the
+      // "+" is clicked — can be validated too. This is the half of the cascade a plain page dump misses.
+      let editorScreenshotPath: string | null = null;
+      let editorOpened = false;
+      const matchedAddButton = candidates.addButton.find((row) => row.visible)?.selector ?? null;
+      if (dryRun && openEditor && matchedAddButton) {
+        await page.locator(matchedAddButton).first().click({ timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+        const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
+        const dialogOpen = await dialog.isVisible().catch(() => false);
+        const editorScope = dialogOpen ? dialog : matchedSection ? page.locator(matchedSection).first() : page;
+        candidates.inputAfterAdd = await probe(NOTES.input, editorScope);
+        candidates.createButtonAfterAdd = await probe(NOTES.createButton, editorScope);
+        editorOpened = candidates.inputAfterAdd.some((row) => row.visible);
+        editorScreenshotPath = await takeScreenshot(page, `bidboard-project-note-editor-${safeProjectId}`).catch(() => null);
+        // Leave the page clean for whatever runs next under the browser lock.
+        await page.keyboard.press("Escape").catch(() => {});
+      }
+
+      let postResult: unknown = null;
+      if (!dryRun && note) {
+        const { postBidBoardProjectNote } = await import("../playwright/bidboard-notes");
+        postResult = await postBidBoardProjectNote(page, projectId, note, projectNumber);
+      }
+
+      return {
+        ok: true as const,
+        projectId,
+        dryRun,
+        overviewTabVisible,
+        url: page.url(),
+        matchedSection,
+        matchedAddButton,
+        editorOpened,
+        candidates,
+        sectionHtml,
+        sectionHtmlTruncated: Boolean(sectionHtml && sectionHtml.length >= MAX_HTML_CHARS),
+        noteTexts,
+        buttons,
+        screenshotPath,
+        editorScreenshotPath,
+        postResult,
+      };
+    });
+
+    await storage.createAuditLog({
+      action: 'playwright_test_bidboard_project_note',
+      entityType: 'playwright',
+      entityId: projectId,
+      source: 'admin',
+      status: outcome.ok ? 'success' : 'failed',
+      details: { projectId, dryRun, matchedSection: outcome.ok ? outcome.matchedSection : null },
+      errorMessage: outcome.ok ? undefined : outcome.error,
+    });
+
+    if (!outcome.ok) {
+      return res.status(400).json({ success: false, error: outcome.error });
+    }
+    res.json({ success: true, ...outcome });
+  }));
+
   app.post("/api/testing/playwright/documents-extract", requireAuth, asyncHandler(async (req, res) => {
     const { projectId } = req.body;
     if (!projectId) {
