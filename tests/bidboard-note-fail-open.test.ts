@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The CRM activity note is posted at the END of createBidBoardProjectFromDeal and is FAIL-OPEN: creating
-// the project is the critical path, a note is not. These tests pin that — a note step that throws, or
-// that returns a failure result, must leave the create successful and every downstream step (sync
-// mapping → which is what the create worker requires before it emits the 'created' callback to the CRM)
-// untouched.
-const postNoteMock = vi.hoisted(() => vi.fn(async () => ({ posted: true, skipped: false }) as any));
+// The CRM activity note is posted by createBidBoardProjectFromDeal and is FAIL-OPEN: creating the
+// project is the critical path, a note is not. These tests pin two things:
+//
+//  1. ORDERING. The note runs only AFTER storage.createSyncMapping — that mapping is the idempotency
+//     record the adopt-instead-of-create guard reads, so anything between the Procore create and the
+//     mapping widens the window where a hard kill leaves a real project unmapped and the next run
+//     creates a duplicate. Asserted by recorded call order, not by "the mapping was written".
+//  2. FAIL-OPEN. A note step that throws, or returns a failure, leaves the create successful and is
+//     recorded (automation log + a 'bidboard_note_failed' audit row) rather than swallowed silently.
+const postNoteMock = vi.hoisted(() => vi.fn());
+const callOrder = vi.hoisted(() => [] as string[]);
 
 vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
 vi.mock("../server/storage.ts", () => ({
@@ -41,6 +46,15 @@ vi.mock("../server/playwright/documents.ts", () => ({
 
 const ACTIVITY_LOG = "CRM Activity Log — DFW-4-16226-ae (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Owner confirmed scope.";
 
+/** Set the note step's outcome while keeping it recorded in the call order. */
+function setNoteOutcome(outcome: Error | { posted?: boolean; skipped?: boolean; error?: string }) {
+  postNoteMock.mockImplementation(async () => {
+    callOrder.push("postNote");
+    if (outcome instanceof Error) throw outcome;
+    return { posted: false, skipped: false, ...outcome };
+  });
+}
+
 function crmArgs(overrides: Record<string, any> = {}) {
   return {
     sourceSystem: "trock_crm" as const,
@@ -60,15 +74,45 @@ function crmArgs(overrides: Record<string, any> = {}) {
   };
 }
 
-describe("createBidBoardProjectFromDeal — CRM activity note is fail-open", () => {
+describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-open", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    postNoteMock.mockReset();
-    postNoteMock.mockResolvedValue({ posted: true, skipped: false } as any);
+    callOrder.length = 0;
+    setNoteOutcome({ posted: true });
     const { storage } = await import("../server/storage.ts");
+    vi.mocked(storage.createSyncMapping).mockImplementation(async () => {
+      callOrder.push("createSyncMapping");
+      return {} as any;
+    });
     vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue(undefined as any);
     vi.mocked(storage.getBidboardMappingByProcoreProjectNumber).mockResolvedValue(undefined as any);
     vi.mocked(storage.getAutomationConfig).mockResolvedValue(undefined as any);
+  });
+
+  it("writes the sync mapping BEFORE attempting the note", async () => {
+    // The whole point of the ordering: createSyncMapping is the record the duplicate-project guard
+    // reads. A kill during the (brittle, browser-driven) note step must not be able to strand a real
+    // Procore project with no mapping — the …849463 vs …849472 duplicate-project class of bug.
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+
+    const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
+
+    expect(result.success).toBe(true);
+    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
+    expect(vi.mocked(storage.createSyncMapping)).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceDealId: "a1c59631", bidboardProjectId: "562949955849472" }),
+    );
+  });
+
+  it("keeps that order even when the note step throws (nothing is retried before the mapping)", async () => {
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    setNoteOutcome(new Error("Target page, context or browser has been closed"));
+
+    const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
+
+    expect(result.success).toBe(true);
+    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
   });
 
   it("posts the note with the created project id, the log text and the project number", async () => {
@@ -95,20 +139,16 @@ describe("createBidBoardProjectFromDeal — CRM activity note is fail-open", () 
     expect(postNoteMock).not.toHaveBeenCalled();
   });
 
-  it("keeps the create successful (and still writes the sync mapping) when the note step THROWS", async () => {
+  it("keeps the create successful when the note step THROWS", async () => {
     const { storage } = await import("../server/storage.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");
-    postNoteMock.mockRejectedValue(new Error("Target page, context or browser has been closed"));
+    setNoteOutcome(new Error("Target page, context or browser has been closed"));
 
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
     expect(result.projectId).toBe("562949955849472");
-    // The sync mapping is the gate the create worker checks before emitting the 'created' callback to
-    // the CRM — proving it is still written proves the note failure did not break the callback path.
-    expect(vi.mocked(storage.createSyncMapping)).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceDealId: "a1c59631", bidboardProjectId: "562949955849472" }),
-    );
+    expect(result.error).toBeUndefined();
     // …and the failure is observable rather than silent.
     expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
       expect.objectContaining({ action: "bidboard_note_failed", status: "error", entityId: "562949955849472" }),
@@ -118,13 +158,12 @@ describe("createBidBoardProjectFromDeal — CRM activity note is fail-open", () 
   it("keeps the create successful when the note step returns a FAILURE result", async () => {
     const { storage } = await import("../server/storage.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");
-    postNoteMock.mockResolvedValue({ posted: false, skipped: false, error: "Add-note control not found" } as any);
+    setNoteOutcome({ error: "Add-note control not found" });
 
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
     expect(result.error).toBeUndefined();
-    expect(vi.mocked(storage.createSyncMapping)).toHaveBeenCalled();
     expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
       expect.objectContaining({ action: "bidboard_note_failed", errorMessage: "Add-note control not found" }),
     );
@@ -133,20 +172,20 @@ describe("createBidBoardProjectFromDeal — CRM activity note is fail-open", () 
   it("keeps the create successful when even the audit logging fails", async () => {
     const { storage } = await import("../server/storage.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");
-    postNoteMock.mockRejectedValue(new Error("note step exploded"));
+    setNoteOutcome(new Error("note step exploded"));
     vi.mocked(storage.createBidboardAutomationLog).mockRejectedValue(new Error("db down") as any);
     vi.mocked(storage.createAuditLog).mockRejectedValue(new Error("db down") as any);
 
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
-    expect(vi.mocked(storage.createSyncMapping)).toHaveBeenCalled();
+    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
   });
 
   it("a skipped note (marker already present) is recorded, not treated as a failure", async () => {
     const { storage } = await import("../server/storage.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");
-    postNoteMock.mockResolvedValue({ posted: false, skipped: true } as any);
+    setNoteOutcome({ skipped: true });
 
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
@@ -157,10 +196,10 @@ describe("createBidBoardProjectFromDeal — CRM activity note is fail-open", () 
     expect(vi.mocked(storage.createAuditLog)).not.toHaveBeenCalled();
   });
 
-  it("also posts the note on an ADOPTED pre-existing project (the marker guard prevents duplicates)", async () => {
+  it("posts the note on a project ADOPTED by exact number, still after the mapping is written", async () => {
     const { storage } = await import("../server/storage.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");
-    // A Procore project with this exact number already exists and is unclaimed → adopt + link.
+    // A Procore project with this exact number already exists and is unclaimed → adopt, then map it.
     const args = {
       ...crmArgs(),
       options: {
@@ -173,6 +212,63 @@ describe("createBidBoardProjectFromDeal — CRM activity note is fail-open", () 
     const result = await bidboard.createBidBoardProjectFromDeal(args);
 
     expect(result.adopted).toBe(true);
+    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
     expect(postNoteMock).toHaveBeenCalledWith({ stub: true }, "111222333", ACTIVITY_LOG, "DFW-4-16226-ae");
+  });
+
+  it("posts the note on a project adopted from an EXISTING sync mapping (the early-return path)", async () => {
+    // This path returns before createSyncMapping — the mapping is why it's taken — so it needs its own
+    // call or a re-run would never (re-)attempt the note. Safe because the marker check makes a repeat
+    // a no-op, and it gives a run whose earlier note attempt failed a second chance.
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue({
+      sourceSystem: "trock_crm",
+      sourceDealId: "a1c59631",
+      bidboardProjectId: "562949955849463",
+      bidboardProjectName: "jasonn ranches",
+      procoreProjectNumber: "DFW-4-16226-ae",
+    } as any);
+    const args = crmArgs();
+
+    const result = await bidboard.createBidBoardProjectFromDeal(args);
+
+    expect(result).toMatchObject({ success: true, adopted: true, projectId: "562949955849463" });
+    expect(args.options.createProject).not.toHaveBeenCalled();
+    // No mapping is written on this path (one already exists), so the note is the only recorded step.
+    expect(callOrder).toEqual(["postNote"]);
+    expect(postNoteMock).toHaveBeenCalledWith({ stub: true }, "562949955849463", ACTIVITY_LOG, "DFW-4-16226-ae");
+  });
+
+  it("a note failure on the mapping-adopt path still returns the adopted project", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue({
+      sourceSystem: "trock_crm",
+      sourceDealId: "a1c59631",
+      bidboardProjectId: "562949955849463",
+    } as any);
+    setNoteOutcome(new Error("Notes section not found"));
+
+    const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
+
+    expect(result).toMatchObject({ success: true, adopted: true, projectId: "562949955849463" });
+    expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "bidboard_note_failed", entityId: "562949955849463" }),
+    );
+  });
+
+  it("does not attempt a note on the mapping-adopt path when there is no activity log", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue({
+      sourceDealId: "a1c59631",
+      bidboardProjectId: "562949955849463",
+    } as any);
+
+    const result = await bidboard.createBidBoardProjectFromDeal(crmArgs({ crm_activity_log: "" }));
+
+    expect(result.adopted).toBe(true);
+    expect(postNoteMock).not.toHaveBeenCalled();
   });
 });
