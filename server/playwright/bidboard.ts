@@ -393,7 +393,26 @@ export async function saveBidBoardState(projects: BidBoardProject[]): Promise<vo
   log(`Saved state for ${projects.length} projects`, "playwright");
 }
 
-export async function navigateToProject(page: Page, projectId: string): Promise<boolean> {
+const PROJECT_NAV_LOAD_TIMEOUT_MS = 90000;
+const PROJECT_NAV_FALLBACK_TIMEOUT_MS = 60000;
+
+/**
+ * Navigate to a Bid Board project's details page.
+ *
+ * `options.timeoutMs` caps the TOTAL navigation budget (both the `load` attempt and the
+ * `domcontentloaded` fallback). It exists so an optional caller — the CRM activity note — can bound
+ * how long it holds the GLOBAL browser lock. Bounding it here is the only safe way to do that: racing
+ * this call and walking away would leave a `goto` in flight on the SHARED page, which then yanks the
+ * page out from under whatever runs next (the document sync, another create) under the same lock.
+ * Never abandon Playwright work on this page; give it a smaller timeout instead.
+ *
+ * Callers that pass nothing keep the original 90s/60s behaviour exactly.
+ */
+export async function navigateToProject(
+  page: Page,
+  projectId: string,
+  options?: { timeoutMs?: number },
+): Promise<boolean> {
   const companyId = await getCompanyId();
   if (!companyId) return false;
 
@@ -402,13 +421,31 @@ export async function navigateToProject(page: Page, projectId: string): Promise<
   const baseUrl = sandbox ? "https://sandbox.procore.com" : "https://us02.procore.com";
   const projectUrl = `${baseUrl}/webclients/host/companies/${companyId}/tools/bid-board/project/${projectId}/details`;
 
+  const budgetMs = options?.timeoutMs;
+  const startedAt = Date.now();
+  // NEVER let a computed timeout reach Playwright as 0 — `timeout: 0` means "no timeout at all", so an
+  // exhausted budget would turn into an UNBOUNDED navigation, the exact opposite of the intent.
+  const clampTimeout = (cap: number, remaining: number | undefined) =>
+    remaining === undefined ? cap : Math.max(1, Math.min(cap, remaining));
+  const remainingBudget = () => (budgetMs === undefined ? undefined : Math.max(0, budgetMs - (Date.now() - startedAt)));
+
   log(`Navigating to project: ${projectUrl}`, "playwright");
   try {
-    await page.goto(projectUrl, { waitUntil: "load", timeout: 90000 });
+    await page.goto(projectUrl, { waitUntil: "load", timeout: clampTimeout(PROJECT_NAV_LOAD_TIMEOUT_MS, budgetMs) });
   } catch (navErr: any) {
     if (navErr.message?.includes('Timeout')) {
+      const fallbackRemaining = remainingBudget();
+      if (fallbackRemaining !== undefined && fallbackRemaining <= 0) {
+        // Budget spent. Report failure rather than starting a second navigation the caller has no
+        // time left to wait for.
+        log(`Navigation timeout (load) and the caller's navigation budget is exhausted`, "playwright");
+        return false;
+      }
       log(`Navigation timeout (load), continuing with domcontentloaded`, "playwright");
-      await page.goto(projectUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.goto(projectUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: clampTimeout(PROJECT_NAV_FALLBACK_TIMEOUT_MS, fallbackRemaining),
+      });
     } else {
       throw navErr;
     }
@@ -2458,6 +2495,7 @@ export async function createBidBoardProjectFromDeal(
 
   if (result.success && result.projectId) {
     // Create sync mapping
+    let mappingPersisted = false;
     try {
       await storage.createSyncMapping({
         sourceSystem,
@@ -2473,6 +2511,7 @@ export async function createBidBoardProjectFromDeal(
         lastSyncDirection: "hubspot_to_procore",
         metadata: result.proposalId ? { proposalId: result.proposalId } : undefined,
       });
+      mappingPersisted = true;
       log(`Created sync mapping for deal ${dealId} → BidBoard ${result.projectId}`, "playwright");
     } catch (err: any) {
       log(`Warning: Could not create sync mapping: ${err.message}`, "playwright");
@@ -2480,7 +2519,30 @@ export async function createBidBoardProjectFromDeal(
 
     // Only now — the project is created AND its sync mapping is durable, so the duplicate-project guard
     // can see it. See the ordering note on postCrmActivityNoteFailOpen; do not move this earlier.
-    await postCrmActivityNoteFailOpen(result.projectId);
+    //
+    // The mapping write's failure is SWALLOWED above (logged, not surfaced), so "we got here" is not
+    // the same as "the mapping exists". Posting onto a project with no mapping would publish the note
+    // onto something that carries no idempotency or ownership record — the very invariant this
+    // ordering exists to protect. If the mapping didn't land, decline and say so; the create worker's
+    // CreatedMappingMissingError recovery reconciles the mapping, and a later run can post the note.
+    if (mappingPersisted) {
+      await postCrmActivityNoteFailOpen(result.projectId);
+    } else if (projectData.crmActivityLog?.trim()) {
+      log(
+        `Not posting the CRM activity note on BidBoard project ${result.projectId}: its sync mapping was not persisted`,
+        "playwright",
+      );
+      await recordBidBoardNoteOutcome({
+        projectId: result.projectId,
+        projectName: projectData.name,
+        sourceSystem,
+        sourceDealId: dealId,
+        noteChars: projectData.crmActivityLog.length,
+        posted: false,
+        skipped: true,
+        skipReason: "sync mapping was not persisted for this project",
+      });
+    }
 
     // Sync documents and photos to BidBoard (with retry)
     if (effectiveOptions.syncDocuments !== false) {

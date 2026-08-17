@@ -223,10 +223,13 @@ export const PROCORE_SELECTORS = {
          */
         createButton: {
           precise: [
-            'button.aid-confirmButton',
             'button[data-qa="qa-create-note-button"]',
           ],
           scopedOnly: [
+            // `aid-confirmButton` is NOT precise: this same file already uses it for the create-project
+            // dialog (createDialogConfirm) and the address dialog (addressSaveButton), so page-wide it
+            // can confirm a completely different dialog. Safe only inside a validated container.
+            'button.aid-confirmButton',
             'button:has-text("Create")',
             'button[type="submit"]',
           ],

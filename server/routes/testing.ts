@@ -480,6 +480,7 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     const { ensureLoggedIn } = await import("../playwright/auth");
     const { withBrowserLock, takeScreenshot } = await import("../playwright/browser");
     const { navigateToProject } = await import("../playwright/bidboard");
+    const { findVisibleMatch } = await import("../playwright/bidboard-notes");
     const { PROCORE_SELECTORS } = await import("../playwright/selectors");
 
     const NOTES = PROCORE_SELECTORS.bidboard.newUi.notes;
@@ -507,7 +508,7 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       // cascade is (or isn't) carrying each step, instead of a single yes/no for a CSS union. The tier
       // is reported because it decides what the automation is ALLOWED to do: it acts on precise
       // (any scope) and scopedOnly (inside a validated container only), and never on loose.
-      type ProbeRow = { selector: string; tier: string; count: number; visible: boolean };
+      type ProbeRow = { selector: string; tier: string; count: number; visible: boolean; visibleIndex: number | null };
       const probe = async (
         tiers: { precise: string[]; scopedOnly?: string[]; loose?: string[] } | string[],
         scope: { locator: (s: string) => any } = page,
@@ -518,10 +519,13 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         const rows: ProbeRow[] = [];
         for (const [tier, candidateList] of groups) {
           for (const selector of candidateList) {
-            const locator = scope.locator(selector);
-            const count = await locator.count().catch(() => -1);
-            const visible = count > 0 ? await locator.first().isVisible().catch(() => false) : false;
-            rows.push({ selector, tier, count, visible });
+            const count = await scope.locator(selector).count().catch(() => -1);
+            // The SAME visible-match walk the automation uses. Probing `.first()` here would report
+            // visible:false for a selector whose first match is a hidden responsive/template duplicate
+            // — a selector the automation happily uses — and this report is what a human reads to
+            // decide which hooks are real. visibleIndex > 0 is itself the signal: earlier ones are hidden.
+            const hit = count > 0 ? await findVisibleMatch(scope as any, selector) : null;
+            rows.push({ selector, tier, count, visible: hit !== null, visibleIndex: hit?.index ?? null });
           }
         }
         return rows;
@@ -541,16 +545,21 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       // matched" — a page where only the loose candidates hit is a page where the note will refuse.
       const matchedSection = candidates.section.find((row) => row.visible && row.tier === "precise")?.selector ?? null;
       const looseSectionOnly = !matchedSection && candidates.section.some((row) => row.visible);
+      // Resolve the section ONCE through the same visible-match walk and reuse that locator below.
+      // Re-deriving it with `.first()` could land on a DIFFERENT (hidden) node than the one the probe
+      // reported, so the HTML dump and the contamination verdict would describe an element the
+      // automation never touches.
+      const sectionLocator = matchedSection ? (await findVisibleMatch(page as any, matchedSection))?.locator ?? null : null;
       // Does the container the automation would use actually look like the Notes card, or is it a
       // page-level wrapper that also holds the description field / Create New Project?
-      const sectionContaminated = matchedSection
-        ? (await page.locator(matchedSection).first().locator(NOTES.sectionContamination).count().catch(() => -1)) !== 0
+      const sectionContaminated = sectionLocator
+        ? (await sectionLocator.locator(NOTES.sectionContamination).count().catch(() => -1)) !== 0
         : null;
-      const sectionHtml = matchedSection
-        ? ((await page.locator(matchedSection).first().evaluate((el) => el.outerHTML).catch(() => "")) || "").slice(0, MAX_HTML_CHARS)
+      const sectionHtml = sectionLocator
+        ? ((await sectionLocator.evaluate((el: Element) => el.outerHTML).catch(() => "")) || "").slice(0, MAX_HTML_CHARS)
         : null;
-      const noteTexts = matchedSection
-        ? await page.locator(matchedSection).first().allTextContents().catch(() => [] as string[])
+      const noteTexts = sectionLocator
+        ? await sectionLocator.allTextContents().catch(() => [] as string[])
         : [];
 
       // When no section matched, dump every button on the page so the operator can spot the real add
@@ -584,11 +593,13 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       // was found, which is the very situation this route exists to diagnose — and then report that
       // unrelated widget's textbox and Create button as a successful selector validation. Wrong
       // validation is worse than none, because it is acted on.
-      const sectionScope = matchedSection && sectionContaminated === false ? page.locator(matchedSection).first() : null;
+      const sectionScope = sectionContaminated === false ? sectionLocator : null;
       candidates.addButtonInSection = sectionScope ? await probe(NOTES.addButton, sectionScope) : [];
       const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible && row.tier !== "loose")?.selector ?? null;
       if (dryRun && openEditor && sectionScope && matchedAddButton) {
-        await sectionScope.locator(matchedAddButton).first().click({ timeout: 10000 }).catch(() => {});
+        // Click the node the WALK found, not `.first()` — same reason as above.
+        const addTarget = await findVisibleMatch(sectionScope as any, matchedAddButton);
+        await addTarget?.locator.click({ timeout: 10000 }).catch(() => {});
         await page.waitForTimeout(2000);
         const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
         const dialogOpen = await dialog.isVisible().catch(() => false);

@@ -1596,6 +1596,14 @@ export async function processRfpApproval(
           attachmentsOverride: attachmentsToSync,
           projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
           editedFieldsOverride: {
+            // The CRM activity log travels here rather than via normalizedDealData, which is passed
+            // ONLY for trock_crm — a hubspot-sourced request that carried crmActivityLog would
+            // otherwise be persisted in deal_data and then silently dropped before the create, so the
+            // field would be "accepted but unused" on that path. editedFieldsOverride is passed for
+            // BOTH source systems, so routing it through here keeps accepted == used everywhere.
+            // (In practice only the CRM sends the field today; this removes the divergence rather than
+            // documenting it.)
+            ...(dealData.crm_activity_log ? { crm_activity_log: String(dealData.crm_activity_log) } : {}),
             // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
             ...(dealData.description ? { description: String(dealData.description) } : {}),
             ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),

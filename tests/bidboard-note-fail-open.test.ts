@@ -140,6 +140,30 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     expect(vi.mocked(storage.createAuditLog)).not.toHaveBeenCalled();
   });
 
+  it("does NOT post when the sync mapping failed to persist", async () => {
+    // createSyncMapping's failure is swallowed (logged, not surfaced), so reaching this point does not
+    // prove the mapping exists. Posting anyway would publish the note onto a project carrying no
+    // idempotency/ownership record — the invariant the ordering exists to protect.
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    vi.mocked(storage.createSyncMapping).mockImplementation(async () => {
+      callOrder.push("createSyncMapping");
+      throw new Error("duplicate key value violates unique constraint");
+    });
+
+    const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
+
+    expect(result.success).toBe(true); // the create itself is unaffected
+    expect(postNoteMock).not.toHaveBeenCalled();
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "post_crm_activity_note",
+        status: "skipped",
+        details: expect.objectContaining({ skipReason: "sync mapping was not persisted for this project" }),
+      }),
+    );
+  });
+
   it("does not attempt a note when the CRM sent no activity log", async () => {
     const bidboard = await import("../server/playwright/bidboard.ts");
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs({ crm_activity_log: "" }));

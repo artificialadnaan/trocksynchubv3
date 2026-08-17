@@ -167,8 +167,18 @@ async function isVisible(locator: Locator, timeoutMs: number): Promise<boolean> 
  */
 const MAX_NODES_PER_SELECTOR = 10;
 
-/** First VISIBLE node matching `selector` within `scope` — not simply the first node. */
-async function firstVisibleNode(scope: Scope, selector: string): Promise<Locator | null> {
+/**
+ * First VISIBLE node matching `selector` within `scope` — not simply the first node.
+ *
+ * Exported so the prober route runs the IDENTICAL walk: if it probed `.first()` while the automation
+ * walks matches, it would report `visible: false` for a selector the automation uses successfully, and
+ * that report is what a human reads to decide which hooks are real. The index is returned because
+ * "matched at index 3" is itself the diagnostic — it means the first three matches are hidden.
+ */
+export async function findVisibleMatch(
+  scope: Scope,
+  selector: string,
+): Promise<{ locator: Locator; index: number } | null> {
   let all: Locator;
   try {
     all = scope.locator(selector);
@@ -180,7 +190,7 @@ async function firstVisibleNode(scope: Scope, selector: string): Promise<Locator
   const count = await all.count().catch(() => 0);
   for (let index = 0; index < Math.min(count, MAX_NODES_PER_SELECTOR); index++) {
     const node = all.nth(index);
-    if (await node.isVisible().catch(() => false)) return node;
+    if (await node.isVisible().catch(() => false)) return { locator: node, index };
   }
   return null;
 }
@@ -206,8 +216,8 @@ async function firstVisibleAcross(
     // that is never going to appear there (and, with the overall deadline, starve the later steps).
     for (const [attemptIndex, attempt] of attempts.entries()) {
       for (const selector of attempt.candidates) {
-        const locator = await firstVisibleNode(attempt.scope, selector);
-        if (locator) return { locator, selector, attemptIndex };
+        const hit = await findVisibleMatch(attempt.scope, selector);
+        if (hit) return { locator: hit.locator, selector, attemptIndex };
       }
     }
     if (Date.now() >= deadline) break;
@@ -274,18 +284,11 @@ async function isForbiddenFillTarget(locator: Locator): Promise<boolean> {
 }
 
 /**
- * Race `promise` against a real timer. Used only for the NAVIGATION, which is the one step that can
- * blow the overall budget on its own and cannot be told a timeout.
+ * Below this much remaining budget the navigation is not even attempted. A tiny timeout would only
+ * produce a guaranteed-failed `goto` (and Playwright treats 0 as "no timeout", which would be
+ * unbounded), so there is nothing to gain by starting one.
  */
-function withDeadline<T>(promise: Promise<T>, ms: number): Promise<{ value: T } | { timedOut: true }> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<{ timedOut: true }>((resolve) => {
-    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(0, ms));
-  });
-  return Promise.race([promise.then((value) => ({ value })), timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
-}
+export const MIN_NAVIGATION_BUDGET_MS = 1000;
 
 /**
  * Close a half-typed editor. The page is shared with the document sync that runs next under the same
@@ -311,8 +314,12 @@ export async function postBidBoardProjectNote(
   projectId: string,
   note: string,
   projectNumber?: string | null,
-  /** Test seam (same spirit as createProject/findExistingProject in bidboard.ts) — keeps suites fast. */
-  options?: { verifyTimeoutMs?: number; overallTimeoutMs?: number },
+  /**
+   * Test seams (same spirit as createProject/findExistingProject in bidboard.ts) — keep suites fast
+   * and deterministic. `stepTimeoutMs` overrides how long any single selector lookup polls; without
+   * it a not-found path in a test would spin for the whole production budget.
+   */
+  options?: { verifyTimeoutMs?: number; overallTimeoutMs?: number; stepTimeoutMs?: number },
 ): Promise<PostBidBoardNoteResult> {
   const matched: Record<string, string> = {};
   const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
@@ -320,8 +327,9 @@ export async function postBidBoardProjectNote(
   const outOfTime = () => Date.now() > deadlineAt;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
   /** Every lookup is clamped to what's left of the overall budget, not just its own step timeout. */
+  const stepBudget = (stepTimeoutMs: number) => Math.min(options?.stepTimeoutMs ?? stepTimeoutMs, remainingMs());
   const find = (scope: Scope, candidates: string[], stepTimeoutMs: number) =>
-    firstVisible(scope, candidates, Math.min(stepTimeoutMs, remainingMs()));
+    firstVisible(scope, candidates, stepBudget(stepTimeoutMs));
   let hasTyped = false;
 
   /** Single exit for every failure: cancels a half-typed editor, then reports. Never throws. */
@@ -340,19 +348,21 @@ export async function postBidBoardProjectNote(
   }
 
   try {
-    // Bound the navigation by the SAME overall deadline. navigateToProject can spend 90s waiting for
-    // `load`, then retry for another 60s on `domcontentloaded`, then delay again — so an OPTIONAL note
-    // step could hold the GLOBAL browser lock for 150s+ with the document sync and every other project
-    // create queued behind it. On a timeout we abandon the navigation and touch nothing else; the
-    // orphan promise gets its own catch so an eventual rejection can't surface as an unhandled one.
-    const navPromise = navigateToProject(page, projectId);
-    const navOutcome = await withDeadline(navPromise, remainingMs());
-    if ("timedOut" in navOutcome) {
-      navPromise.catch(() => {});
-      return await fail(`Navigation to Bid Board project ${projectId} exceeded the note step's deadline`);
+    // Bound the navigation, do NOT race it. navigateToProject can spend 90s waiting for `load`, then
+    // retry for another 60s on `domcontentloaded`, so an OPTIONAL note step could otherwise hold the
+    // GLOBAL browser lock for 150s+ with the document sync and every other create queued behind it.
+    // Racing it and walking away would be worse than the delay: the `goto` would still be in flight on
+    // the SHARED page and would yank it out from under whatever runs next under the same lock. So the
+    // remaining budget is passed INTO the navigation as its timeout — there is never Playwright work
+    // running that we have stopped waiting for.
+    if (remainingMs() < MIN_NAVIGATION_BUDGET_MS) {
+      return await fail(
+        `Not enough of the note step's deadline left to navigate to Bid Board project ${projectId} safely`,
+      );
     }
-    if (!navOutcome.value) {
-      return await fail(`Could not navigate to Bid Board project ${projectId}`);
+    const navigated = await navigateToProject(page, projectId, { timeoutMs: remainingMs() });
+    if (!navigated) {
+      return await fail(`Could not navigate to Bid Board project ${projectId} within the note step's deadline`);
     }
 
     // navigateToProject lands on …/tools/bid-board/project/{id}/details, which is where the Overview
@@ -417,7 +427,7 @@ export async function postBidBoardProjectNote(
         { scope: containerScope, candidates: actableCandidates(selectors.input, true) },
         { scope: page, candidates: actableCandidates(selectors.input, false) },
       ],
-      Math.min(CONTROL_TIMEOUT_MS, remainingMs()),
+      stepBudget(CONTROL_TIMEOUT_MS),
     );
     const scopeIsValidatedContainer = input?.attemptIndex === 0;
     const editorScope: Scope = scopeIsValidatedContainer ? containerScope : page;

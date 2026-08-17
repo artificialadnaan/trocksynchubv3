@@ -12,8 +12,14 @@ vi.mock("../server/playwright/browser.ts", () => ({
   takeScreenshot: vi.fn(async () => ".playwright-storage/shot.png"),
 }));
 
-const { postBidBoardProjectNote, hasMarkerNote, clampNoteForProcore, CRM_ACTIVITY_NOTE_MARKER, NOTE_HARD_CHAR_CAP } =
-  await import("../server/playwright/bidboard-notes.ts");
+const {
+  postBidBoardProjectNote,
+  hasMarkerNote,
+  clampNoteForProcore,
+  CRM_ACTIVITY_NOTE_MARKER,
+  NOTE_HARD_CHAR_CAP,
+  MIN_NAVIGATION_BUDGET_MS,
+} = await import("../server/playwright/bidboard-notes.ts");
 
 const NOTE = [
   "CRM Activity Log — DFW-2-12345-ab (as of Aug 17, 2026)",
@@ -264,7 +270,7 @@ function notesFixture(opts: {
 }
 
 /** Short windows so the "not verified" paths don't spend the real polling/wall-clock budget. */
-const FAST = { verifyTimeoutMs: 50, overallTimeoutMs: 250 };
+const FAST = { verifyTimeoutMs: 50, overallTimeoutMs: 1200, stepTimeoutMs: 20 };
 
 describe("hasMarkerNote", () => {
   it("matches a marker embedded in a rendered note's author/date chrome", () => {
@@ -472,13 +478,24 @@ describe("postBidBoardProjectNote", () => {
     expect(dom.fills[0].value.length).toBe(NOTE_HARD_CHAR_CAP);
   });
 
-  it("gives up on the overall deadline instead of holding the browser lock", async () => {
+  it("gives up between steps when the overall deadline passes, instead of holding the browser lock", async () => {
+    // The deadline is checked BETWEEN steps (never by abandoning an in-flight action), so burn it
+    // inside the navigation and assert the next step declines.
     const dom = notesFixture();
-    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", { overallTimeoutMs: -1 });
+    navigateToProjectMock.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, MIN_NAVIGATION_BUDGET_MS + 80));
+      return true;
+    });
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", {
+      overallTimeoutMs: MIN_NAVIGATION_BUDGET_MS + 20,
+      stepTimeoutMs: 20,
+    });
 
     expect(result.posted).toBe(false);
     expect(result.error).toMatch(/timed out/i);
     expect(dom.fills).toEqual([]);
+    expect(dom.actions).toEqual([]);
   });
 
   it("finds a VISIBLE control when the selector's first match is hidden", async () => {
@@ -520,6 +537,30 @@ describe("postBidBoardProjectNote", () => {
 
     expect(result.posted).toBe(true);
     expect(hasMarkerNote([dom.fills[0].value])).toBe(true);
+  });
+
+  it("BOUNDS the navigation with the remaining budget instead of abandoning it", async () => {
+    // Racing navigateToProject and walking away would leave a `goto` in flight on the SHARED page,
+    // which then yanks it out from under the document sync that runs next under the same browser lock.
+    // So the budget is passed IN as a timeout — there is never Playwright work we stopped waiting for.
+    const dom = notesFixture();
+    await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(navigateToProjectMock).toHaveBeenCalledWith(expect.anything(), "9001", {
+      timeoutMs: expect.any(Number),
+    });
+    const passed = (navigateToProjectMock.mock.calls[0] as any[])[2].timeoutMs;
+    expect(passed).toBeGreaterThan(0); // never 0 — Playwright reads 0 as "no timeout at all"
+    expect(passed).toBeLessThanOrEqual(FAST.overallTimeoutMs);
+  });
+
+  it("does not start a navigation it has no budget left to finish", async () => {
+    const dom = notesFixture();
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", { overallTimeoutMs: 10 });
+
+    expect(result).toMatchObject({ posted: false, skipped: false });
+    expect(result.error).toMatch(/not enough .* deadline left to navigate/i);
+    expect(navigateToProjectMock).not.toHaveBeenCalled();
   });
 
   it("returns an error result (does NOT throw) when navigation fails", async () => {
