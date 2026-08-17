@@ -124,6 +124,77 @@ export const PROCORE_SELECTORS = {
       uploadFilesButton: 'button.StyledUploadButton',
       attachButton: 'button[data-qa="qa-attach-button"]',
       customerSearchInput: 'input[placeholder="Search customer"]',
+      // Notes section on a Bid Board project's Overview tab (used to post the CRM activity log).
+      //
+      // ⚠️ UNVERIFIED AGAINST LIVE DOM. Every selector below is derived from Procore's PUBLISHED
+      // documentation for Bid Board notes (a Notes section on Overview, a "+" add control, plain-text
+      // body, a "Create" button to save, a vertical-ellipsis menu to edit/delete) — NOT from an
+      // observed page. Nobody has run these against a real project yet, because that needs prod
+      // Procore credentials and the browser lock.
+      //   https://support.procore.com/products/online/user-guide/company-level/bid-board/tutorials/add-or-manage-notes-in-a-bid-board-project
+      //   https://support.procore.com/products/online/user-guide/company-level/bid-board/tutorials/add-and-manage-internal-notes-in-a-bid-board-project
+      // Validate (and correct) them with the prober before trusting them:
+      //   POST /api/testing/playwright/bidboard-project-note  { projectId, dryRun: true }
+      // which dumps the Notes-section DOM plus which of these candidates actually matched.
+      //
+      // Each entry is an ORDERED candidate list rather than one comma-joined string (as the older
+      // selectors here are): the caller tries them in order and reports WHICH one matched, so the
+      // prober output tells us exactly which layer is carrying the automation instead of hiding it
+      // behind a CSS union. Order follows this file's usual strategy — stable aid-*/data-qa hooks
+      // first, then structural/role/text fallbacks.
+      notes: {
+        /** The Notes card/section wrapper on the Overview tab. Everything else is scoped inside it. */
+        section: [
+          'div.aid-notes',
+          '[class*="aid-notes"]',
+          '[data-qa="notes-section"]',
+          '[data-testid="notes-section"]',
+          'section:has-text("Notes")',
+          'div[class*="card"]:has-text("Notes")',
+        ],
+        /** The "+" add-a-note control inside the Notes section. */
+        addButton: [
+          'button.aid-add-note',
+          '[class*="aid-add-note"]',
+          'button[data-qa="qa-add-note-button"]',
+          'button[aria-label*="note" i]',
+          'button:has-text("Add Note")',
+          'button[aria-label="Add"]',
+          'button:has-text("+")',
+        ],
+        /**
+         * The note body editor. Procore's notes take plain text (URLs auto-link, "@" opens a mention
+         * picker), so it may be a textarea or a contenteditable rich-text host — cover both.
+         */
+        input: [
+          'textarea[name="note"]',
+          'textarea[name="body"]',
+          'textarea[name="content"]',
+          'textarea[placeholder*="note" i]',
+          '[role="textbox"][contenteditable="true"]',
+          'div[contenteditable="true"]',
+          'textarea',
+        ],
+        /**
+         * The Create button that commits the note. Scoped to the notes container/dialog by the caller —
+         * the project page has other Create buttons (e.g. Create New Project on the list view), and an
+         * unscoped match is how a "click Create" ends up clicking the wrong thing.
+         */
+        createButton: [
+          'button.aid-confirmButton',
+          'button[data-qa="qa-create-note-button"]',
+          'button:has-text("Create")',
+          'button[type="submit"]',
+        ],
+        /** A rendered note row — read for the idempotency marker check and the post-save verify. */
+        item: [
+          'div.aid-note',
+          '[class*="aid-note-item"]',
+          '[data-qa="note-item"]',
+          '[data-testid="note-item"]',
+          'li',
+        ],
+      },
     },
   },
   

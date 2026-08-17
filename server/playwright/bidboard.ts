@@ -882,6 +882,12 @@ export interface NewBidBoardProjectData {
   zip?: string;
   country?: string;
   description?: string;
+  /**
+   * The CRM's rendered activity log, posted as a NOTE on the project's Overview tab (not into the
+   * Project Description, which keeps carrying `description` only). Built and capped by the CRM; see
+   * playwright/bidboard-notes.ts.
+   */
+  crmActivityLog?: string;
   bidDueDate?: string;
   /** Optional: proposalId for BidBoard URL */
   proposalId?: string;
@@ -2031,6 +2037,71 @@ async function findProcoreProjectByExactNumber(projectNumber: string): Promise<E
   }
 }
 
+/**
+ * Record the outcome of the (fail-open) CRM activity-note step.
+ *
+ * Two sinks, on purpose:
+ * - `bidboard_automation_logs` for EVERY outcome, so the Bid Board automation log shows posted/skipped/
+ *   failed per project alongside create_project and sync_hubspot_documents.
+ * - `audit_logs` with status 'error' for a genuine failure ONLY. Because the step is fail-open, this row
+ *   is the only signal that exists — and status 'error' is what the 15-minute failure digest scans, so
+ *   selector rot on Procore's Notes UI surfaces instead of silently dropping every note.
+ *
+ * Both writes are individually swallowed: a logging failure must not become a create failure.
+ */
+async function recordBidBoardNoteOutcome(params: {
+  projectId: string;
+  projectName: string;
+  sourceSystem: SourceSystem;
+  sourceDealId: string;
+  noteChars: number;
+  posted: boolean;
+  skipped: boolean;
+  error?: string;
+  matched?: Record<string, string>;
+}): Promise<void> {
+  const status = params.posted ? "success" : params.skipped ? "skipped" : "failed";
+  try {
+    await storage.createBidboardAutomationLog({
+      projectId: params.projectId,
+      projectName: params.projectName,
+      action: "post_crm_activity_note",
+      status,
+      details: {
+        sourceSystem: params.sourceSystem,
+        sourceDealId: params.sourceDealId,
+        noteChars: params.noteChars,
+        skipped: params.skipped,
+        matchedSelectors: params.matched ?? null,
+      },
+      errorMessage: params.error,
+    });
+  } catch (logErr: any) {
+    log(`Could not write the CRM activity note automation log: ${logErr?.message ?? logErr}`, "playwright");
+  }
+
+  if (params.posted || params.skipped) return;
+
+  try {
+    await storage.createAuditLog({
+      action: "bidboard_note_failed",
+      entityType: "bidboard_project",
+      entityId: params.projectId,
+      source: "bidboard-note",
+      status: "error",
+      errorMessage: params.error ?? "CRM activity note was not posted",
+      details: {
+        sourceSystem: params.sourceSystem,
+        sourceDealId: params.sourceDealId,
+        noteChars: params.noteChars,
+        matchedSelectors: params.matched ?? null,
+      },
+    });
+  } catch (auditErr: any) {
+    log(`Could not write the CRM activity note audit row: ${auditErr?.message ?? auditErr}`, "playwright");
+  }
+}
+
 export async function createBidBoardProjectFromDeal(
   dealIdOrArgs: string | CreateBidBoardProjectFromDealArgs,
   initialStage: string = "Estimate in Progress",
@@ -2101,12 +2172,16 @@ export async function createBidBoardProjectFromDeal(
       zip: get(undefined, "zip") || properties.zip || properties.postal_code || undefined,
       country: get(undefined, "country") || properties.country || undefined,
       description: get(undefined, "description") || properties.description || properties.project_description__briefly_describe_the_project_ || properties.project_description || properties.notes || undefined,
+      // Kept strictly separate from `description`: this goes into a Note, the description into Procore's
+      // Project Description field. Deliberately does NOT fall back to `notes`/`description` — an empty
+      // activity log means "post no note", not "post the description again".
+      crmActivityLog: get(undefined, "crm_activity_log") || properties.crm_activity_log || undefined,
       bidDueDate: get(undefined, "bid_due_date") || properties.bid_due_date || properties.due_date || undefined,
       proposalId: effectiveOptions.proposalId,
     };
 
     log(`Creating BidBoard project from ${sourceSystem} deal: ${deal.dealName} (${dealId})`, "playwright");
-    log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
+    log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}, crmActivityLog: ${projectData.crmActivityLog ? `${projectData.crmActivityLog.length} chars` : 'NONE'}`, "playwright");
     
     // Idempotency guard: one deal → one BidBoard project. A prior approve, a retry, or a concurrent
     // override-approve may have already created the project. The global browser lock serializes creates,
@@ -2268,6 +2343,67 @@ export async function createBidBoardProjectFromDeal(
           await new Promise((r) => setTimeout(r, DESC_RETRY_DELAY_MS));
         }
       }
+    }
+  }
+
+  // Post the CRM activity log as a Note on the project (Overview → Notes), so the estimator opening the
+  // Bid Board project sees the sales history the rep logged in the CRM.
+  //
+  // FAIL-OPEN, on purpose: creating the project is the critical path and a note is not. Any throw or
+  // failure result is logged, recorded in the automation log, and — for a genuine failure — written to
+  // audit_logs as 'bidboard_note_failed', then swallowed. It must never fail the create, the sync
+  // mapping below, the durable callback to the CRM, or the approval email.
+  //
+  // Placed after the description-verify retry (project confirmed, description settled) and after the
+  // adopt/link guards above, so an ADOPTED pre-existing project gets the note too — the marker check
+  // inside postBidBoardProjectNote is what stops a retry or an adopt from stacking duplicate copies.
+  if (result.success && result.projectId && projectData.crmActivityLog?.trim()) {
+    const noteProjectId = result.projectId;
+    try {
+      const { page: notePage, success: loggedIn } = await ensureLoggedIn();
+      if (!loggedIn || !notePage) {
+        throw new Error("Procore login unavailable for the CRM activity note");
+      }
+      // Dynamic import for the same reason documents.ts is dynamically imported here: bidboard-notes
+      // statically imports navigateToProject from this module, so a static import back would be a cycle.
+      const { postBidBoardProjectNote } = await import("./bidboard-notes");
+      const noteResult = await postBidBoardProjectNote(
+        notePage,
+        noteProjectId,
+        projectData.crmActivityLog,
+        projectData.projectNumber,
+      );
+      if (noteResult.posted) {
+        log(`CRM activity note posted on BidBoard project ${noteProjectId}`, "playwright");
+      } else if (noteResult.skipped) {
+        log(`CRM activity note already present on BidBoard project ${noteProjectId} — skipped`, "playwright");
+      } else {
+        log(`CRM activity note NOT posted on BidBoard project ${noteProjectId}: ${noteResult.error ?? "unknown reason"}`, "playwright");
+      }
+      await recordBidBoardNoteOutcome({
+        projectId: noteProjectId,
+        projectName: projectData.name,
+        sourceSystem,
+        sourceDealId: dealId,
+        noteChars: projectData.crmActivityLog.length,
+        posted: noteResult.posted,
+        skipped: noteResult.skipped,
+        error: noteResult.error,
+        matched: noteResult.matched,
+      });
+    } catch (noteErr: any) {
+      const message = noteErr?.message ?? String(noteErr);
+      log(`CRM activity note step failed for BidBoard project ${noteProjectId}: ${message}`, "playwright");
+      await recordBidBoardNoteOutcome({
+        projectId: noteProjectId,
+        projectName: projectData.name,
+        sourceSystem,
+        sourceDealId: dealId,
+        noteChars: projectData.crmActivityLog.length,
+        posted: false,
+        skipped: false,
+        error: message,
+      });
     }
   }
 
