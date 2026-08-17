@@ -25,6 +25,7 @@ const {
   actableCandidates,
   CREATE_BUTTON_ROLE,
 } = await import("../server/playwright/bidboard-notes.ts");
+const { probeBidBoardNotesUi } = await import("../server/playwright/bidboard-notes-probe.ts");
 
 const NOTE = [
   "CRM Activity Log — DFW-2-12345-ab (as of Aug 17, 2026)",
@@ -112,6 +113,20 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[]): any {
     allTextContents: async () => resolve().map((n) => textOf(dom, n)),
     innerText: async () => resolve().map((n) => textOf(dom, n)).join("\n"),
     getAttribute: async (attr: string) => resolve()[0]?.attrs?.[attr] ?? null,
+    // Enough of evaluate/evaluateAll for the prober's HTML + button dumps: the callbacks only read
+    // outerHTML / textContent / getAttribute.
+    evaluate: async (fn: any) => {
+      const target = resolve()[0];
+      if (!target) throw new Error("evaluate on nothing");
+      return fn({ outerHTML: `<div id="${target.id}">${textOf(dom, target)}</div>` });
+    },
+    evaluateAll: async (fn: any) =>
+      fn(
+        resolve().map((n) => ({
+          textContent: n.text ?? "",
+          getAttribute: (attr: string) => n.attrs?.[attr] ?? null,
+        })),
+      ),
     click: async () => {
       const target = resolve()[0];
       if (!target) throw new Error("click on nothing");
@@ -740,5 +755,143 @@ describe("shared resolvers (production and prober call these same functions)", (
       const tiers = { precise: ["a"], scopedOnly: ["b"], loose: ["c"] };
       expect(actableCandidates(tiers)).toEqual(["a", "b"]);
     });
+  });
+});
+
+// The prober's WIRING, driven by the same fake DOM as production. Its output is what an operator reads
+// to choose real Procore hooks, and every safety property downstream rests on those hooks being right —
+// so "it calls the shared resolvers correctly" is asserted here rather than left to review. These
+// assertions are deliberately about the wiring (does the report reflect the shared verdict?), not about
+// the resolvers themselves, which are tested directly above.
+describe("probeBidBoardNotesUi (the prober's wiring)", () => {
+  const PROBE = { sectionTimeoutMs: 20, projectLabel: "9001" };
+
+  it("happy path: reports the rows an operator would act on, with actable set per row", async () => {
+    const dom = notesFixture();
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.sectionVerdict).toMatchObject({ ok: true, selector: "div.aid-notes" });
+    expect(result.matchedSection).toBe("div.aid-notes");
+    expect(result.looseSectionOnly).toBe(false);
+    expect(result.sectionContaminated).toBe(false);
+    expect(result.editorProbeSkippedReason).toBeNull();
+
+    // The add control it would click is the one INSIDE the section, and it is marked actable.
+    expect(result.matchedAddButton).toBe("button.aid-add-note");
+    const addRow = result.candidates.addButtonInSection.find((row: any) => row.selector === "button.aid-add-note");
+    expect(addRow).toMatchObject({ visible: true, actable: true, tier: "precise" });
+
+    // The loose tier is reported but explicitly NOT actable — that distinction is the whole safety model.
+    const looseSectionRow = result.candidates.section.find((row: any) => row.tier === "loose");
+    expect(looseSectionRow?.actable).toBe(false);
+
+    // The editor opened, and both the CSS rows and the role fallback are reported per scope.
+    expect(result.editorOpened).toBe(true);
+    expect(result.editorScopeLabels).toEqual(["section"]);
+    expect(result.candidates.inputAfterAdd.some((row: any) => row.selector === 'textarea[name="note"]' && row.visible)).toBe(true);
+    expect(result.candidates.createButtonAfterAdd.some((row: any) => row.tier === "roleFallback")).toBe(true);
+    // …and the "+" click is reverted, so the shared session is left clean.
+    expect(dom.keys).toContain("Escape");
+  });
+
+  it("loose-only section: reports it and clicks NOTHING", async () => {
+    const dom = notesFixture({ withoutSection: true });
+    dom.nodes.push({ id: "looseSection", parent: "page", matches: ['section:has-text("Notes")'], text: "Notes" });
+    dom.nodes.push({ id: "strayAdd", parent: "page", matches: ['button.aid-add-note'] });
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.looseSectionOnly).toBe(true);
+    expect(result.matchedSection).toBeNull();
+    expect(result.sectionVerdict).toMatchObject({ ok: false, reason: "loose-only" });
+    expect(result.editorProbeSkippedReason).toMatch(/the automation would refuse here too/);
+    // The stray page-level add control must NOT be clicked just because it exists.
+    expect(result.matchedAddButton).toBeNull();
+    expect(dom.actions).toEqual([]);
+    expect(result.editorOpened).toBe(false);
+  });
+
+  it("contaminated section: reports the rejection and clicks nothing", async () => {
+    const result = await probeBidBoardNotesUi(makePage(notesFixture({ contaminatedSection: true })), PROBE);
+
+    expect(result.sectionContaminated).toBe(true);
+    expect(result.sectionVerdict).toMatchObject({ ok: false, reason: "contaminated" });
+    expect(result.matchedAddButton).toBeNull();
+    expect(result.editorProbeSkippedReason).toMatch(/page-level wrapper/i);
+  });
+
+  it("contaminated dialog: falls back to the section, matching production's dialog-then-section order", async () => {
+    const dom = notesFixture();
+    // The add click opens an UNRELATED modal that carries a description field.
+    node(dom, "addBtn")!.onClick = (d) => {
+      d.nodes.push({ id: "dialog", parent: "page", matches: ['[role="dialog"]'], text: "Unrelated modal" });
+      d.nodes.push({
+        id: "dialogDescription",
+        parent: "dialog",
+        matches: ['textarea[name="description"]', '[name*="description" i]'],
+        attrs: { name: "description" },
+      });
+      d.nodes.push({ id: "editor", parent: "notesSection", matches: ['textarea[name="note"]'], attrs: { name: "note" }, text: "" });
+    };
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    // Production would reject that dialog; the prober must not validate selectors inside it.
+    expect(result.editorScopeLabels).toEqual(["section"]);
+    expect(result.candidates.inputAfterAdd.every((row: any) => row.scope === "section")).toBe(true);
+  });
+
+  it("clean dialog: probes dialog THEN section, in production's order", async () => {
+    const dom = notesFixture();
+    node(dom, "addBtn")!.onClick = (d) => {
+      d.nodes.push({ id: "dialog", parent: "page", matches: ['[role="dialog"]'], text: "Add note" });
+      d.nodes.push({ id: "editor", parent: "dialog", matches: ['textarea[name="note"]'], attrs: { name: "note" }, text: "" });
+    };
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.editorScopeLabels).toEqual(["dialog", "section"]);
+  });
+
+  it("marker already present: reports markerAlreadyPresent so 'would skip' is distinguishable from 'broken'", async () => {
+    const dom = notesFixture({
+      existingNotes: ["Colby Burling · Aug 16, 2026\nCRM Activity Log — DFW-2-12345-ab (as of Aug 16, 2026)"],
+    });
+
+    dom.nodes.push({ id: "otherNote", parent: "notesSection", matches: ['div.aid-note'], text: "Walked the roof" });
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.markerAlreadyPresent).toBe(true);
+    expect(result.noteTexts.join("\n")).toMatch(/CRM Activity Log/);
+    // readNoteTexts returns EACH note plus the container's text, not one blob — reporting the blob
+    // would hide which note carries the marker, and would not be what the guard actually reads.
+    expect(result.noteTexts.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("no marker present: reports markerAlreadyPresent false", async () => {
+    const result = await probeBidBoardNotesUi(makePage(notesFixture()), PROBE);
+    expect(result.markerAlreadyPresent).toBe(false);
+  });
+
+  it("description-shaped input: reports inputWouldBeRefused", async () => {
+    const result = await probeBidBoardNotesUi(makePage(notesFixture({ editorLooksLikeDescription: true })), PROBE);
+
+    expect(result.editorOpened).toBe(true);
+    expect(result.inputWouldBeRefused).toBe(true);
+  });
+
+  it("normal input: reports inputWouldBeRefused false", async () => {
+    const result = await probeBidBoardNotesUi(makePage(notesFixture()), PROBE);
+    expect(result.inputWouldBeRefused).toBe(false);
+  });
+
+  it("openEditor:false leaves the page untouched", async () => {
+    const dom = notesFixture();
+    const result = await probeBidBoardNotesUi(makePage(dom), { ...PROBE, openEditor: false });
+
+    expect(dom.actions).toEqual([]);
+    expect(result.editorOpened).toBe(false);
+    expect(result.editorProbeSkippedReason).toBeNull();
   });
 });

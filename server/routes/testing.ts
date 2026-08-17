@@ -478,29 +478,14 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     }
 
     const { ensureLoggedIn } = await import("../playwright/auth");
-    const { withBrowserLock, takeScreenshot } = await import("../playwright/browser");
+    const { withBrowserLock } = await import("../playwright/browser");
     const { navigateToProject } = await import("../playwright/bidboard");
-    // Every decision this route reports is made by the SAME function production uses. Its whole value
-    // is telling a human which selectors are real; a parallel rule here means validating hooks
-    // production would never use, or reporting working ones as absent — and that decision then ships
-    // into an automation touching live Procore projects.
-    const {
-      findVisibleMatch,
-      findVisibleRoleMatch,
-      resolveNotesSection,
-      resolveEditorScopes,
-      actableCandidates,
-      readNoteTexts,
-      hasMarkerNote,
-      isForbiddenFillTarget,
-      cancelEditor,
-      CREATE_BUTTON_ROLE,
-      ROLE_MATCH_LABEL,
-    } = await import("../playwright/bidboard-notes");
-    const { PROCORE_SELECTORS } = await import("../playwright/selectors");
-
-    const NOTES = PROCORE_SELECTORS.bidboard.newUi.notes;
-    const MAX_HTML_CHARS = 20000;
+    // The probe body lives in playwright/bidboard-notes-probe.ts as a plain function over a page-LIKE
+    // object, so it can be driven by the scope-aware fake DOM in tests instead of resting on review.
+    // Its output is what an operator uses to choose real Procore hooks, so "it calls the shared
+    // resolvers correctly" needed to be a test, not a reading. This route keeps only HTTP, auth, the
+    // browser lock, navigation and the audit row.
+    const { probeBidBoardNotesUi } = await import("../playwright/bidboard-notes-probe");
 
     const outcome = await withBrowserLock("testing-bidboard-project-note", async () => {
       const { page, success: loggedIn } = await ensureLoggedIn();
@@ -513,174 +498,15 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         return { ok: false as const, error: `Could not navigate to Bid Board project ${projectId}` };
       }
 
-      const overviewTab = page.locator(PROCORE_SELECTORS.bidboard.projectOverviewTab).first();
-      const overviewTabVisible = await overviewTab.isVisible().catch(() => false);
-      if (overviewTabVisible) {
-        await overviewTab.click({ timeout: 10000 }).catch(() => {});
-        await page.waitForTimeout(2000);
-      }
-
-      // Per-candidate match report: this is the whole point of the route — it says WHICH tier of the
-      // cascade is (or isn't) carrying each step, instead of a single yes/no for a CSS union. The tier
-      // is reported because it decides what the automation is ALLOWED to do: it acts on precise
-      // (any scope) and scopedOnly (inside a validated container only), and never on loose.
-      type ProbeRow = {
-        selector: string;
-        tier: string;
-        /** Whether the AUTOMATION would act on this selector — from actableCandidates(), not a local rule. */
-        actable: boolean;
-        count: number;
-        visible: boolean;
-        visibleIndex: number | null;
-      };
-      const probe = async (
-        tiers: { precise: string[]; scopedOnly?: string[]; loose?: string[] } | string[],
-        scope: { locator: (s: string) => any } = page,
-      ) => {
-        const groups: Array<[string, string[]]> = Array.isArray(tiers)
-          ? [["flat", tiers]]
-          : [["precise", tiers.precise], ["scopedOnly", tiers.scopedOnly ?? []], ["loose", tiers.loose ?? []]];
-        // The actable set comes from the shared function so "would the automation use this?" cannot
-        // drift from what the automation actually does (it used to be a local `tier !== "loose"`).
-        const actableSet = new Set(Array.isArray(tiers) ? tiers : actableCandidates(tiers));
-        const rows: ProbeRow[] = [];
-        for (const [tier, candidateList] of groups) {
-          for (const selector of candidateList) {
-            const count = await scope.locator(selector).count().catch(() => -1);
-            // The SAME visible-match walk the automation uses. Probing `.first()` here would report
-            // visible:false for a selector whose first match is a hidden responsive/template duplicate
-            // — a selector the automation happily uses. visibleIndex > 0 is itself the signal.
-            const hit = count > 0 ? await findVisibleMatch(scope as any, selector) : null;
-            rows.push({
-              selector,
-              tier,
-              actable: actableSet.has(selector),
-              count,
-              visible: hit !== null,
-              visibleIndex: hit?.index ?? null,
-            });
-          }
-        }
-        return rows;
-      };
-
-      /** The Create button's role fallback, probed exactly as production resolves it. */
-      const probeCreateRole = async (scope: { locator: (s: string) => any }): Promise<ProbeRow> => {
-        const hit = await findVisibleRoleMatch(scope as any, CREATE_BUTTON_ROLE);
-        return {
-          selector: ROLE_MATCH_LABEL,
-          tier: "roleFallback",
-          actable: true,
-          count: hit ? hit.index + 1 : 0,
-          visible: hit !== null,
-          visibleIndex: hit?.index ?? null,
-        };
-      };
-
-      const candidates: Record<string, ProbeRow[]> = {
-        section: await probe(NOTES.section),
-        addButton: await probe(NOTES.addButton),
-        item: await probe(NOTES.item),
-        // Probed page-wide BEFORE the editor is open, so these two are expected to be empty/irrelevant
-        // here; the meaningful numbers are the *AfterAdd variants below.
-        input: await probe(NOTES.input),
-        createButton: await probe(NOTES.createButton),
-      };
-
-      // THE verdict — section resolution, the precise-only rule, the loose-only refusal and the
-      // contamination check all come from resolveNotesSection, the same call production makes. This
-      // replaced four parallel re-implementations that agreed only by coincidence.
-      const sectionResolution = await resolveNotesSection(page as any, { projectLabel: projectId });
-      const sectionLocator = sectionResolution.ok ? sectionResolution.locator : null;
-      const matchedSection = sectionResolution.ok ? sectionResolution.selector : null;
-      const looseSectionOnly = !sectionResolution.ok && sectionResolution.reason === "loose-only";
-      const sectionContaminated = !sectionResolution.ok && sectionResolution.reason === "contaminated";
-      const sectionHtml = sectionLocator
-        ? ((await sectionLocator.evaluate((el: Element) => el.outerHTML).catch(() => "")) || "").slice(0, MAX_HTML_CHARS)
-        : null;
-      // readNoteTexts, not allTextContents: the idempotency guard reads the union of the item
-      // selectors AND the container's own text, so anything else would report texts the guard never sees.
-      const noteTexts = sectionLocator ? await readNoteTexts(sectionLocator) : [];
-      // Would production SKIP this project as already-noted? That is the single most consequential
-      // thing this route can tell an operator, and it was previously not reported at all.
-      const markerAlreadyPresent = sectionLocator ? hasMarkerNote(noteTexts) : null;
-
-      // When no section matched, dump every button on the page so the operator can spot the real add
-      // control (its label/aria-label/class is what the selectors need to become).
-      const buttons = matchedSection
-        ? []
-        : await page
-            .locator("button")
-            .evaluateAll((els) =>
-              els.slice(0, 120).map((el) => ({
-                text: (el.textContent || "").trim().slice(0, 60),
-                ariaLabel: el.getAttribute("aria-label"),
-                className: (el.getAttribute("class") || "").slice(0, 160),
-                dataQa: el.getAttribute("data-qa"),
-              })),
-            )
-            .catch(() => [] as Array<Record<string, unknown>>);
-
       // takeScreenshot() interpolates the name straight into a file path, so keep the caller-supplied
       // id out of it as anything but [A-Za-z0-9_-].
       const safeProjectId = projectId.replace(/[^A-Za-z0-9_-]/g, "");
-      const screenshotPath = await takeScreenshot(page, `bidboard-project-note-probe-${safeProjectId}`).catch(() => null);
-
-      // Open the editor (but never commit) so the input/Create selectors — which don't exist until the
-      // "+" is clicked — can be validated too. This is the half of the cascade a plain page dump misses.
-      let editorScreenshotPath: string | null = null;
-      let editorOpened = false;
-      // ONLY click an add control that lives inside a RESOLVED, uncontaminated Notes section.
-      // candidates.addButton above is a page-wide diagnostic sweep; clicking off it would let the
-      // prober hit the first unrelated "Add"/"+" on a live project — precisely when no Notes section
-      // was found, which is the very situation this route exists to diagnose — and then report that
-      // unrelated widget's textbox and Create button as a successful selector validation. Wrong
-      // validation is worse than none, because it is acted on.
-      const sectionScope = sectionLocator;
-      candidates.addButtonInSection = sectionScope ? await probe(NOTES.addButton, sectionScope) : [];
-      // `actable` comes from the shared tier rule, so this matches what the automation would click.
-      const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible && row.actable)?.selector ?? null;
-      let editorScopeLabels: string[] = [];
-      let inputWouldBeRefused: boolean | null = null;
-      if (dryRun && openEditor && sectionScope && matchedAddButton) {
-        // Click the node the WALK found, not `.first()` — same reason as above.
-        const addTarget = await findVisibleMatch(sectionScope as any, matchedAddButton);
-        await addTarget?.locator.click({ timeout: 10000 }).catch(() => {});
-        await page.waitForTimeout(2000);
-
-        // resolveEditorScopes applies production's dialog rule: visible AND uncontaminated, with the
-        // section retained as a second scope. Probing a dialog production would REJECT (or skipping
-        // the inline section because a dialog happens to be visible) is the exact inverse of this
-        // route's purpose.
-        const editorScopes = await resolveEditorScopes(page as any, sectionScope as any);
-        editorScopeLabels = editorScopes.map((scope) => scope.label);
-        candidates.inputAfterAdd = [];
-        candidates.createButtonAfterAdd = [];
-        for (const { label, scope } of editorScopes) {
-          const inputRows = (await probe(NOTES.input, scope as any)).map((row) => ({ ...row, scope: label }));
-          const createRows = [
-            ...(await probe(NOTES.createButton, scope as any)),
-            await probeCreateRole(scope as any),
-          ].map((row) => ({ ...row, scope: label }));
-          candidates.inputAfterAdd.push(...inputRows);
-          candidates.createButtonAfterAdd.push(...createRows);
-        }
-        editorOpened = candidates.inputAfterAdd.some((row) => row.visible && row.actable);
-
-        // Would the fill be refused by the description guard? Report it rather than leaving the
-        // operator to discover it only when a real post declines.
-        const resolvedInput = candidates.inputAfterAdd.find((row) => row.visible && row.actable);
-        if (resolvedInput) {
-          const scopeForInput = editorScopes.find((scope) => scope.label === (resolvedInput as any).scope);
-          const inputHit = scopeForInput ? await findVisibleMatch(scopeForInput.scope as any, resolvedInput.selector) : null;
-          inputWouldBeRefused = inputHit ? await isForbiddenFillTarget(inputHit.locator) : null;
-        }
-
-        editorScreenshotPath = await takeScreenshot(page, `bidboard-project-note-editor-${safeProjectId}`).catch(() => null);
-        // Leave the page clean for whatever runs next under the browser lock — same helper production
-        // uses on every post-fill exit.
-        await cancelEditor(page);
-      }
+      const probeResult = await probeBidBoardNotesUi(page, {
+        projectLabel: projectId,
+        // Opening the editor only makes sense on a dry run; a real post drives it itself below.
+        openEditor: dryRun && openEditor,
+        screenshotPrefix: `bidboard-project-note-${safeProjectId}`,
+      });
 
       let postResult: unknown = null;
       if (!dryRun && note) {
@@ -688,44 +514,7 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         postResult = await postBidBoardProjectNote(page, projectId, note, projectNumber);
       }
 
-      return {
-        ok: true as const,
-        projectId,
-        dryRun,
-        overviewTabVisible,
-        url: page.url(),
-        matchedSection,
-        // The shared resolver's verdict verbatim — the same string production would log.
-        sectionVerdict: sectionResolution.ok
-          ? { ok: true, selector: sectionResolution.selector }
-          : { ok: false, reason: sectionResolution.reason, selector: sectionResolution.selector, message: sectionResolution.message },
-        looseSectionOnly,
-        sectionContaminated,
-        markerAlreadyPresent,
-        editorScopeLabels,
-        inputWouldBeRefused,
-        matchedAddButton,
-        // Why the editor probe did nothing, so a "no input/Create rows" report is never read as "those
-        // selectors are broken" when the truth is "we refused to click anything".
-        editorProbeSkippedReason: !dryRun || !openEditor
-          ? null
-          : !sectionResolution.ok
-            // Verbatim from the shared resolver, so the reason the prober declines is word-for-word
-            // the reason production would decline.
-            ? `${sectionResolution.message} (the automation would refuse here too)`
-            : !matchedAddButton
-              ? "no add control matched INSIDE the resolved Notes section"
-              : null,
-        editorOpened,
-        candidates,
-        sectionHtml,
-        sectionHtmlTruncated: Boolean(sectionHtml && sectionHtml.length >= MAX_HTML_CHARS),
-        noteTexts,
-        buttons,
-        screenshotPath,
-        editorScreenshotPath,
-        postResult,
-      };
+      return { ok: true as const, projectId, dryRun, ...probeResult, postResult };
     });
 
     await storage.createAuditLog({
