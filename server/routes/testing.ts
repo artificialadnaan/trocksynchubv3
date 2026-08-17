@@ -508,10 +508,25 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         screenshotPrefix: `bidboard-project-note-${safeProjectId}`,
       });
 
-      let postResult: unknown = null;
+      let postResult: import("../playwright/bidboard-notes").PostBidBoardNoteResult | null = null;
       if (!dryRun && note) {
         const { postBidBoardProjectNote } = await import("../playwright/bidboard-notes");
         postResult = await postBidBoardProjectNote(page, projectId, note, projectNumber);
+      }
+
+      // A real write to a real Procore project that FAILED must not come back as ok:true. The probe
+      // half can succeed while the post half fails, so the outcome is conditioned on the post result
+      // when there was one. (`skipped` is a success: the note was already there.)
+      const postFailed = postResult !== null && !postResult.posted && !postResult.skipped;
+      if (postFailed) {
+        return {
+          ok: false as const,
+          error: postResult?.error ?? "Posting the note failed",
+          projectId,
+          dryRun,
+          ...probeResult,
+          postResult,
+        };
       }
 
       return { ok: true as const, projectId, dryRun, ...probeResult, postResult };
@@ -528,7 +543,10 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     });
 
     if (!outcome.ok) {
-      return res.status(400).json({ success: false, error: outcome.error });
+      // Keep the diagnostics on a failed post — they are the most useful output there is when a real
+      // write did not land.
+      const { ok: _ok, ...rest } = outcome as Record<string, unknown> & { ok: boolean };
+      return res.status(400).json({ success: false, ...rest });
     }
     res.json({ success: true, ...outcome });
   }));

@@ -39,7 +39,7 @@ import {
   findVisibleRoleMatch,
   hasMarkerNote,
   isForbiddenFillTarget,
-  readNoteTexts,
+  readNoteTextsDetailed,
   resolveEditorScopes,
   resolveNotesSection,
   type NotesSectionResolution,
@@ -61,8 +61,10 @@ export type NotesProbeRow = {
   tier: string;
   /** Whether the AUTOMATION would act on this selector — from actableCandidates(), not a local rule. */
   actable: boolean;
-  count: number;
-  visible: boolean;
+  /** Number of matching nodes, or null when the query itself failed (NOT the same as zero). */
+  count: number | null;
+  /** True/false, or null when it could not be determined. Never optimistically false. */
+  visible: boolean | null;
   /** Index of the first VISIBLE match. > 0 means the earlier matches are hidden duplicates. */
   visibleIndex: number | null;
   /** Which editor container this row was probed in, for the post-add rows. */
@@ -71,7 +73,7 @@ export type NotesProbeRow = {
 
 export type NotesProbeResult = {
   url: string | null;
-  overviewTabVisible: boolean;
+  overviewTabVisible: boolean | null;
   sectionVerdict:
     | { ok: true; selector: string }
     | { ok: false; reason: NotesSectionResolution extends { ok: false } ? string : string; selector: string | null; message: string };
@@ -86,6 +88,14 @@ export type NotesProbeResult = {
   buttons: Array<Record<string, unknown>>;
   candidates: Record<string, NotesProbeRow[]>;
   matchedAddButton: string | null;
+  /** True when the add control could not be clicked — the editor probe is then NOT run. */
+  addClickFailed: boolean;
+  overviewTabClickFailed: boolean;
+  /**
+   * Everything that could not be determined. Non-empty means parts of this report are unknown rather
+   * than negative — read it before concluding a selector is absent.
+   */
+  problems: string[];
   editorScopeLabels: string[];
   editorOpened: boolean;
   /** True when the resolved editor would be rejected by the description guard. */
@@ -115,10 +125,21 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   const openEditor = options.openEditor !== false;
   const prefix = options.screenshotPrefix ?? "bidboard-project-note";
 
+  const problems: string[] = [];
   const overviewTab = page.locator(PROCORE_SELECTORS.bidboard.projectOverviewTab).first();
-  const overviewTabVisible = await overviewTab.isVisible().catch(() => false);
+  const overviewTabVisible = await overviewTab.isVisible().catch(() => null);
+  let overviewTabClickFailed = false;
   if (overviewTabVisible) {
-    await overviewTab.click({ timeout: 10000 }).catch(() => {});
+    const clicked = await overviewTab
+      .click({ timeout: 10000 })
+      .then(() => true)
+      .catch((err: any) => {
+        // Everything below inspects a page that may not be showing Overview. Say so rather than
+        // reporting the resulting absences as if they were selector facts.
+        problems.push(`Overview tab click failed: ${err?.message ?? err}`);
+        return false;
+      });
+    overviewTabClickFailed = !clicked;
     await randomDelay(1500, 2500);
   }
 
@@ -138,12 +159,21 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     const rows: NotesProbeRow[] = [];
     for (const [tier, candidateList] of groups) {
       for (const selector of candidateList) {
-        const count = await scope.locator(selector).count().catch(() => -1);
+        // A failed count is UNKNOWN, not zero — reporting zero would read as "this hook isn't on the
+        // page", which is a different diagnosis and would send the operator hunting for a replacement.
+        const rawCount = await scope.locator(selector).count().catch(() => null);
         // The SAME visible-match walk the automation uses. Probing `.first()` here would report
         // visible:false for a selector whose first match is a hidden responsive/template duplicate —
         // a selector the automation happily uses.
-        const hit = count > 0 ? await findVisibleMatch(scope as any, selector) : null;
-        rows.push({ selector, tier, actable: actableSet.has(selector), count, visible: hit !== null, visibleIndex: hit?.index ?? null });
+        const hit = rawCount !== null && rawCount > 0 ? await findVisibleMatch(scope as any, selector) : null;
+        rows.push({
+          selector,
+          tier,
+          actable: actableSet.has(selector),
+          count: rawCount,
+          visible: rawCount === null ? null : hit !== null,
+          visibleIndex: hit?.index ?? null,
+        });
       }
     }
     return rows;
@@ -151,13 +181,24 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
 
   /** The Create button's role fallback, probed exactly as production resolves it. */
   const probeCreateRole = async (scope: ProbePage): Promise<NotesProbeRow> => {
+    // `count` is the NUMBER OF MATCHES, taken from the locator — not `hit.index + 1`, which is the
+    // POSITION of the first visible one, and which reported 0 when every match was hidden. "Zero
+    // matches" and "three matches, all hidden" are opposite diagnoses: the first says the role
+    // fallback is wrong, the second says it is right but the page renders hidden duplicates.
+    let count: number | null = null;
+    if (typeof scope.getByRole === "function") {
+      count = await scope
+        .getByRole(CREATE_BUTTON_ROLE.role, { name: CREATE_BUTTON_ROLE.name })
+        .count()
+        .catch(() => null);
+    }
     const hit = await findVisibleRoleMatch(scope as any, CREATE_BUTTON_ROLE);
     return {
       selector: ROLE_MATCH_LABEL,
       tier: "roleFallback",
       actable: true,
-      count: hit ? hit.index + 1 : 0,
-      visible: hit !== null,
+      count,
+      visible: count === null ? null : hit !== null,
       visibleIndex: hit?.index ?? null,
     };
   };
@@ -187,16 +228,20 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   if (sectionLocator) {
     try {
       sectionHtml = (((await sectionLocator.evaluate((el: Element) => el.outerHTML)) as string) || "").slice(0, MAX_HTML_CHARS);
-    } catch {
+    } catch (err: any) {
       sectionHtml = null;
+      problems.push(`Notes-section HTML capture failed: ${err?.message ?? err}`);
     }
   }
   // readNoteTexts, not allTextContents: the idempotency guard reads the union of the item selectors
   // AND the container's own text, so anything else would report texts the guard never sees.
-  const noteTexts = sectionLocator ? await readNoteTexts(sectionLocator) : [];
+  const noteRead = sectionLocator ? await readNoteTextsDetailed(sectionLocator) : { texts: [], failed: false };
+  const noteTexts = noteRead.texts;
+  if (noteRead.failed) problems.push("Could not fully read the existing notes; markerAlreadyPresent is unknown");
   // Would production SKIP this project as already-noted? That distinguishes "the automation is working
   // and has nothing to do" from "the selectors are broken", which look identical from the outside.
-  const markerAlreadyPresent = sectionLocator ? hasMarkerNote(noteTexts) : null;
+  // A failed read reports UNKNOWN, never `false` — false means "safe to post", the favourable answer.
+  const markerAlreadyPresent = !sectionLocator || noteRead.failed ? null : hasMarkerNote(noteTexts);
 
   // When no section matched, dump every button on the page so the operator can spot the real add
   // control (its label/aria-label/class is what the selectors need to become).
@@ -211,8 +256,11 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
           dataQa: el.getAttribute("data-qa"),
         })),
       );
-    } catch {
+    } catch (err: any) {
       buttons = [];
+      // An empty button dump reads as "this page has no buttons", which would be a bizarre and
+      // misleading finding on a Procore project page.
+      problems.push(`Button dump failed: ${err?.message ?? err}`);
     }
   }
   buttons = buttons.slice(0, MAX_BUTTONS_DUMPED);
@@ -225,19 +273,38 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   // and then report that unrelated widget's textbox and Create button as successful validation. Wrong
   // validation is worse than none, because it is acted on.
   candidates.addButtonInSection = sectionLocator ? await probe(NOTES.addButton, sectionLocator) : [];
-  const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible && row.actable)?.selector ?? null;
+  const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible === true && row.actable)?.selector ?? null;
 
   let editorScopeLabels: string[] = [];
   let inputWouldBeRefused: boolean | null = null;
   let editorOpened = false;
   let editorScreenshotPath: string | null = null;
 
+  let addClickFailed = false;
   if (openEditor && sectionLocator && matchedAddButton) {
     // Click the node the WALK found, not `.first()`.
     const addTarget = await findVisibleMatch(sectionLocator as any, matchedAddButton);
-    await addTarget?.locator.click({ timeout: 10000 }).catch(() => {});
+    if (!addTarget) {
+      addClickFailed = true;
+      problems.push("The add control vanished between probing and clicking; the editor was not opened");
+    } else {
+      const clicked = await addTarget.locator
+        .click({ timeout: 10000 })
+        .then(() => true)
+        .catch((err: any) => {
+          problems.push(`Add-control click failed: ${err?.message ?? err}`);
+          return false;
+        });
+      addClickFailed = !clicked;
+    }
     await randomDelay(1500, 2500);
+  }
 
+  // STOP if the click did not land. Carrying on would inspect a section/dialog that never opened an
+  // editor, where pre-existing editor-shaped controls get reported as though they were the notes
+  // editor — and those rows are what an operator substitutes into the automation. A prober that says
+  // "here's the editor" when no editor opened is worse than one that says nothing.
+  if (openEditor && sectionLocator && matchedAddButton && !addClickFailed) {
     // resolveEditorScopes applies production's dialog rule: visible AND uncontaminated, with the
     // section retained as a second scope. Probing a dialog production would REJECT (or skipping the
     // inline section because a dialog happens to be visible) is the exact inverse of this route's job.
@@ -254,11 +321,11 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
       candidates.inputAfterAdd.push(...inputRows);
       candidates.createButtonAfterAdd.push(...createRows);
     }
-    editorOpened = candidates.inputAfterAdd.some((row) => row.visible && row.actable);
+    editorOpened = candidates.inputAfterAdd.some((row) => row.visible === true && row.actable);
 
     // Would the fill be refused by the description guard? Report it, rather than leaving the operator
     // to discover it only when a real post declines.
-    const resolvedInput = candidates.inputAfterAdd.find((row) => row.visible && row.actable);
+    const resolvedInput = candidates.inputAfterAdd.find((row) => row.visible === true && row.actable);
     if (resolvedInput) {
       const scopeForInput = editorScopes.find((scope) => scope.label === resolvedInput.scope);
       const inputHit = scopeForInput ? await findVisibleMatch(scopeForInput.scope as any, resolvedInput.selector) : null;
@@ -287,6 +354,9 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     looseSectionOnly,
     sectionContaminated,
     markerAlreadyPresent,
+    addClickFailed,
+    overviewTabClickFailed,
+    problems,
     noteTexts,
     sectionHtml,
     sectionHtmlTruncated: Boolean(sectionHtml && sectionHtml.length >= MAX_HTML_CHARS),
@@ -304,7 +374,9 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
         ? `${sectionResolution.message} (the automation would refuse here too)`
         : !matchedAddButton
           ? "no add control matched INSIDE the resolved Notes section"
-          : null,
+          : addClickFailed
+            ? "the add control could not be clicked, so the editor never opened — the input/Create rows below are NOT selector evidence"
+            : null,
     screenshotPath,
     editorScreenshotPath,
   };

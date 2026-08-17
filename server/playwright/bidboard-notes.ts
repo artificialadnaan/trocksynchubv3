@@ -290,18 +290,32 @@ async function firstVisible(
  * hiding an existing note and posting a duplicate. Union means a wrong `item` match can only add
  * noise, and the marker is still found through the container's text.
  */
-export async function readNoteTexts(section: Locator): Promise<string[]> {
+export async function readNoteTextsDetailed(section: Locator): Promise<{ texts: string[]; failed: boolean }> {
   const texts: string[] = [];
+  let failed = false;
   for (const selector of PROCORE_SELECTORS.bidboard.newUi.notes.item) {
     const items = section.locator(selector);
-    const count = await items.count().catch(() => 0);
+    const count = await items.count().catch(() => -1);
+    if (count < 0) {
+      failed = true;
+      continue;
+    }
     if (count > 0) {
-      texts.push(...(await items.allTextContents().catch(() => [] as string[])));
+      const got = await items.allTextContents().catch(() => null);
+      if (got === null) failed = true;
+      else texts.push(...got);
     }
   }
-  const sectionText = await section.innerText().catch(() => "");
-  if (sectionText) texts.push(sectionText);
-  return texts;
+  const sectionText = await section.innerText().catch(() => null);
+  if (sectionText === null) failed = true;
+  else if (sectionText) texts.push(sectionText);
+  // `failed` exists so a caller can tell "this project has no CRM note" from "we could not read the
+  // notes". They are the same empty array, and only one of them means it is safe to post.
+  return { texts, failed };
+}
+
+export async function readNoteTexts(section: Locator): Promise<string[]> {
+  return (await readNoteTextsDetailed(section)).texts;
 }
 
 /**
@@ -310,10 +324,13 @@ export async function readNoteTexts(section: Locator): Promise<string[]> {
  * including "the Create button next to the editor" — is unscoped in practice.
  */
 async function isPlausibleNotesSection(section: Locator): Promise<boolean> {
+  // FAIL CLOSED. `.catch(() => 0)` here used to mean "the contamination query blew up, therefore the
+  // container is clean" — an unknown converted into the favourable answer, on the check that decides
+  // whether it is safe to act inside this element at all. An unreadable container is not a safe one.
   const contaminated = await section
     .locator(PROCORE_SELECTORS.bidboard.newUi.notes.sectionContamination)
     .count()
-    .catch(() => 0);
+    .catch(() => -1);
   return contaminated === 0;
 }
 
@@ -393,11 +410,16 @@ export async function resolveEditorScopes(
  * Independent of which selector matched, so it still holds if a candidate is edited carelessly later.
  */
 export async function isForbiddenFillTarget(locator: Locator): Promise<boolean> {
+  // FAIL CLOSED. A read error is NOT "the attribute is absent": if we cannot tell what this element is,
+  // we must not type 8 KB into it. The sentinel keeps a genuine null (attribute absent) distinct from
+  // an unreadable one, so only the latter refuses.
+  const UNREADABLE = Symbol("unreadable");
   const attrs = await Promise.all(
     ["name", "id", "aria-label", "placeholder", "data-qa"].map((attr) =>
-      locator.getAttribute(attr).catch(() => null),
+      locator.getAttribute(attr).catch(() => UNREADABLE as unknown as string | null),
     ),
   );
+  if (attrs.some((value) => (value as unknown) === UNREADABLE)) return true;
   return attrs.some((value) => (value ?? "").toLowerCase().includes("description"));
 }
 
@@ -448,6 +470,15 @@ export async function postBidBoardProjectNote(
   const stepBudget = (stepTimeoutMs: number) => Math.min(options?.stepTimeoutMs ?? stepTimeoutMs, remainingMs());
   const find = (scope: Scope, candidates: string[], stepTimeoutMs: number) =>
     firstVisible(scope, candidates, stepBudget(stepTimeoutMs));
+  /**
+   * Timeout for an ACTION (click/fill), clamped to what's left of the overall budget.
+   *
+   * A lookup can legitimately consume nearly the whole budget and still return a control just before
+   * expiry; starting a fresh full-length click after that is how the step overruns the global browser
+   * lock it is supposed to be bounded by. Floored at 1ms because Playwright reads `timeout: 0` as "no
+   * timeout at all" — the same trap as the navigation bound.
+   */
+  const actBudget = () => Math.max(1, Math.min(CONTROL_TIMEOUT_MS, remainingMs()));
   let hasTyped = false;
 
   /** Single exit for every failure: cancels a half-typed editor, then reports. Never throws. */
@@ -487,7 +518,7 @@ export async function postBidBoardProjectNote(
     // content lives; click the Overview tab only if it is actually there (a no-op on /details).
     const overviewTab = page.locator(PROCORE_SELECTORS.bidboard.projectOverviewTab).first();
     if (await overviewTab.isVisible().catch(() => false)) {
-      await overviewTab.click({ timeout: CONTROL_TIMEOUT_MS }).catch(() => {});
+      await overviewTab.click({ timeout: actBudget() }).catch(() => {});
       await randomDelay(1000, 2000);
     }
 
@@ -523,7 +554,8 @@ export async function postBidBoardProjectNote(
     }
     matched.addButton = addButton.selector;
 
-    await addButton.locator.click({ timeout: CONTROL_TIMEOUT_MS });
+    if (outOfTime()) return await fail(`Timed out before opening the note editor on project ${projectId}`);
+    await addButton.locator.click({ timeout: actBudget() });
     await randomDelay(800, 1500);
 
     // The editor may open inline in the Notes section or in a dialog. resolveEditorScopes decides which
@@ -578,7 +610,7 @@ export async function postBidBoardProjectNote(
       log(`[bidboard-notes] clamped the note from ${marked.length} to ${clamped.length} chars before typing`, "playwright");
     }
     hasTyped = true;
-    await input.locator.fill(clamped, { timeout: CONTROL_TIMEOUT_MS });
+    await input.locator.fill(clamped, { timeout: actBudget() });
     await randomDelay(300, 700);
 
     // CSS candidates AND the anchored role fallback go through the one resolver, so both get the same
@@ -596,7 +628,11 @@ export async function postBidBoardProjectNote(
     }
     matched.createButton = createButton.selector;
 
-    await createButton.locator.click({ timeout: CONTROL_TIMEOUT_MS });
+    if (outOfTime()) {
+      // The note is already typed, so this exit cancels the editor rather than leaving a draft behind.
+      return await fail(`Timed out before submitting the note on project ${projectId}`);
+    }
+    await createButton.locator.click({ timeout: actBudget() });
     await randomDelay(1500, 2500);
 
     // Verify the note actually rendered. Procore's Notes have no documented length limit, so a silently

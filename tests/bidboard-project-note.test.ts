@@ -23,6 +23,7 @@ const {
   resolveEditorScopes,
   findVisibleRoleMatch,
   actableCandidates,
+  isForbiddenFillTarget,
   CREATE_BUTTON_ROLE,
 } = await import("../server/playwright/bidboard-notes.ts");
 const { probeBidBoardNotesUi } = await import("../server/playwright/bidboard-notes-probe.ts");
@@ -63,6 +64,14 @@ type FakeDom = {
   actions: string[];
   fills: Array<{ id: string; value: string }>;
   keys: string[];
+  /**
+   * Inject query failures, so tests can distinguish "the page says no" from "we could not tell".
+   * Those two must never produce the same report.
+   */
+  fail?: {
+    count?: (selector: string) => boolean;
+    innerText?: (nodeId: string) => boolean;
+  };
 };
 
 const node = (dom: FakeDom, id: string) => dom.nodes.find((n) => n.id === id);
@@ -98,20 +107,27 @@ function matchNodes(dom: FakeDom, selector: string, within: string[] | null): Fa
   });
 }
 
-function makeLocator(dom: FakeDom, resolve: () => FakeNode[]): any {
+function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): any {
   const locator: any = {
-    first: () => makeLocator(dom, () => resolve().slice(0, 1)),
-    last: () => makeLocator(dom, () => resolve().slice(-1)),
-    nth: (index: number) => makeLocator(dom, () => resolve().slice(index, index + 1)),
+    first: () => makeLocator(dom, () => resolve().slice(0, 1), selector),
+    last: () => makeLocator(dom, () => resolve().slice(-1), selector),
+    nth: (index: number) => makeLocator(dom, () => resolve().slice(index, index + 1), selector),
     // count() includes hidden nodes, as the real DOM does — that is what makes probing only .first()
     // able to miss a usable control.
-    count: async () => resolve().length,
+    count: async () => {
+      if (dom.fail?.count?.(selector)) throw new Error("execution context was destroyed");
+      return resolve().length;
+    },
     isVisible: async () => resolve().some((n) => !n.hidden),
     waitFor: async () => {
       if (!resolve().some((n) => !n.hidden)) throw new Error("Timeout waiting for selector");
     },
     allTextContents: async () => resolve().map((n) => textOf(dom, n)),
-    innerText: async () => resolve().map((n) => textOf(dom, n)).join("\n"),
+    innerText: async () => {
+      const nodes = resolve();
+      if (nodes.some((n) => dom.fail?.innerText?.(n.id))) throw new Error("element is detached");
+      return nodes.map((n) => textOf(dom, n)).join("\n");
+    },
     getAttribute: async (attr: string) => resolve()[0]?.attrs?.[attr] ?? null,
     // Enough of evaluate/evaluateAll for the prober's HTML + button dumps: the callbacks only read
     // outerHTML / textContent / getAttribute.
@@ -140,7 +156,7 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[]): any {
       dom.fills.push({ id: target.id, value });
       target.text = value;
     },
-    locator: (nested: string) => makeLocator(dom, () => matchNodes(dom, nested, resolve().map((n) => n.id))),
+    locator: (nested: string) => makeLocator(dom, () => matchNodes(dom, nested, resolve().map((n) => n.id)), nested),
     getByRole: (role: string, opts?: { name?: RegExp | string }) =>
       makeLocator(dom, () => matchRole(dom, role, opts, resolve().map((n) => n.id))),
   };
@@ -159,7 +175,7 @@ function matchRole(dom: FakeDom, role: string, opts: { name?: RegExp | string } 
 function makePage(dom: FakeDom) {
   return {
     url: () => "https://us02.procore.com/webclients/host/companies/1/tools/bid-board/project/9/details",
-    locator: (selector: string) => makeLocator(dom, () => matchNodes(dom, selector, null)),
+    locator: (selector: string) => makeLocator(dom, () => matchNodes(dom, selector, null), selector),
     getByRole: (role: string, opts?: { name?: RegExp | string }) => makeLocator(dom, () => matchRole(dom, role, opts, null)),
     keyboard: {
       press: async (key: string) => {
@@ -893,5 +909,94 @@ describe("probeBidBoardNotesUi (the prober's wiring)", () => {
     expect(dom.actions).toEqual([]);
     expect(result.editorOpened).toBe(false);
     expect(result.editorProbeSkippedReason).toBeNull();
+  });
+});
+
+// The prober must never shade toward optimism: a failure, a timeout, an absence or an unknown must
+// never be reported as a value an operator would act on. Everything here asserts the pessimistic or
+// explicitly-unknown answer, because the whole chain of safety in this feature depends on someone
+// reading this output and substituting real Procore hooks from it.
+describe("probeBidBoardNotesUi — failures never read as success", () => {
+  const PROBE = { sectionTimeoutMs: 20, projectLabel: "9001" };
+
+  it("STOPS probing when the add click fails — no editor rows are reported", async () => {
+    const dom = notesFixture();
+    // A detached/disabled/covered control: present and visible, but the click throws.
+    node(dom, "addBtn")!.onClick = () => {
+      throw new Error("element is not enabled");
+    };
+    // Editor-shaped controls that already exist in the section would otherwise be reported as though
+    // the notes editor had opened.
+    dom.nodes.push({ id: "preExistingBox", parent: "notesSection", matches: ['textarea[name="note"]'], attrs: { name: "note" } });
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.addClickFailed).toBe(true);
+    expect(result.editorOpened).toBe(false);
+    expect(result.candidates.inputAfterAdd).toBeUndefined();
+    expect(result.candidates.createButtonAfterAdd).toBeUndefined();
+    expect(result.editorProbeSkippedReason).toMatch(/could not be clicked/i);
+    expect(result.problems.join(" ")).toMatch(/Add-control click failed/);
+  });
+
+  it("reports the real role-fallback match count when every match is HIDDEN", async () => {
+    // "Zero matches" and "three matches, all hidden" are opposite diagnoses.
+    const dom = notesFixture({ createButtonRoleOnly: true });
+    node(dom, "addBtn")!.onClick = (d) => {
+      d.nodes.push({ id: "editor", parent: "notesSection", matches: ['textarea[name="note"]'], attrs: { name: "note" }, text: "" });
+      d.nodes.push({ id: "c1", parent: "notesSection", matches: [], role: "button", name: "Create", hidden: true });
+      d.nodes.push({ id: "c2", parent: "notesSection", matches: [], role: "button", name: "Create", hidden: true });
+    };
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    const roleRow = result.candidates.createButtonAfterAdd.find((row: any) => row.tier === "roleFallback");
+    expect(roleRow?.count).toBe(2); // matches exist…
+    expect(roleRow?.visible).toBe(false); // …but none is usable
+    expect(roleRow?.visibleIndex).toBeNull();
+  });
+
+  it("reports UNKNOWN, not zero/false, when a selector query fails", async () => {
+    const dom = notesFixture();
+    dom.fail = { count: (selector) => selector === "div.aid-note" };
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    const row = result.candidates.item.find((r: any) => r.selector === "div.aid-note");
+    expect(row?.count).toBeNull();
+    expect(row?.visible).toBeNull(); // NOT false — we could not tell
+  });
+
+  it("reports markerAlreadyPresent as UNKNOWN when the notes cannot be read", async () => {
+    // false would mean "no CRM note here, safe to post" — the favourable answer, from a failed read.
+    const dom = notesFixture();
+    dom.fail = { innerText: (id) => id === "notesSection" };
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.markerAlreadyPresent).toBeNull();
+    expect(result.problems.join(" ")).toMatch(/markerAlreadyPresent is unknown/);
+  });
+});
+
+describe("fail-closed safety checks", () => {
+  it("treats an unreadable container as CONTAMINATED, not clean", async () => {
+    // The contamination query decides whether it is safe to act inside an element at all; a query
+    // failure used to mean "clean".
+    const dom = notesFixture();
+    dom.fail = { count: (selector) => selector.includes("sectionContamination") || selector.includes('[name*="description" i]') };
+
+    const result = await resolveNotesSection(makePage(dom), { timeoutMs: 20 });
+    expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+  });
+
+  it("refuses to fill an element whose attributes cannot be read", async () => {
+    const unreadable: any = { getAttribute: async () => { throw new Error("detached"); } };
+    expect(await isForbiddenFillTarget(unreadable)).toBe(true);
+  });
+
+  it("still allows a normal element whose attributes are simply absent", async () => {
+    const plain: any = { getAttribute: async () => null };
+    expect(await isForbiddenFillTarget(plain)).toBe(false);
   });
 });
