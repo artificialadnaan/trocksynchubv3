@@ -132,6 +132,31 @@ describe("POST /api/bid-board/create-from-rfp (endpoint)", () => {
     });
   });
 
+  it("carries crmActivityLog through to the command (createFromRfpBodySchema inherits the field)", async () => {
+    await withServer(async (baseUrl) => {
+      // createFromRfpBodySchema extends rfpRequestBodySchema, so the voting path inherits the field —
+      // asserted, not assumed, because the Bid Board note depends on it surviving this parse.
+      const activityLog = "CRM Activity Log — TR-1001 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep";
+      const raw = JSON.stringify(requestBody({ deal: { ...requestBody().deal, crmActivityLog: activityLog } }));
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST", headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) }, body: raw,
+      });
+      expect(res.status).toBe(202);
+      expect((enqueueCommandMock.mock.calls[0][0] as any).deal.crmActivityLog).toBe(activityLog);
+    });
+  });
+
+  it("drops a malformed crmActivityLog instead of 422ing the vote", async () => {
+    await withServer(async (baseUrl) => {
+      const raw = JSON.stringify(requestBody({ deal: { ...requestBody().deal, crmActivityLog: 12345 } }));
+      const res = await fetch(`${baseUrl}/api/bid-board/create-from-rfp`, {
+        method: "POST", headers: { "content-type": "application/json", "x-rfp-request-signature": sign(raw) }, body: raw,
+      });
+      expect(res.status).toBe(202); // dropped via .catch(undefined) — a display extra never blocks a create
+      expect((enqueueCommandMock.mock.calls[0][0] as any).deal.crmActivityLog).toBeUndefined();
+    });
+  });
+
   it("accepts a LARGE attachments body (raised limit) instead of 413ing the Bid Board create", async () => {
     await withServer(async (baseUrl) => {
       // A project with hundreds of files: the inline attachments list pushes the body well past

@@ -53,6 +53,11 @@ export interface NormalizedRfpRequestInput {
       country: string | null;
     } | null;
     description: string | null;
+    /**
+     * The CRM's rendered activity log (calls, notes, site visits…), posted as a NOTE on the Bid Board
+     * project. Optional + nullable: a soft display extra, absent on any body that predates the field.
+     */
+    crmActivityLog?: string | null;
     dueDate: string | null;
     workflowRoute: string | null;
   };
@@ -978,6 +983,12 @@ function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { owner
     country: input.deal.address?.country || '',
     description: input.deal.description || '',
     notes: input.deal.description || '',
+    // The CRM activity log, carried through to the Bid Board create as a NOTE on the project. Kept in
+    // its own key: `description`/`notes` above still feed Procore's Project Description, and the
+    // activity log must not leak into that field. Also note resolveRfpDescription's "any key containing
+    // 'description'" fallback — 'crm_activity_log' deliberately doesn't match it, so the review email's
+    // Description row can never pick this up.
+    crm_activity_log: input.deal.crmActivityLog || '',
     bid_due_date: input.deal.dueDate || '',
     due_date: input.deal.dueDate || '',
     workflowRoute: input.deal.workflowRoute || '',

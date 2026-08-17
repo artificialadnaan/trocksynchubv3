@@ -766,6 +766,9 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
     zip: d.address?.zip,
     country: d.address?.country,
     description: d.description,
+    // The CRM activity log, posted as a NOTE on the created project. Its own key on purpose:
+    // description/notes below keep feeding Procore's Project Description, which must not carry it.
+    crm_activity_log: d.crmActivityLog ?? "",
     bid_due_date: d.dueDate,
     attachments: input.attachments,
     project_location: d.address?.street,
