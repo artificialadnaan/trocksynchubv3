@@ -578,13 +578,21 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       // "+" is clicked — can be validated too. This is the half of the cascade a plain page dump misses.
       let editorScreenshotPath: string | null = null;
       let editorOpened = false;
-      const matchedAddButton = candidates.addButton.find((row) => row.visible && row.tier !== "loose")?.selector ?? null;
-      if (dryRun && openEditor && matchedAddButton) {
-        await page.locator(matchedAddButton).first().click({ timeout: 10000 }).catch(() => {});
+      // ONLY click an add control that lives inside a RESOLVED, uncontaminated Notes section.
+      // candidates.addButton above is a page-wide diagnostic sweep; clicking off it would let the
+      // prober hit the first unrelated "Add"/"+" on a live project — precisely when no Notes section
+      // was found, which is the very situation this route exists to diagnose — and then report that
+      // unrelated widget's textbox and Create button as a successful selector validation. Wrong
+      // validation is worse than none, because it is acted on.
+      const sectionScope = matchedSection && sectionContaminated === false ? page.locator(matchedSection).first() : null;
+      candidates.addButtonInSection = sectionScope ? await probe(NOTES.addButton, sectionScope) : [];
+      const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible && row.tier !== "loose")?.selector ?? null;
+      if (dryRun && openEditor && sectionScope && matchedAddButton) {
+        await sectionScope.locator(matchedAddButton).first().click({ timeout: 10000 }).catch(() => {});
         await page.waitForTimeout(2000);
         const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
         const dialogOpen = await dialog.isVisible().catch(() => false);
-        const editorScope = dialogOpen ? dialog : matchedSection ? page.locator(matchedSection).first() : page;
+        const editorScope = dialogOpen ? dialog : sectionScope;
         candidates.inputAfterAdd = await probe(NOTES.input, editorScope);
         candidates.createButtonAfterAdd = await probe(NOTES.createButton, editorScope);
         editorOpened = candidates.inputAfterAdd.some((row) => row.visible);
@@ -609,6 +617,19 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         looseSectionOnly,
         sectionContaminated,
         matchedAddButton,
+        // Why the editor probe did nothing, so a "no input/Create rows" report is never read as "those
+        // selectors are broken" when the truth is "we refused to click anything".
+        editorProbeSkippedReason: !dryRun || !openEditor
+          ? null
+          : !matchedSection
+            ? (looseSectionOnly
+                ? "only the loose (text-shaped) Notes-section candidates matched — refusing to click anything; the automation would refuse here too"
+                : "no Notes section matched")
+            : sectionContaminated
+              ? "the resolved Notes section also contains the Project Description or Create New Project — refusing to click inside a page-level wrapper"
+              : !matchedAddButton
+                ? "no add control matched INSIDE the resolved Notes section"
+                : null,
         editorOpened,
         candidates,
         sectionHtml,

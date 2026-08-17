@@ -2057,6 +2057,8 @@ async function recordBidBoardNoteOutcome(params: {
   noteChars: number;
   posted: boolean;
   skipped: boolean;
+  /** Why the step declined, when it declined for a reason other than "the note is already there". */
+  skipReason?: string;
   error?: string;
   matched?: Record<string, string>;
 }): Promise<void> {
@@ -2072,6 +2074,7 @@ async function recordBidBoardNoteOutcome(params: {
         sourceDealId: params.sourceDealId,
         noteChars: params.noteChars,
         skipped: params.skipped,
+        skipReason: params.skipReason ?? null,
         matchedSelectors: params.matched ?? null,
       },
       errorMessage: params.error,
@@ -2285,7 +2288,36 @@ export async function createBidBoardProjectFromDeal(
       // already exists, so we are by definition posting after it. Re-attempting on an adopt is
       // deliberate and safe — the marker check makes it a no-op when the note is already there, and it
       // gives a re-run whose earlier note attempt failed a second chance.
-      await postCrmActivityNoteFailOpen(existingMapping.bidboardProjectId);
+      //
+      // OWNERSHIP FIRST. `dealMapping` is this deal's by construction, but `numberMapping` is keyed on
+      // the project NUMBER and can belong to a DIFFERENT deal that shares it — the same
+      // claimedByOtherDeal collision the exact-number lookup below models explicitly. Adopting it is
+      // pre-existing behaviour; posting into it is NOT: it would publish this deal's private sales
+      // history onto another deal's Procore project. The create worker guards this collision before it
+      // ever gets here, but direct approval and other callers do not, so the check belongs here too.
+      // When in doubt this step declines and records why.
+      const adoptedOwner = hasBidId(dealMapping) ? undefined : numberMapping;
+      const claimedByOtherDeal = Boolean(
+        adoptedOwner && !(adoptedOwner.sourceSystem === sourceSystem && adoptedOwner.sourceDealId === dealId),
+      );
+      if (claimedByOtherDeal) {
+        log(
+          `Not posting the CRM activity note for ${sourceSystem} deal ${dealId}: BidBoard project ${existingMapping.bidboardProjectId} (number ${projectNumber}) is linked to ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
+          "playwright",
+        );
+        await recordBidBoardNoteOutcome({
+          projectId: existingMapping.bidboardProjectId,
+          projectName: projectData.name,
+          sourceSystem,
+          sourceDealId: dealId,
+          noteChars: projectData.crmActivityLog?.length ?? 0,
+          posted: false,
+          skipped: true,
+          skipReason: `project is claimed by ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
+        });
+      } else {
+        await postCrmActivityNoteFailOpen(existingMapping.bidboardProjectId);
+      }
       return {
         success: true,
         projectId: existingMapping.bidboardProjectId,

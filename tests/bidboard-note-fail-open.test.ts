@@ -249,6 +249,54 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     expect(postNoteMock).toHaveBeenCalledWith({ stub: true }, "562949955849463", ACTIVITY_LOG, "DFW-4-16226-ae");
   });
 
+  it("does NOT post into a project whose mapping belongs to ANOTHER deal", async () => {
+    // P1 leak: with no mapping for THIS deal, the adopt falls back to a lookup keyed on the project
+    // NUMBER, which can return a row owned by a different deal. Adopting it is pre-existing behaviour;
+    // posting into it would publish this deal's private sales history onto that other deal's Procore
+    // project. The create worker guards this collision, but direct approval reaches here without it.
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getBidboardMappingByProcoreProjectNumber).mockResolvedValue({
+      sourceSystem: "trock_crm",
+      sourceDealId: "SOME-OTHER-DEAL",
+      bidboardProjectId: "999888777",
+      procoreProjectNumber: "DFW-4-16226-ae",
+    } as any);
+
+    const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
+
+    // The adopt itself is unchanged (pre-existing behaviour) — only the note declines.
+    expect(result).toMatchObject({ success: true, adopted: true, projectId: "999888777" });
+    expect(postNoteMock).not.toHaveBeenCalled();
+    expect(callOrder).toEqual([]);
+    // …and the refusal is recorded rather than silent.
+    expect(vi.mocked(storage.createBidboardAutomationLog)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "post_crm_activity_note",
+        status: "skipped",
+        details: expect.objectContaining({ skipReason: "project is claimed by trock_crm deal SOME-OTHER-DEAL" }),
+      }),
+    );
+  });
+
+  it("DOES post when the number-keyed mapping belongs to this same deal", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const bidboard = await import("../server/playwright/bidboard.ts");
+    vi.mocked(storage.getSyncMappingBySourceDealId).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getBidboardMappingByProcoreProjectNumber).mockResolvedValue({
+      sourceSystem: "trock_crm",
+      sourceDealId: "a1c59631",
+      bidboardProjectId: "999888777",
+      procoreProjectNumber: "DFW-4-16226-ae",
+    } as any);
+
+    const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
+
+    expect(result.adopted).toBe(true);
+    expect(postNoteMock).toHaveBeenCalledWith({ stub: true }, "999888777", ACTIVITY_LOG, "DFW-4-16226-ae");
+  });
+
   it("a note failure on the mapping-adopt path still returns the adopted project", async () => {
     const { storage } = await import("../server/storage.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");

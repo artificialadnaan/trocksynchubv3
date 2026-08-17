@@ -41,6 +41,8 @@ type FakeNode = {
   name?: string;
   attrs?: Record<string, string>;
   text?: string;
+  /** Present in the DOM but not visible — a responsive/template duplicate, a collapsed panel. */
+  hidden?: boolean;
   onClick?: (dom: FakeDom) => void;
 };
 
@@ -88,10 +90,13 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[]): any {
   const locator: any = {
     first: () => makeLocator(dom, () => resolve().slice(0, 1)),
     last: () => makeLocator(dom, () => resolve().slice(-1)),
+    nth: (index: number) => makeLocator(dom, () => resolve().slice(index, index + 1)),
+    // count() includes hidden nodes, as the real DOM does — that is what makes probing only .first()
+    // able to miss a usable control.
     count: async () => resolve().length,
-    isVisible: async () => resolve().length > 0,
+    isVisible: async () => resolve().some((n) => !n.hidden),
     waitFor: async () => {
-      if (resolve().length === 0) throw new Error("Timeout waiting for selector");
+      if (!resolve().some((n) => !n.hidden)) throw new Error("Timeout waiting for selector");
     },
     allTextContents: async () => resolve().map((n) => textOf(dom, n)),
     innerText: async () => resolve().map((n) => textOf(dom, n)).join("\n"),
@@ -259,7 +264,7 @@ function notesFixture(opts: {
 }
 
 /** Short windows so the "not verified" paths don't spend the real polling/wall-clock budget. */
-const FAST = { verifyTimeoutMs: 50, overallTimeoutMs: 5000 };
+const FAST = { verifyTimeoutMs: 50, overallTimeoutMs: 250 };
 
 describe("hasMarkerNote", () => {
   it("matches a marker embedded in a rendered note's author/date chrome", () => {
@@ -474,6 +479,47 @@ describe("postBidBoardProjectNote", () => {
     expect(result.posted).toBe(false);
     expect(result.error).toMatch(/timed out/i);
     expect(dom.fills).toEqual([]);
+  });
+
+  it("finds a VISIBLE control when the selector's first match is hidden", async () => {
+    // Procore's SPA renders responsive/template duplicates. Probing only `.first()` would see the
+    // hidden node, reject the selector and decline the whole step — silently, forever.
+    const dom = notesFixture();
+    const realAdd = node(dom, "addBtn")!;
+    dom.nodes = dom.nodes.filter((n) => n.id !== "addBtn");
+    dom.nodes.push({ id: "addBtnHidden", parent: "notesSection", matches: ['button.aid-add-note'], hidden: true });
+    dom.nodes.push(realAdd);
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    expect(dom.actions).toContain("click:addBtn");
+    expect(dom.actions).not.toContain("click:addBtnHidden");
+  });
+
+  it("prepends the marker when the CRM sends a body without the heading", async () => {
+    // The schema accepts any string. Posting a marker-less body verbatim would create a REAL note that
+    // neither the existing-note check nor the verification can see — reported as a failure, and
+    // re-submitted as an invisible duplicate on every adopted-project retry.
+    const dom = notesFixture();
+    const bare = "Aug 14, 2026 · Call · Jane Rep\n  Owner confirmed scope.";
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", bare, "DFW-2-12345-ab", FAST);
+
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    const typed = dom.fills[0].value;
+    expect(typed.startsWith("CRM Activity Log — DFW-2-12345-ab")).toBe(true);
+    expect(typed).toContain(bare);
+    // The guard can now see it, so a re-run skips instead of posting a second copy.
+    expect(hasMarkerNote([typed])).toBe(true);
+  });
+
+  it("still marks a marker-less body when there is no project number", async () => {
+    const dom = notesFixture();
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", "just some history", null, FAST);
+
+    expect(result.posted).toBe(true);
+    expect(hasMarkerNote([dom.fills[0].value])).toBe(true);
   });
 
   it("returns an error result (does NOT throw) when navigation fails", async () => {

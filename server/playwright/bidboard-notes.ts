@@ -115,6 +115,23 @@ export function clampNoteForProcore(note: string): string {
   return `${note.slice(0, NOTE_HARD_CHAR_CAP - suffix.length)}${suffix}`;
 }
 
+/**
+ * Guarantee the posted text carries the marker, prepending the heading when it doesn't.
+ *
+ * The request schema accepts ANY string for `crmActivityLog`, so the CRM (or a future caller, or a
+ * hand-made payload) can hand us a body with no heading. Posting that verbatim would create a REAL
+ * note that neither the existing-note check nor the post-save verification can see: the submission
+ * would be reported as a failure, and every adopted-project retry would submit another invisible
+ * duplicate, forever. Marker-bearing text is this module's invariant, so it enforces it rather than
+ * trusting the sender.
+ */
+export function ensureNoteMarker(note: string, projectNumber?: string | null): string {
+  if (hasMarkerNote([note])) return note;
+  const label = (projectNumber || "").trim();
+  const heading = label ? `${CRM_ACTIVITY_NOTE_MARKER} ${label}` : CRM_ACTIVITY_NOTE_MARKER;
+  return `${heading}\n\n${note}`;
+}
+
 type Scope = Pick<Page, "locator"> & Partial<Pick<Page, "getByRole">>;
 type CandidateTiers = { precise: string[]; scopedOnly?: string[]; loose?: string[] };
 
@@ -141,37 +158,70 @@ async function isVisible(locator: Locator, timeoutMs: number): Promise<boolean> 
 }
 
 /**
- * Try each candidate selector in order; return the first visible match and the selector that found it.
+ * How many matches of one selector to inspect for a visible node.
  *
- * Waits ONCE on the union of the candidates, then identifies which one matched with zero-wait probes.
- * Waiting `timeoutMs` per candidate instead would spend the full timeout on every wrong guess in turn.
+ * Probing only `.first()` rejects a selector whenever its first match is a hidden node — a
+ * responsive/mobile duplicate, a collapsed panel, an off-screen template — even though a perfectly
+ * usable visible control exists a few nodes later. Procore's SPA renders exactly that shape, and the
+ * consequence here is silent: the whole step declines and no note is ever posted.
  */
+const MAX_NODES_PER_SELECTOR = 10;
+
+/** First VISIBLE node matching `selector` within `scope` — not simply the first node. */
+async function firstVisibleNode(scope: Scope, selector: string): Promise<Locator | null> {
+  let all: Locator;
+  try {
+    all = scope.locator(selector);
+  } catch (err: any) {
+    // A selector Playwright can't even parse must not take the whole step down.
+    log(`[bidboard-notes] selector rejected by Playwright: ${selector} (${err?.message ?? err})`, "playwright");
+    return null;
+  }
+  const count = await all.count().catch(() => 0);
+  for (let index = 0; index < Math.min(count, MAX_NODES_PER_SELECTOR); index++) {
+    const node = all.nth(index);
+    if (await node.isVisible().catch(() => false)) return node;
+  }
+  return null;
+}
+
+/**
+ * Try each candidate selector in order and return the first VISIBLE match, polling until `timeoutMs`.
+ *
+ * Polls the whole candidate list rather than waiting on a union of it: the union wait had the same
+ * hidden-first-node blind spot as `.first()` (it would sit on a hidden node for the full timeout and
+ * then report nothing), and a per-candidate wait would spend the whole timeout on every wrong guess in
+ * turn. One cheap pass over all candidates, repeated until the deadline, gives the SPA time to render
+ * without either failure mode.
+ */
+async function firstVisibleAcross(
+  attempts: Array<{ scope: Scope; candidates: string[] }>,
+  timeoutMs: number,
+): Promise<{ locator: Locator; selector: string; attemptIndex: number } | null> {
+  if (attempts.every((attempt) => attempt.candidates.length === 0)) return null;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  do {
+    // All attempts are tried on EVERY pass, in preference order. Exhausting the whole timeout on the
+    // preferred scope before even looking at the fallback would burn the budget waiting for something
+    // that is never going to appear there (and, with the overall deadline, starve the later steps).
+    for (const [attemptIndex, attempt] of attempts.entries()) {
+      for (const selector of attempt.candidates) {
+        const locator = await firstVisibleNode(attempt.scope, selector);
+        if (locator) return { locator, selector, attemptIndex };
+      }
+    }
+    if (Date.now() >= deadline) break;
+    await randomDelay(250, 500);
+  } while (Date.now() < deadline);
+  return null;
+}
+
 async function firstVisible(
   scope: Scope,
   candidates: string[],
   timeoutMs: number,
 ): Promise<{ locator: Locator; selector: string } | null> {
-  if (candidates.length === 0) return null;
-  try {
-    await isVisible(scope.locator(candidates.join(", ")).first(), timeoutMs);
-  } catch {
-    // A union Playwright can't parse/wait on must not veto the individual probes below.
-  }
-
-  for (const selector of candidates) {
-    let locator: Locator;
-    try {
-      locator = scope.locator(selector).first();
-    } catch (err: any) {
-      // A selector Playwright can't even parse must not take the whole step down.
-      log(`[bidboard-notes] selector rejected by Playwright: ${selector} (${err?.message ?? err})`, "playwright");
-      continue;
-    }
-    if (await locator.isVisible().catch(() => false)) {
-      return { locator, selector };
-    }
-  }
-  return null;
+  return firstVisibleAcross([{ scope, candidates }], timeoutMs);
 }
 
 /**
@@ -224,6 +274,20 @@ async function isForbiddenFillTarget(locator: Locator): Promise<boolean> {
 }
 
 /**
+ * Race `promise` against a real timer. Used only for the NAVIGATION, which is the one step that can
+ * blow the overall budget on its own and cannot be told a timeout.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<{ value: T } | { timedOut: true }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(0, ms));
+  });
+  return Promise.race([promise.then((value) => ({ value })), timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
  * Close a half-typed editor. The page is shared with the document sync that runs next under the same
  * browser lock, so an abandoned 8 KB draft must never be left sitting in it.
  */
@@ -254,6 +318,10 @@ export async function postBidBoardProjectNote(
   const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
   const deadlineAt = Date.now() + (options?.overallTimeoutMs ?? OVERALL_TIMEOUT_MS);
   const outOfTime = () => Date.now() > deadlineAt;
+  const remainingMs = () => Math.max(0, deadlineAt - Date.now());
+  /** Every lookup is clamped to what's left of the overall budget, not just its own step timeout. */
+  const find = (scope: Scope, candidates: string[], stepTimeoutMs: number) =>
+    firstVisible(scope, candidates, Math.min(stepTimeoutMs, remainingMs()));
   let hasTyped = false;
 
   /** Single exit for every failure: cancels a half-typed editor, then reports. Never throws. */
@@ -272,8 +340,18 @@ export async function postBidBoardProjectNote(
   }
 
   try {
-    const navigated = await navigateToProject(page, projectId);
-    if (!navigated) {
+    // Bound the navigation by the SAME overall deadline. navigateToProject can spend 90s waiting for
+    // `load`, then retry for another 60s on `domcontentloaded`, then delay again — so an OPTIONAL note
+    // step could hold the GLOBAL browser lock for 150s+ with the document sync and every other project
+    // create queued behind it. On a timeout we abandon the navigation and touch nothing else; the
+    // orphan promise gets its own catch so an eventual rejection can't surface as an unhandled one.
+    const navPromise = navigateToProject(page, projectId);
+    const navOutcome = await withDeadline(navPromise, remainingMs());
+    if ("timedOut" in navOutcome) {
+      navPromise.catch(() => {});
+      return await fail(`Navigation to Bid Board project ${projectId} exceeded the note step's deadline`);
+    }
+    if (!navOutcome.value) {
       return await fail(`Could not navigate to Bid Board project ${projectId}`);
     }
 
@@ -289,7 +367,7 @@ export async function postBidBoardProjectNote(
 
     // ONLY the precise tier. When the text-shaped guesses are all that match we refuse: `.first()` on
     // `section:has-text("Notes")` returns the outermost ancestor, which can be most of the page.
-    const section = await firstVisible(page, selectors.section.precise, SECTION_TIMEOUT_MS);
+    const section = await find(page, selectors.section.precise, SECTION_TIMEOUT_MS);
     if (!section) {
       return await fail(
         `Notes section not found on project ${projectId} — no structural (aid-*/data-qa) match; the selectors need validating with the prober before this can run`,
@@ -311,7 +389,7 @@ export async function postBidBoardProjectNote(
 
     if (outOfTime()) return await fail(`Timed out before opening the note editor on project ${projectId}`);
 
-    const addButton = await firstVisible(section.locator, actableCandidates(selectors.addButton, true), CONTROL_TIMEOUT_MS);
+    const addButton = await find(section.locator, actableCandidates(selectors.addButton, true), CONTROL_TIMEOUT_MS);
     if (!addButton) {
       return await fail(
         `Add-note control not found on project ${projectId} (selectors may need updating)`,
@@ -330,18 +408,19 @@ export async function postBidBoardProjectNote(
     // an unrelated modal (or a mis-resolved one wrapping the page) would otherwise re-open every
     // scoping hazard the section check just closed.
     const dialogOpen = (await dialog.isVisible().catch(() => false)) && (await isPlausibleNotesSection(dialog));
-    let editorScope: Scope = dialogOpen ? dialog : section.locator;
-    let scopeIsValidatedContainer = true;
-    let input = await firstVisible(editorScope, actableCandidates(selectors.input, true), CONTROL_TIMEOUT_MS);
-    if (!input) {
-      // Widen to the page — but ONLY with the precise tier. This is exactly where a bare `textarea`
-      // candidate would resolve to Procore's Project Description, so the generic tiers are dropped.
-      input = await firstVisible(page, actableCandidates(selectors.input, false), CONTROL_TIMEOUT_MS);
-      if (input) {
-        editorScope = page;
-        scopeIsValidatedContainer = false;
-      }
-    }
+    const containerScope: Scope = dialogOpen ? dialog : section.locator;
+    // Preferred: inside the validated container. Fallback: the whole page, but ONLY with the precise
+    // tier — this is exactly where a bare `textarea` candidate would resolve to Procore's Project
+    // Description, so the generic tiers are dropped when the scope is not a validated container.
+    const input = await firstVisibleAcross(
+      [
+        { scope: containerScope, candidates: actableCandidates(selectors.input, true) },
+        { scope: page, candidates: actableCandidates(selectors.input, false) },
+      ],
+      Math.min(CONTROL_TIMEOUT_MS, remainingMs()),
+    );
+    const scopeIsValidatedContainer = input?.attemptIndex === 0;
+    const editorScope: Scope = scopeIsValidatedContainer ? containerScope : page;
     if (!input) {
       return await fail(
         `Note editor not found on project ${projectId} after clicking add (selectors may need updating)`,
@@ -360,15 +439,18 @@ export async function postBidBoardProjectNote(
 
     if (outOfTime()) return await fail(`Timed out before typing the note on project ${projectId}`);
 
-    const clamped = clampNoteForProcore(note);
-    if (clamped.length !== note.length) {
-      log(`[bidboard-notes] clamped the note from ${note.length} to ${clamped.length} chars before typing`, "playwright");
+    // Marker first, then clamp — so the heading the idempotency guard and the post-save verification
+    // both search for is guaranteed present AND survives truncation (the clamp keeps the head).
+    const marked = ensureNoteMarker(note, projectNumber);
+    const clamped = clampNoteForProcore(marked);
+    if (clamped.length !== marked.length) {
+      log(`[bidboard-notes] clamped the note from ${marked.length} to ${clamped.length} chars before typing`, "playwright");
     }
     hasTyped = true;
     await input.locator.fill(clamped, { timeout: CONTROL_TIMEOUT_MS });
     await randomDelay(300, 700);
 
-    let createButton = await firstVisible(
+    let createButton = await find(
       editorScope,
       actableCandidates(selectors.createButton, scopeIsValidatedContainer),
       CONTROL_TIMEOUT_MS,
