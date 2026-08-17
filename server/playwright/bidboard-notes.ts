@@ -136,14 +136,15 @@ type Scope = Pick<Page, "locator"> & Partial<Pick<Page, "getByRole">>;
 type CandidateTiers = { precise: string[]; scopedOnly?: string[]; loose?: string[] };
 
 /**
- * The candidates the automation may ACT on in this scope.
- * `loose` is never included — it is prober diagnostics only. `scopedOnly` is included only inside an
- * already-validated container (a page-wide search must not use generic selectors).
+ * The candidates the automation may ACT on.
+ *
+ * `loose` is never included — it is prober diagnostics only. `scopedOnly` always is, because every
+ * actable lookup in this module is now confined to a VALIDATED container (the resolved, uncontaminated
+ * Notes section or an open dialog that passed the same check). That invariant replaced the old
+ * page-wide fallback; if a lookup ever gains a page-wide scope again, this function's contract breaks.
  */
-function actableCandidates(tiers: CandidateTiers, scopeIsValidatedContainer: boolean): string[] {
-  return scopeIsValidatedContainer && tiers.scopedOnly
-    ? [...tiers.precise, ...tiers.scopedOnly]
-    : [...tiers.precise];
+function actableCandidates(tiers: CandidateTiers): string[] {
+  return [...tiers.precise, ...(tiers.scopedOnly ?? [])];
 }
 
 async function isVisible(locator: Locator, timeoutMs: number): Promise<boolean> {
@@ -399,7 +400,7 @@ export async function postBidBoardProjectNote(
 
     if (outOfTime()) return await fail(`Timed out before opening the note editor on project ${projectId}`);
 
-    const addButton = await find(section.locator, actableCandidates(selectors.addButton, true), CONTROL_TIMEOUT_MS);
+    const addButton = await find(section.locator, actableCandidates(selectors.addButton), CONTROL_TIMEOUT_MS);
     if (!addButton) {
       return await fail(
         `Add-note control not found on project ${projectId} (selectors may need updating)`,
@@ -418,25 +419,39 @@ export async function postBidBoardProjectNote(
     // an unrelated modal (or a mis-resolved one wrapping the page) would otherwise re-open every
     // scoping hazard the section check just closed.
     const dialogOpen = (await dialog.isVisible().catch(() => false)) && (await isPlausibleNotesSection(dialog));
-    const containerScope: Scope = dialogOpen ? dialog : section.locator;
-    // Preferred: inside the validated container. Fallback: the whole page, but ONLY with the precise
-    // tier — this is exactly where a bare `textarea` candidate would resolve to Procore's Project
-    // Description, so the generic tiers are dropped when the scope is not a validated container.
+    //
+    // The editor is looked for ONLY inside validated containers: the open dialog (when one is present
+    // and passed the contamination check) and the Notes section. There is deliberately NO page-wide
+    // fallback.
+    //
+    // ⚠️ DO NOT ADD ONE. A page-wide scope is the single root cause behind a whole class of hazards:
+    // the anchored `getByRole('button', { name: /^create$/i })` fallback below bypasses the selector
+    // tiers entirely and would click any unrelated "Create" on the page; and
+    // `[role="textbox"][contenteditable="true"]` carries no Notes-specific identity, so a rich-text
+    // Project Description would satisfy it — the very corruption isForbiddenFillTarget already had to
+    // catch once. Every candidate we might add re-opens the same question.
+    //
+    // The rule this module follows everywhere else applies here too: when it cannot POSITIVELY
+    // identify the Notes editor, it declines. That costs nothing real — it already declines on
+    // loose-only sections, contaminated containers, cross-deal mappings and deadline exhaustion — and
+    // a note that doesn't post is a non-event, while filling the wrong field on a live Procore project
+    // is not.
+    const editorScopes: Array<{ label: string; scope: Scope }> = dialogOpen
+      ? [{ label: "dialog", scope: dialog }, { label: "section", scope: section.locator }]
+      : [{ label: "section", scope: section.locator }];
     const input = await firstVisibleAcross(
-      [
-        { scope: containerScope, candidates: actableCandidates(selectors.input, true) },
-        { scope: page, candidates: actableCandidates(selectors.input, false) },
-      ],
+      editorScopes.map(({ scope }) => ({ scope, candidates: actableCandidates(selectors.input) })),
       stepBudget(CONTROL_TIMEOUT_MS),
     );
-    const scopeIsValidatedContainer = input?.attemptIndex === 0;
-    const editorScope: Scope = scopeIsValidatedContainer ? containerScope : page;
     if (!input) {
       return await fail(
-        `Note editor not found on project ${projectId} after clicking add (selectors may need updating)`,
+        `Note editor not found inside the ${editorScopes.map((s) => s.label).join(" or ")} on project ${projectId} after clicking add — declining rather than widening the search to the page (selectors may need updating)`,
         "bidboard-note-input-not-found",
       );
     }
+    // The Create button is searched in the SAME validated container the editor was found in.
+    const editorScope: Scope = editorScopes[input.attemptIndex].scope;
+    matched.editorScope = editorScopes[input.attemptIndex].label;
     if (await isForbiddenFillTarget(input.locator)) {
       // Hard stop. Typing here would erase Procore's Project Description and blur-save the activity
       // log over it, and fail-open would report the create a success.
@@ -460,14 +475,10 @@ export async function postBidBoardProjectNote(
     await input.locator.fill(clamped, { timeout: CONTROL_TIMEOUT_MS });
     await randomDelay(300, 700);
 
-    let createButton = await find(
-      editorScope,
-      actableCandidates(selectors.createButton, scopeIsValidatedContainer),
-      CONTROL_TIMEOUT_MS,
-    );
+    let createButton = await find(editorScope, actableCandidates(selectors.createButton), CONTROL_TIMEOUT_MS);
     if (!createButton && typeof editorScope.getByRole === "function") {
-      // Role/text fallback. Anchored /^create$/i — an exact accessible-name match, so unlike
-      // `button:has-text("Create")` it cannot hit "Create New Project" / "Create New Customer".
+      // Role/text fallback, anchored /^create$/i. This bypasses the selector tiers, so it is only safe
+      // because `editorScope` is always a validated container — never the page.
       const byRole = editorScope.getByRole("button", { name: /^create$/i }).first();
       if (await isVisible(byRole, CONTROL_TIMEOUT_MS)) {
         createButton = { locator: byRole, selector: 'role=button[name=/^create$/i]' };
@@ -491,7 +502,9 @@ export async function postBidBoardProjectNote(
     // The editor-still-open check has to come FIRST: readNoteTexts unions the container's own text,
     // which includes the text still sitting in an open editor — i.e. an uncommitted note would
     // "verify" itself.
-    const verifyDeadline = Date.now() + (options?.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS);
+    // Clamped to the overall deadline, not a fresh window: after a slow navigation this would otherwise
+    // hold the GLOBAL browser lock for another full verify window on top of an already-spent budget.
+    const verifyDeadline = Math.min(Date.now() + (options?.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS), deadlineAt);
     let editorStillOpen = true;
     do {
       editorStillOpen = await input.locator.isVisible().catch(() => false);

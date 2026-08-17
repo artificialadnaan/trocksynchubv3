@@ -2517,33 +2517,6 @@ export async function createBidBoardProjectFromDeal(
       log(`Warning: Could not create sync mapping: ${err.message}`, "playwright");
     }
 
-    // Only now — the project is created AND its sync mapping is durable, so the duplicate-project guard
-    // can see it. See the ordering note on postCrmActivityNoteFailOpen; do not move this earlier.
-    //
-    // The mapping write's failure is SWALLOWED above (logged, not surfaced), so "we got here" is not
-    // the same as "the mapping exists". Posting onto a project with no mapping would publish the note
-    // onto something that carries no idempotency or ownership record — the very invariant this
-    // ordering exists to protect. If the mapping didn't land, decline and say so; the create worker's
-    // CreatedMappingMissingError recovery reconciles the mapping, and a later run can post the note.
-    if (mappingPersisted) {
-      await postCrmActivityNoteFailOpen(result.projectId);
-    } else if (projectData.crmActivityLog?.trim()) {
-      log(
-        `Not posting the CRM activity note on BidBoard project ${result.projectId}: its sync mapping was not persisted`,
-        "playwright",
-      );
-      await recordBidBoardNoteOutcome({
-        projectId: result.projectId,
-        projectName: projectData.name,
-        sourceSystem,
-        sourceDealId: dealId,
-        noteChars: projectData.crmActivityLog.length,
-        posted: false,
-        skipped: true,
-        skipReason: "sync mapping was not persisted for this project",
-      });
-    }
-
     // Sync documents and photos to BidBoard (with retry)
     if (effectiveOptions.syncDocuments !== false) {
       const DOC_SYNC_MAX_ATTEMPTS = 3;
@@ -2612,8 +2585,41 @@ export async function createBidBoardProjectFromDeal(
         }
       }
     }
+
+    // LAST. The order is: create -> sync mapping -> documents -> note, weakest link last.
+    //
+    // Same reasoning that moved this after createSyncMapping. The note is a brittle, browser-driven
+    // step on an optional, purely informational field; anything it sits in front of is something a
+    // crash mid-note can strand. In front of the mapping that meant a real project with no
+    // idempotency record (a duplicate on the next run); in front of the document sync it means a
+    // project whose attachments never uploaded while the mapping already says it was handled, so the
+    // retry can treat it as done. Documents are what the estimator actually needs; the note is not.
+    //
+    // The mapping write's failure is SWALLOWED above (logged, not surfaced), so "we got here" is not
+    // the same as "the mapping exists". Posting onto a project with no mapping would publish the note
+    // onto something that carries no idempotency or ownership record. If the mapping didn't land,
+    // decline and say so; the create worker's CreatedMappingMissingError recovery reconciles the
+    // mapping, and a later run can post the note.
+    if (mappingPersisted) {
+      await postCrmActivityNoteFailOpen(result.projectId);
+    } else if (projectData.crmActivityLog?.trim()) {
+      log(
+        `Not posting the CRM activity note on BidBoard project ${result.projectId}: its sync mapping was not persisted`,
+        "playwright",
+      );
+      await recordBidBoardNoteOutcome({
+        projectId: result.projectId,
+        projectName: projectData.name,
+        sourceSystem,
+        sourceDealId: dealId,
+        noteChars: projectData.crmActivityLog.length,
+        posted: false,
+        skipped: true,
+        skipReason: "sync mapping was not persisted for this project",
+      });
+    }
   }
 
-    return result;
+  return result;
   });
 }

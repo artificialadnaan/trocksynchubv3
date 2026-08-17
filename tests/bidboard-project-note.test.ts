@@ -420,18 +420,43 @@ describe("postBidBoardProjectNote", () => {
     expect(result.matched?.createButton).toMatch(/role=button/);
   });
 
-  it("does not fall back to a loose page-level Create button when the editor is found page-wide", async () => {
-    // The widening branch: the editor renders outside the section, so the scope becomes the PAGE and
-    // the generic `button:has-text("Create")` tier is dropped — it would match "Create New Project".
+  it("DECLINES when the editor renders outside the Notes section — no page-wide widening", async () => {
+    // There is no page-wide fallback by design. A page scope is the root cause behind the whole class:
+    // the anchored getByRole('button', {name:/^create$/i}) fallback bypasses the selector tiers and
+    // would click any unrelated "Create", and `[role="textbox"][contenteditable="true"]` carries no
+    // Notes-specific identity, so a rich-text Project Description would satisfy it. When the module
+    // cannot positively identify the editor inside a validated container, it declines.
     const dom = notesFixture({ editorOutsideSection: true, createButtonPageLevelLooseOnly: true });
     const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
 
-    expect(result.posted).toBe(false);
-    expect(result.error).toMatch(/create button not found/i);
+    expect(result).toMatchObject({ posted: false, skipped: false });
+    expect(result.error).toMatch(/note editor not found inside the section/i);
+    expect(result.error).toMatch(/declining rather than widening the search to the page/i);
+    // Nothing was typed and nothing was clicked outside the section.
+    expect(dom.fills).toEqual([]);
     expect(dom.actions).not.toContain("click:createBtn");
-    // …and the half-typed note is cleaned up rather than left on the shared page.
-    expect(dom.keys).toContain("Escape");
-    expect(node(dom, "editor")).toBeUndefined();
+  });
+
+  it("does not fill a page-level rich-text editor even when it matches a precise candidate", async () => {
+    // `[role="textbox"][contenteditable="true"]` is precise but Notes-agnostic: a rich-text Project
+    // Description matches it. Outside the section it must never be reachable.
+    const dom = notesFixture();
+    node(dom, "addBtn")!.onClick = (d) => {
+      d.nodes.push({
+        id: "richTextDescription",
+        parent: "page",
+        matches: ['[role="textbox"][contenteditable="true"]'],
+        attrs: { "aria-label": "Project Description" },
+        text: "Existing rich-text description",
+      });
+    };
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/note editor not found/i);
+    expect(dom.fills).toEqual([]);
+    expect(node(dom, "richTextDescription")!.text).toBe("Existing rich-text description");
   });
 
   it("cancels the editor when the note cannot be verified after saving", async () => {
@@ -561,6 +586,29 @@ describe("postBidBoardProjectNote", () => {
     expect(result).toMatchObject({ posted: false, skipped: false });
     expect(result.error).toMatch(/not enough .* deadline left to navigate/i);
     expect(navigateToProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("clamps post-save verification to the overall deadline, not a fresh window", async () => {
+    // A fresh verify window would hold the GLOBAL browser lock for another full period on top of an
+    // already-spent budget (e.g. after a slow navigation). Timing assertion with a wide margin: with
+    // the clamp this finishes at the overall deadline (~1.3s); without it, it runs the whole 5s verify
+    // window on top.
+    const dom = notesFixture({ createRenders: false });
+    navigateToProjectMock.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return true;
+    });
+
+    const startedAt = Date.now();
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", {
+      overallTimeoutMs: MIN_NAVIGATION_BUDGET_MS + 300,
+      stepTimeoutMs: 20,
+      verifyTimeoutMs: 5000,
+    });
+    const elapsed = Date.now() - startedAt;
+
+    expect(result.posted).toBe(false);
+    expect(elapsed).toBeLessThan(3000);
   });
 
   it("returns an error result (does NOT throw) when navigation fails", async () => {

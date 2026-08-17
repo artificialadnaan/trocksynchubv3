@@ -11,6 +11,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 //     recorded (automation log + a 'bidboard_note_failed' audit row) rather than swallowed silently.
 const postNoteMock = vi.hoisted(() => vi.fn());
 const callOrder = vi.hoisted(() => [] as string[]);
+const syncDocumentsMock = vi.hoisted(() =>
+  vi.fn(async () => {
+    callOrder.push("syncDocuments");
+    return { success: true, documentsUploaded: 1, documentsDownloaded: 1, errors: [] };
+  }),
+);
 
 vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
 vi.mock("../server/storage.ts", () => ({
@@ -40,8 +46,8 @@ vi.mock("../server/playwright/auth.ts", () => ({
 }));
 vi.mock("../server/playwright/bidboard-notes.ts", () => ({ postBidBoardProjectNote: postNoteMock }));
 vi.mock("../server/playwright/documents.ts", () => ({
-  syncHubSpotAttachmentsToBidBoard: vi.fn().mockResolvedValue({ success: true, documentsUploaded: 0, documentsDownloaded: 0, errors: [] }),
-  syncAttachmentsListToBidBoard: vi.fn().mockResolvedValue({ success: true, documentsUploaded: 0, documentsDownloaded: 0, errors: [] }),
+  syncHubSpotAttachmentsToBidBoard: syncDocumentsMock,
+  syncAttachmentsListToBidBoard: syncDocumentsMock,
 }));
 
 const ACTIVITY_LOG = "CRM Activity Log — DFW-4-16226-ae (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Owner confirmed scope.";
@@ -77,7 +83,8 @@ function crmArgs(overrides: Record<string, any> = {}) {
       ...overrides,
     },
     options: {
-      syncDocuments: false,
+      // Document sync is ON so the recorded call order covers it: the note must come after it.
+      syncDocuments: true,
       createProject: vi.fn(async () => ({ success: true, projectId: "562949955849472", projectName: "jasonn ranches" } as any)),
     },
   };
@@ -88,6 +95,10 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     vi.clearAllMocks();
     callOrder.length = 0;
     setNoteOutcome({ posted: true });
+    syncDocumentsMock.mockImplementation(async () => {
+      callOrder.push("syncDocuments");
+      return { success: true, documentsUploaded: 1, documentsDownloaded: 1, errors: [] };
+    });
     const { storage } = await import("../server/storage.ts");
     vi.mocked(storage.createSyncMapping).mockImplementation(async () => {
       callOrder.push("createSyncMapping");
@@ -108,7 +119,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
+    expect(callOrder).toEqual(["createSyncMapping", "syncDocuments", "postNote:start", "postNote:done"]);
     expect(vi.mocked(storage.createSyncMapping)).toHaveBeenCalledWith(
       expect.objectContaining({ sourceDealId: "a1c59631", bidboardProjectId: "562949955849472" }),
     );
@@ -121,7 +132,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
+    expect(callOrder).toEqual(["createSyncMapping", "syncDocuments", "postNote:start", "postNote:done"]);
   });
 
   it("posts the note with the created project id, the log text and the project number", async () => {
@@ -206,13 +217,18 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const { storage } = await import("../server/storage.ts");
     const bidboard = await import("../server/playwright/bidboard.ts");
     setNoteOutcome(new Error("note step exploded"));
-    vi.mocked(storage.createBidboardAutomationLog).mockRejectedValue(new Error("db down") as any);
+    // Fail ONLY the note's own logging. A blanket rejection would also break the document sync's
+    // automation-log write, which is a different (pre-existing) code path and not what this pins.
+    vi.mocked(storage.createBidboardAutomationLog).mockImplementation(async (row: any) => {
+      if (row?.action === "post_crm_activity_note") throw new Error("db down");
+      return {} as any;
+    });
     vi.mocked(storage.createAuditLog).mockRejectedValue(new Error("db down") as any);
 
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
+    expect(callOrder).toEqual(["createSyncMapping", "syncDocuments", "postNote:start", "postNote:done"]);
   });
 
   it("a skipped note (marker already present) is recorded, not treated as a failure", async () => {
@@ -245,7 +261,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const result = await bidboard.createBidBoardProjectFromDeal(args);
 
     expect(result.adopted).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
+    expect(callOrder).toEqual(["createSyncMapping", "syncDocuments", "postNote:start", "postNote:done"]);
     expect(postNoteMock).toHaveBeenCalledWith({ stub: true }, "111222333", ACTIVITY_LOG, "DFW-4-16226-ae");
   });
 
