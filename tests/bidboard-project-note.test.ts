@@ -71,6 +71,8 @@ type FakeDom = {
   fail?: {
     count?: (selector: string) => boolean;
     innerText?: (nodeId: string) => boolean;
+    isVisible?: (nodeId: string) => boolean;
+    keyboard?: boolean;
   };
 };
 
@@ -118,7 +120,11 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): an
       if (dom.fail?.count?.(selector)) throw new Error("execution context was destroyed");
       return resolve().length;
     },
-    isVisible: async () => resolve().some((n) => !n.hidden),
+    isVisible: async () => {
+      const nodes = resolve();
+      if (nodes.some((n) => dom.fail?.isVisible?.(n.id))) throw new Error("element is detached");
+      return nodes.some((n) => !n.hidden);
+    },
     waitFor: async () => {
       if (!resolve().some((n) => !n.hidden)) throw new Error("Timeout waiting for selector");
     },
@@ -179,6 +185,7 @@ function makePage(dom: FakeDom) {
     getByRole: (role: string, opts?: { name?: RegExp | string }) => makeLocator(dom, () => matchRole(dom, role, opts, null)),
     keyboard: {
       press: async (key: string) => {
+        if (dom.fail?.keyboard) throw new Error("keyboard is unavailable");
         dom.keys.push(key);
         // Escape closes Procore's editor; model it so "leave the page clean" is observable.
         if (key === "Escape") removeNode(dom, "editor");
@@ -998,5 +1005,62 @@ describe("fail-closed safety checks", () => {
   it("still allows a normal element whose attributes are simply absent", async () => {
     const plain: any = { getAttribute: async () => null };
     expect(await isForbiddenFillTarget(plain)).toBe(false);
+  });
+});
+
+// The production path's own fail-open sweep. Every case here injects a QUERY FAILURE and asserts the
+// pessimistic outcome — these bugs are invisible when everything succeeds, which is exactly why
+// inspection kept missing them.
+describe("postBidBoardProjectNote — failures never resolve to the favourable branch", () => {
+  beforeEach(() => {
+    navigateToProjectMock.mockReset();
+    navigateToProjectMock.mockResolvedValue(true);
+  });
+
+  it("REFUSES to post when the existing notes cannot be read", async () => {
+    // An unreadable notes list is not an empty one. Reading [] as "no marker present" means "safe to
+    // post", and being wrong costs another 8 KB duplicate — on every retry and every adopt.
+    const dom = notesFixture();
+    dom.fail = { innerText: (id) => id === "notesSection" };
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result).toMatchObject({ posted: false, skipped: false });
+    expect(result.error).toMatch(/could not read the existing notes/i);
+    expect(dom.fills).toEqual([]);
+    expect(dom.actions).toEqual([]);
+  });
+
+  it("does NOT self-verify off an unsaved draft when editor visibility is unknown", async () => {
+    // The marker check reads the container's text, which includes an OPEN editor's content. If a
+    // visibility error counted as "editor closed", the note would verify itself as saved when it was
+    // not. Unknown must count as still open.
+    const dom = notesFixture({ createRenders: false, createClosesEditor: false });
+    // Fails only AFTER the note is typed, so the editor lookup itself still succeeds — the unknown has
+    // to land on the post-Create visibility probe, which is where the self-verification hole was.
+    dom.fail = { isVisible: (id) => id === "editor" && dom.fills.length > 0 };
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/editor is still open/i);
+  });
+
+  it("warns when a composed note could not be cancelled off the shared page", async () => {
+    // Escape failing means an ~8 KB draft may still be sitting in the editor that document sync uses
+    // next, under the same browser lock. A clean-looking failure would hide that.
+    const dom = notesFixture({ createRenders: false });
+    dom.fail = { keyboard: true };
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/could not be cancelled and may still be open/i);
+  });
+
+  it("still posts normally when nothing fails (the guards do not fire spuriously)", async () => {
+    const dom = notesFixture();
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+    expect(result).toMatchObject({ posted: true, skipped: false });
   });
 });

@@ -18,7 +18,7 @@
  * HTTP, auth, the browser lock, navigation and the audit row.
  *
  * Every decision here is delegated to the shared resolvers in bidboard-notes.ts — resolveNotesSection,
- * resolveEditorScopes, findVisibleMatch, findVisibleRoleMatch, actableCandidates, readNoteTexts,
+ * resolveEditorScopes, findVisibleMatch, findVisibleRoleMatch, actableCandidates, readNoteTextsDetailed,
  * hasMarkerNote, isForbiddenFillTarget, cancelEditor. Nothing about "what the automation would do" is
  * re-derived locally; if it were, this report could confidently describe behaviour production does not
  * have. The ONE deliberate difference is deadlines: production runs inside the global browser lock and
@@ -233,7 +233,7 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
       problems.push(`Notes-section HTML capture failed: ${err?.message ?? err}`);
     }
   }
-  // readNoteTexts, not allTextContents: the idempotency guard reads the union of the item selectors
+  // readNoteTextsDetailed, not allTextContents: the idempotency guard reads the union of the item selectors
   // AND the container's own text, so anything else would report texts the guard never sees.
   const noteRead = sectionLocator ? await readNoteTextsDetailed(sectionLocator) : { texts: [], failed: false };
   const noteTexts = noteRead.texts;

@@ -229,6 +229,9 @@ export async function findVisibleRoleMatch(
   } catch {
     return null;
   }
+  // These two defaults resolve to "no usable match", which makes every caller DECLINE — the pessimistic
+  // direction, and the only one that is safe here. (Contrast the prober, which must report the same
+  // failure as UNKNOWN rather than as an absence, because a human acts on its output.)
   const count = await all.count().catch(() => 0);
   for (let index = 0; index < Math.min(count, MAX_NODES_PER_SELECTOR); index++) {
     const node = all.nth(index);
@@ -314,9 +317,10 @@ export async function readNoteTextsDetailed(section: Locator): Promise<{ texts: 
   return { texts, failed };
 }
 
-export async function readNoteTexts(section: Locator): Promise<string[]> {
-  return (await readNoteTextsDetailed(section)).texts;
-}
+// NOTE: there is deliberately NO `readNoteTexts(): string[]` convenience wrapper. One existed, it
+// dropped the `failed` flag, and a caller then read an empty array as "no CRM note here, safe to post"
+// — producing a duplicate 8 KB note on a transient SPA rerender. Every caller must handle `failed`.
+
 
 /**
  * Reject a "Notes section" that is really a page-sized wrapper. If the container also holds the
@@ -399,6 +403,8 @@ export async function resolveEditorScopes(
   section: Locator,
 ): Promise<Array<{ label: string; scope: Scope }>> {
   const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
+  // An unreadable dialog is treated as unusable, so the search falls back to the validated section —
+  // the narrower, pessimistic scope.
   const dialogUsable = (await dialog.isVisible().catch(() => false)) && (await isPlausibleNotesSection(dialog));
   return dialogUsable
     ? [{ label: "dialog", scope: dialog }, { label: "section", scope: section }]
@@ -434,12 +440,17 @@ export const MIN_NAVIGATION_BUDGET_MS = 1000;
  * Close a half-typed editor. The page is shared with the document sync that runs next under the same
  * browser lock, so an abandoned 8 KB draft must never be left sitting in it.
  */
-export async function cancelEditor(page: Page): Promise<void> {
+export async function cancelEditor(page: Page): Promise<boolean> {
   try {
     await page.keyboard.press("Escape");
     await randomDelay(300, 600);
-  } catch {
-    /* best effort — the caller is already on a failure path */
+    return true;
+  } catch (err: any) {
+    // Returns FALSE rather than swallowing: if the cancel did not go through, an ~8 KB draft may still
+    // be sitting in the editor on the SHARED page that document sync runs on next, under the same
+    // browser lock. The caller says so in its error rather than reporting a clean failure.
+    log(`[bidboard-notes] could not cancel the note editor: ${err?.message ?? err}`, "playwright");
+    return false;
   }
 }
 
@@ -487,7 +498,12 @@ export async function postBidBoardProjectNote(
       const path = await takeScreenshot(page, screenshotName).catch(() => "");
       if (path) message = `${message}; screenshot: ${path}`;
     }
-    if (hasTyped) await cancelEditor(page);
+    if (hasTyped) {
+      const cancelled = await cancelEditor(page);
+      if (!cancelled) {
+        message = `${message}; WARNING: the composed note could not be cancelled and may still be open in the editor`;
+      }
+    }
     return { posted: false, skipped: false, error: message, matched };
   };
 
@@ -517,6 +533,9 @@ export async function postBidBoardProjectNote(
     // navigateToProject lands on …/tools/bid-board/project/{id}/details, which is where the Overview
     // content lives; click the Overview tab only if it is actually there (a no-op on /details).
     const overviewTab = page.locator(PROCORE_SELECTORS.bidboard.projectOverviewTab).first();
+    // Both defaults here mean "we may not be on the Overview tab", which makes the section lookup below
+    // fail and the whole step decline. Safe direction, but see the prober, which reports the click
+    // failure explicitly because an operator would otherwise read the resulting absences as facts.
     if (await overviewTab.isVisible().catch(() => false)) {
       await overviewTab.click({ timeout: actBudget() }).catch(() => {});
       await randomDelay(1000, 2000);
@@ -538,7 +557,17 @@ export async function postBidBoardProjectNote(
     }
     matched.section = section.selector;
 
-    if (hasMarkerNote(await readNoteTexts(section.locator))) {
+    // FAIL CLOSED. An unreadable notes list is NOT an empty one: reading [] as "no marker present"
+    // means "safe to post", and the cost of being wrong is another ~8 KB duplicate on the project,
+    // repeated on every retry and on every adopt.
+    const existingNotes = await readNoteTextsDetailed(section.locator);
+    if (existingNotes.failed) {
+      return await fail(
+        `Could not read the existing notes on project ${projectId} — refusing to post in case a CRM activity note is already there`,
+        "bidboard-note-read-failed",
+      );
+    }
+    if (hasMarkerNote(existingNotes.texts)) {
       log(`[bidboard-notes] project ${projectId} already has a CRM activity note — skipping`, "playwright");
       return { posted: false, skipped: true, matched };
     }
@@ -647,8 +676,16 @@ export async function postBidBoardProjectNote(
     const verifyDeadline = Math.min(Date.now() + (options?.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS), deadlineAt);
     let editorStillOpen = true;
     do {
-      editorStillOpen = await input.locator.isVisible().catch(() => false);
-      if (!editorStillOpen && hasMarkerNote(await readNoteTexts(section.locator))) {
+      // `catch(() => false)` here would mean "the visibility probe threw, therefore the editor closed",
+      // and the marker check below reads the container's text — which INCLUDES an open editor's
+      // content. An unknown would therefore let our own unsaved draft verify itself as saved. Unknown
+      // counts as STILL OPEN.
+      const editorVisible = await input.locator.isVisible().catch(() => null);
+      editorStillOpen = editorVisible !== false;
+      const rendered = editorStillOpen ? null : await readNoteTextsDetailed(section.locator);
+      // A failed verify read is not "not there yet" and not "there" — keep polling, and if the window
+      // expires the step reports unverified, which is the pessimistic answer.
+      if (rendered && !rendered.failed && hasMarkerNote(rendered.texts)) {
         log(`[bidboard-notes] posted the CRM activity note on project ${projectId} (${clamped.length} chars)`, "playwright");
         return { posted: true, skipped: false, matched };
       }
