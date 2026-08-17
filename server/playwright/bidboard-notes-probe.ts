@@ -149,6 +149,7 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   const probe = async (
     tiers: { precise: string[]; scopedOnly?: string[]; loose?: string[] } | string[],
     scope: { locator: (s: string) => any } = page,
+    scopeLabel = "",
   ): Promise<NotesProbeRow[]> => {
     const groups: Array<[string, string[]]> = Array.isArray(tiers)
       ? [["flat", tiers]]
@@ -159,20 +160,24 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     const rows: NotesProbeRow[] = [];
     for (const [tier, candidateList] of groups) {
       for (const selector of candidateList) {
-        // A failed count is UNKNOWN, not zero — reporting zero would read as "this hook isn't on the
-        // page", which is a different diagnosis and would send the operator hunting for a replacement.
-        const rawCount = await scope.locator(selector).count().catch(() => null);
-        // The SAME visible-match walk the automation uses. Probing `.first()` here would report
-        // visible:false for a selector whose first match is a hidden responsive/template duplicate —
-        // a selector the automation happily uses.
-        const hit = rawCount !== null && rawCount > 0 ? await findVisibleMatch(scope as any, selector) : null;
+        // The SAME walk the automation uses, and it now returns the count and the probe-failure flag
+        // too — so this no longer runs its own count() alongside it, and no longer loses the
+        // distinction the walk made internally.
+        const match = await findVisibleMatch(scope as any, selector);
+        // `probeFailed` with no hit means UNKNOWN, not "absent". Reporting false there would read as
+        // "this hook isn't on the page" and send the operator hunting for a replacement, when the
+        // truth is "re-run, an SPA rerender interrupted us".
+        const unknown = match.hit === null && match.probeFailed;
+        if (unknown) {
+          problems.push(`Could not determine visibility for ${selector}${scopeLabel ? ` in the ${scopeLabel}` : ""}`);
+        }
         rows.push({
           selector,
           tier,
           actable: actableSet.has(selector),
-          count: rawCount,
-          visible: rawCount === null ? null : hit !== null,
-          visibleIndex: hit?.index ?? null,
+          count: match.count,
+          visible: unknown ? null : match.hit !== null,
+          visibleIndex: match.hit?.index ?? null,
         });
       }
     }
@@ -185,21 +190,17 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     // POSITION of the first visible one, and which reported 0 when every match was hidden. "Zero
     // matches" and "three matches, all hidden" are opposite diagnoses: the first says the role
     // fallback is wrong, the second says it is right but the page renders hidden duplicates.
-    let count: number | null = null;
-    if (typeof scope.getByRole === "function") {
-      count = await scope
-        .getByRole(CREATE_BUTTON_ROLE.role, { name: CREATE_BUTTON_ROLE.name })
-        .count()
-        .catch(() => null);
-    }
-    const hit = await findVisibleRoleMatch(scope as any, CREATE_BUTTON_ROLE);
+    const match = await findVisibleRoleMatch(scope as any, CREATE_BUTTON_ROLE);
+    const unknown = match.hit === null && match.probeFailed;
+    if (unknown) problems.push(`Could not determine visibility for the Create role fallback`);
     return {
       selector: ROLE_MATCH_LABEL,
       tier: "roleFallback",
       actable: true,
-      count,
-      visible: count === null ? null : hit !== null,
-      visibleIndex: hit?.index ?? null,
+      // The NUMBER OF MATCHES from the shared walk — not the position of the first visible one.
+      count: match.count,
+      visible: unknown ? null : match.hit !== null,
+      visibleIndex: match.hit?.index ?? null,
     };
   };
 
@@ -283,7 +284,7 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   let addClickFailed = false;
   if (openEditor && sectionLocator && matchedAddButton) {
     // Click the node the WALK found, not `.first()`.
-    const addTarget = await findVisibleMatch(sectionLocator as any, matchedAddButton);
+    const addTarget = (await findVisibleMatch(sectionLocator as any, matchedAddButton)).hit;
     if (!addTarget) {
       addClickFailed = true;
       problems.push("The add control vanished between probing and clicking; the editor was not opened");
@@ -313,8 +314,8 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     candidates.inputAfterAdd = [];
     candidates.createButtonAfterAdd = [];
     for (const { label, scope } of editorScopes) {
-      const inputRows = (await probe(NOTES.input, scope as any)).map((row) => ({ ...row, scope: label }));
-      const createRows = [...(await probe(NOTES.createButton, scope as any)), await probeCreateRole(scope as any)].map((row) => ({
+      const inputRows = (await probe(NOTES.input, scope as any, label)).map((row) => ({ ...row, scope: label }));
+      const createRows = [...(await probe(NOTES.createButton, scope as any, label)), await probeCreateRole(scope as any)].map((row) => ({
         ...row,
         scope: label,
       }));
@@ -326,16 +327,23 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     // Would the fill be refused by the description guard? Report it, rather than leaving the operator
     // to discover it only when a real post declines.
     const resolvedInput = candidates.inputAfterAdd.find((row) => row.visible === true && row.actable);
+    let resolvedInputLocator: any = null;
     if (resolvedInput) {
       const scopeForInput = editorScopes.find((scope) => scope.label === resolvedInput.scope);
-      const inputHit = scopeForInput ? await findVisibleMatch(scopeForInput.scope as any, resolvedInput.selector) : null;
+      const inputHit = scopeForInput ? (await findVisibleMatch(scopeForInput.scope as any, resolvedInput.selector)).hit : null;
+      resolvedInputLocator = inputHit?.locator ?? null;
       inputWouldBeRefused = inputHit ? await isForbiddenFillTarget(inputHit.locator) : null;
     }
 
     editorScreenshotPath = await takeScreenshot(page as any, `${prefix}-editor`).catch(() => null);
     // Leave the page clean for whatever runs next under the browser lock — the same helper production
-    // uses on every post-fill exit.
-    await cancelEditor(page as any);
+    // uses on every post-fill exit, and with the editor locator so the close is VERIFIED rather than
+    // assumed from the keypress (Procore's mention picker eats the first Escape).
+    const cancel = await cancelEditor(page as any, resolvedInputLocator ?? undefined);
+    if (cancel.closed !== true) {
+      const state = cancel.closed === false ? "is still open" : "could not be confirmed closed";
+      problems.push(`The note editor ${state} after ${cancel.attempts} cancel attempt(s) — the shared page may not be clean`);
+    }
   }
 
   return {

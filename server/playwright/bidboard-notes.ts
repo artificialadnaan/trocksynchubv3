@@ -165,24 +165,42 @@ const MAX_NODES_PER_SELECTOR = 10;
  * that report is what a human reads to decide which hooks are real. The index is returned because
  * "matched at index 3" is itself the diagnostic — it means the first three matches are hidden.
  */
-export async function findVisibleMatch(
-  scope: Scope,
-  selector: string,
-): Promise<{ locator: Locator; index: number } | null> {
+export type VisibleMatch = {
+  /** The first visible node, or null when none is visible OR it could not be determined. */
+  hit: { locator: Locator; index: number } | null;
+  /** Number of matching nodes, or null when the count query itself failed (NOT the same as zero). */
+  count: number | null;
+  /**
+   * True when a query threw. `hit: null` then means UNKNOWN, not "no such element".
+   *
+   * Returned rather than swallowed, and deliberately NOT hidden behind a convenience wrapper that
+   * discards it — that exact shape (a wrapper dropping a failure flag) caused the duplicate-note bug.
+   * Production declines on `hit: null` either way, which is its safe direction; the PROBER must tell
+   * the two apart, because "discard this selector" and "re-run, we could not tell" lead an operator to
+   * opposite conclusions.
+   */
+  probeFailed: boolean;
+};
+
+export async function findVisibleMatch(scope: Scope, selector: string): Promise<VisibleMatch> {
   let all: Locator;
   try {
     all = scope.locator(selector);
   } catch (err: any) {
     // A selector Playwright can't even parse must not take the whole step down.
     log(`[bidboard-notes] selector rejected by Playwright: ${selector} (${err?.message ?? err})`, "playwright");
-    return null;
+    return { hit: null, count: null, probeFailed: true };
   }
-  const count = await all.count().catch(() => 0);
+  const count = await all.count().catch(() => null);
+  if (count === null) return { hit: null, count: null, probeFailed: true };
+  let probeFailed = false;
   for (let index = 0; index < Math.min(count, MAX_NODES_PER_SELECTOR); index++) {
     const node = all.nth(index);
-    if (await node.isVisible().catch(() => false)) return { locator: node, index };
+    const visible = await node.isVisible().catch(() => null);
+    if (visible === null) probeFailed = true;
+    else if (visible) return { hit: { locator: node, index }, count, probeFailed };
   }
-  return null;
+  return { hit: null, count, probeFailed };
 }
 
 /**
@@ -221,23 +239,24 @@ export type ResolveAttempt = {
 export async function findVisibleRoleMatch(
   scope: Scope,
   role: { role: "button"; name: RegExp },
-): Promise<{ locator: Locator; index: number } | null> {
-  if (typeof scope.getByRole !== "function") return null;
+): Promise<VisibleMatch> {
+  if (typeof scope.getByRole !== "function") return { hit: null, count: null, probeFailed: true };
   let all: Locator;
   try {
     all = scope.getByRole(role.role, { name: role.name });
   } catch {
-    return null;
+    return { hit: null, count: null, probeFailed: true };
   }
-  // These two defaults resolve to "no usable match", which makes every caller DECLINE — the pessimistic
-  // direction, and the only one that is safe here. (Contrast the prober, which must report the same
-  // failure as UNKNOWN rather than as an absence, because a human acts on its output.)
-  const count = await all.count().catch(() => 0);
+  const count = await all.count().catch(() => null);
+  if (count === null) return { hit: null, count: null, probeFailed: true };
+  let probeFailed = false;
   for (let index = 0; index < Math.min(count, MAX_NODES_PER_SELECTOR); index++) {
     const node = all.nth(index);
-    if (await node.isVisible().catch(() => false)) return { locator: node, index };
+    const visible = await node.isVisible().catch(() => null);
+    if (visible === null) probeFailed = true;
+    else if (visible) return { hit: { locator: node, index }, count, probeFailed };
   }
-  return null;
+  return { hit: null, count, probeFailed };
 }
 
 /**
@@ -261,12 +280,14 @@ export async function firstVisibleAcross(
     // preferred scope before even looking at the fallback would burn the budget waiting for something
     // that is never going to appear there (and, with the overall deadline, starve the later steps).
     for (const [attemptIndex, attempt] of attempts.entries()) {
+      // Production declines on `hit: null` whether that means "absent" or "could not tell" — both are
+      // reasons not to act. The distinction is preserved on the result for the prober's benefit.
       for (const selector of attempt.candidates ?? []) {
-        const hit = await findVisibleMatch(attempt.scope, selector);
+        const { hit } = await findVisibleMatch(attempt.scope, selector);
         if (hit) return { locator: hit.locator, selector, attemptIndex };
       }
       if (attempt.role) {
-        const hit = await findVisibleRoleMatch(attempt.scope, attempt.role);
+        const { hit } = await findVisibleRoleMatch(attempt.scope, attempt.role);
         if (hit) return { locator: hit.locator, selector: ROLE_MATCH_LABEL, attemptIndex };
       }
     }
@@ -440,18 +461,70 @@ export const MIN_NAVIGATION_BUDGET_MS = 1000;
  * Close a half-typed editor. The page is shared with the document sync that runs next under the same
  * browser lock, so an abandoned 8 KB draft must never be left sitting in it.
  */
-export async function cancelEditor(page: Page): Promise<boolean> {
-  try {
-    await page.keyboard.press("Escape");
-    await randomDelay(300, 600);
-    return true;
-  } catch (err: any) {
-    // Returns FALSE rather than swallowing: if the cancel did not go through, an ~8 KB draft may still
-    // be sitting in the editor on the SHARED page that document sync runs on next, under the same
-    // browser lock. The caller says so in its error rather than reporting a clean failure.
-    log(`[bidboard-notes] could not cancel the note editor: ${err?.message ?? err}`, "playwright");
-    return false;
+export type CancelEditorResult = {
+  /** true = verified gone, false = still there, null = could not be verified. */
+  closed: boolean | null;
+  attempts: number;
+  /** True when the draft text was wiped as a last resort. */
+  cleared: boolean;
+  detail?: string;
+};
+
+/** How many times to press Escape before giving up. */
+const CANCEL_MAX_ATTEMPTS = 3;
+
+/**
+ * Close a half-typed editor and CONFIRM it closed.
+ *
+ * Delivering the keypress is not the same as changing the state. The concrete case: this module's own
+ * docs note that Procore treats "@" as a mention trigger, and activity bodies are rep-authored free
+ * text, so a note containing "@" can leave the mention picker open — the first Escape then dismisses
+ * the PICKER, not the editor. Reporting success off the keypress would skip the warning and let
+ * document sync proceed on a page with an ~8 KB draft still open.
+ *
+ * Pass the editor locator to get verification; without one the result is `closed: null` (unknown),
+ * never an optimistic true.
+ */
+export async function cancelEditor(page: Page, editor?: Locator): Promise<CancelEditorResult> {
+  let attempts = 0;
+  let lastError: string | undefined;
+
+  for (let attempt = 1; attempt <= CANCEL_MAX_ATTEMPTS; attempt++) {
+    attempts = attempt;
+    try {
+      await page.keyboard.press("Escape");
+      await randomDelay(300, 600);
+    } catch (err: any) {
+      lastError = err?.message ?? String(err);
+      log(`[bidboard-notes] could not press Escape to cancel the note editor: ${lastError}`, "playwright");
+      break;
+    }
+    if (!editor) continue;
+    const stillVisible = await editor.isVisible().catch(() => null);
+    // Unknown visibility is NOT "closed" — same rule as the post-Create check.
+    if (stillVisible === false) return { closed: true, attempts, cleared: false };
+    if (stillVisible === null) {
+      return { closed: null, attempts, cleared: false, detail: "editor visibility could not be read after Escape" };
+    }
   }
+
+  if (!editor) {
+    return { closed: null, attempts, cleared: false, detail: lastError ?? "no editor locator to verify against" };
+  }
+
+  // Last resort: empty the field. If the editor cannot be closed, a blank draft is materially safer
+  // than an ~8 KB one — Procore blur-saves this field, which is why the description-verify path
+  // presses Tab to commit. This targets the same locator already vetted by isForbiddenFillTarget.
+  const cleared = await editor
+    .fill("")
+    .then(() => true)
+    .catch(() => false);
+  return {
+    closed: false,
+    attempts,
+    cleared,
+    detail: lastError ?? `editor still open after ${attempts} Escape attempt(s)`,
+  };
 }
 
 /**
@@ -474,6 +547,8 @@ export async function postBidBoardProjectNote(
 ): Promise<PostBidBoardNoteResult> {
   const matched: Record<string, string> = {};
   const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
+  /** The editor we typed into, so a cancel can be VERIFIED against it rather than assumed. */
+  let typedEditor: Locator | undefined;
   const deadlineAt = Date.now() + (options?.overallTimeoutMs ?? OVERALL_TIMEOUT_MS);
   const outOfTime = () => Date.now() > deadlineAt;
   const remainingMs = () => Math.max(0, deadlineAt - Date.now());
@@ -499,9 +574,13 @@ export async function postBidBoardProjectNote(
       if (path) message = `${message}; screenshot: ${path}`;
     }
     if (hasTyped) {
-      const cancelled = await cancelEditor(page);
-      if (!cancelled) {
-        message = `${message}; WARNING: the composed note could not be cancelled and may still be open in the editor`;
+      const cancel = await cancelEditor(page, typedEditor);
+      if (cancel.closed !== true) {
+        // Anything other than a VERIFIED close is reported. The page is shared: document sync runs on
+        // it next under the same browser lock.
+        const state = cancel.closed === false ? "is still open" : "could not be confirmed closed";
+        const cleared = cancel.cleared ? " (its text was cleared as a fallback)" : "";
+        message = `${message}; WARNING: the note editor ${state} after ${cancel.attempts} cancel attempt(s)${cleared}`;
       }
     }
     return { posted: false, skipped: false, error: message, matched };
@@ -639,6 +718,7 @@ export async function postBidBoardProjectNote(
       log(`[bidboard-notes] clamped the note from ${marked.length} to ${clamped.length} chars before typing`, "playwright");
     }
     hasTyped = true;
+    typedEditor = input.locator;
     await input.locator.fill(clamped, { timeout: actBudget() });
     await randomDelay(300, 700);
 

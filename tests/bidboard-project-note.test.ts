@@ -24,6 +24,7 @@ const {
   findVisibleRoleMatch,
   actableCandidates,
   isForbiddenFillTarget,
+  cancelEditor,
   CREATE_BUTTON_ROLE,
 } = await import("../server/playwright/bidboard-notes.ts");
 const { probeBidBoardNotesUi } = await import("../server/playwright/bidboard-notes-probe.ts");
@@ -74,6 +75,11 @@ type FakeDom = {
     isVisible?: (nodeId: string) => boolean;
     keyboard?: boolean;
   };
+  /**
+   * How many Escapes it takes to actually close the editor. Procore's mention picker (opened by "@" in
+   * the note body) eats the first one, so a delivered keypress is not a closed editor.
+   */
+  escapesToClose?: number;
 };
 
 const node = (dom: FakeDom, id: string) => dom.nodes.find((n) => n.id === id);
@@ -187,8 +193,12 @@ function makePage(dom: FakeDom) {
       press: async (key: string) => {
         if (dom.fail?.keyboard) throw new Error("keyboard is unavailable");
         dom.keys.push(key);
-        // Escape closes Procore's editor; model it so "leave the page clean" is observable.
-        if (key === "Escape") removeNode(dom, "editor");
+        // Escape closes Procore's editor — but only after any mention picker has swallowed its share.
+        if (key === "Escape") {
+          const remaining = dom.escapesToClose ?? 1;
+          dom.escapesToClose = remaining - 1;
+          if (remaining - 1 <= 0) removeNode(dom, "editor");
+        }
       },
     },
   } as any;
@@ -763,13 +773,17 @@ describe("shared resolvers (production and prober call these same functions)", (
       const dom = notesFixture();
       dom.nodes.push({ id: "hiddenCreate", parent: "notesSection", matches: [], role: "button", name: "Create", hidden: true });
       dom.nodes.push({ id: "realCreate", parent: "notesSection", matches: [], role: "button", name: "Create" });
-      const hit = await findVisibleRoleMatch(makePage(dom), CREATE_BUTTON_ROLE);
-      expect(hit?.index).toBe(1);
+      const match = await findVisibleRoleMatch(makePage(dom), CREATE_BUTTON_ROLE);
+      expect(match.hit?.index).toBe(1);
+      expect(match.count).toBe(2);
+      expect(match.probeFailed).toBe(false);
     });
 
     it("returns null when the scope cannot do role queries", async () => {
-      const hit = await findVisibleRoleMatch({ locator: () => ({}) } as any, CREATE_BUTTON_ROLE);
-      expect(hit).toBeNull();
+      const match = await findVisibleRoleMatch({ locator: () => ({}) } as any, CREATE_BUTTON_ROLE);
+      // Not a determination that there is no Create button — we could not ask.
+      expect(match.hit).toBeNull();
+      expect(match.probeFailed).toBe(true);
     });
   });
 
@@ -1055,12 +1069,97 @@ describe("postBidBoardProjectNote — failures never resolve to the favourable b
     const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
 
     expect(result.posted).toBe(false);
-    expect(result.error).toMatch(/could not be cancelled and may still be open/i);
+    expect(result.error).toMatch(/note editor (is still open|could not be confirmed closed)/i);
   });
 
   it("still posts normally when nothing fails (the guards do not fire spuriously)", async () => {
     const dom = notesFixture();
     const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
     expect(result).toMatchObject({ posted: true, skipped: false });
+  });
+});
+
+// "The action was attempted" is not "the state changed". Both cases here deliver a keypress or a query
+// successfully and still must not report the favourable outcome.
+describe("attempted vs accomplished", () => {
+  beforeEach(() => {
+    navigateToProjectMock.mockReset();
+    navigateToProjectMock.mockResolvedValue(true);
+  });
+
+  it("does not report a cancel as successful when the editor is still open (the @-mention case)", async () => {
+    // This module documents that "@" opens Procore's mention picker, and activity bodies are
+    // rep-authored free text. Escape then closes the PICKER, not the editor — the keypress lands, the
+    // editor stays, and an ~8 KB draft would be left on the page document sync runs on next.
+    const dom = notesFixture({ createRenders: false, createClosesEditor: false });
+    dom.escapesToClose = 99; // the picker keeps swallowing them
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", `${NOTE}\n@colby can you confirm?`, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/WARNING: the note editor is still open after \d+ cancel attempt/i);
+    // It retried rather than giving up on the first Escape…
+    expect(dom.keys.filter((key) => key === "Escape").length).toBeGreaterThan(1);
+    // …and, unable to close it, emptied the draft so a blur-save cannot commit 8 KB.
+    expect(result.error).toMatch(/text was cleared as a fallback/i);
+    expect(node(dom, "editor")!.text).toBe("");
+  });
+
+  it("retries past a picker that swallows the FIRST Escape and then verifies the close", async () => {
+    const dom = notesFixture({ createRenders: false, createClosesEditor: false });
+    dom.escapesToClose = 2; // the mention picker eats one, the editor takes the next
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).not.toMatch(/WARNING:/);
+    expect(dom.keys.filter((key) => key === "Escape").length).toBe(2);
+    expect(node(dom, "editor")).toBeUndefined();
+  });
+
+  it("reports a VERIFIED cancel without a warning when the editor really closes", async () => {
+    const dom = notesFixture({ createRenders: false, createClosesEditor: true });
+    // The editor closes on Escape, as it would without a mention picker in the way.
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).not.toMatch(/WARNING:/);
+  });
+
+  it("cancelEditor reports UNKNOWN rather than success when it has nothing to verify against", async () => {
+    const dom = notesFixture();
+    const result = await cancelEditor(makePage(dom));
+    expect(result.closed).toBeNull(); // never an optimistic true
+  });
+});
+
+describe("probeBidBoardNotesUi — unknown visibility is surfaced, not reported as absent", () => {
+  const PROBE = { sectionTimeoutMs: 20, projectLabel: "9001" };
+
+  it("reports visible:null AND a problems entry when a visibility probe rejects", async () => {
+    // count() succeeds, isVisible() rejects mid-rerender. findVisibleMatch turns that into no-match,
+    // which is right for production (decline) but must NOT read as "this selector doesn't match" here:
+    // that says "discard the selector", when the truth says "re-run".
+    const dom = notesFixture();
+    dom.fail = { isVisible: (id) => id === "addBtn" };
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    const row = result.candidates.addButton.find((r: any) => r.selector === "button.aid-add-note");
+    expect(row?.count).toBe(1); // the element IS there…
+    expect(row?.visible).toBeNull(); // …we just could not tell if it is usable
+    expect(result.problems.join(" ")).toMatch(/Could not determine visibility for button\.aid-add-note/);
+  });
+
+  it("still reports visible:false when the element is genuinely hidden", async () => {
+    // The other side of the same coin: a real determination must not be blurred into "unknown".
+    const dom = notesFixture();
+    node(dom, "addBtn")!.hidden = true;
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    const row = result.candidates.addButton.find((r: any) => r.selector === "button.aid-add-note");
+    expect(row?.visible).toBe(false);
+    expect(result.problems.join(" ")).not.toMatch(/Could not determine visibility for button\.aid-add-note/);
   });
 });
