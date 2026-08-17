@@ -46,10 +46,19 @@ vi.mock("../server/playwright/documents.ts", () => ({
 
 const ACTIVITY_LOG = "CRM Activity Log — DFW-4-16226-ae (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Owner confirmed scope.";
 
-/** Set the note step's outcome while keeping it recorded in the call order. */
+/**
+ * Set the note step's outcome while keeping it recorded in the call order.
+ *
+ * Records start AND done either side of a real timer so the order assertions also pin that the note is
+ * AWAITED. A fire-and-forget `void postCrmActivityNoteFailOpen(...)` would still record "start" in the
+ * right place but would let createBidBoardProjectFromDeal resolve before "done" — racing the document
+ * sync that runs next on the same page under the same browser lock.
+ */
 function setNoteOutcome(outcome: Error | { posted?: boolean; skipped?: boolean; error?: string }) {
   postNoteMock.mockImplementation(async () => {
-    callOrder.push("postNote");
+    callOrder.push("postNote:start");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    callOrder.push("postNote:done");
     if (outcome instanceof Error) throw outcome;
     return { posted: false, skipped: false, ...outcome };
   });
@@ -99,7 +108,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
+    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
     expect(vi.mocked(storage.createSyncMapping)).toHaveBeenCalledWith(
       expect.objectContaining({ sourceDealId: "a1c59631", bidboardProjectId: "562949955849472" }),
     );
@@ -112,7 +121,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
+    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
   });
 
   it("posts the note with the created project id, the log text and the project number", async () => {
@@ -179,7 +188,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const result = await bidboard.createBidBoardProjectFromDeal(crmArgs());
 
     expect(result.success).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
+    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
   });
 
   it("a skipped note (marker already present) is recorded, not treated as a failure", async () => {
@@ -212,7 +221,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     const result = await bidboard.createBidBoardProjectFromDeal(args);
 
     expect(result.adopted).toBe(true);
-    expect(callOrder).toEqual(["createSyncMapping", "postNote"]);
+    expect(callOrder).toEqual(["createSyncMapping", "postNote:start", "postNote:done"]);
     expect(postNoteMock).toHaveBeenCalledWith({ stub: true }, "111222333", ACTIVITY_LOG, "DFW-4-16226-ae");
   });
 
@@ -236,7 +245,7 @@ describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-
     expect(result).toMatchObject({ success: true, adopted: true, projectId: "562949955849463" });
     expect(args.options.createProject).not.toHaveBeenCalled();
     // No mapping is written on this path (one already exists), so the note is the only recorded step.
-    expect(callOrder).toEqual(["postNote"]);
+    expect(callOrder).toEqual(["postNote:start", "postNote:done"]);
     expect(postNoteMock).toHaveBeenCalledWith({ stub: true }, "562949955849463", ACTIVITY_LOG, "DFW-4-16226-ae");
   });
 

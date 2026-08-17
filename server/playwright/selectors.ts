@@ -140,53 +140,104 @@ export const PROCORE_SELECTORS = {
       // Each entry is an ORDERED candidate list rather than one comma-joined string (as the older
       // selectors here are): the caller tries them in order and reports WHICH one matched, so the
       // prober output tells us exactly which layer is carrying the automation instead of hiding it
-      // behind a CSS union. Order follows this file's usual strategy — stable aid-*/data-qa hooks
-      // first, then structural/role/text fallbacks.
+      // behind a CSS union.
+      //
+      // The three TIERS are a safety boundary, not documentation. This page also hosts Procore's
+      // Project Description field and its own Create buttons, so a selector that drifts one element
+      // sideways doesn't fail — it silently edits the wrong real thing.
+      //   precise    — names the element (aid-*/data-qa/data-testid/named field). Usable in any scope.
+      //   scopedOnly — plausible but generic; only ever used INSIDE an already-validated notes
+      //                container or dialog, never in a page-wide search.
+      //   loose      — DIAGNOSTIC ONLY. The prober reports these; the automation never acts on one and
+      //                REFUSES (reports not-found) when they are all that match. A note that doesn't
+      //                get posted is a non-event; a wrong fill or click on a live project is not.
       notes: {
-        /** The Notes card/section wrapper on the Overview tab. Everything else is scoped inside it. */
-        section: [
-          'div.aid-notes',
-          '[class*="aid-notes"]',
-          '[data-qa="notes-section"]',
-          '[data-testid="notes-section"]',
-          'section:has-text("Notes")',
-          'div[class*="card"]:has-text("Notes")',
-        ],
+        /**
+         * The Notes card on the Overview tab. Everything else is scoped inside it, so a wrong match
+         * here poisons every step below it.
+         *
+         * The text-shaped candidates are loose because `:has-text()` matches ANCESTORS as readily as
+         * the card — and `.first()` then takes the OUTERMOST, i.e. a page-sized wrapper containing the
+         * description textarea and the Create New Project button. `:has-text("Notes")` also cannot
+         * distinguish "Notes" from "Internal Notes" (two different Procore features).
+         */
+        section: {
+          precise: [
+            'div.aid-notes',
+            '[class*="aid-notes"]',
+            '[data-qa="notes-section"]',
+            '[data-testid="notes-section"]',
+          ],
+          loose: [
+            'section:has-text("Notes")',
+            'div[class*="card"]:has-text("Notes")',
+          ],
+        },
+        /**
+         * Anything inside a resolved "Notes section" that proves it is NOT the Notes card but a wrapper
+         * that swallowed the rest of the page. A container matching this is refused outright.
+         */
+        sectionContamination: 'textarea[name="description"], [name*="description" i], button.aid-addNewProject, button:has-text("Create New Project")',
         /** The "+" add-a-note control inside the Notes section. */
-        addButton: [
-          'button.aid-add-note',
-          '[class*="aid-add-note"]',
-          'button[data-qa="qa-add-note-button"]',
-          'button[aria-label*="note" i]',
-          'button:has-text("Add Note")',
-          'button[aria-label="Add"]',
-          'button:has-text("+")',
-        ],
+        addButton: {
+          precise: [
+            'button.aid-add-note',
+            '[class*="aid-add-note"]',
+            'button[data-qa="qa-add-note-button"]',
+            'button[aria-label="Add Note"]',
+            'button[aria-label="Add note"]',
+          ],
+          scopedOnly: [
+            'button:has-text("Add Note")',
+            'button[aria-label="Add"]',
+            'button:has-text("+")',
+          ],
+          // Procore's docs give every EXISTING note a vertical-ellipsis menu; a "Note options" /
+          // "Note actions" control matches this and sits earlier in the DOM than the real add button,
+          // so `.first()` would open a note's menu instead of adding one.
+          loose: ['button[aria-label*="note" i]'],
+        },
         /**
          * The note body editor. Procore's notes take plain text (URLs auto-link, "@" opens a mention
          * picker), so it may be a textarea or a contenteditable rich-text host — cover both.
          */
-        input: [
-          'textarea[name="note"]',
-          'textarea[name="body"]',
-          'textarea[name="content"]',
-          'textarea[placeholder*="note" i]',
-          '[role="textbox"][contenteditable="true"]',
-          'div[contenteditable="true"]',
-          'textarea',
-        ],
+        input: {
+          precise: [
+            'textarea[name="note"]',
+            'textarea[name="body"]',
+            'textarea[name="content"]',
+            'textarea[placeholder*="note" i]',
+            '[role="textbox"][contenteditable="true"]',
+          ],
+          scopedOnly: ['div[contenteditable="true"]'],
+          // ⚠️ NEVER promote this. A bare `textarea` on a Bid Board project page is the PROJECT
+          // DESCRIPTION — bidboard.ts's description-verify retry resolves that exact field with
+          // `textarea[name="description"], textarea` on this same page. Filling it would erase the
+          // description and blur-save an 8 KB activity log over it, and fail-open would report success.
+          loose: ['textarea'],
+        },
         /**
-         * The Create button that commits the note. Scoped to the notes container/dialog by the caller —
-         * the project page has other Create buttons (e.g. Create New Project on the list view), and an
-         * unscoped match is how a "click Create" ends up clicking the wrong thing.
+         * The Create button that commits the note. Only ever searched inside a VALIDATED notes
+         * container or the open dialog: `button:has-text("Create")` is a substring match that would
+         * happily hit "Create New Project" or "Create New Customer" elsewhere on the page.
          */
-        createButton: [
-          'button.aid-confirmButton',
-          'button[data-qa="qa-create-note-button"]',
-          'button:has-text("Create")',
-          'button[type="submit"]',
-        ],
-        /** A rendered note row — read for the idempotency marker check and the post-save verify. */
+        createButton: {
+          precise: [
+            'button.aid-confirmButton',
+            'button[data-qa="qa-create-note-button"]',
+          ],
+          scopedOnly: [
+            'button:has-text("Create")',
+            'button[type="submit"]',
+          ],
+          loose: [],
+        },
+        /**
+         * A rendered note row — read for the idempotency marker check and the post-save verify. These
+         * stay one flat list because the reader UNIONS every match with the container's own text
+         * instead of trusting the first hit, so a wrong match here can only add noise, never hide an
+         * existing note (which would post a duplicate).
+         */
         item: [
           'div.aid-note',
           '[class*="aid-note-item"]',

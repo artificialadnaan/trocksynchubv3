@@ -503,20 +503,31 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         await page.waitForTimeout(2000);
       }
 
-      // Per-candidate match report: this is the whole point of the route — it says WHICH layer of the
-      // cascade is (or isn't) carrying each step, instead of a single yes/no for a CSS union.
-      const probe = async (candidates: string[], scope: { locator: (s: string) => any } = page) => {
-        const rows: Array<{ selector: string; count: number; visible: boolean }> = [];
-        for (const selector of candidates) {
-          const locator = scope.locator(selector);
-          const count = await locator.count().catch(() => -1);
-          const visible = count > 0 ? await locator.first().isVisible().catch(() => false) : false;
-          rows.push({ selector, count, visible });
+      // Per-candidate match report: this is the whole point of the route — it says WHICH tier of the
+      // cascade is (or isn't) carrying each step, instead of a single yes/no for a CSS union. The tier
+      // is reported because it decides what the automation is ALLOWED to do: it acts on precise
+      // (any scope) and scopedOnly (inside a validated container only), and never on loose.
+      type ProbeRow = { selector: string; tier: string; count: number; visible: boolean };
+      const probe = async (
+        tiers: { precise: string[]; scopedOnly?: string[]; loose?: string[] } | string[],
+        scope: { locator: (s: string) => any } = page,
+      ) => {
+        const groups: Array<[string, string[]]> = Array.isArray(tiers)
+          ? [["flat", tiers]]
+          : [["precise", tiers.precise], ["scopedOnly", tiers.scopedOnly ?? []], ["loose", tiers.loose ?? []]];
+        const rows: ProbeRow[] = [];
+        for (const [tier, candidateList] of groups) {
+          for (const selector of candidateList) {
+            const locator = scope.locator(selector);
+            const count = await locator.count().catch(() => -1);
+            const visible = count > 0 ? await locator.first().isVisible().catch(() => false) : false;
+            rows.push({ selector, tier, count, visible });
+          }
         }
         return rows;
       };
 
-      const candidates: Record<string, Array<{ selector: string; count: number; visible: boolean }>> = {
+      const candidates: Record<string, ProbeRow[]> = {
         section: await probe(NOTES.section),
         addButton: await probe(NOTES.addButton),
         item: await probe(NOTES.item),
@@ -526,7 +537,15 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         createButton: await probe(NOTES.createButton),
       };
 
-      const matchedSection = candidates.section.find((row) => row.visible)?.selector ?? null;
+      // The automation only acts on a PRECISE section match, so report that separately from "something
+      // matched" — a page where only the loose candidates hit is a page where the note will refuse.
+      const matchedSection = candidates.section.find((row) => row.visible && row.tier === "precise")?.selector ?? null;
+      const looseSectionOnly = !matchedSection && candidates.section.some((row) => row.visible);
+      // Does the container the automation would use actually look like the Notes card, or is it a
+      // page-level wrapper that also holds the description field / Create New Project?
+      const sectionContaminated = matchedSection
+        ? (await page.locator(matchedSection).first().locator(NOTES.sectionContamination).count().catch(() => -1)) !== 0
+        : null;
       const sectionHtml = matchedSection
         ? ((await page.locator(matchedSection).first().evaluate((el) => el.outerHTML).catch(() => "")) || "").slice(0, MAX_HTML_CHARS)
         : null;
@@ -559,7 +578,7 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
       // "+" is clicked — can be validated too. This is the half of the cascade a plain page dump misses.
       let editorScreenshotPath: string | null = null;
       let editorOpened = false;
-      const matchedAddButton = candidates.addButton.find((row) => row.visible)?.selector ?? null;
+      const matchedAddButton = candidates.addButton.find((row) => row.visible && row.tier !== "loose")?.selector ?? null;
       if (dryRun && openEditor && matchedAddButton) {
         await page.locator(matchedAddButton).first().click({ timeout: 10000 }).catch(() => {});
         await page.waitForTimeout(2000);
@@ -587,6 +606,8 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
         overviewTabVisible,
         url: page.url(),
         matchedSection,
+        looseSectionOnly,
+        sectionContaminated,
         matchedAddButton,
         editorOpened,
         candidates,

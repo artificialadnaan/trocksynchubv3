@@ -17,16 +17,22 @@
  * prober route POST /api/testing/playwright/bidboard-project-note is how they get validated against
  * a real project, and it must be run before this ships.
  *
- * Two invariants:
+ * Because the selectors are unverified, the module is written to FAIL CLEAN rather than to try hard.
+ * Four invariants:
  *
- * 1. IDEMPOTENT. Every note the CRM sends starts with a marker line
- *    (`CRM Activity Log — <project number> (as of <date>)`). Before adding anything we read the
- *    existing notes and skip when that marker is already there. Without this, a retry, an adopted
- *    pre-existing project, or a duplicate create command stacks four near-identical 8 KB notes on
- *    one project.
- * 2. NEVER THROWS. Every exit is a result object. Posting a note is strictly less important than
- *    creating the project, so the caller can treat any failure as a no-op (see the fail-open wrapper
- *    in createBidBoardProjectFromDeal).
+ * 1. NEVER TOUCH THE WRONG FIELD. The Project Description textarea lives on this same page — the
+ *    description-verify retry in bidboard.ts resolves it with a bare `textarea`. So: the automation
+ *    acts only on `precise`/`scopedOnly` selector tiers (never the `loose` ones), the resolved Notes
+ *    container is rejected if it also contains the description field or a Create New Project button,
+ *    and the fill target is re-checked by attribute immediately before typing. Any doubt ⇒ refuse.
+ * 2. IDEMPOTENT. Every CRM note starts with the `CRM Activity Log —` marker; the existing notes are
+ *    read first and the step skips when the marker is already present in this project's Notes.
+ *    Without it a retry, an ADOPTED pre-existing project, or a duplicate create command stacks copies
+ *    of the same ~8 KB note.
+ * 3. LEAVES THE PAGE CLEAN. Once anything has been typed, every exit path cancels the editor. The
+ *    page is shared: the document sync runs on it next, under the same browser lock.
+ * 4. NEVER THROWS. Every exit is a result object. Posting a note is strictly less important than
+ *    creating the project (see the fail-open wrapper in createBidBoardProjectFromDeal).
  *
  * @module playwright/bidboard-notes
  */
@@ -37,16 +43,35 @@ import { randomDelay, takeScreenshot } from "./browser";
 import { navigateToProject } from "./bidboard";
 import { log } from "../index";
 
-/** The stable prefix every CRM-generated activity note starts with (the CRM builds the full line). */
-export const CRM_ACTIVITY_NOTE_MARKER_PREFIX = "CRM Activity Log";
+/**
+ * The idempotency marker. PROJECT-SCOPED: Procore's Notes are already per-project, so matching the
+ * literal prefix inside THIS project's notes is all the discrimination needed.
+ *
+ * Deliberately does NOT include the project number. Keying on the number was wrong twice over: a
+ * substring compare made `DFW-4-16226-a` match an existing `DFW-4-16226-ab` note (and skip), and the
+ * CRM's heading label and the payload's `projectNumber` don't always agree — the CRM falls back to the
+ * deal NAME when a deal has no display number, while the payload falls back to a UUID, so a
+ * number-keyed guard could never match for HubSpot-imported "Pending" deals and would post a duplicate
+ * on every run. The human-readable label stays in the note's heading; the guard just doesn't use it.
+ */
+export const CRM_ACTIVITY_NOTE_MARKER = "CRM Activity Log —";
 
-// Timeouts are deliberately modest and per-interaction rather than one big wrapper: the note step runs
-// inside the browser lock during a create, so it must be bounded, but abandoning an in-flight Playwright
+// Timeouts are per-interaction rather than one big wrapper, because abandoning an in-flight Playwright
 // action (e.g. by racing a timer) would leave the shared page in an unknown state for the document sync
-// that runs after. Bounded per-call timeouts give a bounded worst case without abandoning anything.
+// that runs after. OVERALL_TIMEOUT_MS is the backstop: it is checked BETWEEN steps, so it bounds the
+// total time this holds the browser lock without ever abandoning an action mid-flight. The per-call
+// timeouts alone sum to minutes on a page where nothing matches.
 const SECTION_TIMEOUT_MS = 15000;
 const CONTROL_TIMEOUT_MS = 10000;
 const VERIFY_TIMEOUT_MS = 10000;
+const OVERALL_TIMEOUT_MS = 90000;
+
+/**
+ * Defensive cap applied immediately before typing. The CRM already caps the note (MAX_NOTE_CHARS), but
+ * this module is the last hop before a real Procore field and does not get to assume the other side
+ * behaved — a runaway payload should be truncated here, not pasted into Procore.
+ */
+export const NOTE_HARD_CHAR_CAP = 10000;
 
 export interface PostBidBoardNoteResult {
   /** True only when the note was typed, saved, and seen on the page afterwards. */
@@ -56,31 +81,9 @@ export interface PostBidBoardNoteResult {
   error?: string;
   /**
    * Which selector candidate matched at each step. Logged and returned so a selector change shows up
-   * as "we fell through to the text fallback" instead of silently degrading until it breaks.
+   * as "we fell through to the scopedOnly tier" instead of silently degrading until it breaks.
    */
   matched?: Record<string, string>;
-}
-
-/**
- * The idempotency key we look for in the existing notes.
- *
- * Derived from the note's OWN first line (minus the volatile "(as of <date>)" suffix, which changes
- * between attempts) rather than from `projectNumber` alone. The CRM labels the note with its display
- * number, which can legitimately differ from the Procore project number SyncHub used to create the
- * project (an approver can edit `project_number`, and the CRM falls back to the deal name when it has
- * no number). Keying on the note text means the marker we search for is exactly the marker a previous
- * run would have written; `projectNumber` is only the fallback for a note that has no marker line.
- */
-export function noteMarkerFor(note: string, projectNumber?: string | null): string {
-  const firstLine = (note || "").split(/\r?\n/, 1)[0]?.trim() ?? "";
-  const withoutAsOf = firstLine.replace(/\s*\(as of[^)]*\)\s*$/i, "").trim();
-  if (withoutAsOf.toLowerCase().startsWith(CRM_ACTIVITY_NOTE_MARKER_PREFIX.toLowerCase())) {
-    return withoutAsOf;
-  }
-  const trimmedNumber = (projectNumber || "").trim();
-  return trimmedNumber
-    ? `${CRM_ACTIVITY_NOTE_MARKER_PREFIX} — ${trimmedNumber}`
-    : CRM_ACTIVITY_NOTE_MARKER_PREFIX;
 }
 
 /** Collapse whitespace and unify dash characters so a marker comparison survives re-rendering. */
@@ -93,21 +96,38 @@ function normalizeForMarkerMatch(value: string): string {
 }
 
 /**
- * True when any of the rendered note texts already carries the marker.
+ * True when any of this project's rendered note texts already carries the marker.
  *
- * Deliberately a CONTAINS check, not a starts-with: a rendered note row usually wraps the body in
- * author/date chrome, so the marker rarely sits at character 0 of the row's text. The asymmetry is
- * intentional — a false positive (skipping a note we should have posted) costs one missing note, while
- * a false negative stacks another 8 KB duplicate on the project every retry. The marker string is
- * distinctive enough ("CRM Activity Log — DFW-2-12345-ab") that a coincidental match is not a real risk.
+ * A CONTAINS check, not starts-with: a rendered note row wraps the body in author/date chrome, so the
+ * marker rarely sits at character 0. The asymmetry is intentional and the caller must preserve it —
+ * a false positive costs one missing note, a false negative stacks another ~8 KB duplicate on the
+ * project on every retry, and the adopt path re-attempts on every re-run.
  */
-export function hasMarkerNote(existingTexts: Array<string | null | undefined>, marker: string): boolean {
-  const needle = normalizeForMarkerMatch(marker);
-  if (!needle) return false;
+export function hasMarkerNote(existingTexts: Array<string | null | undefined>): boolean {
+  const needle = normalizeForMarkerMatch(CRM_ACTIVITY_NOTE_MARKER);
   return existingTexts.some((text) => normalizeForMarkerMatch(text ?? "").includes(needle));
 }
 
+/** Truncate to the hard cap, keeping the marker line (which is first) intact. */
+export function clampNoteForProcore(note: string): string {
+  if (note.length <= NOTE_HARD_CHAR_CAP) return note;
+  const suffix = "\n… (truncated)";
+  return `${note.slice(0, NOTE_HARD_CHAR_CAP - suffix.length)}${suffix}`;
+}
+
 type Scope = Pick<Page, "locator"> & Partial<Pick<Page, "getByRole">>;
+type CandidateTiers = { precise: string[]; scopedOnly?: string[]; loose?: string[] };
+
+/**
+ * The candidates the automation may ACT on in this scope.
+ * `loose` is never included — it is prober diagnostics only. `scopedOnly` is included only inside an
+ * already-validated container (a page-wide search must not use generic selectors).
+ */
+function actableCandidates(tiers: CandidateTiers, scopeIsValidatedContainer: boolean): string[] {
+  return scopeIsValidatedContainer && tiers.scopedOnly
+    ? [...tiers.precise, ...tiers.scopedOnly]
+    : [...tiers.precise];
+}
 
 async function isVisible(locator: Locator, timeoutMs: number): Promise<boolean> {
   // waitFor() gives the SPA time to render; isVisible() alone is a zero-wait snapshot and races the
@@ -124,14 +144,14 @@ async function isVisible(locator: Locator, timeoutMs: number): Promise<boolean> 
  * Try each candidate selector in order; return the first visible match and the selector that found it.
  *
  * Waits ONCE on the union of the candidates, then identifies which one matched with zero-wait probes.
- * Waiting `timeoutMs` per candidate instead would spend the full timeout on every wrong guess in turn —
- * with 7 candidates that is over a minute burned inside the browser lock before we conclude "not found".
+ * Waiting `timeoutMs` per candidate instead would spend the full timeout on every wrong guess in turn.
  */
 async function firstVisible(
   scope: Scope,
   candidates: string[],
   timeoutMs: number,
 ): Promise<{ locator: Locator; selector: string } | null> {
+  if (candidates.length === 0) return null;
   try {
     await isVisible(scope.locator(candidates.join(", ")).first(), timeoutMs);
   } catch {
@@ -154,26 +174,73 @@ async function firstVisible(
   return null;
 }
 
+/**
+ * Read every candidate note text in the section, UNIONED with the container's own text.
+ *
+ * Never early-returns on the first candidate that yields something. The `item` list ends in a bare
+ * `li`, so an unrelated list in the card (an empty-state bullet list, a menu, pagination) would
+ * otherwise satisfy the loop, return unrelated strings, and suppress the container-text fallback —
+ * hiding an existing note and posting a duplicate. Union means a wrong `item` match can only add
+ * noise, and the marker is still found through the container's text.
+ */
 async function readNoteTexts(section: Locator): Promise<string[]> {
+  const texts: string[] = [];
   for (const selector of PROCORE_SELECTORS.bidboard.newUi.notes.item) {
     const items = section.locator(selector);
     const count = await items.count().catch(() => 0);
     if (count > 0) {
-      const texts = await items.allTextContents().catch(() => [] as string[]);
-      if (texts.length > 0) return texts;
+      texts.push(...(await items.allTextContents().catch(() => [] as string[])));
     }
   }
-  // No note-row selector matched (an empty Notes section, or the row markup differs from every guess).
-  // Fall back to the section's whole text so the marker check still works — for idempotency, one blob
-  // of text is as good as a list.
   const sectionText = await section.innerText().catch(() => "");
-  return sectionText ? [sectionText] : [];
+  if (sectionText) texts.push(sectionText);
+  return texts;
+}
+
+/**
+ * Reject a "Notes section" that is really a page-sized wrapper. If the container also holds the
+ * Project Description field or a Create New Project button, then every scoped search below it —
+ * including "the Create button next to the editor" — is unscoped in practice.
+ */
+async function isPlausibleNotesSection(section: Locator): Promise<boolean> {
+  const contaminated = await section
+    .locator(PROCORE_SELECTORS.bidboard.newUi.notes.sectionContamination)
+    .count()
+    .catch(() => 0);
+  return contaminated === 0;
+}
+
+/**
+ * Last line of defence before typing: refuse any element whose own attributes say "description".
+ * Independent of which selector matched, so it still holds if a candidate is edited carelessly later.
+ */
+async function isForbiddenFillTarget(locator: Locator): Promise<boolean> {
+  const attrs = await Promise.all(
+    ["name", "id", "aria-label", "placeholder", "data-qa"].map((attr) =>
+      locator.getAttribute(attr).catch(() => null),
+    ),
+  );
+  return attrs.some((value) => (value ?? "").toLowerCase().includes("description"));
+}
+
+/**
+ * Close a half-typed editor. The page is shared with the document sync that runs next under the same
+ * browser lock, so an abandoned 8 KB draft must never be left sitting in it.
+ */
+async function cancelEditor(page: Page): Promise<void> {
+  try {
+    await page.keyboard.press("Escape");
+    await randomDelay(300, 600);
+  } catch {
+    /* best effort — the caller is already on a failure path */
+  }
 }
 
 /**
  * Post `note` as a Note on Bid Board project `projectId`.
  *
  * Never throws: returns `{ posted }`, `{ skipped }` (marker already present) or `{ error }`.
+ * `projectNumber` is diagnostics only — the idempotency guard is project-scoped and does not key on it.
  */
 export async function postBidBoardProjectNote(
   page: Page,
@@ -181,10 +248,23 @@ export async function postBidBoardProjectNote(
   note: string,
   projectNumber?: string | null,
   /** Test seam (same spirit as createProject/findExistingProject in bidboard.ts) — keeps suites fast. */
-  options?: { verifyTimeoutMs?: number },
+  options?: { verifyTimeoutMs?: number; overallTimeoutMs?: number },
 ): Promise<PostBidBoardNoteResult> {
   const matched: Record<string, string> = {};
   const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
+  const deadlineAt = Date.now() + (options?.overallTimeoutMs ?? OVERALL_TIMEOUT_MS);
+  const outOfTime = () => Date.now() > deadlineAt;
+  let hasTyped = false;
+
+  /** Single exit for every failure: cancels a half-typed editor, then reports. Never throws. */
+  const fail = async (message: string, screenshotName?: string): Promise<PostBidBoardNoteResult> => {
+    if (screenshotName) {
+      const path = await takeScreenshot(page, screenshotName).catch(() => "");
+      if (path) message = `${message}; screenshot: ${path}`;
+    }
+    if (hasTyped) await cancelEditor(page);
+    return { posted: false, skipped: false, error: message, matched };
+  };
 
   if (!note || !note.trim()) {
     // Nothing to say. Treated as a skip, not an error — an activity-free deal is normal.
@@ -194,7 +274,7 @@ export async function postBidBoardProjectNote(
   try {
     const navigated = await navigateToProject(page, projectId);
     if (!navigated) {
-      return { posted: false, skipped: false, error: `Could not navigate to Bid Board project ${projectId}`, matched };
+      return await fail(`Could not navigate to Bid Board project ${projectId}`);
     }
 
     // navigateToProject lands on …/tools/bid-board/project/{id}/details, which is where the Overview
@@ -205,34 +285,38 @@ export async function postBidBoardProjectNote(
       await randomDelay(1000, 2000);
     }
 
-    const section = await firstVisible(page, selectors.section, SECTION_TIMEOUT_MS);
+    if (outOfTime()) return await fail(`Timed out before locating the Notes section on project ${projectId}`);
+
+    // ONLY the precise tier. When the text-shaped guesses are all that match we refuse: `.first()` on
+    // `section:has-text("Notes")` returns the outermost ancestor, which can be most of the page.
+    const section = await firstVisible(page, selectors.section.precise, SECTION_TIMEOUT_MS);
     if (!section) {
-      const screenshotPath = await takeScreenshot(page, "bidboard-note-section-not-found").catch(() => "");
-      return {
-        posted: false,
-        skipped: false,
-        error: `Notes section not found on project ${projectId} (selectors may need updating)${screenshotPath ? `; screenshot: ${screenshotPath}` : ""}`,
-        matched,
-      };
+      return await fail(
+        `Notes section not found on project ${projectId} — no structural (aid-*/data-qa) match; the selectors need validating with the prober before this can run`,
+        "bidboard-note-section-not-found",
+      );
+    }
+    if (!(await isPlausibleNotesSection(section.locator))) {
+      return await fail(
+        `Resolved "Notes section" on project ${projectId} (${section.selector}) also contains the Project Description or a Create New Project button — refusing to act inside a page-level wrapper`,
+        "bidboard-note-section-implausible",
+      );
     }
     matched.section = section.selector;
 
-    const marker = noteMarkerFor(note, projectNumber);
-    const existingTexts = await readNoteTexts(section.locator);
-    if (hasMarkerNote(existingTexts, marker)) {
-      log(`[bidboard-notes] project ${projectId} already has a "${marker}" note — skipping`, "playwright");
+    if (hasMarkerNote(await readNoteTexts(section.locator))) {
+      log(`[bidboard-notes] project ${projectId} already has a CRM activity note — skipping`, "playwright");
       return { posted: false, skipped: true, matched };
     }
 
-    const addButton = await firstVisible(section.locator, selectors.addButton, CONTROL_TIMEOUT_MS);
+    if (outOfTime()) return await fail(`Timed out before opening the note editor on project ${projectId}`);
+
+    const addButton = await firstVisible(section.locator, actableCandidates(selectors.addButton, true), CONTROL_TIMEOUT_MS);
     if (!addButton) {
-      const screenshotPath = await takeScreenshot(page, "bidboard-note-add-control-not-found").catch(() => "");
-      return {
-        posted: false,
-        skipped: false,
-        error: `Add-note control not found on project ${projectId} (selectors may need updating)${screenshotPath ? `; screenshot: ${screenshotPath}` : ""}`,
-        matched,
-      };
+      return await fail(
+        `Add-note control not found on project ${projectId} (selectors may need updating)`,
+        "bidboard-note-add-control-not-found",
+      );
     }
     matched.addButton = addButton.selector;
 
@@ -240,59 +324,68 @@ export async function postBidBoardProjectNote(
     await randomDelay(800, 1500);
 
     // The editor may open inline in the Notes section or in a dialog. Prefer a dialog when one is open
-    // (that also scopes the Create button away from the rest of the page), else stay inside the section,
-    // and only then widen to the page.
+    // (that also scopes the Create button away from the rest of the page), else stay inside the section.
     const dialog = page.locator('[role="dialog"], .MuiDialog-root, dialog').last();
-    const dialogOpen = await dialog.isVisible().catch(() => false);
+    // A dialog is only trusted as a scope if it passes the same contamination check as the section —
+    // an unrelated modal (or a mis-resolved one wrapping the page) would otherwise re-open every
+    // scoping hazard the section check just closed.
+    const dialogOpen = (await dialog.isVisible().catch(() => false)) && (await isPlausibleNotesSection(dialog));
     let editorScope: Scope = dialogOpen ? dialog : section.locator;
-    let editorScopeIsPage = false;
-    let input = await firstVisible(editorScope, selectors.input, CONTROL_TIMEOUT_MS);
+    let scopeIsValidatedContainer = true;
+    let input = await firstVisible(editorScope, actableCandidates(selectors.input, true), CONTROL_TIMEOUT_MS);
     if (!input) {
-      input = await firstVisible(page, selectors.input, CONTROL_TIMEOUT_MS);
+      // Widen to the page — but ONLY with the precise tier. This is exactly where a bare `textarea`
+      // candidate would resolve to Procore's Project Description, so the generic tiers are dropped.
+      input = await firstVisible(page, actableCandidates(selectors.input, false), CONTROL_TIMEOUT_MS);
       if (input) {
-        // The editor rendered outside our section/dialog guess, so its Create button is outside too —
-        // move the scope with it (and see the narrowed candidate list below).
         editorScope = page;
-        editorScopeIsPage = true;
+        scopeIsValidatedContainer = false;
       }
     }
     if (!input) {
-      const screenshotPath = await takeScreenshot(page, "bidboard-note-input-not-found").catch(() => "");
-      return {
-        posted: false,
-        skipped: false,
-        error: `Note editor not found on project ${projectId} after clicking add (selectors may need updating)${screenshotPath ? `; screenshot: ${screenshotPath}` : ""}`,
-        matched,
-      };
+      return await fail(
+        `Note editor not found on project ${projectId} after clicking add (selectors may need updating)`,
+        "bidboard-note-input-not-found",
+      );
+    }
+    if (await isForbiddenFillTarget(input.locator)) {
+      // Hard stop. Typing here would erase Procore's Project Description and blur-save the activity
+      // log over it, and fail-open would report the create a success.
+      return await fail(
+        `Refusing to type the CRM activity note into a description field on project ${projectId} (matched ${input.selector})`,
+        "bidboard-note-forbidden-target",
+      );
     }
     matched.input = input.selector;
 
-    await input.locator.fill(note, { timeout: CONTROL_TIMEOUT_MS });
+    if (outOfTime()) return await fail(`Timed out before typing the note on project ${projectId}`);
+
+    const clamped = clampNoteForProcore(note);
+    if (clamped.length !== note.length) {
+      log(`[bidboard-notes] clamped the note from ${note.length} to ${clamped.length} chars before typing`, "playwright");
+    }
+    hasTyped = true;
+    await input.locator.fill(clamped, { timeout: CONTROL_TIMEOUT_MS });
     await randomDelay(300, 700);
 
-    // Scoped to the notes container/dialog, every candidate is safe. Searching the whole PAGE is not:
-    // `button:has-text("Create")` also matches "Create New Project" / "Create New Customer", and
-    // `button[type="submit"]` matches any other form on the page. Drop those when the scope widened.
-    const createCandidates = editorScopeIsPage
-      ? selectors.createButton.filter((selector) => !selector.includes(":has-text") && !selector.includes('[type="submit"]'))
-      : selectors.createButton;
-    let createButton = await firstVisible(editorScope, createCandidates, CONTROL_TIMEOUT_MS);
+    let createButton = await firstVisible(
+      editorScope,
+      actableCandidates(selectors.createButton, scopeIsValidatedContainer),
+      CONTROL_TIMEOUT_MS,
+    );
     if (!createButton && typeof editorScope.getByRole === "function") {
-      // Role/text fallback, matching the layered strategy the selectors module documents. Anchored
-      // /^create$/i so it can't match "Create New Project" or "Create Customer".
+      // Role/text fallback. Anchored /^create$/i — an exact accessible-name match, so unlike
+      // `button:has-text("Create")` it cannot hit "Create New Project" / "Create New Customer".
       const byRole = editorScope.getByRole("button", { name: /^create$/i }).first();
       if (await isVisible(byRole, CONTROL_TIMEOUT_MS)) {
         createButton = { locator: byRole, selector: 'role=button[name=/^create$/i]' };
       }
     }
     if (!createButton) {
-      const screenshotPath = await takeScreenshot(page, "bidboard-note-create-button-not-found").catch(() => "");
-      return {
-        posted: false,
-        skipped: false,
-        error: `Note Create button not found on project ${projectId} (selectors may need updating)${screenshotPath ? `; screenshot: ${screenshotPath}` : ""}`,
-        matched,
-      };
+      return await fail(
+        `Note Create button not found on project ${projectId} (selectors may need updating)`,
+        "bidboard-note-create-button-not-found",
+      );
     }
     matched.createButton = createButton.selector;
 
@@ -301,36 +394,31 @@ export async function postBidBoardProjectNote(
 
     // Verify the note actually rendered. Procore's Notes have no documented length limit, so a silently
     // rejected over-long note is a real possibility — without this check we would report success for a
-    // note that never landed, and the next run's marker check would then post it again.
+    // note that never landed.
     //
-    // The editor-still-open check has to come FIRST: when no note-row selector matches, readNoteTexts
-    // falls back to the section's whole text, which would include the text still sitting in the open
-    // editor — i.e. an uncommitted note would "verify" itself.
+    // The editor-still-open check has to come FIRST: readNoteTexts unions the container's own text,
+    // which includes the text still sitting in an open editor — i.e. an uncommitted note would
+    // "verify" itself.
     const verifyDeadline = Date.now() + (options?.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS);
     let editorStillOpen = true;
     do {
       editorStillOpen = await input.locator.isVisible().catch(() => false);
-      if (!editorStillOpen && hasMarkerNote(await readNoteTexts(section.locator), marker)) {
-        log(`[bidboard-notes] posted the CRM activity note on project ${projectId} (${note.length} chars)`, "playwright");
+      if (!editorStillOpen && hasMarkerNote(await readNoteTexts(section.locator))) {
+        log(`[bidboard-notes] posted the CRM activity note on project ${projectId} (${clamped.length} chars)`, "playwright");
         return { posted: true, skipped: false, matched };
       }
       await randomDelay(800, 1200);
     } while (Date.now() < verifyDeadline);
 
-    const screenshotPath = await takeScreenshot(page, "bidboard-note-not-verified").catch(() => "");
-    const reason = editorStillOpen
-      ? "the note editor is still open, so the save did not commit"
-      : "it could not be verified on the page";
-    return {
-      posted: false,
-      skipped: false,
-      error: `Note was submitted on project ${projectId} but ${reason}${screenshotPath ? `; screenshot: ${screenshotPath}` : ""}`,
-      matched,
-    };
+    return await fail(
+      `Note was submitted on project ${projectId} but ${
+        editorStillOpen ? "the note editor is still open, so the save did not commit" : "it could not be verified on the page"
+      }`,
+      "bidboard-note-not-verified",
+    );
   } catch (err: any) {
-    // Belt and braces: nothing in here may throw at the caller, which is mid-create.
-    const message = err?.message ?? String(err);
-    await takeScreenshot(page, "bidboard-note-error").catch(() => "");
-    return { posted: false, skipped: false, error: message, matched };
+    // Belt and braces: nothing in here may throw at the caller, which is mid-create. fail() also
+    // cancels the editor, so a throw after fill() cannot strand a half-typed draft on the shared page.
+    return await fail(err?.message ?? String(err), "bidboard-note-error");
   }
 }
