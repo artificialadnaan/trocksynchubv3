@@ -41,6 +41,8 @@ import {
   isForbiddenFillTarget,
   readNoteTextsDetailed,
   resolveEditorScopes,
+  resolveNoteCreateControl,
+  resolveNoteEditorInput,
   resolveNotesSection,
   type NotesSectionResolution,
 } from "./bidboard-notes";
@@ -88,6 +90,14 @@ export type NotesProbeResult = {
   buttons: Array<Record<string, unknown>>;
   candidates: Record<string, NotesProbeRow[]>;
   matchedAddButton: string | null;
+  /**
+   * What production's own resolution returned — the selector it would type into, the container it
+   * fixed on, and the Create control it would click IN THAT CONTAINER. Read these as the verdict; the
+   * `candidates` rows are supporting evidence.
+   */
+  resolvedInputSelector: string | null;
+  resolvedInputScope: string | null;
+  resolvedCreateSelector: string | null;
   /** True when the add control could not be clicked — the editor probe is then NOT run. */
   addClickFailed: boolean;
   overviewTabClickFailed: boolean;
@@ -112,6 +122,8 @@ export type ProbeOptions = {
   openEditor?: boolean;
   /** Passed to resolveNotesSection; keeps test runs fast. */
   sectionTimeoutMs?: number;
+  /** Polling budget for the post-Add editor/Create resolution. Mirrors production's step timeout. */
+  editorTimeoutMs?: number;
   /** Prefix for the two screenshots. Callers must sanitise it — it reaches a file path. */
   screenshotPrefix?: string;
 };
@@ -124,6 +136,10 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   const NOTES = PROCORE_SELECTORS.bidboard.newUi.notes;
   const openEditor = options.openEditor !== false;
   const prefix = options.screenshotPrefix ?? "bidboard-project-note";
+  // Mirrors production's per-step budget. The prober has no overall deadline (it is human-invoked and
+  // should wait as long as the page takes — the one documented divergence), but the POLLING itself has
+  // to match, or a slow-rendering editor gets reported as a missing selector.
+  const editorTimeoutMs = options.editorTimeoutMs ?? 10000;
 
   const problems: string[] = [];
   const overviewTab = page.locator(PROCORE_SELECTORS.bidboard.projectOverviewTab).first();
@@ -280,6 +296,10 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   let inputWouldBeRefused: boolean | null = null;
   let editorOpened = false;
   let editorScreenshotPath: string | null = null;
+  /** What production WOULD use — resolved by production's own helpers, not inferred from the rows. */
+  let resolvedInputSelector: string | null = null;
+  let resolvedInputScope: string | null = null;
+  let resolvedCreateSelector: string | null = null;
 
   let addClickFailed = false;
   if (openEditor && sectionLocator && matchedAddButton) {
@@ -306,34 +326,48 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   // editor — and those rows are what an operator substitutes into the automation. A prober that says
   // "here's the editor" when no editor opened is worse than one that says nothing.
   if (openEditor && sectionLocator && matchedAddButton && !addClickFailed) {
-    // resolveEditorScopes applies production's dialog rule: visible AND uncontaminated, with the
-    // section retained as a second scope. Probing a dialog production would REJECT (or skipping the
-    // inline section because a dialog happens to be visible) is the exact inverse of this route's job.
-    const editorScopes = await resolveEditorScopes(page as any, sectionLocator as any);
-    editorScopeLabels = editorScopes.map((scope) => scope.label);
-    candidates.inputAfterAdd = [];
-    candidates.createButtonAfterAdd = [];
-    for (const { label, scope } of editorScopes) {
-      const inputRows = (await probe(NOTES.input, scope as any, label)).map((row) => ({ ...row, scope: label }));
-      const createRows = [...(await probe(NOTES.createButton, scope as any, label)), await probeCreateRole(scope as any)].map((row) => ({
-        ...row,
-        scope: label,
-      }));
-      candidates.inputAfterAdd.push(...inputRows);
-      candidates.createButtonAfterAdd.push(...createRows);
-    }
-    editorOpened = candidates.inputAfterAdd.some((row) => row.visible === true && row.actable);
+    // ── The verdict comes from PRODUCTION'S OWN post-Add code path ──────────────────────────────
+    // resolveNoteEditorInput does the dialog rule, the POLLING (production waits to a deadline; a
+    // single immediate probe after a fixed delay would report a slow-rendering editor as absent, and
+    // an operator would then replace working selectors), and the SCOPE FIXING. Running it first also
+    // means the per-candidate diagnostic rows below are taken after the editor has actually rendered.
+    const editor = await resolveNoteEditorInput(page as any, sectionLocator as any, editorTimeoutMs);
+    editorScopeLabels = editor.scopes.map((scope) => scope.label);
+    editorOpened = editor.input !== null;
+    resolvedInputSelector = editor.input?.selector ?? null;
+    resolvedInputScope = editor.input?.scopeLabel ?? null;
 
-    // Would the fill be refused by the description guard? Report it, rather than leaving the operator
-    // to discover it only when a real post declines.
-    const resolvedInput = candidates.inputAfterAdd.find((row) => row.visible === true && row.actable);
-    let resolvedInputLocator: any = null;
-    if (resolvedInput) {
-      const scopeForInput = editorScopes.find((scope) => scope.label === resolvedInput.scope);
-      const inputHit = scopeForInput ? (await findVisibleMatch(scopeForInput.scope as any, resolvedInput.selector)).hit : null;
-      resolvedInputLocator = inputHit?.locator ?? null;
-      inputWouldBeRefused = inputHit ? await isForbiddenFillTarget(inputHit.locator) : null;
+    if (editor.input) {
+      // Would the fill be refused by the description guard? Report it, rather than leaving the
+      // operator to discover it only when a real post declines.
+      inputWouldBeRefused = await isForbiddenFillTarget(editor.input.locator);
     }
+
+    // Diagnostics: every candidate, in every scope, so the operator can see which tier carried it and
+    // what the near-misses were. These are EVIDENCE; the verdict above is what production would do.
+    candidates.inputAfterAdd = [];
+    for (const { label, scope } of editor.scopes) {
+      const rows = (await probe(NOTES.input, scope as any, label)).map((row) => ({ ...row, scope: label }));
+      candidates.inputAfterAdd.push(...rows);
+    }
+
+    // Create is probed ONLY in the scope the input resolved to — production fixes editorScope to that
+    // one container, so reporting a Create match from the OTHER scope would say "these selectors work"
+    // for a combination production cannot use.
+    candidates.createButtonAfterAdd = [];
+    if (editor.editorScope && editor.editorScopeLabel) {
+      const label = editor.editorScopeLabel;
+      const rows = [
+        ...(await probe(NOTES.createButton, editor.editorScope as any, label)),
+        await probeCreateRole(editor.editorScope as any),
+      ].map((row) => ({ ...row, scope: label }));
+      candidates.createButtonAfterAdd.push(...rows);
+      // …and the verdict for Create likewise comes from the shared helper, in that fixed scope.
+      const create = await resolveNoteCreateControl(editor.editorScope as any, editorTimeoutMs);
+      resolvedCreateSelector = create?.selector ?? null;
+    }
+
+    const resolvedInputLocator: any = editor.input?.locator ?? null;
 
     editorScreenshotPath = await takeScreenshot(page as any, `${prefix}-editor`).catch(() => null);
     // Leave the page clean for whatever runs next under the browser lock — the same helper production
@@ -371,6 +405,9 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     buttons,
     candidates,
     matchedAddButton,
+    resolvedInputSelector,
+    resolvedInputScope,
+    resolvedCreateSelector,
     editorScopeLabels,
     editorOpened,
     inputWouldBeRefused,

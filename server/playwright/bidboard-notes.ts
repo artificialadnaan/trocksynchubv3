@@ -108,6 +108,32 @@ export function hasMarkerNote(existingTexts: Array<string | null | undefined>): 
   return existingTexts.some((text) => normalizeForMarkerMatch(text ?? "").includes(needle));
 }
 
+/** How much of the note's tail must be found again for the body to count as intact. */
+const TAIL_FINGERPRINT_CHARS = 60;
+
+/**
+ * The normalized tail of what we typed — the part that can only be present if the WHOLE body survived.
+ *
+ * ensureNoteMarker deliberately puts the marker on the FIRST line, so "the rendered note contains the
+ * marker" is satisfied by a note Procore accepted and then truncated. The payload is capped at 8 KB
+ * precisely because Procore's own limit is undocumented, which makes truncation a live possibility
+ * rather than a hypothetical, and a truncated note would otherwise be recorded as fully posted.
+ *
+ * Normalized (whitespace collapsed, dashes unified, lowercased) rather than compared byte-for-byte,
+ * because Procore re-renders the text — auto-linking URLs, reflowing whitespace.
+ */
+export function noteTailFingerprint(note: string): string {
+  const normalized = normalizeForMarkerMatch(note);
+  return normalized.slice(-TAIL_FINGERPRINT_CHARS);
+}
+
+/** True when the rendered text still contains the tail of what we typed. */
+export function hasNoteTail(renderedTexts: Array<string | null | undefined>, note: string): boolean {
+  const tail = noteTailFingerprint(note);
+  if (!tail) return false;
+  return renderedTexts.some((text) => normalizeForMarkerMatch(text ?? "").includes(tail));
+}
+
 /** Truncate to the hard cap, keeping the marker line (which is first) intact. */
 export function clampNoteForProcore(note: string): string {
   if (note.length <= NOTE_HARD_CHAR_CAP) return note;
@@ -433,6 +459,67 @@ export async function resolveEditorScopes(
 }
 
 /**
+ * The post-Add phase, shared verbatim between the automation and the prober.
+ *
+ * This is the step that has now produced the same review finding three times in different clothes —
+ * the prober approximating production's timing, its scope fixing, or its actable filtering, and
+ * therefore reporting that a selector combination works when production could not use it. So the
+ * automation and the prober call THIS, and the prober reports what it returned rather than deriving
+ * an equivalent.
+ *
+ * Two calls rather than one, because ORDER matters and must not be flattened: the Create control is
+ * resolved only AFTER the note is typed, since a Procore editor may not render (or may disable) Create
+ * until the body is non-empty. Resolving both up front would look tidier and would quietly change what
+ * production does.
+ */
+export type NoteEditorResolution = {
+  scopes: Array<{ label: string; scope: Scope }>;
+  /** The input the automation would type into, with the container it was found in. */
+  input: { locator: Locator; selector: string; scopeLabel: string } | null;
+  /** The scope the Create search is then FIXED to — the one the input was found in, never both. */
+  editorScope: Scope | null;
+  editorScopeLabel: string | null;
+};
+
+export async function resolveNoteEditorInput(
+  page: Scope,
+  section: Locator,
+  timeoutMs: number,
+): Promise<NoteEditorResolution> {
+  const scopes = await resolveEditorScopes(page, section);
+  const input = await firstVisibleAcross(
+    scopes.map(({ scope }) => ({ scope, candidates: actableCandidates(PROCORE_SELECTORS.bidboard.newUi.notes.input) })),
+    timeoutMs,
+  );
+  if (!input) return { scopes, input: null, editorScope: null, editorScopeLabel: null };
+  const resolved = scopes[input.attemptIndex];
+  return {
+    scopes,
+    input: { locator: input.locator, selector: input.selector, scopeLabel: resolved.label },
+    editorScope: resolved.scope,
+    editorScopeLabel: resolved.label,
+  };
+}
+
+/** Resolve the Create control INSIDE the already-fixed editor scope. Polled, like every other lookup. */
+export async function resolveNoteCreateControl(
+  editorScope: Scope,
+  timeoutMs: number,
+): Promise<{ locator: Locator; selector: string } | null> {
+  const hit = await firstVisibleAcross(
+    [
+      {
+        scope: editorScope,
+        candidates: actableCandidates(PROCORE_SELECTORS.bidboard.newUi.notes.createButton),
+        role: CREATE_BUTTON_ROLE,
+      },
+    ],
+    timeoutMs,
+  );
+  return hit ? { locator: hit.locator, selector: hit.selector } : null;
+}
+
+/**
  * Last line of defence before typing: refuse any element whose own attributes say "description".
  * Independent of which selector matched, so it still holds if a candidate is edited carelessly later.
  */
@@ -489,6 +576,9 @@ export async function cancelEditor(page: Page, editor?: Locator): Promise<Cancel
   let attempts = 0;
   let lastError: string | undefined;
 
+  /** The most recent visibility reading: true = still open, false = gone, null = could not tell. */
+  let lastReading: boolean | null = null;
+
   for (let attempt = 1; attempt <= CANCEL_MAX_ATTEMPTS; attempt++) {
     attempts = attempt;
     try {
@@ -500,12 +590,11 @@ export async function cancelEditor(page: Page, editor?: Locator): Promise<Cancel
       break;
     }
     if (!editor) continue;
-    const stillVisible = await editor.isVisible().catch(() => null);
-    // Unknown visibility is NOT "closed" — same rule as the post-Create check.
-    if (stillVisible === false) return { closed: true, attempts, cleared: false };
-    if (stillVisible === null) {
-      return { closed: null, attempts, cleared: false, detail: "editor visibility could not be read after Escape" };
-    }
+    lastReading = await editor.isVisible().catch(() => null);
+    // ONLY a confirmed "gone" ends the loop. An indeterminate reading must not: returning here would
+    // consume the remaining Escape attempts and skip the clear fallback — i.e. an unknown would defeat
+    // the very retry it sits inside. Unknown means "keep trying, and if we run out, warn and clear".
+    if (lastReading === false) return { closed: true, attempts, cleared: false };
   }
 
   if (!editor) {
@@ -520,10 +609,16 @@ export async function cancelEditor(page: Page, editor?: Locator): Promise<Cancel
     .then(() => true)
     .catch(() => false);
   return {
-    closed: false,
+    // An indeterminate final reading is reported as UNKNOWN, not as a confirmed "still open" — but it
+    // takes the same warning-and-clear path, because both mean "we cannot promise the page is clean".
+    closed: lastReading === null ? null : false,
     attempts,
     cleared,
-    detail: lastError ?? `editor still open after ${attempts} Escape attempt(s)`,
+    detail:
+      lastError ??
+      (lastReading === null
+        ? `editor visibility could not be read after ${attempts} Escape attempt(s)`
+        : `editor still open after ${attempts} Escape attempt(s)`),
   };
 }
 
@@ -684,20 +779,17 @@ export async function postBidBoardProjectNote(
     // loose-only sections, contaminated containers, cross-deal mappings and deadline exhaustion — and
     // a note that doesn't post is a non-event, while filling the wrong field on a live Procore project
     // is not.
-    const editorScopes = await resolveEditorScopes(page, section.locator);
-    const input = await firstVisibleAcross(
-      editorScopes.map(({ scope }) => ({ scope, candidates: actableCandidates(selectors.input) })),
-      stepBudget(CONTROL_TIMEOUT_MS),
-    );
+    const editor = await resolveNoteEditorInput(page, section.locator, stepBudget(CONTROL_TIMEOUT_MS));
+    const input = editor.input;
     if (!input) {
       return await fail(
-        `Note editor not found inside the ${editorScopes.map((s) => s.label).join(" or ")} on project ${projectId} after clicking add — declining rather than widening the search to the page (selectors may need updating)`,
+        `Note editor not found inside the ${editor.scopes.map((s) => s.label).join(" or ")} on project ${projectId} after clicking add — declining rather than widening the search to the page (selectors may need updating)`,
         "bidboard-note-input-not-found",
       );
     }
     // The Create button is searched in the SAME validated container the editor was found in.
-    const editorScope: Scope = editorScopes[input.attemptIndex].scope;
-    matched.editorScope = editorScopes[input.attemptIndex].label;
+    const editorScope = editor.editorScope!;
+    matched.editorScope = editor.editorScopeLabel!;
     if (await isForbiddenFillTarget(input.locator)) {
       // Hard stop. Typing here would erase Procore's Project Description and blur-save the activity
       // log over it, and fail-open would report the create a success.
@@ -722,13 +814,10 @@ export async function postBidBoardProjectNote(
     await input.locator.fill(clamped, { timeout: actBudget() });
     await randomDelay(300, 700);
 
-    // CSS candidates AND the anchored role fallback go through the one resolver, so both get the same
-    // polling and the same visible-match walk. The role fallback bypasses the selector tiers, so it is
-    // safe only because `editorScope` is always a validated container — never the page.
-    const createButton = await firstVisibleAcross(
-      [{ scope: editorScope, candidates: actableCandidates(selectors.createButton), role: CREATE_BUTTON_ROLE }],
-      stepBudget(CONTROL_TIMEOUT_MS),
-    );
+    // Resolved only NOW, after the body is typed — a Procore editor may not render or enable Create
+    // until the note is non-empty. Same shared helper the prober calls, so the scope fixing and the
+    // polling cannot drift apart.
+    const createButton = await resolveNoteCreateControl(editorScope, stepBudget(CONTROL_TIMEOUT_MS));
     if (!createButton) {
       return await fail(
         `Note Create button not found on project ${projectId} (selectors may need updating)`,
@@ -755,6 +844,7 @@ export async function postBidBoardProjectNote(
     // hold the GLOBAL browser lock for another full verify window on top of an already-spent budget.
     const verifyDeadline = Math.min(Date.now() + (options?.verifyTimeoutMs ?? VERIFY_TIMEOUT_MS), deadlineAt);
     let editorStillOpen = true;
+    let markerSeen = false;
     do {
       // `catch(() => false)` here would mean "the visibility probe threw, therefore the editor closed",
       // and the marker check below reads the container's text — which INCLUDES an open editor's
@@ -765,16 +855,29 @@ export async function postBidBoardProjectNote(
       const rendered = editorStillOpen ? null : await readNoteTextsDetailed(section.locator);
       // A failed verify read is not "not there yet" and not "there" — keep polling, and if the window
       // expires the step reports unverified, which is the pessimistic answer.
-      if (rendered && !rendered.failed && hasMarkerNote(rendered.texts)) {
-        log(`[bidboard-notes] posted the CRM activity note on project ${projectId} (${clamped.length} chars)`, "playwright");
-        return { posted: true, skipped: false, matched };
+      if (rendered && !rendered.failed) {
+        // TWO conditions. The marker alone is satisfied by a note Procore accepted and TRUNCATED,
+        // because ensureNoteMarker puts the marker on the first line; the tail can only be there if the
+        // whole body survived. Tracking markerSeen separately turns "truncated" into its own diagnosis
+        // instead of a generic "could not be verified".
+        if (hasMarkerNote(rendered.texts)) {
+          markerSeen = true;
+          if (hasNoteTail(rendered.texts, clamped)) {
+            log(`[bidboard-notes] posted the CRM activity note on project ${projectId} (${clamped.length} chars)`, "playwright");
+            return { posted: true, skipped: false, matched };
+          }
+        }
       }
       await randomDelay(800, 1200);
     } while (Date.now() < verifyDeadline);
 
     return await fail(
       `Note was submitted on project ${projectId} but ${
-        editorStillOpen ? "the note editor is still open, so the save did not commit" : "it could not be verified on the page"
+        editorStillOpen
+          ? "the note editor is still open, so the save did not commit"
+          : markerSeen
+            ? `only its opening line rendered — the body appears to have been TRUNCATED by Procore (posted ${clamped.length} chars; consider lowering the CRM's MAX_NOTE_CHARS)`
+            : "it could not be verified on the page"
       }`,
       "bidboard-note-not-verified",
     );

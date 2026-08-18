@@ -8,7 +8,10 @@ const navigateToProjectMock = vi.hoisted(() => vi.fn(async () => true));
 vi.mock("../server/playwright/bidboard.ts", () => ({ navigateToProject: navigateToProjectMock }));
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 vi.mock("../server/playwright/browser.ts", () => ({
-  randomDelay: vi.fn(async () => {}),
+  // Yields a MACROTASK, not just a microtask. An `async () => {}` mock makes the polling loops spin in
+  // microtasks and starve the timer queue, so anything the page renders on a setTimeout (i.e. any
+  // simulated async render) could never appear — the loop would look broken when it is not.
+  randomDelay: vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 0))),
   takeScreenshot: vi.fn(async () => ".playwright-storage/shot.png"),
 }));
 
@@ -230,6 +233,12 @@ function notesFixture(opts: {
   createButtonRoleOnly?: boolean;
   /** Extra nodes appended to the fixture. */
   extra?: FakeNode[];
+  /** Delay before the editor appears after the add click — models a slow SPA render. */
+  editorAppearsAfterMs?: number;
+  /** Transform the typed text on save — models Procore TRUNCATING an over-long note. */
+  renderTransform?: (typed: string) => string;
+  /** Put the editor in a clean dialog and the only Create button in the section. */
+  editorInDialogCreateInSection?: boolean;
 } = {}): FakeDom {
   const createRenders = opts.createRenders ?? true;
   const createClosesEditor = opts.createClosesEditor ?? true;
@@ -237,17 +246,26 @@ function notesFixture(opts: {
   const saveNote = (dom: FakeDom) => {
     const editor = node(dom, "editor");
     if (createRenders && editor) {
+      const rendered = (opts.renderTransform ?? ((typed: string) => typed))(editor.text ?? "");
       dom.nodes.push({
         id: `note-${dom.nodes.length}`,
         parent: "notesSection",
         matches: ['div.aid-note'],
-        text: `Colby Burling · Aug 17, 2026\n${editor.text ?? ""}`,
+        text: `Colby Burling · Aug 17, 2026\n${rendered}`,
       });
     }
     if (createClosesEditor) removeNode(dom, "editor");
   };
 
-  const openEditor = (dom: FakeDom) => {
+  const addEditorNodes = (dom: FakeDom) => {
+    if (opts.editorInDialogCreateInSection) {
+      dom.nodes.push({ id: "dialog", parent: "page", matches: ['[role="dialog"]'], text: "Add note" });
+      dom.nodes.push({ id: "editor", parent: "dialog", matches: ['textarea[name="note"]'], attrs: { name: "note" }, text: "" });
+      // The only Create lives in the SECTION — production fixes the scope to the dialog, so it must
+      // not count.
+      dom.nodes.push({ id: "createBtn", parent: "notesSection", matches: ['button.aid-confirmButton'], role: "button", name: "Create", onClick: saveNote });
+      return;
+    }
     dom.nodes.push({
       id: "editor",
       parent: opts.editorOutsideSection ? "page" : "notesSection",
@@ -285,6 +303,15 @@ function notesFixture(opts: {
         onClick: saveNote,
       });
     }
+  };
+
+  const openEditor = (dom: FakeDom) => {
+    if (opts.editorAppearsAfterMs) {
+      // The editor renders LATE. A single immediate probe misses it; production polls to a deadline.
+      setTimeout(() => addEditorNodes(dom), opts.editorAppearsAfterMs);
+      return;
+    }
+    addEditorNodes(dom);
   };
 
   const nodes: FakeNode[] = [
@@ -1161,5 +1188,84 @@ describe("probeBidBoardNotesUi — unknown visibility is surfaced, not reported 
     const row = result.candidates.addButton.find((r: any) => r.selector === "button.aid-add-note");
     expect(row?.visible).toBe(false);
     expect(result.problems.join(" ")).not.toMatch(/Could not determine visibility for button\.aid-add-note/);
+  });
+});
+
+describe("round-10: retry survives unknowns, and truncation is not success", () => {
+  beforeEach(() => {
+    navigateToProjectMock.mockReset();
+    navigateToProjectMock.mockResolvedValue(true);
+  });
+
+  it("keeps retrying Escape when the visibility check is INDETERMINATE, then warns and clears", async () => {
+    // An unknown reading must not end the retry loop: doing so consumes the remaining attempts and
+    // skips the clear fallback — the unknown-handling would cancel out the retry it sits inside.
+    const dom = notesFixture({ createRenders: false, createClosesEditor: false });
+    dom.escapesToClose = 99;
+    dom.fail = { isVisible: (id) => id === "editor" && dom.fills.length > 0 };
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    // All three attempts ran…
+    expect(dom.keys.filter((key) => key === "Escape").length).toBe(3);
+    // …the operator is warned it could not be confirmed closed…
+    expect(result.error).toMatch(/WARNING: the note editor could not be confirmed closed after 3 cancel attempt/i);
+    // …and the draft was emptied rather than left as 8 KB on a shared page.
+    expect(result.error).toMatch(/text was cleared as a fallback/i);
+    expect(node(dom, "editor")!.text).toBe("");
+  });
+
+  it("does NOT report a TRUNCATED note as posted", async () => {
+    // ensureNoteMarker puts the marker first, so a marker-only check passes for a note Procore
+    // accepted and then cut short. The 8 KB cap exists because Procore's real limit is undocumented,
+    // which makes this a live possibility.
+    const dom = notesFixture({ renderTransform: (typed) => typed.split("\n")[0] });
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/TRUNCATED/);
+    expect(result.error).toMatch(/lowering the CRM's MAX_NOTE_CHARS/);
+  });
+
+  it("reports posted when the whole body survives, whitespace re-rendering included", async () => {
+    // The tail check must be robust to Procore reflowing the text, not require byte equality.
+    const dom = notesFixture({ renderTransform: (typed) => typed.replace(/\s+/g, "  ").toUpperCase() });
+
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result).toMatchObject({ posted: true, skipped: false });
+  });
+});
+
+describe("round-10: the prober runs production's post-Add path", () => {
+  const PROBE = { sectionTimeoutMs: 20, projectLabel: "9001", editorTimeoutMs: 1000 };
+
+  it("POLLS for a slow-rendering editor instead of reporting the selectors absent", async () => {
+    // A single immediate probe after a fixed delay would call these selectors missing, and an operator
+    // would then replace working ones.
+    const dom = notesFixture({ editorAppearsAfterMs: 120 });
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.editorOpened).toBe(true);
+    expect(result.resolvedInputSelector).toBe('textarea[name="note"]');
+    expect(result.resolvedCreateSelector).toBe("button.aid-confirmButton");
+  });
+
+  it("probes Create ONLY in the scope the input resolved to", async () => {
+    // Input in the dialog, the only Create in the section. Production fixes editorScope to the dialog
+    // and would fail; reporting the section's Create as visible+actable would claim a combination
+    // production cannot use.
+    const dom = notesFixture({ editorInDialogCreateInSection: true });
+
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.resolvedInputScope).toBe("dialog");
+    expect(result.candidates.createButtonAfterAdd.every((row: any) => row.scope === "dialog")).toBe(true);
+    expect(result.candidates.createButtonAfterAdd.some((row: any) => row.visible === true)).toBe(false);
+    // …and the verdict says production would NOT find a usable Create.
+    expect(result.resolvedCreateSelector).toBeNull();
   });
 });
