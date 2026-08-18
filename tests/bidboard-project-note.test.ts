@@ -836,15 +836,20 @@ describe("shared resolvers (production and prober call these same functions)", (
       expect((result as any).selector).toContain('svg[data-qa="ci-Plus"]');
     });
 
-    it("still refuses when the anchor path is ALSO contaminated", async () => {
+    it("still refuses when the anchor path is ALSO contaminated, and says so specifically", async () => {
       // Reuses contaminatedSection, which parents descField onto "notesSection" regardless of which
       // tier found that container — proving the contamination check applies identically to a
       // climbed-to container, not just a CSS-matched one.
+      //
+      // The reason must be "contaminated", NOT "not-found"/"loose-only" — collapsing a genuinely
+      // located, contaminated card into a generic refusal hides the real diagnosis (a page-level
+      // wrapper) from whoever reads it to pick real Procore hooks.
       const result = await resolveNotesSection(
         makePage(notesFixture({ anchorOnly: true, contaminatedSection: true })),
         FAST_SECTION,
       );
-      expect(result).toMatchObject({ ok: false, reason: "not-found" });
+      expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+      expect((result as any).message).toMatch(/page-level wrapper/i);
     });
 
     it("prefers a real aid-notes match over the anchor when both exist", async () => {
@@ -871,11 +876,12 @@ describe("shared resolvers (production and prober call these same functions)", (
     it("climbs past unclassed wrappers to the labelled, uncontaminated card", async () => {
       const dom = notesFixture({ anchorOnly: true });
       const result = await resolveNotesSectionByAnchor(makePage(dom));
-      expect(result).not.toBeNull();
-      expect(await result!.locator.getAttribute("data-never-set")).toBeNull(); // it's a real locator
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("unreachable");
+      expect(await result.locator.getAttribute("data-never-set")).toBeNull(); // it's a real locator
       // The climbed container IS "notesSection" — proven by asking it for the add button it should
       // contain, exactly as production's next step (resolveEditorScopes → click) would.
-      const nestedAdd = await result!.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
+      const nestedAdd = await result.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
       expect(nestedAdd).toBe(1);
     });
 
@@ -892,10 +898,10 @@ describe("shared resolvers (production and prober call these same functions)", (
       );
 
       const result = await resolveNotesSectionByAnchor(makePage(dom));
-      expect(result).not.toBeNull();
-      expect(result!.locator).not.toBeNull();
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("unreachable");
       // It resolved to the REAL card, not the decoy's — proven the same way as the happy-path test.
-      const editorHost = await result!.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
+      const editorHost = await result.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
       expect(editorHost).toBe(1);
     });
 
@@ -927,7 +933,14 @@ describe("shared resolvers (production and prober call these same functions)", (
       };
 
       const result = await resolveNotesSectionByAnchor(makePage(dom));
-      expect(result).toBeNull();
+      // The reviewer-flagged bug: a bare null here erases whether we found a real, contaminated card
+      // or found nothing at all — an operator reading this needs the difference, since "contaminated"
+      // means fix the page-level wrapper and "not-found" means find a new selector entirely.
+      expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+      if (result.ok || result.reason !== "contaminated") throw new Error("unreachable");
+      // ⇑2 proves it stopped at innerContaminatedCard (anchorBtn→innerWrap→innerContaminatedCard) and
+      // did NOT continue climbing to outerCleanCard, which would only be reachable at ⇑4.
+      expect(result.selector).toContain("⇑2");
     });
 
     it("gives up when the label sits beyond the climb bound", async () => {
@@ -949,12 +962,12 @@ describe("shared resolvers (production and prober call these same functions)", (
       nodes.push({ id: "anchorBtn", parent, matches: ['button:has(svg[data-qa="ci-Plus"])'] });
 
       const result = await resolveNotesSectionByAnchor(makePage({ nodes, actions: [], fills: [], keys: [] }));
-      expect(result).toBeNull();
+      expect(result).toEqual({ ok: false, reason: "not-found" });
     });
 
-    it("returns null when no anchor button exists at all", async () => {
+    it("reports not-found (not contaminated) when no anchor button exists at all", async () => {
       const result = await resolveNotesSectionByAnchor(makePage(notesFixture({ withoutSection: true })));
-      expect(result).toBeNull();
+      expect(result).toEqual({ ok: false, reason: "not-found" });
     });
   });
 
@@ -1075,6 +1088,22 @@ describe("probeBidBoardNotesUi (the prober's wiring)", () => {
 
     expect(result.sectionContaminated).toBe(true);
     expect(result.sectionVerdict).toMatchObject({ ok: false, reason: "contaminated" });
+    expect(result.matchedAddButton).toBeNull();
+    expect(result.editorProbeSkippedReason).toMatch(/page-level wrapper/i);
+  });
+
+  // The operator-facing side of the reviewer-flagged bug: when the ONLY way the section was located
+  // is the anchor climb, and that climbed-to card is contaminated, the prober output an operator reads
+  // to pick real hooks must say "contaminated", not read as though nothing was found at all.
+  it("contaminated section found ONLY via the anchor: still reports contamination, not a bare miss", async () => {
+    const result = await probeBidBoardNotesUi(
+      makePage(notesFixture({ anchorOnly: true, contaminatedSection: true })),
+      PROBE,
+    );
+
+    expect(result.sectionContaminated).toBe(true);
+    expect(result.sectionVerdict).toMatchObject({ ok: false, reason: "contaminated" });
+    expect(result.looseSectionOnly).toBe(false);
     expect(result.matchedAddButton).toBeNull();
     expect(result.editorProbeSkippedReason).toMatch(/page-level wrapper/i);
   });

@@ -420,6 +420,18 @@ async function holdsNotesLabel(container: Locator): Promise<boolean> {
 }
 
 /**
+ * Mirrors `NotesSectionResolution`'s ok/reason shape rather than a bare `{locator,selector} | null`,
+ * because a bare null erases the difference between "never found a labelled ancestor at all" and
+ * "found one, and it's contaminated" — the second is an actionable diagnosis (a page-level wrapper
+ * problem) that a plain not-found/loose-only report would hide from the prober and from whoever reads
+ * its output to pick real Procore hooks. See resolveNotesSectionByAnchor's docblock.
+ */
+export type NotesAnchorResolution =
+  | { ok: true; locator: Locator; selector: string }
+  | { ok: false; reason: "contaminated"; selector: string }
+  | { ok: false; reason: "not-found" };
+
+/**
  * Resolve the Notes card structurally, by climbing from the "+" control rather than guessing a class.
  *
  * Why this exists: every `section.precise` candidate was an educated guess at Procore's markup, and a
@@ -433,14 +445,16 @@ async function holdsNotesLabel(container: Locator): Promise<boolean> {
  *
  * The climb stops at the first ancestor that is labelled but CONTAMINATED, rather than continuing: once
  * a container has grown large enough to swallow the description field, every wider one does too, so
- * continuing could only produce a worse match than the one just rejected.
+ * continuing could only produce a worse match than the one just rejected. That contaminated verdict is
+ * remembered (not discarded) — if every remaining anchor candidate also fails, it is what gets reported,
+ * rather than a generic not-found that would send an operator hunting for a "missing" selector when the
+ * real problem is a page-level wrapper.
  */
-export async function resolveNotesSectionByAnchor(
-  page: Scope,
-): Promise<{ locator: Locator; selector: string } | null> {
+export async function resolveNotesSectionByAnchor(page: Scope): Promise<NotesAnchorResolution> {
   const anchorSelector = PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor;
   const anchors = page.locator(anchorSelector);
   const total = await anchors.count().catch(() => 0);
+  let contaminatedSelector: string | null = null;
   for (let i = 0; i < Math.min(total, ANCHOR_CANDIDATE_LIMIT); i += 1) {
     const anchor = anchors.nth(i);
     if (!(await anchor.isVisible().catch(() => false))) continue;
@@ -448,11 +462,20 @@ export async function resolveNotesSectionByAnchor(
     for (let depth = 1; depth <= ANCHOR_CLIMB_LIMIT; depth += 1) {
       node = node.locator("xpath=..");
       if (!(await holdsNotesLabel(node))) continue;
-      if (!(await isPlausibleNotesSection(node))) break;
-      return { locator: node, selector: `${anchorSelector} ⇑${depth} + exact-text "Notes"` };
+      const selector = `${anchorSelector} ⇑${depth} + exact-text "Notes"`;
+      if (!(await isPlausibleNotesSection(node))) {
+        // Keep the FIRST contaminated hit across all anchors — it is real evidence either way, and a
+        // later anchor succeeding outright makes this moot anyway (the function returns immediately).
+        if (!contaminatedSelector) contaminatedSelector = selector;
+        break;
+      }
+      return { ok: true, locator: node, selector };
     }
   }
-  return null;
+  if (contaminatedSelector) {
+    return { ok: false, reason: "contaminated", selector: contaminatedSelector };
+  }
+  return { ok: false, reason: "not-found" };
 }
 
 export async function resolveNotesSection(
@@ -468,8 +491,20 @@ export async function resolveNotesSection(
     // same contamination check as everything else — it is a different way to FIND the card, not a
     // weaker standard for accepting one.
     const anchored = await resolveNotesSectionByAnchor(page);
-    if (anchored) {
+    if (anchored.ok) {
       return { ok: true, locator: anchored.locator, selector: anchored.selector };
+    }
+    // A structurally-located-but-contaminated card is a different, more actionable diagnosis than
+    // "nothing matched" — collapsing it into not-found/loose-only would send an operator hunting for a
+    // missing selector when the real problem is a page-level wrapper. Reported the same way the
+    // precise-tier contamination case is, below.
+    if (anchored.reason === "contaminated") {
+      return {
+        ok: false,
+        reason: "contaminated",
+        selector: anchored.selector,
+        message: `Resolved "Notes section"${where} (${anchored.selector}) also contains the Project Description or a Create New Project button — refusing to act inside a page-level wrapper`,
+      };
     }
     // Distinguish "nothing matched" from "only the loose text-shaped guesses matched". Production
     // refuses either way, but the operator needs to know which — the second means the docs-shaped
