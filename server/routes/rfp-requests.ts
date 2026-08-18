@@ -41,6 +41,11 @@ export const rfpRequestBodySchema = z.object({
       country: z.string().trim().nullable(),
     }).nullable(),
     description: z.string().trim().nullable(),
+    // The CRM's rendered activity log (calls, notes, site visits…), posted as a NOTE on the Bid Board
+    // project — never into Procore's Project Description. Soft exactly like ownerName/ownerEmail above:
+    // optional (bodies predating the field), nullable (no activity to show) and .catch(undefined) so a
+    // malformed value is DROPPED rather than 422'd — a display extra must never block RFP ingestion.
+    crmActivityLog: z.string().nullable().optional().catch(undefined),
     dueDate: z.string().trim().datetime({ offset: true }).nullable(),
     workflowRoute: z.string().trim().nullable(),
   }),

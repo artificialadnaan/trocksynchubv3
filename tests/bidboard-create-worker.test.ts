@@ -98,6 +98,23 @@ describe("performCreateFromRfpVote (create logic)", () => {
     expect(enq.payload.bidboardProjectId).toBe("999");
   });
 
+  it("flattens the CRM activity log into normalizedDealData as crm_activity_log (Bid Board note input)", async () => {
+    const activityLog = "CRM Activity Log — TR-1001 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep";
+    await performCreateFromRfpVote(input({
+      deal: { ...input().deal, description: "roof replacement", crmActivityLog: activityLog },
+    }));
+    const dealData = (createBidBoardMock.mock.calls[0][0] as any).normalizedDealData;
+    expect(dealData.crm_activity_log).toBe(activityLog);
+    // description/notes drive Procore's Project Description and must be untouched by the note field.
+    expect(dealData.description).toBe("roof replacement");
+    expect(dealData.notes).toBe("roof replacement");
+  });
+
+  it("sends an empty crm_activity_log when the vote payload carries none (pre-field bodies)", async () => {
+    await performCreateFromRfpVote(input());
+    expect((createBidBoardMock.mock.calls[0][0] as any).normalizedDealData.crm_activity_log).toBe("");
+  });
+
   it("[AA3] stamps the callback createdAt with the command receipt time, not now", async () => {
     const commandAt = "2026-07-03T14:00:00.000Z";
     await performCreateFromRfpVote(input(), commandAt);

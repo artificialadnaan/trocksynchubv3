@@ -53,6 +53,11 @@ export interface NormalizedRfpRequestInput {
       country: string | null;
     } | null;
     description: string | null;
+    /**
+     * The CRM's rendered activity log (calls, notes, site visits…), posted as a NOTE on the Bid Board
+     * project. Optional + nullable: a soft display extra, absent on any body that predates the field.
+     */
+    crmActivityLog?: string | null;
     dueDate: string | null;
     workflowRoute: string | null;
   };
@@ -978,6 +983,12 @@ function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { owner
     country: input.deal.address?.country || '',
     description: input.deal.description || '',
     notes: input.deal.description || '',
+    // The CRM activity log, carried through to the Bid Board create as a NOTE on the project. Kept in
+    // its own key: `description`/`notes` above still feed Procore's Project Description, and the
+    // activity log must not leak into that field. Also note resolveRfpDescription's "any key containing
+    // 'description'" fallback — 'crm_activity_log' deliberately doesn't match it, so the review email's
+    // Description row can never pick this up.
+    crm_activity_log: input.deal.crmActivityLog || '',
     bid_due_date: input.deal.dueDate || '',
     due_date: input.deal.dueDate || '',
     workflowRoute: input.deal.workflowRoute || '',
@@ -1585,6 +1596,14 @@ export async function processRfpApproval(
           attachmentsOverride: attachmentsToSync,
           projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
           editedFieldsOverride: {
+            // The CRM activity log travels here rather than via normalizedDealData, which is passed
+            // ONLY for trock_crm — a hubspot-sourced request that carried crmActivityLog would
+            // otherwise be persisted in deal_data and then silently dropped before the create, so the
+            // field would be "accepted but unused" on that path. editedFieldsOverride is passed for
+            // BOTH source systems, so routing it through here keeps accepted == used everywhere.
+            // (In practice only the CRM sends the field today; this removes the divergence rather than
+            // documenting it.)
+            ...(dealData.crm_activity_log ? { crm_activity_log: String(dealData.crm_activity_log) } : {}),
             // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
             ...(dealData.description ? { description: String(dealData.description) } : {}),
             ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),

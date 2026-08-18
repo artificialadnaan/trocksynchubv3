@@ -393,7 +393,26 @@ export async function saveBidBoardState(projects: BidBoardProject[]): Promise<vo
   log(`Saved state for ${projects.length} projects`, "playwright");
 }
 
-export async function navigateToProject(page: Page, projectId: string): Promise<boolean> {
+const PROJECT_NAV_LOAD_TIMEOUT_MS = 90000;
+const PROJECT_NAV_FALLBACK_TIMEOUT_MS = 60000;
+
+/**
+ * Navigate to a Bid Board project's details page.
+ *
+ * `options.timeoutMs` caps the TOTAL navigation budget (both the `load` attempt and the
+ * `domcontentloaded` fallback). It exists so an optional caller — the CRM activity note — can bound
+ * how long it holds the GLOBAL browser lock. Bounding it here is the only safe way to do that: racing
+ * this call and walking away would leave a `goto` in flight on the SHARED page, which then yanks the
+ * page out from under whatever runs next (the document sync, another create) under the same lock.
+ * Never abandon Playwright work on this page; give it a smaller timeout instead.
+ *
+ * Callers that pass nothing keep the original 90s/60s behaviour exactly.
+ */
+export async function navigateToProject(
+  page: Page,
+  projectId: string,
+  options?: { timeoutMs?: number },
+): Promise<boolean> {
   const companyId = await getCompanyId();
   if (!companyId) return false;
 
@@ -402,13 +421,31 @@ export async function navigateToProject(page: Page, projectId: string): Promise<
   const baseUrl = sandbox ? "https://sandbox.procore.com" : "https://us02.procore.com";
   const projectUrl = `${baseUrl}/webclients/host/companies/${companyId}/tools/bid-board/project/${projectId}/details`;
 
+  const budgetMs = options?.timeoutMs;
+  const startedAt = Date.now();
+  // NEVER let a computed timeout reach Playwright as 0 — `timeout: 0` means "no timeout at all", so an
+  // exhausted budget would turn into an UNBOUNDED navigation, the exact opposite of the intent.
+  const clampTimeout = (cap: number, remaining: number | undefined) =>
+    remaining === undefined ? cap : Math.max(1, Math.min(cap, remaining));
+  const remainingBudget = () => (budgetMs === undefined ? undefined : Math.max(0, budgetMs - (Date.now() - startedAt)));
+
   log(`Navigating to project: ${projectUrl}`, "playwright");
   try {
-    await page.goto(projectUrl, { waitUntil: "load", timeout: 90000 });
+    await page.goto(projectUrl, { waitUntil: "load", timeout: clampTimeout(PROJECT_NAV_LOAD_TIMEOUT_MS, budgetMs) });
   } catch (navErr: any) {
     if (navErr.message?.includes('Timeout')) {
+      const fallbackRemaining = remainingBudget();
+      if (fallbackRemaining !== undefined && fallbackRemaining <= 0) {
+        // Budget spent. Report failure rather than starting a second navigation the caller has no
+        // time left to wait for.
+        log(`Navigation timeout (load) and the caller's navigation budget is exhausted`, "playwright");
+        return false;
+      }
       log(`Navigation timeout (load), continuing with domcontentloaded`, "playwright");
-      await page.goto(projectUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.goto(projectUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: clampTimeout(PROJECT_NAV_FALLBACK_TIMEOUT_MS, fallbackRemaining),
+      });
     } else {
       throw navErr;
     }
@@ -882,6 +919,12 @@ export interface NewBidBoardProjectData {
   zip?: string;
   country?: string;
   description?: string;
+  /**
+   * The CRM's rendered activity log, posted as a NOTE on the project's Overview tab (not into the
+   * Project Description, which keeps carrying `description` only). Built and capped by the CRM; see
+   * playwright/bidboard-notes.ts.
+   */
+  crmActivityLog?: string;
   bidDueDate?: string;
   /** Optional: proposalId for BidBoard URL */
   proposalId?: string;
@@ -2031,6 +2074,74 @@ async function findProcoreProjectByExactNumber(projectNumber: string): Promise<E
   }
 }
 
+/**
+ * Record the outcome of the (fail-open) CRM activity-note step.
+ *
+ * Two sinks, on purpose:
+ * - `bidboard_automation_logs` for EVERY outcome, so the Bid Board automation log shows posted/skipped/
+ *   failed per project alongside create_project and sync_hubspot_documents.
+ * - `audit_logs` with status 'error' for a genuine failure ONLY. Because the step is fail-open, this row
+ *   is the only signal that exists — and status 'error' is what the 15-minute failure digest scans, so
+ *   selector rot on Procore's Notes UI surfaces instead of silently dropping every note.
+ *
+ * Both writes are individually swallowed: a logging failure must not become a create failure.
+ */
+async function recordBidBoardNoteOutcome(params: {
+  projectId: string;
+  projectName: string;
+  sourceSystem: SourceSystem;
+  sourceDealId: string;
+  noteChars: number;
+  posted: boolean;
+  skipped: boolean;
+  /** Why the step declined, when it declined for a reason other than "the note is already there". */
+  skipReason?: string;
+  error?: string;
+  matched?: Record<string, string>;
+}): Promise<void> {
+  const status = params.posted ? "success" : params.skipped ? "skipped" : "failed";
+  try {
+    await storage.createBidboardAutomationLog({
+      projectId: params.projectId,
+      projectName: params.projectName,
+      action: "post_crm_activity_note",
+      status,
+      details: {
+        sourceSystem: params.sourceSystem,
+        sourceDealId: params.sourceDealId,
+        noteChars: params.noteChars,
+        skipped: params.skipped,
+        skipReason: params.skipReason ?? null,
+        matchedSelectors: params.matched ?? null,
+      },
+      errorMessage: params.error,
+    });
+  } catch (logErr: any) {
+    log(`Could not write the CRM activity note automation log: ${logErr?.message ?? logErr}`, "playwright");
+  }
+
+  if (params.posted || params.skipped) return;
+
+  try {
+    await storage.createAuditLog({
+      action: "bidboard_note_failed",
+      entityType: "bidboard_project",
+      entityId: params.projectId,
+      source: "bidboard-note",
+      status: "error",
+      errorMessage: params.error ?? "CRM activity note was not posted",
+      details: {
+        sourceSystem: params.sourceSystem,
+        sourceDealId: params.sourceDealId,
+        noteChars: params.noteChars,
+        matchedSelectors: params.matched ?? null,
+      },
+    });
+  } catch (auditErr: any) {
+    log(`Could not write the CRM activity note audit row: ${auditErr?.message ?? auditErr}`, "playwright");
+  }
+}
+
 export async function createBidBoardProjectFromDeal(
   dealIdOrArgs: string | CreateBidBoardProjectFromDealArgs,
   initialStage: string = "Estimate in Progress",
@@ -2101,13 +2212,89 @@ export async function createBidBoardProjectFromDeal(
       zip: get(undefined, "zip") || properties.zip || properties.postal_code || undefined,
       country: get(undefined, "country") || properties.country || undefined,
       description: get(undefined, "description") || properties.description || properties.project_description__briefly_describe_the_project_ || properties.project_description || properties.notes || undefined,
+      // Kept strictly separate from `description`: this goes into a Note, the description into Procore's
+      // Project Description field. Deliberately does NOT fall back to `notes`/`description` — an empty
+      // activity log means "post no note", not "post the description again".
+      crmActivityLog: get(undefined, "crm_activity_log") || properties.crm_activity_log || undefined,
       bidDueDate: get(undefined, "bid_due_date") || properties.bid_due_date || properties.due_date || undefined,
       proposalId: effectiveOptions.proposalId,
     };
 
     log(`Creating BidBoard project from ${sourceSystem} deal: ${deal.dealName} (${dealId})`, "playwright");
-    log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}`, "playwright");
-    
+    log(`Project data — clientName: ${projectData.clientName || 'NONE'}, contactName: ${projectData.contactName || 'NONE'}, bidDueDate: ${projectData.bidDueDate || 'NONE'}, address: ${projectData.address || 'NONE'}, city: ${projectData.city || 'NONE'}, state: ${projectData.state || 'NONE'}, description: ${projectData.description ? 'SET' : 'NONE'}, estimator: ${projectData.estimator || 'NONE'}, crmActivityLog: ${projectData.crmActivityLog ? `${projectData.crmActivityLog.length} chars` : 'NONE'}`, "playwright");
+
+    /**
+     * Post the CRM activity log as a Note on the project (Overview → Notes), so the estimator opening
+     * the Bid Board project sees the sales history the rep logged in the CRM.
+     *
+     * FAIL-OPEN, on purpose: creating the project is the critical path and a note is not. Any throw or
+     * failure result is logged, recorded in the automation log, and — for a genuine failure — written
+     * to audit_logs as 'bidboard_note_failed', then swallowed. It must never fail the create, the sync
+     * mapping, the durable callback to the CRM, or the approval email.
+     *
+     * ⚠️ ORDERING — CALL THIS ONLY ONCE THE PROJECT'S SYNC MAPPING IS DURABLE. Do not "tidy" it back up
+     * next to the create. `storage.createSyncMapping` is the idempotency record the adopt-instead-of-
+     * create guard below reads, so ANY step between creating the Procore project and writing that
+     * mapping widens the window in which a hard kill leaves a REAL project with no mapping — and the
+     * next run then creates a DUPLICATE (the …849463 vs …849472 class of bug this function exists to
+     * prevent). The note is purely informational and has no dependency on the mapping, so it belongs
+     * strictly after it. Both call sites honour that: the adopt path below already has a mapping by
+     * definition, and the create path calls this after createSyncMapping returns.
+     *
+     * (The description-verify retry further down still runs before the mapping and has exactly this
+     * exposure. That is PRE-EXISTING, not something the note introduced, and is out of scope here.)
+     */
+    const postCrmActivityNoteFailOpen = async (noteProjectId: string): Promise<void> => {
+      if (!noteProjectId || !projectData.crmActivityLog?.trim()) return;
+      try {
+        const { page: notePage, success: loggedIn } = await ensureLoggedIn();
+        if (!loggedIn || !notePage) {
+          throw new Error("Procore login unavailable for the CRM activity note");
+        }
+        // Dynamic import for the same reason documents.ts is dynamically imported here: bidboard-notes
+        // statically imports navigateToProject from this module, so a static import back would be a cycle.
+        const { postBidBoardProjectNote } = await import("./bidboard-notes");
+        const noteResult = await postBidBoardProjectNote(
+          notePage,
+          noteProjectId,
+          projectData.crmActivityLog,
+          projectData.projectNumber,
+        );
+        if (noteResult.posted) {
+          log(`CRM activity note posted on BidBoard project ${noteProjectId}`, "playwright");
+        } else if (noteResult.skipped) {
+          log(`CRM activity note already present on BidBoard project ${noteProjectId} — skipped`, "playwright");
+        } else {
+          log(`CRM activity note NOT posted on BidBoard project ${noteProjectId}: ${noteResult.error ?? "unknown reason"}`, "playwright");
+        }
+        await recordBidBoardNoteOutcome({
+          projectId: noteProjectId,
+          projectName: projectData.name,
+          sourceSystem,
+          sourceDealId: dealId,
+          noteChars: projectData.crmActivityLog.length,
+          posted: noteResult.posted,
+          skipped: noteResult.skipped,
+          error: noteResult.error,
+          matched: noteResult.matched,
+        });
+      } catch (noteErr: any) {
+        const message = noteErr?.message ?? String(noteErr);
+        log(`CRM activity note step failed for BidBoard project ${noteProjectId}: ${message}`, "playwright");
+        await recordBidBoardNoteOutcome({
+          projectId: noteProjectId,
+          projectName: projectData.name,
+          sourceSystem,
+          sourceDealId: dealId,
+          noteChars: projectData.crmActivityLog.length,
+          posted: false,
+          skipped: false,
+          error: message,
+        });
+      }
+    };
+
+
     // Idempotency guard: one deal → one BidBoard project. A prior approve, a retry, or a concurrent
     // override-approve may have already created the project. The global browser lock serializes creates,
     // so by the time we hold it, any earlier create's sync mapping is already committed. If a BidBoard
@@ -2133,6 +2320,41 @@ export async function createBidBoardProjectFromDeal(
         `BidBoard project already exists for ${sourceSystem} deal ${dealId} (${existingMapping.bidboardProjectId}) — adopting it instead of creating a duplicate`,
         "playwright",
       );
+      // This path RETURNS before createSyncMapping (the mapping is why we're here), so it needs its own
+      // call or an adopted project would never get the note. The ordering rule still holds: the mapping
+      // already exists, so we are by definition posting after it. Re-attempting on an adopt is
+      // deliberate and safe — the marker check makes it a no-op when the note is already there, and it
+      // gives a re-run whose earlier note attempt failed a second chance.
+      //
+      // OWNERSHIP FIRST. `dealMapping` is this deal's by construction, but `numberMapping` is keyed on
+      // the project NUMBER and can belong to a DIFFERENT deal that shares it — the same
+      // claimedByOtherDeal collision the exact-number lookup below models explicitly. Adopting it is
+      // pre-existing behaviour; posting into it is NOT: it would publish this deal's private sales
+      // history onto another deal's Procore project. The create worker guards this collision before it
+      // ever gets here, but direct approval and other callers do not, so the check belongs here too.
+      // When in doubt this step declines and records why.
+      const adoptedOwner = hasBidId(dealMapping) ? undefined : numberMapping;
+      const claimedByOtherDeal = Boolean(
+        adoptedOwner && !(adoptedOwner.sourceSystem === sourceSystem && adoptedOwner.sourceDealId === dealId),
+      );
+      if (claimedByOtherDeal) {
+        log(
+          `Not posting the CRM activity note for ${sourceSystem} deal ${dealId}: BidBoard project ${existingMapping.bidboardProjectId} (number ${projectNumber}) is linked to ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
+          "playwright",
+        );
+        await recordBidBoardNoteOutcome({
+          projectId: existingMapping.bidboardProjectId,
+          projectName: projectData.name,
+          sourceSystem,
+          sourceDealId: dealId,
+          noteChars: projectData.crmActivityLog?.length ?? 0,
+          posted: false,
+          skipped: true,
+          skipReason: `project is claimed by ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
+        });
+      } else {
+        await postCrmActivityNoteFailOpen(existingMapping.bidboardProjectId);
+      }
       return {
         success: true,
         projectId: existingMapping.bidboardProjectId,
@@ -2273,6 +2495,7 @@ export async function createBidBoardProjectFromDeal(
 
   if (result.success && result.projectId) {
     // Create sync mapping
+    let mappingPersisted = false;
     try {
       await storage.createSyncMapping({
         sourceSystem,
@@ -2288,6 +2511,7 @@ export async function createBidBoardProjectFromDeal(
         lastSyncDirection: "hubspot_to_procore",
         metadata: result.proposalId ? { proposalId: result.proposalId } : undefined,
       });
+      mappingPersisted = true;
       log(`Created sync mapping for deal ${dealId} → BidBoard ${result.projectId}`, "playwright");
     } catch (err: any) {
       log(`Warning: Could not create sync mapping: ${err.message}`, "playwright");
@@ -2361,8 +2585,41 @@ export async function createBidBoardProjectFromDeal(
         }
       }
     }
+
+    // LAST. The order is: create -> sync mapping -> documents -> note, weakest link last.
+    //
+    // Same reasoning that moved this after createSyncMapping. The note is a brittle, browser-driven
+    // step on an optional, purely informational field; anything it sits in front of is something a
+    // crash mid-note can strand. In front of the mapping that meant a real project with no
+    // idempotency record (a duplicate on the next run); in front of the document sync it means a
+    // project whose attachments never uploaded while the mapping already says it was handled, so the
+    // retry can treat it as done. Documents are what the estimator actually needs; the note is not.
+    //
+    // The mapping write's failure is SWALLOWED above (logged, not surfaced), so "we got here" is not
+    // the same as "the mapping exists". Posting onto a project with no mapping would publish the note
+    // onto something that carries no idempotency or ownership record. If the mapping didn't land,
+    // decline and say so; the create worker's CreatedMappingMissingError recovery reconciles the
+    // mapping, and a later run can post the note.
+    if (mappingPersisted) {
+      await postCrmActivityNoteFailOpen(result.projectId);
+    } else if (projectData.crmActivityLog?.trim()) {
+      log(
+        `Not posting the CRM activity note on BidBoard project ${result.projectId}: its sync mapping was not persisted`,
+        "playwright",
+      );
+      await recordBidBoardNoteOutcome({
+        projectId: result.projectId,
+        projectName: projectData.name,
+        sourceSystem,
+        sourceDealId: dealId,
+        noteChars: projectData.crmActivityLog.length,
+        posted: false,
+        skipped: true,
+        skipReason: "sync mapping was not persisted for this project",
+      });
+    }
   }
 
-    return result;
+  return result;
   });
 }

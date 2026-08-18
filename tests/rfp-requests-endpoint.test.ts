@@ -318,6 +318,66 @@ describe("POST /api/rfp-requests", () => {
     });
   });
 
+  it("stores the CRM activity log in deal_data as crm_activity_log (for the Bid Board note)", async () => {
+    await withServer(async (baseUrl) => {
+      const activityLog = "CRM Activity Log — DFW-2-12345 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Owner confirmed scope.";
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({ deal: { ...requestBody().deal, projectNumber: "ACTLOG-1", crmActivityLog: activityLog } })
+      );
+      expect(response.status).toBe(201);
+      expect(rfpRows[0].dealData.crm_activity_log).toBe(activityLog);
+      // It must NOT leak into the fields that drive Procore's Project Description.
+      expect(rfpRows[0].dealData.description).toBe("Project description");
+      expect(rfpRows[0].dealData.notes).toBe("Project description");
+    });
+  });
+
+  it("keeps the activity log out of the RFP review email (an 8 KB dump would bury the decision)", async () => {
+    await withServer(async (baseUrl) => {
+      const activityLog = "CRM Activity Log — DFW-2-12345 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  UNIQUE-ACTIVITY-MARKER";
+      const response = await postRfpRequest(
+        baseUrl,
+        requestBody({ deal: { ...requestBody().deal, projectNumber: "ACTLOG-EMAIL-1", crmActivityLog: activityLog } })
+      );
+      expect(response.status).toBe(201);
+      const html = (sendEmailMock.mock.calls[0]?.[0] as any)?.htmlBody ?? "";
+      expect(html).not.toContain("UNIQUE-ACTIVITY-MARKER");
+      // resolveRfpDescription falls back to "any key containing 'description'"; crm_activity_log must
+      // not be picked up by it, so the Description row still shows the real description.
+      expect(html).toContain("Project description");
+    });
+  });
+
+  it("stores an empty activity log when the CRM omits the field or sends null (pre-field bodies)", async () => {
+    await withServer(async (baseUrl) => {
+      const body = requestBody({ deal: { ...requestBody().deal, projectNumber: "ACTLOG-2" } });
+      expect((body.deal as any).crmActivityLog).toBeUndefined();
+      expect((await postRfpRequest(baseUrl, body)).status).toBe(201);
+      expect(rfpRows[0].dealData).toMatchObject({ crm_activity_log: "" });
+
+      const nullBody = requestBody({
+        sourceDealId: "crm-deal-2",
+        sourceEventId: "crm-event-2",
+        deal: { ...requestBody().deal, projectNumber: "ACTLOG-3", crmActivityLog: null },
+      });
+      expect((await postRfpRequest(baseUrl, nullBody)).status).toBe(201);
+      expect(rfpRows[1].dealData).toMatchObject({ crm_activity_log: "" });
+    });
+  });
+
+  it("drops a malformed activity log instead of rejecting the RFP (no 422)", async () => {
+    await withServer(async (baseUrl) => {
+      // Soft field, exactly like ownerName/ownerEmail: a display extra must never block RFP ingestion.
+      const body = requestBody({
+        deal: { ...requestBody().deal, projectNumber: "ACTLOG-BAD-1", crmActivityLog: 12345 as any },
+      });
+      const response = await postRfpRequest(baseUrl, body);
+      expect(response.status).toBe(201); // dropped via .catch(undefined), not 422
+      expect(rfpRows[0].dealData).toMatchObject({ crm_activity_log: "" });
+    });
+  });
+
   it("review email shows the owner email as Deal Owner when only an email is resolved", async () => {
     await withServer(async (baseUrl) => {
       const response = await postRfpRequest(

@@ -444,6 +444,113 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     res.json(result);
   }));
 
+  /**
+   * Notes-section prober for a Bid Board project — the validation vehicle for the CRM activity note.
+   *
+   * The selectors in PROCORE_SELECTORS.bidboard.newUi.notes are written from Procore's PUBLISHED docs,
+   * not from observed DOM (nobody can open prod Procore from CI). This route is how a human validates
+   * them against a real project before the automation ships: it reports, per candidate selector, how
+   * many elements matched and whether any is visible, dumps the matched Notes section's HTML, and saves
+   * a screenshot.
+   *
+   * Body: { projectId, projectNumber?, note?, dryRun?, openEditor? }. dryRun DEFAULTS TO TRUE — this
+   * route can post a real note to a real Procore project, so posting must be opted into explicitly with
+   * dryRun:false plus a note. On a dry run it also clicks the "+" control by default (openEditor, safe:
+   * only the Create button commits a note) because the editor and Create selectors do not exist in the
+   * DOM until it is open, so without that click half the cascade could not be validated at all.
+   *
+   * Unlike the older probers here it drives the SHARED session (ensureLoggedIn) inside withBrowserLock
+   * rather than launching its own Chromium: the probe must observe the same page the real automation
+   * will drive, and it must not run concurrently with a live RFP create that holds the browser.
+   */
+  app.post("/api/testing/playwright/bidboard-project-note", requireAuth, asyncHandler(async (req, res) => {
+    const projectId = String(req.body?.projectId ?? "").trim();
+    const projectNumber = req.body?.projectNumber ? String(req.body.projectNumber).trim() : undefined;
+    const note = typeof req.body?.note === "string" ? req.body.note : undefined;
+    const dryRun = req.body?.dryRun !== false;
+    const openEditor = req.body?.openEditor !== false;
+
+    if (!projectId) {
+      return res.status(400).json({ error: "projectId is required" });
+    }
+    if (!dryRun && !note?.trim()) {
+      return res.status(400).json({ error: "note is required when dryRun is false" });
+    }
+
+    const { ensureLoggedIn } = await import("../playwright/auth");
+    const { withBrowserLock } = await import("../playwright/browser");
+    const { navigateToProject } = await import("../playwright/bidboard");
+    // The probe body lives in playwright/bidboard-notes-probe.ts as a plain function over a page-LIKE
+    // object, so it can be driven by the scope-aware fake DOM in tests instead of resting on review.
+    // Its output is what an operator uses to choose real Procore hooks, so "it calls the shared
+    // resolvers correctly" needed to be a test, not a reading. This route keeps only HTTP, auth, the
+    // browser lock, navigation and the audit row.
+    const { probeBidBoardNotesUi } = await import("../playwright/bidboard-notes-probe");
+
+    const outcome = await withBrowserLock("testing-bidboard-project-note", async () => {
+      const { page, success: loggedIn } = await ensureLoggedIn();
+      if (!loggedIn || !page) {
+        return { ok: false as const, error: "Failed to log in to Procore" };
+      }
+
+      const navigated = await navigateToProject(page, projectId);
+      if (!navigated) {
+        return { ok: false as const, error: `Could not navigate to Bid Board project ${projectId}` };
+      }
+
+      // takeScreenshot() interpolates the name straight into a file path, so keep the caller-supplied
+      // id out of it as anything but [A-Za-z0-9_-].
+      const safeProjectId = projectId.replace(/[^A-Za-z0-9_-]/g, "");
+      const probeResult = await probeBidBoardNotesUi(page, {
+        projectLabel: projectId,
+        // Opening the editor only makes sense on a dry run; a real post drives it itself below.
+        openEditor: dryRun && openEditor,
+        screenshotPrefix: `bidboard-project-note-${safeProjectId}`,
+      });
+
+      let postResult: import("../playwright/bidboard-notes").PostBidBoardNoteResult | null = null;
+      if (!dryRun && note) {
+        const { postBidBoardProjectNote } = await import("../playwright/bidboard-notes");
+        postResult = await postBidBoardProjectNote(page, projectId, note, projectNumber);
+      }
+
+      // A real write to a real Procore project that FAILED must not come back as ok:true. The probe
+      // half can succeed while the post half fails, so the outcome is conditioned on the post result
+      // when there was one. (`skipped` is a success: the note was already there.)
+      const postFailed = postResult !== null && !postResult.posted && !postResult.skipped;
+      if (postFailed) {
+        return {
+          ok: false as const,
+          error: postResult?.error ?? "Posting the note failed",
+          projectId,
+          dryRun,
+          ...probeResult,
+          postResult,
+        };
+      }
+
+      return { ok: true as const, projectId, dryRun, ...probeResult, postResult };
+    });
+
+    await storage.createAuditLog({
+      action: 'playwright_test_bidboard_project_note',
+      entityType: 'playwright',
+      entityId: projectId,
+      source: 'admin',
+      status: outcome.ok ? 'success' : 'failed',
+      details: { projectId, dryRun, matchedSection: outcome.ok ? outcome.matchedSection : null },
+      errorMessage: outcome.ok ? undefined : outcome.error,
+    });
+
+    if (!outcome.ok) {
+      // Keep the diagnostics on a failed post — they are the most useful output there is when a real
+      // write did not land.
+      const { ok: _ok, ...rest } = outcome as Record<string, unknown> & { ok: boolean };
+      return res.status(400).json({ success: false, ...rest });
+    }
+    res.json({ success: true, ...outcome });
+  }));
+
   app.post("/api/testing/playwright/documents-extract", requireAuth, asyncHandler(async (req, res) => {
     const { projectId } = req.body;
     if (!projectId) {
