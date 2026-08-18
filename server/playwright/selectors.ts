@@ -56,6 +56,13 @@ function stageTabSelectorFor(labels: readonly string[]): string {
     .join(", ");
 }
 
+/**
+ * The Bid Board Notes card's add-a-note control. Confirmed against a live project (2026-08-18) — see
+ * `notes.sectionAnchor`'s docblock for the full story and why this must be declared once, as a shared
+ * constant, rather than as two independently-editable literal strings.
+ */
+const BIDBOARD_NOTES_ADD_BUTTON_ANCHOR = 'button:has(svg[data-qa="ci-Plus"])';
+
 export const PROCORE_SELECTORS = {
   // Login page - Procore uses a two-step login flow
   login: {
@@ -174,6 +181,40 @@ export const PROCORE_SELECTORS = {
           ],
         },
         /**
+         * STRUCTURAL ANCHOR for the Notes card, used when none of `section.precise` matches — AND the
+         * real add-a-note control, registered again below as `addButton.precise[0]`.
+         *
+         * Confirmed against a live Bid Board project (2026-08-18): none of the `aid-notes` /
+         * `data-qa="notes-section"` guesses above exist on the page, so the automation fell through to
+         * `loose` and correctly refused. The add-a-note control is an icon button whose SVG carries
+         * Procore's own QA hook:
+         *
+         *   <button><span class="StyledContent-core-12_53_0__sc-…"><svg data-qa="ci-Plus" name="Plus">
+         *
+         * `data-qa` is the only durable part. The styled-components class has the component-library
+         * VERSION baked into it (`core-12_53_0`) and `fYTJkl` / `f45h` are generated hashes — all three
+         * churn on every Procore release, so none of them may be used as a hook.
+         *
+         * On its own this selector is NOT specific enough to act on directly against the page — other
+         * cards may render the same "+" icon — which is why it is used two different ways rather than
+         * one:
+         *   1. as an ANCHOR TO CLIMB FROM (resolveNotesSectionByAnchor keeps only the innermost
+         *      ancestor that also carries an exact-text "Notes" label and passes the contamination
+         *      check — the inversion of `:has-text()`, which returns the OUTERMOST ancestor and is how
+         *      the loose tier ends up holding most of the page);
+         *   2. as the `addButton.precise` candidate searched for AFTER the section above resolves,
+         *      because once scoped inside a validated container the "other cards" ambiguity is gone —
+         *      it is safe to click there. Both roles are declared here, once, as the same literal
+         *      string, so a Procore change to this button updates both at once rather than drifting.
+         */
+        sectionAnchor: BIDBOARD_NOTES_ADD_BUTTON_ANCHOR,
+        /**
+         * Exact-text label that identifies the climbed container as the Notes card. `:text-is()` is an
+         * EXACT match, so unlike `:has-text("Notes")` it does not also match "Internal Notes" — a
+         * different Procore feature whose card would otherwise be indistinguishable.
+         */
+        sectionLabel: ':text-is("Notes")',
+        /**
          * Anything inside a resolved "Notes section" that proves it is NOT the Notes card but a wrapper
          * that swallowed the rest of the page. A container matching this is refused outright.
          */
@@ -181,6 +222,12 @@ export const PROCORE_SELECTORS = {
         /** The "+" add-a-note control inside the Notes section. */
         addButton: {
           precise: [
+            // CONFIRMED (2026-08-18) — the same real control `sectionAnchor` climbs from, searched for
+            // again here because this list is consulted separately, scoped inside the already-resolved
+            // section. Listed first: it is the one hook known to exist on the live page; the four
+            // guesses below have not been seen on it and stay only in case an older Bid Board layout
+            // still uses them.
+            BIDBOARD_NOTES_ADD_BUTTON_ANCHOR,
             'button.aid-add-note',
             '[class*="aid-add-note"]',
             'button[data-qa="qa-add-note-button"]',
@@ -203,10 +250,19 @@ export const PROCORE_SELECTORS = {
          */
         input: {
           precise: [
+            // CONFIRMED against a live project (2026-08-18). MUI renders a multiline TextField as TWO
+            // textareas — the real one, and an aria-hidden readonly shadow copy it uses to measure
+            // height. The shadow has no placeholder and no name, so it cannot match this selector; the
+            // `:not([aria-hidden="true"])` is belt-and-braces, because filling the shadow would be
+            // SILENT (it is readonly) and would surface only as an empty note at verify time.
+            //
+            // Deliberately NOT `textarea[name="value"]` on its own: `value` is a generic MUI field name
+            // that says nothing about this being the note body.
+            'textarea[name="value"][placeholder="Enter note"]:not([aria-hidden="true"])',
             'textarea[name="note"]',
             'textarea[name="body"]',
             'textarea[name="content"]',
-            'textarea[placeholder*="note" i]',
+            'textarea[placeholder*="note" i]:not([aria-hidden="true"])',
             '[role="textbox"][contenteditable="true"]',
           ],
           scopedOnly: ['div[contenteditable="true"]'],

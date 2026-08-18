@@ -398,6 +398,63 @@ export type NotesSectionResolution =
   | { ok: true; locator: Locator; selector: string }
   | { ok: false; reason: "not-found" | "loose-only" | "contaminated"; selector: string | null; message: string };
 
+/**
+ * How many levels above the "+" anchor the Notes card may sit. Bounded on purpose: an unbounded climb
+ * ends at <body>, which is precisely the page-sized wrapper this whole mechanism exists to avoid. Eight
+ * covers the observed nesting (button > span > div > … > card) with slack for a layout change.
+ */
+const ANCHOR_CLIMB_LIMIT = 8;
+/** Bound on how many "+" controls are considered, so a page full of icon buttons cannot spin. */
+const ANCHOR_CANDIDATE_LIMIT = 12;
+
+/**
+ * Does this container carry an exact-text "Notes" label? Fails CLOSED — an unreadable container is not
+ * a labelled one, same posture as isPlausibleNotesSection.
+ */
+async function holdsNotesLabel(container: Locator): Promise<boolean> {
+  const count = await container
+    .locator(PROCORE_SELECTORS.bidboard.newUi.notes.sectionLabel)
+    .count()
+    .catch(() => -1);
+  return count > 0;
+}
+
+/**
+ * Resolve the Notes card structurally, by climbing from the "+" control rather than guessing a class.
+ *
+ * Why this exists: every `section.precise` candidate was an educated guess at Procore's markup, and a
+ * live project (2026-08-18) has none of them — so production fell through to `loose` and refused. More
+ * guesses would only move the next failure, because the guessed hooks (`aid-notes`, styled-components
+ * hashes) are exactly the things Procore churns.
+ *
+ * The rule: take the INNERMOST ancestor of a "+" button that (a) carries an exact-text "Notes" label and
+ * (b) passes the contamination check. Innermost is the whole point — `:has-text()` yields the OUTERMOST
+ * ancestor, which is how the loose tier ends up holding most of the page.
+ *
+ * The climb stops at the first ancestor that is labelled but CONTAMINATED, rather than continuing: once
+ * a container has grown large enough to swallow the description field, every wider one does too, so
+ * continuing could only produce a worse match than the one just rejected.
+ */
+export async function resolveNotesSectionByAnchor(
+  page: Scope,
+): Promise<{ locator: Locator; selector: string } | null> {
+  const anchorSelector = PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor;
+  const anchors = page.locator(anchorSelector);
+  const total = await anchors.count().catch(() => 0);
+  for (let i = 0; i < Math.min(total, ANCHOR_CANDIDATE_LIMIT); i += 1) {
+    const anchor = anchors.nth(i);
+    if (!(await anchor.isVisible().catch(() => false))) continue;
+    let node: Locator = anchor;
+    for (let depth = 1; depth <= ANCHOR_CLIMB_LIMIT; depth += 1) {
+      node = node.locator("xpath=..");
+      if (!(await holdsNotesLabel(node))) continue;
+      if (!(await isPlausibleNotesSection(node))) break;
+      return { locator: node, selector: `${anchorSelector} ⇑${depth} + exact-text "Notes"` };
+    }
+  }
+  return null;
+}
+
 export async function resolveNotesSection(
   page: Scope,
   options?: { timeoutMs?: number; projectLabel?: string },
@@ -406,6 +463,14 @@ export async function resolveNotesSection(
   const where = options?.projectLabel ? ` on project ${options.projectLabel}` : "";
   const precise = await firstVisible(page, selectors.section.precise, options?.timeoutMs ?? SECTION_TIMEOUT_MS);
   if (!precise) {
+    // Before reporting a refusal, try the structural anchor. It is attempted only AFTER the precise
+    // tier so a real hook (if Procore ever ships one) still wins on speed, and it is validated by the
+    // same contamination check as everything else — it is a different way to FIND the card, not a
+    // weaker standard for accepting one.
+    const anchored = await resolveNotesSectionByAnchor(page);
+    if (anchored) {
+      return { ok: true, locator: anchored.locator, selector: anchored.selector };
+    }
     // Distinguish "nothing matched" from "only the loose text-shaped guesses matched". Production
     // refuses either way, but the operator needs to know which — the second means the docs-shaped
     // guess is on the page and a real structural hook has to be found to replace it.

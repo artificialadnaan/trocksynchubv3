@@ -23,6 +23,7 @@ const {
   NOTE_HARD_CHAR_CAP,
   MIN_NAVIGATION_BUDGET_MS,
   resolveNotesSection,
+  resolveNotesSectionByAnchor,
   resolveEditorScopes,
   findVisibleRoleMatch,
   actableCandidates,
@@ -118,6 +119,19 @@ function matchNodes(dom: FakeDom, selector: string, within: string[] | null): Fa
   });
 }
 
+/**
+ * Real Playwright's `locator.locator('xpath=..')` evaluates the xpath relative to each node the
+ * current locator resolved to, so it returns that node's IMMEDIATE parent element — the standard
+ * way to climb one level in a chain (used by resolveNotesSectionByAnchor's ancestor walk). Modelled
+ * here rather than approximated: `.parent` already exists on every FakeNode, so this is a faithful
+ * one-line translation of the real semantic, not a softened stand-in for it. Deduped, because two
+ * resolved nodes sharing one parent must not fan out into two copies of it.
+ */
+function parentsOf(dom: FakeDom, current: FakeNode[]): FakeNode[] {
+  const parentIds = new Set(current.map((n) => n.parent).filter((id): id is string => Boolean(id)));
+  return dom.nodes.filter((n) => parentIds.has(n.id));
+}
+
 function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): any {
   const locator: any = {
     first: () => makeLocator(dom, () => resolve().slice(0, 1), selector),
@@ -171,7 +185,10 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): an
       dom.fills.push({ id: target.id, value });
       target.text = value;
     },
-    locator: (nested: string) => makeLocator(dom, () => matchNodes(dom, nested, resolve().map((n) => n.id)), nested),
+    locator: (nested: string) =>
+      nested === "xpath=.."
+        ? makeLocator(dom, () => parentsOf(dom, resolve()), nested)
+        : makeLocator(dom, () => matchNodes(dom, nested, resolve().map((n) => n.id)), nested),
     getByRole: (role: string, opts?: { name?: RegExp | string }) =>
       makeLocator(dom, () => matchRole(dom, role, opts, resolve().map((n) => n.id))),
   };
@@ -239,6 +256,14 @@ function notesFixture(opts: {
   renderTransform?: (typed: string) => string;
   /** Put the editor in a clean dialog and the only Create button in the section. */
   editorInDialogCreateInSection?: boolean;
+  /**
+   * Model the LIVE page reported 2026-08-18: no `aid-notes` class anywhere, just an exact-text
+   * "Notes" label a few levels above a `button:has(svg[data-qa="ci-Plus"])` add control. Everything
+   * downstream (editor, createBtn, contamination via `contaminatedSection`) is unchanged — only how
+   * the same "notesSection" container gets FOUND differs, so this fixture exercises the anchor-climb
+   * path with the same behavioural coverage the `aid-notes` fixtures already have.
+   */
+  anchorOnly?: boolean;
 } = {}): FakeDom {
   const createRenders = opts.createRenders ?? true;
   const createClosesEditor = opts.createClosesEditor ?? true;
@@ -327,18 +352,38 @@ function notesFixture(opts: {
   ];
 
   if (!opts.withoutSection) {
-    nodes.push({
-      id: "notesSection",
-      parent: "page",
-      matches: ['div.aid-notes', '[class*="aid-notes"]'],
-      text: "Notes",
-    });
-    nodes.push({
-      id: "addBtn",
-      parent: opts.addButtonOutsideSection ? "page" : "notesSection",
-      matches: ['button.aid-add-note'],
-      onClick: openEditor,
-    });
+    if (opts.anchorOnly) {
+      // The card itself carries no class and no text of its own — the "Notes" label is a HEADING
+      // node nested inside it, exactly as a real card renders (<div class="card"><h3>Notes</h3>…).
+      // holdsNotesLabel does a genuine DESCENDANT search (the only thing Playwright's `.locator()`
+      // scoping can do), so self-labelling the container — the first version of this fixture did
+      // that — would silently test something no real page produces.
+      nodes.push({ id: "notesSection", parent: "page", matches: [], text: "" });
+      nodes.push({ id: "notesLabel", parent: "notesSection", matches: [':text-is("Notes")'], text: "Notes" });
+      // Two unclassed wrappers between the card and the button — the anchor climb has to pass through
+      // them rather than landing on the label in one hop, matching the reported live nesting.
+      nodes.push({ id: "notesWrap1", parent: "notesSection", matches: [] });
+      nodes.push({ id: "notesWrap2", parent: "notesWrap1", matches: [] });
+      nodes.push({
+        id: "addBtn",
+        parent: opts.addButtonOutsideSection ? "page" : "notesWrap2",
+        matches: ['button:has(svg[data-qa="ci-Plus"])'],
+        onClick: openEditor,
+      });
+    } else {
+      nodes.push({
+        id: "notesSection",
+        parent: "page",
+        matches: ['div.aid-notes', '[class*="aid-notes"]'],
+        text: "Notes",
+      });
+      nodes.push({
+        id: "addBtn",
+        parent: opts.addButtonOutsideSection ? "page" : "notesSection",
+        matches: ['button.aid-add-note'],
+        onClick: openEditor,
+      });
+    }
   }
 
   for (const existing of opts.existingNotes ?? []) {
@@ -728,6 +773,27 @@ describe("postBidBoardProjectNote", () => {
     expect(result).toMatchObject({ posted: false, skipped: true });
     expect(navigateToProjectMock).not.toHaveBeenCalled();
   });
+
+  // THE regression test for the live failure reported 2026-08-18: "Only the loose (text-shaped)
+  // Notes-section candidates matched … refusing to act". No `aid-notes` class on the page — the note
+  // must now post via the structural anchor instead of refusing forever.
+  it("posts via the structural anchor when the page has no aid-notes class anywhere", async () => {
+    const dom = notesFixture({ anchorOnly: true });
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    expect(dom.fills).toEqual([{ id: "editor", value: NOTE }]);
+    expect(dom.actions).toEqual(["click:addBtn", "fill:editor", "click:createBtn"]);
+  });
+
+  it("still refuses via the anchor path if the climbed container is contaminated", async () => {
+    const dom = notesFixture({ anchorOnly: true, contaminatedSection: true });
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(dom.fills).toEqual([]);
+    expect(node(dom, "descField")!.text).toBe("Existing project description — must never be overwritten");
+  });
 });
 
 // These cover the functions the prober and the production path now SHARE. Testing them directly is the
@@ -760,6 +826,135 @@ describe("shared resolvers (production and prober call these same functions)", (
       const result = await resolveNotesSection(makePage(notesFixture({ contaminatedSection: true })), FAST_SECTION);
       expect(result).toMatchObject({ ok: false, reason: "contaminated" });
       expect((result as any).message).toMatch(/page-level wrapper/i);
+    });
+
+    // Regression coverage for the live page reported 2026-08-18: NONE of the `aid-notes` guesses
+    // exist, so without the anchor fallback this would report "loose-only" and refuse forever.
+    it("falls back to the structural anchor when no aid-notes class exists on the page", async () => {
+      const result = await resolveNotesSection(makePage(notesFixture({ anchorOnly: true })), FAST_SECTION);
+      expect(result).toMatchObject({ ok: true });
+      expect((result as any).selector).toContain('svg[data-qa="ci-Plus"]');
+    });
+
+    it("still refuses when the anchor path is ALSO contaminated", async () => {
+      // Reuses contaminatedSection, which parents descField onto "notesSection" regardless of which
+      // tier found that container — proving the contamination check applies identically to a
+      // climbed-to container, not just a CSS-matched one.
+      const result = await resolveNotesSection(
+        makePage(notesFixture({ anchorOnly: true, contaminatedSection: true })),
+        FAST_SECTION,
+      );
+      expect(result).toMatchObject({ ok: false, reason: "not-found" });
+    });
+
+    it("prefers a real aid-notes match over the anchor when both exist", async () => {
+      // The anchor is a fallback, tried only after `section.precise` misses — if a future Procore
+      // build ships a real hook, that hook must still win.
+      const dom = notesFixture();
+      dom.nodes.push({
+        id: "decoyLabel",
+        parent: "page",
+        matches: [':text-is("Notes")'],
+        text: "Notes",
+      });
+      dom.nodes.push({
+        id: "decoyAnchor",
+        parent: "decoyLabel",
+        matches: ['button:has(svg[data-qa="ci-Plus"])'],
+      });
+      const result = await resolveNotesSection(makePage(dom), FAST_SECTION);
+      expect(result).toMatchObject({ ok: true, selector: "div.aid-notes" });
+    });
+  });
+
+  describe("resolveNotesSectionByAnchor", () => {
+    it("climbs past unclassed wrappers to the labelled, uncontaminated card", async () => {
+      const dom = notesFixture({ anchorOnly: true });
+      const result = await resolveNotesSectionByAnchor(makePage(dom));
+      expect(result).not.toBeNull();
+      expect(await result!.locator.getAttribute("data-never-set")).toBeNull(); // it's a real locator
+      // The climbed container IS "notesSection" — proven by asking it for the add button it should
+      // contain, exactly as production's next step (resolveEditorScopes → click) would.
+      const nestedAdd = await result!.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
+      expect(nestedAdd).toBe(1);
+    });
+
+    it("skips a decoy '+' button that never climbs to a Notes label, and finds the real one", async () => {
+      const dom = notesFixture({ anchorOnly: true });
+      // A decoy plus-button elsewhere on the page, inside a DIFFERENT labelled feature ("Internal
+      // Notes" is a real, distinct Procore feature — :text-is is an exact match, so it must not
+      // collide with "Notes"). The label is a descendant HEADING of the decoy card, same shape as
+      // the real one. Pushed FIRST so it is tried before the real anchor.
+      dom.nodes.unshift(
+        { id: "internalNotesCard", parent: "page", matches: [], text: "" },
+        { id: "internalNotesLabel", parent: "internalNotesCard", matches: [':text-is("Internal Notes")'], text: "Internal Notes" },
+        { id: "decoyAnchor", parent: "internalNotesCard", matches: ['button:has(svg[data-qa="ci-Plus"])'] },
+      );
+
+      const result = await resolveNotesSectionByAnchor(makePage(dom));
+      expect(result).not.toBeNull();
+      expect(result!.locator).not.toBeNull();
+      // It resolved to the REAL card, not the decoy's — proven the same way as the happy-path test.
+      const editorHost = await result!.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
+      expect(editorHost).toBe(1);
+    });
+
+    it("stops at the FIRST labelled ancestor even if it is contaminated, rather than climbing past it", async () => {
+      // A clean, labelled grandparent exists further up — the documented rule says the climb must
+      // stop at the nearer labelled-but-contaminated one instead of continuing to find it. Both
+      // cards carry their label as a descendant HEADING, not as their own text — the shape a real
+      // card renders, and the shape holdsNotesLabel's descendant search actually looks for.
+      const dom: FakeDom = {
+        nodes: [
+          { id: "page", matches: [] },
+          { id: "outerCleanCard", parent: "page", matches: [], text: "" },
+          { id: "outerCleanLabel", parent: "outerCleanCard", matches: [':text-is("Notes")'], text: "Notes" },
+          { id: "outerWrap", parent: "outerCleanCard", matches: [] },
+          { id: "innerContaminatedCard", parent: "outerWrap", matches: [], text: "" },
+          { id: "innerContaminatedLabel", parent: "innerContaminatedCard", matches: [':text-is("Notes")'], text: "Notes" },
+          {
+            id: "innerDescField",
+            parent: "innerContaminatedCard",
+            matches: ['textarea[name="description"]', '[name*="description" i]'],
+            attrs: { name: "description" },
+          },
+          { id: "innerWrap", parent: "innerContaminatedCard", matches: [] },
+          { id: "anchorBtn", parent: "innerWrap", matches: ['button:has(svg[data-qa="ci-Plus"])'] },
+        ],
+        actions: [],
+        fills: [],
+        keys: [],
+      };
+
+      const result = await resolveNotesSectionByAnchor(makePage(dom));
+      expect(result).toBeNull();
+    });
+
+    it("gives up when the label sits beyond the climb bound", async () => {
+      // 10 plain wrappers between the anchor and its label — past ANCHOR_CLIMB_LIMIT (8), so the
+      // climb must give up rather than keep going indefinitely. The label is a descendant heading of
+      // "farCard", a sibling of the wrapper chain — not an ancestor of any wrapper — so even an
+      // unbounded climb could only reach it by reaching farCard itself, which the bound prevents.
+      const nodes: FakeNode[] = [
+        { id: "page", matches: [] },
+        { id: "farCard", parent: "page", matches: [], text: "" },
+        { id: "farLabel", parent: "farCard", matches: [':text-is("Notes")'], text: "Notes" },
+      ];
+      let parent = "farCard";
+      for (let i = 0; i < 10; i += 1) {
+        const id = `wrap${i}`;
+        nodes.push({ id, parent, matches: [] });
+        parent = id;
+      }
+      nodes.push({ id: "anchorBtn", parent, matches: ['button:has(svg[data-qa="ci-Plus"])'] });
+
+      const result = await resolveNotesSectionByAnchor(makePage({ nodes, actions: [], fills: [], keys: [] }));
+      expect(result).toBeNull();
+    });
+
+    it("returns null when no anchor button exists at all", async () => {
+      const result = await resolveNotesSectionByAnchor(makePage(notesFixture({ withoutSection: true })));
+      expect(result).toBeNull();
     });
   });
 
@@ -957,6 +1152,24 @@ describe("probeBidBoardNotesUi (the prober's wiring)", () => {
     expect(dom.actions).toEqual([]);
     expect(result.editorOpened).toBe(false);
     expect(result.editorProbeSkippedReason).toBeNull();
+  });
+
+  // Parity check for the anchor fallback: the prober calls resolveNotesSection DIRECTLY (see the
+  // "shared resolvers" describe above), so this is really proving the WIRING reports it, not the
+  // resolver logic again. What matters operationally: an operator reading this output must see the
+  // fix reflected, or they would conclude the automation is still broken when it is not.
+  it("reports the anchor fallback the same way it reports a precise match", async () => {
+    const dom = notesFixture({ anchorOnly: true });
+    const result = await probeBidBoardNotesUi(makePage(dom), PROBE);
+
+    expect(result.sectionVerdict.ok).toBe(true);
+    expect(result.looseSectionOnly).toBe(false);
+    expect(result.sectionContaminated).toBe(false);
+    expect(result.matchedSection).toContain('svg[data-qa="ci-Plus"]');
+    // The add button is the SAME confirmed hook, now also registered in addButton.precise — the
+    // prober's addButtonInSection probe (scoped to the resolved section) must find it too.
+    expect(result.matchedAddButton).toBe('button:has(svg[data-qa="ci-Plus"])');
+    expect(result.editorOpened).toBe(true);
   });
 });
 
