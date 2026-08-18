@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The CRM activity note is posted by createBidBoardProjectFromDeal and is FAIL-OPEN: creating the
 // project is the critical path, a note is not. These tests pin two things:
@@ -91,7 +91,16 @@ function crmArgs(overrides: Record<string, any> = {}) {
 }
 
 describe("createBidBoardProjectFromDeal — CRM activity note ordering and fail-open", () => {
+  afterEach(() => {
+    delete process.env.BIDBOARD_NOTES_ENABLED;
+  });
+
   beforeEach(async () => {
+    // These tests describe the behaviour of the note step when it RUNS. It is gated OFF by default in
+    // production (BIDBOARD_NOTES_ENABLED) until the Procore selectors have been validated with the
+    // prober, so it has to be switched on explicitly here. The gate itself is covered in
+    // bidboard-notes-env-gate.test.ts.
+    process.env.BIDBOARD_NOTES_ENABLED = "true";
     vi.clearAllMocks();
     callOrder.length = 0;
     setNoteOutcome({ posted: true });

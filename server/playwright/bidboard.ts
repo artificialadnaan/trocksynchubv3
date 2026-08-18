@@ -43,6 +43,9 @@ import { Locator, Page } from "playwright";
 import { detectPageAuthState, ensureLoggedIn } from "./auth";
 import { BIDBOARD_STAGE_TAB_LABELS, type BidBoardStageTabKind, PROCORE_SELECTORS, getBidBoardUrlNew } from "./selectors";
 import { randomDelay, takeScreenshot, withBrowserLock, withRetry, waitForNavigation } from "./browser";
+// Static import is safe: bidboard-notes-flag has no imports of its own, so it cannot close the cycle
+// that forces bidboard-notes itself to be loaded dynamically at the call site.
+import { isBidBoardNotesEnabled } from "./bidboard-notes-flag";
 import { log } from "../index";
 import { storage, type SourceSystem } from "../storage";
 
@@ -2244,7 +2247,20 @@ export async function createBidBoardProjectFromDeal(
      * (The description-verify retry further down still runs before the mapping and has exactly this
      * exposure. That is PRE-EXISTING, not something the note introduced, and is out of scope here.)
      */
+    // Read once per create. Gates EVERY note-related side effect below — not just the browser work but
+    // the audit/automation-log rows the skip branches would otherwise write — so that with the flag off
+    // this function behaves exactly as it did before the note feature existed.
+    const notesAutomationEnabled = isBidBoardNotesEnabled();
+
     const postCrmActivityNoteFailOpen = async (noteProjectId: string): Promise<void> => {
+      // KILL SWITCH FIRST — before ensureLoggedIn, before the dynamic import, before any navigation.
+      // With the flag off this costs nothing: the Bid Board create is byte-for-byte the automation it
+      // was before the note feature existed. The selectors are unvalidated guesses, so until the prober
+      // has been run against a real project and the real hooks substituted, the step would navigate and
+      // then burn SECTION_TIMEOUT_MS failing to find a Notes card — on EVERY create, holding the global
+      // browser lock while exports, other creates and the portfolio automation queue behind it.
+      // Sequence: run the prober → substitute the hooks → set BIDBOARD_NOTES_ENABLED=true.
+      if (!notesAutomationEnabled) return;
       if (!noteProjectId || !projectData.crmActivityLog?.trim()) return;
       try {
         const { page: notePage, success: loggedIn } = await ensureLoggedIn();
@@ -2337,21 +2353,27 @@ export async function createBidBoardProjectFromDeal(
       const claimedByOtherDeal = Boolean(
         adoptedOwner && !(adoptedOwner.sourceSystem === sourceSystem && adoptedOwner.sourceDealId === dealId),
       );
+      // The ownership guard stays the OUTER branch on purpose. Folding the flag into this condition
+      // would make a claimed project fall through to the else — harmless today because the helper
+      // returns early when the flag is off, but one edit away from leaking this deal's sales history
+      // onto another deal's project. The flag only suppresses the bookkeeping inside it.
       if (claimedByOtherDeal) {
-        log(
-          `Not posting the CRM activity note for ${sourceSystem} deal ${dealId}: BidBoard project ${existingMapping.bidboardProjectId} (number ${projectNumber}) is linked to ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
-          "playwright",
-        );
-        await recordBidBoardNoteOutcome({
-          projectId: existingMapping.bidboardProjectId,
-          projectName: projectData.name,
-          sourceSystem,
-          sourceDealId: dealId,
-          noteChars: projectData.crmActivityLog?.length ?? 0,
-          posted: false,
-          skipped: true,
-          skipReason: `project is claimed by ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
-        });
+        if (notesAutomationEnabled) {
+          log(
+            `Not posting the CRM activity note for ${sourceSystem} deal ${dealId}: BidBoard project ${existingMapping.bidboardProjectId} (number ${projectNumber}) is linked to ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
+            "playwright",
+          );
+          await recordBidBoardNoteOutcome({
+            projectId: existingMapping.bidboardProjectId,
+            projectName: projectData.name,
+            sourceSystem,
+            sourceDealId: dealId,
+            noteChars: projectData.crmActivityLog?.length ?? 0,
+            posted: false,
+            skipped: true,
+            skipReason: `project is claimed by ${adoptedOwner!.sourceSystem} deal ${adoptedOwner!.sourceDealId}`,
+          });
+        }
       } else {
         await postCrmActivityNoteFailOpen(existingMapping.bidboardProjectId);
       }
@@ -2602,7 +2624,7 @@ export async function createBidBoardProjectFromDeal(
     // mapping, and a later run can post the note.
     if (mappingPersisted) {
       await postCrmActivityNoteFailOpen(result.projectId);
-    } else if (projectData.crmActivityLog?.trim()) {
+    } else if (notesAutomationEnabled && projectData.crmActivityLog?.trim()) {
       log(
         `Not posting the CRM activity note on BidBoard project ${result.projectId}: its sync mapping was not persisted`,
         "playwright",
