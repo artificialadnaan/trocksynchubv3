@@ -32,6 +32,14 @@ const {
   CREATE_BUTTON_ROLE,
 } = await import("../server/playwright/bidboard-notes.ts");
 const { probeBidBoardNotesUi } = await import("../server/playwright/bidboard-notes-probe.ts");
+const { PROCORE_SELECTORS } = await import("../server/playwright/selectors.ts");
+
+/**
+ * The REAL label selector, not a copy of it. A fixture that hard-codes the literal keeps matching its
+ * own copy after production's selector changes, so the suite would go on proving the climb works with a
+ * selector production no longer uses.
+ */
+const NOTES_LABEL = PROCORE_SELECTORS.bidboard.newUi.notes.sectionLabel;
 
 const NOTE = [
   "CRM Activity Log — DFW-2-12345-ab (as of Aug 17, 2026)",
@@ -52,6 +60,12 @@ const NOTE = [
 type FakeNode = {
   id: string;
   parent?: string;
+  /**
+   * The element's tag name, lowercased. Only the page-root check reads it, and defaulting to "div"
+   * means an ordinary fixture node is never mistaken for `<body>`/`<main>` — the fixtures that DO want
+   * to exercise that rule say so explicitly.
+   */
+  tag?: string;
   /** Selector strings this element matches (use the literal strings from PROCORE_SELECTORS). */
   matches: string[];
   role?: string;
@@ -132,6 +146,21 @@ function parentsOf(dom: FakeDom, current: FakeNode[]): FakeNode[] {
   return dom.nodes.filter((n) => parentIds.has(n.id));
 }
 
+/**
+ * `xpath=self::html|self::body|self::main` — the SELF check, which a CSS `.locator()` cannot express
+ * because CSS only ever searches descendants. Real Playwright evaluates it against each resolved node
+ * and keeps the ones whose tag matches, so it answers "is this node itself a page root?" in one count.
+ * Modelled by tag, like parentsOf is modelled by `.parent`, rather than by literal-string matching —
+ * a literal matcher would return 0 for every fixture and the rule would be untestable here.
+ */
+function selfTagMatches(current: FakeNode[], xpath: string): FakeNode[] {
+  const tags = xpath
+    .replace(/^xpath=/, "")
+    .split("|")
+    .map((part) => part.trim().replace(/^self::/, "").toLowerCase());
+  return current.filter((n) => tags.includes((n.tag ?? "div").toLowerCase()));
+}
+
 function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): any {
   const locator: any = {
     first: () => makeLocator(dom, () => resolve().slice(0, 1), selector),
@@ -163,7 +192,15 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): an
     evaluate: async (fn: any) => {
       const target = resolve()[0];
       if (!target) throw new Error("evaluate on nothing");
-      return fn({ outerHTML: `<div id="${target.id}">${textOf(dom, target)}</div>` });
+      // `id` and `tagName` are here so a test can assert WHICH element resolved, the way the real-
+      // Chromium suite does. An assertion that merely counts what a container holds is satisfied by
+      // every wrapper on the climb path and so cannot tell the card from the page.
+      return fn({
+        id: target.id,
+        tagName: (target.tag ?? "div").toUpperCase(),
+        textContent: textOf(dom, target),
+        outerHTML: `<div id="${target.id}">${textOf(dom, target)}</div>`,
+      });
     },
     evaluateAll: async (fn: any) =>
       fn(
@@ -188,7 +225,9 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): an
     locator: (nested: string) =>
       nested === "xpath=.."
         ? makeLocator(dom, () => parentsOf(dom, resolve()), nested)
-        : makeLocator(dom, () => matchNodes(dom, nested, resolve().map((n) => n.id)), nested),
+        : nested.startsWith("xpath=self::")
+          ? makeLocator(dom, () => selfTagMatches(resolve(), nested), nested)
+          : makeLocator(dom, () => matchNodes(dom, nested, resolve().map((n) => n.id)), nested),
     getByRole: (role: string, opts?: { name?: RegExp | string }) =>
       makeLocator(dom, () => matchRole(dom, role, opts, resolve().map((n) => n.id))),
   };
@@ -359,7 +398,7 @@ function notesFixture(opts: {
       // scoping can do), so self-labelling the container — the first version of this fixture did
       // that — would silently test something no real page produces.
       nodes.push({ id: "notesSection", parent: "page", matches: [], text: "" });
-      nodes.push({ id: "notesLabel", parent: "notesSection", matches: [':text-is("Notes")'], text: "Notes" });
+      nodes.push({ id: "notesLabel", parent: "notesSection", matches: [NOTES_LABEL], text: "Notes" });
       // Two unclassed wrappers between the card and the button — the anchor climb has to pass through
       // them rather than landing on the label in one hop, matching the reported live nesting.
       nodes.push({ id: "notesWrap1", parent: "notesSection", matches: [] });
@@ -448,6 +487,36 @@ describe("postBidBoardProjectNote", () => {
     expect(result.error).toBeUndefined();
     expect(dom.actions).toEqual(["click:addBtn", "fill:editor", "click:createBtn"]);
     expect(dom.fills).toEqual([{ id: "editor", value: NOTE }]);
+  });
+
+  it("dismisses whatever the add click opened, even though nothing was typed", async () => {
+    // Cleanup used to be gated on `hasTyped` alone, so a click that opened something we then could not
+    // use — an unrelated modal, an upload dialog — was never dismissed, and the SHARED page went to the
+    // document sync (same browser lock, immediately after) with it still open. Nothing was typed, so
+    // there is no draft and no warning; the page still has to be put back.
+    const dom = notesFixture();
+    node(dom, "addBtn")!.onClick = (d) => {
+      d.nodes.push({ id: "strayModal", parent: "page", matches: ['[role="dialog"]'], text: "Upload a file" });
+    };
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(dom.actions).toContain("click:addBtn");
+    expect(dom.keys).toContain("Escape");
+    // No draft exists, so the operator must NOT be told one might be sitting there — that warning has
+    // to keep meaning what it says.
+    expect(result.error).not.toMatch(/WARNING:/);
+  });
+
+  it("presses nothing when it declines BEFORE clicking add", async () => {
+    // The other half of the same rule: a step that never touched the page must not go pressing keys on
+    // it. Escape on a shared page is not free — it closes whatever the previous job left open.
+    const dom = notesFixture({ withoutSection: true });
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(dom.actions).toEqual([]);
+    expect(dom.keys).toEqual([]);
   });
 
   it("NEVER fills Procore's Project Description when the note editor cannot be found", async () => {
@@ -859,7 +928,7 @@ describe("shared resolvers (production and prober call these same functions)", (
       dom.nodes.push({
         id: "decoyLabel",
         parent: "page",
-        matches: [':text-is("Notes")'],
+        matches: [NOTES_LABEL],
         text: "Notes",
       });
       dom.nodes.push({
@@ -873,24 +942,30 @@ describe("shared resolvers (production and prober call these same functions)", (
   });
 
   describe("resolveNotesSectionByAnchor", () => {
+    /**
+     * WHICH element resolved — the only assertion that can tell the card from a wrapper.
+     *
+     * The tests this replaces asserted `container.locator('button:has(…)').count() === 1`, described as
+     * proving the climbed container IS the notes section. It proves nothing: EVERY wrapper between the
+     * button and `<body>` contains that button, so the assertion held for the card, for the column, and
+     * for the page alike — which is why two of them stayed green with the climb's core rule deleted.
+     */
+    const resolvedId = async (result: any) => await result.locator.evaluate((el: any) => el.id);
+
     it("climbs past unclassed wrappers to the labelled, uncontaminated card", async () => {
       const dom = notesFixture({ anchorOnly: true });
       const result = await resolveNotesSectionByAnchor(makePage(dom));
       expect(result.ok).toBe(true);
       if (!result.ok) throw new Error("unreachable");
-      expect(await result.locator.getAttribute("data-never-set")).toBeNull(); // it's a real locator
-      // The climbed container IS "notesSection" — proven by asking it for the add button it should
-      // contain, exactly as production's next step (resolveEditorScopes → click) would.
-      const nestedAdd = await result.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
-      expect(nestedAdd).toBe(1);
+      expect(await resolvedId(result)).toBe("notesSection");
     });
 
-    it("skips a decoy '+' button that never climbs to a Notes label, and finds the real one", async () => {
+    it("resolves the REAL Notes card, not the Internal Notes card that owns an earlier '+'", async () => {
       const dom = notesFixture({ anchorOnly: true });
-      // A decoy plus-button elsewhere on the page, inside a DIFFERENT labelled feature ("Internal
-      // Notes" is a real, distinct Procore feature — :text-is is an exact match, so it must not
-      // collide with "Notes"). The label is a descendant HEADING of the decoy card, same shape as
-      // the real one. Pushed FIRST so it is tried before the real anchor.
+      // Procore's separate "Internal Notes" feature, with its own "+", FIRST in DOM order — the shape
+      // that made the old climb post the note into the wrong card and report success. Anchoring on the
+      // label means the decoy's "+" is never a starting point; the exactly-one-"+" rule then stops the
+      // climb below the wrapper that holds both cards.
       dom.nodes.unshift(
         { id: "internalNotesCard", parent: "page", matches: [], text: "" },
         { id: "internalNotesLabel", parent: "internalNotesCard", matches: [':text-is("Internal Notes")'], text: "Internal Notes" },
@@ -900,24 +975,21 @@ describe("shared resolvers (production and prober call these same functions)", (
       const result = await resolveNotesSectionByAnchor(makePage(dom));
       expect(result.ok).toBe(true);
       if (!result.ok) throw new Error("unreachable");
-      // It resolved to the REAL card, not the decoy's — proven the same way as the happy-path test.
-      const editorHost = await result.locator.locator('button:has(svg[data-qa="ci-Plus"])').count();
-      expect(editorHost).toBe(1);
+      expect(await resolvedId(result)).toBe("notesSection");
     });
 
-    it("stops at the FIRST labelled ancestor even if it is contaminated, rather than climbing past it", async () => {
-      // A clean, labelled grandparent exists further up — the documented rule says the climb must
-      // stop at the nearer labelled-but-contaminated one instead of continuing to find it. Both
-      // cards carry their label as a descendant HEADING, not as their own text — the shape a real
-      // card renders, and the shape holdsNotesLabel's descendant search actually looks for.
+    it("stops at the FIRST container that is too wide, rather than climbing past it", async () => {
+      // A clean, labelled grandparent exists further up. Contamination is MONOTONE — a wider container
+      // holds a superset, so it holds the description field too — which is why the climb stops here
+      // instead of continuing to a match that cannot actually be better.
       const dom: FakeDom = {
         nodes: [
           { id: "page", matches: [] },
           { id: "outerCleanCard", parent: "page", matches: [], text: "" },
-          { id: "outerCleanLabel", parent: "outerCleanCard", matches: [':text-is("Notes")'], text: "Notes" },
+          { id: "outerCleanLabel", parent: "outerCleanCard", matches: [NOTES_LABEL], text: "Notes" },
           { id: "outerWrap", parent: "outerCleanCard", matches: [] },
           { id: "innerContaminatedCard", parent: "outerWrap", matches: [], text: "" },
-          { id: "innerContaminatedLabel", parent: "innerContaminatedCard", matches: [':text-is("Notes")'], text: "Notes" },
+          { id: "innerContaminatedLabel", parent: "innerContaminatedCard", matches: [NOTES_LABEL], text: "Notes" },
           {
             id: "innerDescField",
             parent: "innerContaminatedCard",
@@ -933,36 +1005,64 @@ describe("shared resolvers (production and prober call these same functions)", (
       };
 
       const result = await resolveNotesSectionByAnchor(makePage(dom));
-      // The reviewer-flagged bug: a bare null here erases whether we found a real, contaminated card
-      // or found nothing at all — an operator reading this needs the difference, since "contaminated"
+      // The reviewer-flagged bug: a bare null here erases whether we found a real, too-wide card or
+      // found nothing at all — an operator reading this needs the difference, since "contaminated"
       // means fix the page-level wrapper and "not-found" means find a new selector entirely.
       expect(result).toMatchObject({ ok: false, reason: "contaminated" });
       if (result.ok || result.reason !== "contaminated") throw new Error("unreachable");
-      // ⇑2 proves it stopped at innerContaminatedCard (anchorBtn→innerWrap→innerContaminatedCard) and
-      // did NOT continue climbing to outerCleanCard, which would only be reachable at ⇑4.
-      expect(result.selector).toContain("⇑2");
+      // ⇑1 proves it stopped at the FIRST ancestor of the outer label (outerCleanCard, which holds the
+      // inner card's description field) — it did not climb on hunting for something cleaner.
+      expect(result.selector).toContain("⇑1");
     });
 
-    it("gives up when the label sits beyond the climb bound", async () => {
-      // 10 plain wrappers between the anchor and its label — past ANCHOR_CLIMB_LIMIT (8), so the
-      // climb must give up rather than keep going indefinitely. The label is a descendant heading of
-      // "farCard", a sibling of the wrapper chain — not an ancestor of any wrapper — so even an
-      // unbounded climb could only reach it by reaching farCard itself, which the bound prevents.
+    it("gives up when the '+' sits beyond the climb bound above the label", async () => {
+      // The label is buried 10 plain wrappers deep inside the card, and the card is the first ancestor
+      // that holds the "+". Past ANCHOR_CLIMB_LIMIT (8), so the climb must give up rather than keep
+      // going indefinitely — the bound is the last line of defence against ending at <body>.
       const nodes: FakeNode[] = [
         { id: "page", matches: [] },
-        { id: "farCard", parent: "page", matches: [], text: "" },
-        { id: "farLabel", parent: "farCard", matches: [':text-is("Notes")'], text: "Notes" },
+        { id: "card", parent: "page", matches: [], text: "" },
+        { id: "anchorBtn", parent: "card", matches: ['button:has(svg[data-qa="ci-Plus"])'] },
       ];
-      let parent = "farCard";
+      let parent = "card";
       for (let i = 0; i < 10; i += 1) {
         const id = `wrap${i}`;
         nodes.push({ id, parent, matches: [] });
         parent = id;
       }
-      nodes.push({ id: "anchorBtn", parent, matches: ['button:has(svg[data-qa="ci-Plus"])'] });
+      nodes.push({ id: "farLabel", parent, matches: [NOTES_LABEL], text: "Notes" });
 
       const result = await resolveNotesSectionByAnchor(makePage({ nodes, actions: [], fills: [], keys: [] }));
       expect(result).toEqual({ ok: false, reason: "not-found" });
+    });
+
+    it("refuses to resolve to <body>, and says it could not tell when a query fails", async () => {
+      // Two rules that only this fake DOM can drive cheaply. First: with nothing contaminating the page
+      // at all, the SELF page-root check is the thing that stops the climb — `notesSection` wins, not
+      // `body`. Second: a query that THROWS must not be read as "no", the way `.catch(() => 0)` did.
+      const build = (): FakeDom => ({
+        nodes: [
+          { id: "body", tag: "body", matches: [] },
+          { id: "notesSection", parent: "body", matches: [], text: "" },
+          { id: "notesLabel", parent: "notesSection", matches: [NOTES_LABEL], text: "Notes" },
+          { id: "addBtn", parent: "notesSection", matches: ['button:has(svg[data-qa="ci-Plus"])'] },
+        ],
+        actions: [],
+        fills: [],
+        keys: [],
+      });
+
+      const clean = await resolveNotesSectionByAnchor(makePage(build()));
+      expect(clean.ok).toBe(true);
+      if (!clean.ok) throw new Error("unreachable");
+      expect(await resolvedId(clean)).toBe("notesSection");
+
+      const broken = build();
+      broken.fail = { count: (selector) => selector === PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor };
+      const unreadable = await resolveNotesSectionByAnchor(makePage(broken));
+      // NOT "not-found". This module keeps `VisibleMatch.probeFailed` for exactly this distinction, and
+      // records that dropping a failure flag once caused the duplicate-note bug.
+      expect(unreadable).toMatchObject({ ok: false, reason: "unreadable" });
     });
 
     it("reports not-found (not contaminated) when no anchor button exists at all", async () => {
