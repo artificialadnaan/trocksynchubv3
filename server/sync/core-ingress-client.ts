@@ -55,6 +55,18 @@ export function buildServiceRfpIngressTargetUrl(
 ): string | null {
   const trimmed = baseUrl?.trim().replace(/\/+$/, "");
   if (!trimmed || !office) return null;
+  // HTTPS ONLY. This body carries the customer's name, contact email and site address, and the HMAC
+  // authenticates the bytes without concealing them — over plain http the whole payload is readable on
+  // the wire. A misconfigured base URL is the realistic way that happens, so it is refused at the point
+  // the URL is built rather than trusted to be right. Returning null keeps the feature inert, which is
+  // the same shape an absent secret already takes.
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
   return `${trimmed}/webhooks/crm/${encodeURIComponent(office)}/service-rfp/v1`;
 }
 
@@ -121,6 +133,12 @@ async function classifyResponse(response: Response): Promise<ServiceRfpIngressOu
     const reason = typeof body.reason === "string" ? body.reason : "unknown";
     return { kind: "terminal", status: 409, error: `Core refused the approval: ${reason}` };
   }
+
+  // Every remaining branch ignores the body, so it must be DISCARDED rather than left dangling: an
+  // unread response body keeps undici from reusing the connection, and the retryable branch below is the
+  // one that repeats — a provisioning gap answering 404/503 on every attempt would leak a connection per
+  // try until the dispatcher pool is exhausted.
+  await response.body?.cancel().catch(() => {});
 
   if (response.status === 404 || response.status === 408 || response.status === 429 || response.status >= 500) {
     return { kind: "retryable", status: response.status, error: `Core ingress returned ${response.status}` };
