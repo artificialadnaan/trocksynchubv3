@@ -65,12 +65,16 @@ export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subjec
       <p><strong>Row:</strong> service_rfp_core_outbox, keyed by source_system + source_deal_id + rfp_request_id</p>`;
 
   // Said in every failure branch because it is the first thing a reader needs in order to decide how
-  // fast to move: the handoff is fail-open by construction, so the approval completed and the Procore
-  // automation ran regardless. What is missing is only the card in Core's estimating lane.
+  // fast to move. It stops at what is actually known: the handoff never blocks or fails the approval,
+  // and the Procore automation is not gated on it. It does NOT claim the create succeeded — on the
+  // inline path this email is rendered BEFORE createBidBoardProjectFromDeal is even called (the
+  // handoff is awaited in front of it), and that create can fail on its own. Reporting an outcome
+  // nobody has observed would have an operator assume a Procore project exists when it may not.
   const unaffected = `
       <p>The approval itself is <strong>not</strong> affected: this handoff is fail-open, so the RFP was
-      approved and the Procore create ran regardless. What is missing is the job in Core's service
-      estimating lane, which an estimator can still be given by hand in the meantime.</p>`;
+      approved and the Procore create proceeds independently of it — this alert reports nothing about
+      the outcome of that create, which surfaces on its own. What is missing here is the job in Core's
+      service estimating lane, which an estimator can still be given by hand in the meantime.</p>`;
 
   if (e.kind === "request_rejected") {
     return {
@@ -138,6 +142,55 @@ export interface ServiceRfpCoreDeliveryOutcome {
 }
 
 /**
+ * Per-office serialization of the read-decide-send-upsert transition.
+ *
+ * recordPushOutcomeAndMaybeAlert takes no lock and documents exactly why: its original caller, the
+ * stage-sync cycle, is ALREADY serialized by bidboardStageSyncRunning, so the only overlap it can see
+ * is a rare manual trigger. That is a precondition, and this caller does not meet it — service
+ * approvals are fire-and-forget behind a 202, they can complete concurrently, and DFW is the only
+ * Core tenant, so every Core alert in flight contends for one primary-key row. Interleaved, two
+ * failures both read 'ok', both decide "first failure", and both email; a success and a failure
+ * racing can leave the state describing whichever upsert happened to land last.
+ *
+ * So the caller supplies the serialization the shared module assumes, rather than the shared module
+ * growing a lock its owner deliberately declined.
+ *
+ * A promise chain per office, not a lock: it cannot deadlock, and a predecessor is waited on for at
+ * most CHAIN_WAIT_MS, so a wedged dispatch DELAYS the next alert instead of silencing the stream. The
+ * degraded case therefore degrades to exactly today's behaviour — a possible duplicate ops email —
+ * which is the trade this table's owner already accepted over coordination machinery.
+ */
+const CHAIN_WAIT_MS = 5_000;
+const alertChain = new Map<string, Promise<unknown>>();
+
+async function serializedByOffice<T>(officeSlug: string, work: () => Promise<T>): Promise<T> {
+  const predecessor = alertChain.get(officeSlug);
+  const mine = (async () => {
+    if (predecessor) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        predecessor,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, CHAIN_WAIT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
+    return work();
+  })();
+
+  // The chain link must never reject, or the next caller's await would throw someone else's error.
+  const link = mine.catch(() => undefined);
+  alertChain.set(officeSlug, link);
+  try {
+    return await mine;
+  } finally {
+    // Only if nobody has queued behind us; otherwise the newer link is the live tail.
+    if (alertChain.get(officeSlug) === link) alertChain.delete(officeSlug);
+  }
+}
+
+/**
  * Record one Core delivery outcome against the shared debounce, rendered in this stream's own words.
  * Never throws — recordPushOutcomeAndMaybeAlert wraps everything, because alerting must never be able
  * to fail the work it is reporting on.
@@ -145,18 +198,21 @@ export interface ServiceRfpCoreDeliveryOutcome {
 export async function recordServiceRfpCoreDelivery(
   outcome: ServiceRfpCoreDeliveryOutcome,
 ): Promise<{ action: PushAlertAction } | { skipped: true }> {
-  return recordPushOutcomeAndMaybeAlert(
-    {
-      pushResult: {
-        ok: outcome.ok,
-        attempts: outcome.attempts,
-        status: outcome.status,
-        error: outcome.error,
-        rejected: !outcome.ok && outcome.terminal === true,
-        terminalFailure: !outcome.ok && outcome.terminal !== true,
+  const officeSlug = serviceRfpCoreAlertOffice(outcome.office);
+  return serializedByOffice(officeSlug, () =>
+    recordPushOutcomeAndMaybeAlert(
+      {
+        pushResult: {
+          ok: outcome.ok,
+          attempts: outcome.attempts,
+          status: outcome.status,
+          error: outcome.error,
+          rejected: !outcome.ok && outcome.terminal === true,
+          terminalFailure: !outcome.ok && outcome.terminal !== true,
+        },
+        officeSlug,
       },
-      officeSlug: serviceRfpCoreAlertOffice(outcome.office),
-    },
-    { render: renderServiceRfpCoreAlertEmail },
+      { render: renderServiceRfpCoreAlertEmail },
+    ),
   );
 }

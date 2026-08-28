@@ -1,13 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The renderer is pure, but its module imports escapeHtml (and the shared orchestrator) from
 // bidboard-crm-alert, which pulls in ../db and ../email-service at load. Stub the chain, not the
 // escaping — the point of this suite is the exact WORDING an operator receives.
+//
+// bidboard-crm-alert itself is REAL here, so the serialization test below exercises the actual
+// read-decide-send-upsert state machine rather than a double of it.
+const poolMock = vi.hoisted(() => ({ query: vi.fn(async () => ({ rows: [] as any[] })) }));
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
-vi.mock("../server/db.ts", () => ({ pool: { query: vi.fn(async () => ({ rows: [] })) } }));
+vi.mock("../server/db.ts", () => ({ pool: poolMock }));
 vi.mock("../server/email-service.ts", () => ({ sendEmail: vi.fn(async () => ({ success: true })) }));
 
-const { renderServiceRfpCoreAlertEmail, serviceRfpCoreAlertOffice } = await import(
+const { renderServiceRfpCoreAlertEmail, serviceRfpCoreAlertOffice, recordServiceRfpCoreDelivery } = await import(
   "../server/sync/service-rfp-core-alert.ts"
 );
 
@@ -90,6 +94,74 @@ describe("renderServiceRfpCoreAlertEmail", () => {
 
     expect(htmlBody).not.toContain("<script>");
     expect(htmlBody).toContain("&lt;script&gt;");
+  });
+
+  it("does not claim the Procore create has already run", () => {
+    // The inline handoff alert is rendered BEFORE createBidBoardProjectFromDeal is called, and that
+    // create can itself fail. Telling an operator it "ran regardless" reports an outcome nobody has
+    // observed yet, and invites them to assume a Procore project exists when it may not.
+    for (const kind of ["request_rejected", "terminal_failure", "unconfirmed"] as const) {
+      const { htmlBody } = render(kind);
+      expect(htmlBody, kind).not.toMatch(/create (ran|succeeded|completed|went ahead)/i);
+      expect(htmlBody, kind).toMatch(/proceeds|attempted|independently/i);
+    }
+  });
+});
+
+describe("recordServiceRfpCoreDelivery concurrency", () => {
+  const OLD_RECIPIENT = process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+
+  beforeEach(() => {
+    // Without a recipient the orchestrator is inert and never reaches the DB at all.
+    process.env.BIDBOARD_CRM_ALERT_RECIPIENT = "ops@trock.test";
+    poolMock.query.mockReset();
+  });
+
+  afterEach(() => {
+    if (OLD_RECIPIENT === undefined) delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    else process.env.BIDBOARD_CRM_ALERT_RECIPIENT = OLD_RECIPIENT;
+  });
+
+  it("serializes the read-decide-write transition per office", async () => {
+    // recordPushOutcomeAndMaybeAlert takes no lock and documents why: its original caller, the
+    // stage-sync cycle, is already serialized by bidboardStageSyncRunning. THIS caller is not —
+    // approvals are fire-and-forget behind a 202, and DFW is the only Core tenant, so every Core alert
+    // in flight contends for one row. Interleaved, two failures both read 'ok' and both send a
+    // "first failure" email.
+    const order: string[] = [];
+    poolMock.query.mockImplementation(async (text: string) => {
+      order.push(/CREATE TABLE/i.test(text) ? "ensure" : /^\s*SELECT/i.test(text) ? "read" : "write");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { rows: [] };
+    });
+
+    await Promise.all([
+      recordServiceRfpCoreDelivery({ office: "dallas", ok: false, attempts: 1, error: "a", terminal: true }),
+      recordServiceRfpCoreDelivery({ office: "dallas", ok: false, attempts: 1, error: "b", terminal: true }),
+    ]);
+
+    expect(order).toEqual(["ensure", "read", "write", "ensure", "read", "write"]);
+  });
+
+  it("does not serialize across DIFFERENT offices", async () => {
+    // The contention is on one primary-key row; two offices share nothing, and making them queue would
+    // be a self-inflicted bottleneck.
+    let concurrent = 0;
+    let observedOverlap = false;
+    poolMock.query.mockImplementation(async () => {
+      concurrent += 1;
+      if (concurrent > 1) observedOverlap = true;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      concurrent -= 1;
+      return { rows: [] };
+    });
+
+    await Promise.all([
+      recordServiceRfpCoreDelivery({ office: "dallas", ok: false, attempts: 1, error: "a", terminal: true }),
+      recordServiceRfpCoreDelivery({ office: "atlanta", ok: false, attempts: 1, error: "b", terminal: true }),
+    ]);
+
+    expect(observedOverlap).toBe(true);
   });
 });
 
