@@ -76,10 +76,15 @@ vi.mock("../server/playwright/bidboard.ts", () => ({
   }),
 }));
 
+// A wedged alerter: a lock-contended alert-state query, or a mail provider that accepted the
+// connection and then stopped talking. sendEmail has no timeout of its own, so this is reachable.
+const alertGate = vi.hoisted(() => ({ stalled: false }));
+
 vi.mock("../server/sync/bidboard-crm-alert.ts", () => ({
   recordPushOutcomeAndMaybeAlert: vi.fn(async (args: any, deps: any) => {
     alertCalls.push(args);
     alertDeps.push(deps);
+    if (alertGate.stalled) await new Promise(() => {});
     return { action: "alert_failure" };
   }),
   // service-rfp-core-alert renders through this. Identity, not behaviour: the escaping itself is
@@ -193,6 +198,7 @@ describe("service RFP → TROCK Core handoff", () => {
     dbExecuteMock.mockResolvedValue({ rows: [{ id: 501, attempt_count: 1, max_attempts: 5 }] });
     alertCalls.length = 0;
     alertDeps.length = 0;
+    alertGate.stalled = false;
     outboundCalls.length = 0;
     handoffInputs.length = 0;
     coreFetchMock.mockReset();
@@ -326,6 +332,51 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
       expect(outboundCalls).toEqual(["core", "playwright"]);
       expect(executedSql()).toContain("status = 'pending'");
+    });
+
+    it("still runs Playwright when the ALERTER wedges, on a refusal", async () => {
+      // The outbox row is durable before the alert is dispatched, so nothing about the record depends
+      // on this promise — but the approval used to await it, unbounded, in front of the Procore create.
+      // The alerter is three DB round-trips plus an SMTP send, none of it inside the Core POST's 5 s.
+      alertGate.stalled = true;
+      coreFetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ reason: "live_project" }), { status: 409 }),
+      );
+
+      const result = await runApproval();
+
+      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+      expect(outboundCalls).toEqual(["core", "playwright"]);
+      // The notification was still handed off — walking away from it does not cancel it.
+      expect(alertCalls).toHaveLength(1);
+    });
+
+    it("still runs Playwright when the ALERTER wedges on a SUCCESSFUL delivery", async () => {
+      // The common case, and the one the recovery-reporting fix newly put an await in front of.
+      alertGate.stalled = true;
+
+      const result = await runApproval();
+
+      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+      expect(outboundCalls).toEqual(["core", "playwright"]);
+    });
+
+    it("finishes a worker tick when the alerter wedges, instead of holding the drain lock", async () => {
+      // Same hazard one level down: processServiceRfpCoreOutbox holds outboxWorkerRunning across the
+      // await, so a wedged alerter would starve every later interval, not just this tick.
+      alertGate.stalled = true;
+      coreFetchMock.mockImplementation(
+        async () => new Response(JSON.stringify({ reason: "live_project" }), { status: 409 }),
+      );
+      dbExecuteMock.mockReset();
+      dbExecuteMock
+        .mockResolvedValueOnce({ rows: [claimedRow({ attempt_count: 2 })] })
+        .mockResolvedValue({ rows: [] });
+      const { processServiceRfpCoreOutbox } = await import("../server/sync/service-rfp-core-outbox.ts");
+
+      const result = await processServiceRfpCoreOutbox();
+
+      expect(result).toMatchObject({ processed: 1, sent: 0, failed: 1 });
     });
 
     it("still runs Playwright when the outbox insert itself throws", async () => {

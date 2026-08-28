@@ -55,6 +55,21 @@ async function getDb() {
 }
 
 /**
+ * How long anything here will WAIT on an ops notification before walking away from it.
+ *
+ * The alert is not part of the record — the outbox row is durable before it is dispatched — but the
+ * alerter is three DB round-trips plus an SMTP send, and sendEmail has no timeout of its own. Awaited
+ * unbounded it sits on two critical paths: in the producer it is in front of the Playwright Bid Board
+ * create, so a wedged mail provider would hold the entire approval; in the drain it is inside the
+ * outboxWorkerRunning guard, so it would starve every later tick, not just its own.
+ *
+ * Both are the failure the fail-open design exists to prevent, and neither is covered by the Core
+ * POST's own 5 s deadline. Walking away does NOT cancel the notification — it finishes in the
+ * background — it only stops being something real work waits on.
+ */
+const ALERT_DISPATCH_WAIT_MS = 2_000;
+
+/**
  * Tell the alerter what happened to one delivery. SUCCESS is reported too, not just failure: the alert
  * state only leaves 'failing' on an ok outcome, so a stream that reports failures alone never sends a
  * recovery email and — worse — leaves the failure debounce holding a stale incident that swallows the
@@ -71,8 +86,31 @@ async function reportDelivery(outcome: {
   error?: string;
   terminal?: boolean;
 }): Promise<void> {
-  const { recordServiceRfpCoreDelivery } = await import("./service-rfp-core-alert");
-  await recordServiceRfpCoreDelivery(outcome);
+  const dispatch = (async () => {
+    const { recordServiceRfpCoreDelivery } = await import("./service-rfp-core-alert");
+    await recordServiceRfpCoreDelivery(outcome);
+  })();
+
+  // recordServiceRfpCoreDelivery never throws by contract, but the dynamic import can — and a promise
+  // this function may stop awaiting must never surface as an unhandledRejection.
+  const guarded = dispatch.catch((error: any) => {
+    log(`[service-rfp-core] Alert dispatch failed: ${error?.message || error}`, "sync");
+  });
+
+  const SLOW = Symbol("alert-dispatch-slow");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcomeOfRace = await Promise.race([
+    guarded.then(() => undefined),
+    new Promise<typeof SLOW>((resolve) => {
+      timer = setTimeout(() => resolve(SLOW), ALERT_DISPATCH_WAIT_MS);
+    }),
+  ]);
+  // Cleared on the fast path too, so a delivery that took 20 ms does not leave a live 2 s timer behind.
+  clearTimeout(timer);
+
+  if (outcomeOfRace === SLOW) {
+    log(`[service-rfp-core] Alert dispatch is slow (>${ALERT_DISPATCH_WAIT_MS}ms); continuing without it`, "sync");
+  }
 }
 
 function rowsOf(result: unknown): any[] {
