@@ -29,6 +29,14 @@ export const rfpRequestBodySchema = z.object({
     // display field must never block RFP ingestion. The CRM resolves it from assigned_rep → owner.
     ownerName: z.string().trim().nullable().optional().catch(undefined),
     ownerEmail: z.string().trim().nullable().optional().catch(undefined),
+    // The CRM's customer / job-site uuids. zod STRIPS unknown keys, so without these two lines the
+    // CRM's identity fields would be accepted by the endpoint and then silently dropped before ever
+    // reaching deal_data — the Core handoff would then take its terminal-skip path on every RFP.
+    // Soft in the same way as ownerName/ownerEmail: a malformed value is DROPPED rather than 422'd,
+    // because an unusable uuid must not stop an RFP reaching its approver. The consequence of a drop
+    // is loud, not silent — the Core handoff records a terminal row and alerts.
+    companyId: z.string().trim().nullable().optional().catch(undefined),
+    propertyId: z.string().trim().nullable().optional().catch(undefined),
     companyName: z.string().trim().nullable(),
     contactName: z.string().trim().nullable(),
     clientEmail: z.string().trim().email().nullable(),

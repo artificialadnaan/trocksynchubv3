@@ -33,6 +33,35 @@ export function replaceProjectTypeInNumber(projectNumber: string, newTypeDigit: 
   return projectNumber.replace(/^([A-Za-z]{2,4}-)\d+(-)/, `$1${newTypeDigit}$2`);
 }
 
+// Same shape as PROJECT_NUMBER_PREFIX_RE but capturing the OFFICE rather than the type digit, so the
+// two readings of a project number stay in one file and cannot drift apart.
+const PROJECT_NUMBER_OFFICE_RE = /^([A-Za-z]{2,4})-\d+-/;
+
+/** Extract the office prefix from a project number (DFW-4-06426-ah → "DFW"), upper-cased. */
+export function parseOfficePrefixFromNumber(projectNumber: string): string | null {
+  const match = projectNumber?.match(PROJECT_NUMBER_OFFICE_RE);
+  return match ? match[1].toUpperCase() : null;
+}
+
+/**
+ * Office prefix → TROCK Core tenant slug. Core's KNOWN_OFFICES is `["dallas"]`, so DFW is the only
+ * office with a tenant today; ATL is mapped EXPLICITLY to null rather than left out, because the two
+ * cases are different facts and only one of them is a surprise. An unknown prefix and a known-but-
+ * unmapped one both refuse, but the map records which offices we have actually considered.
+ *
+ * A refusal here is never a silent drop: the caller writes a terminal outbox row and alerts.
+ */
+const CORE_OFFICE_TENANTS: Record<string, string | null> = {
+  DFW: "dallas",
+  ATL: null,
+};
+
+/** The Core tenant slug for an office prefix, or null when that office has no Core tenant. */
+export function officeTenantForPrefix(prefix: string | null | undefined): string | null {
+  if (!prefix) return null;
+  return CORE_OFFICE_TENANTS[prefix.trim().toUpperCase()] ?? null;
+}
+
 /**
  * The CANONICAL project-type digit an RFP approval will actually CREATE — the single source of truth
  * shared by processRfpApproval (which selects the service vs non-service BidBoard stage from it), the

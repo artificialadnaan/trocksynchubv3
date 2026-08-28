@@ -161,6 +161,29 @@ describe("recordPushOutcomeAndMaybeAlert (orchestrator)", () => {
     expect(send.mock.calls[0][0]).toMatchObject({ to: "ops@trock.test", bypassGlobalCc: true });
   });
 
+  it("sends a caller-supplied renderer's copy, so a shared debounce cannot name the wrong subsystem", async () => {
+    // The state machine, the table and the send path are shared by design; the WORDING is not. A
+    // producer that is not the Bid Board → CRM push (see server/sync/service-rfp-core-alert.ts) passes
+    // its own renderer, and this is what proves the orchestrator actually reaches for it rather than
+    // rendering the default copy and telling the reader to inspect bid_board_ingestion_inbox.
+    const db = fakeDb();
+    const render = vi.fn(() => ({ subject: "CUSTOM SUBJECT", htmlBody: "<p>custom body</p>" }));
+
+    await recordPushOutcomeAndMaybeAlert(
+      { pushResult: { ok: false, attempts: 3, status: 500, error: "x" }, officeSlug: "dallas", now: NOW, recipient: "ops@trock.test" },
+      { db, send, render }
+    );
+
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toMatchObject({ subject: "CUSTOM SUBJECT", htmlBody: "<p>custom body</p>" });
+  });
+
+  it("falls back to the Bid Board → CRM copy when no renderer is supplied", async () => {
+    const db = fakeDb();
+    await run(db, { ok: false, attempts: 3, status: 500, error: "x" }, NOW);
+    expect(send.mock.calls[0][0].subject).toContain("Bid Board → CRM");
+  });
+
   it("does NOT email again for a sustained outage within the window (no storm)", async () => {
     const db = fakeDb();
     await run(db, { ok: false, attempts: 3, status: 500, error: "x" }, NOW); // first alert
