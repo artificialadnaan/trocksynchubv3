@@ -20,21 +20,59 @@ import {
   type ServiceRfpApprovedBody,
 } from "./core-ingress-client";
 
-const BACKOFF_INTERVALS = ["30 seconds", "2 minutes", "10 minutes", "30 minutes", "2 hours"] as const;
-const MAX_ATTEMPTS = 5;
+/** The wait BEFORE each retry: attempt N+1 fires this long after attempt N. */
+export const SERVICE_RFP_CORE_BACKOFF_INTERVALS = [
+  "30 seconds",
+  "2 minutes",
+  "10 minutes",
+  "30 minutes",
+  "2 hours",
+] as const;
+
+/**
+ * One MORE than the number of waits — five intervals describe the gaps between SIX attempts, so a
+ * ceiling equal to the interval count strands the last one. It did: at 5, the row dead-lettered on the
+ * fifth claim ~42.5 minutes after approval, and the declared two-hour retry never ran once. That made
+ * classifying Core's 404 (ingress dark) and 503 (Core has no secret) as RETRYABLE self-defeating — the
+ * whole point of those two is to carry an approval across the provisioning window, and a flag flipped
+ * later than ~42 minutes after deploy left every approval in it permanently dead.
+ *
+ * DERIVED, not written down, so adding a sixth interval cannot strand it again. Kept in step with
+ * max_attempts in migrations/0025 and shared/schema.ts — the DB value is what wins at runtime, because
+ * the worker reads max_attempts off the claimed row.
+ */
+export const SERVICE_RFP_CORE_MAX_ATTEMPTS = SERVICE_RFP_CORE_BACKOFF_INTERVALS.length + 1;
+
 let outboxWorkerTimer: ReturnType<typeof setInterval> | null = null;
 let outboxWorkerRunning = false;
 
 // Both of these are dynamic on purpose, matching bidboard-callback-worker's getDb(). `../db`
-// THROWS at import time without DATABASE_URL, and bidboard-crm-alert imports its pool statically —
-// so a static import here would drag that throw into rfp-approval.ts's own module graph and take
-// every suite that imports the approval path down with it.
+// THROWS at import time without DATABASE_URL, and service-rfp-core-alert reaches bidboard-crm-alert,
+// which imports its pool statically — so a static import here would drag that throw into
+// rfp-approval.ts's own module graph and take every suite that imports the approval path down with it.
 async function getDb() {
   return (await import("../db")).db;
 }
 
-async function getAlerter() {
-  return (await import("./bidboard-crm-alert")).recordPushOutcomeAndMaybeAlert;
+/**
+ * Tell the alerter what happened to one delivery. SUCCESS is reported too, not just failure: the alert
+ * state only leaves 'failing' on an ok outcome, so a stream that reports failures alone never sends a
+ * recovery email and — worse — leaves the failure debounce holding a stale incident that swallows the
+ * next real one.
+ *
+ * The copy is this stream's own (see ./service-rfp-core-alert); only the debounce, the state table and
+ * the send path are shared with the Bid Board → CRM push.
+ */
+async function reportDelivery(outcome: {
+  office: string | null;
+  ok: boolean;
+  attempts: number;
+  status?: number;
+  error?: string;
+  terminal?: boolean;
+}): Promise<void> {
+  const { recordServiceRfpCoreDelivery } = await import("./service-rfp-core-alert");
+  await recordServiceRfpCoreDelivery(outcome);
 }
 
 function rowsOf(result: unknown): any[] {
@@ -261,32 +299,6 @@ function stampOccurredAt(body: ServiceRfpApprovedBody): ServiceRfpApprovedBody {
   return { ...body, occurredAt: new Date().toISOString() };
 }
 
-/**
- * Alert state is keyed by office_slug in a table the Bid Board → CRM push already writes under the
- * bare slug ("dallas"). Namespacing keeps the two streams from sharing one row, where a Core failure
- * would suppress the push's recovery email and vice versa.
- */
-function alertOffice(office: string | null): string {
-  return `service-rfp-core:${office ?? "unmapped"}`;
-}
-
-async function raiseAlert(args: { office: string | null; attempts: number; status?: number; error: string; terminal: boolean }): Promise<void> {
-  const recordPushOutcomeAndMaybeAlert = await getAlerter();
-  await recordPushOutcomeAndMaybeAlert({
-    pushResult: {
-      ok: false,
-      attempts: args.attempts,
-      status: args.status,
-      error: args.error,
-      // A refusal that will never be accepted as-is maps to the 'request_rejected' wording; a
-      // dead-lettered retry maps to 'terminal_failure'.
-      rejected: args.terminal,
-      terminalFailure: !args.terminal,
-    },
-    officeSlug: alertOffice(args.office),
-  });
-}
-
 // ── Row lifecycle ────────────────────────────────────────────────────────────
 
 interface EnqueuedRow {
@@ -319,7 +331,7 @@ async function insertOutboxRow(input: {
     VALUES (
       ${input.sourceSystem}, ${input.sourceDealId}, ${input.rfpRequestId},
       ${JSON.stringify(input.payload)}::jsonb, ${input.targetUrl}, ${input.status},
-      ${attemptCount}, ${MAX_ATTEMPTS}, ${input.lastError},
+      ${attemptCount}, ${SERVICE_RFP_CORE_MAX_ATTEMPTS}, ${input.lastError},
       ${input.status === "pending" ? sql`NOW()` : sql`NULL`},
       NOW() + interval '30 seconds'
     )
@@ -331,7 +343,7 @@ async function insertOutboxRow(input: {
   return {
     id: Number(row.id),
     attemptCount: Number(row.attempt_count ?? attemptCount),
-    maxAttempts: Number(row.max_attempts ?? MAX_ATTEMPTS),
+    maxAttempts: Number(row.max_attempts ?? SERVICE_RFP_CORE_MAX_ATTEMPTS),
   };
 }
 
@@ -375,7 +387,10 @@ async function markRetryable(row: EnqueuedRow, error: string, status?: number): 
     `);
     return { dead: true };
   }
-  const backoff = BACKOFF_INTERVALS[Math.max(0, Math.min(row.attemptCount - 1, BACKOFF_INTERVALS.length - 1))];
+  const backoff =
+    SERVICE_RFP_CORE_BACKOFF_INTERVALS[
+      Math.max(0, Math.min(row.attemptCount - 1, SERVICE_RFP_CORE_BACKOFF_INTERVALS.length - 1))
+    ];
   await db.execute(sql`
     UPDATE service_rfp_core_outbox
        SET status = 'pending',
@@ -401,8 +416,22 @@ async function deliver(
   if (!secret) {
     // Unprovisioned or too short for Core's 32-byte floor. Retryable: an operator sets the value and
     // the queued row drains without the approval having to be repeated.
-    await markRetryable(row, "SERVICE_RFP_INGRESS_SECRET_CURRENT is missing or shorter than 32 bytes");
-    return "pending";
+    //
+    // It is NOT exempt from the attempt ceiling, though — every worker claim burns an attempt whether
+    // or not a POST goes out — so this row does eventually stop being retried. Discarding
+    // markRetryable's `dead` and always reporting 'pending' is how that happened in silence: the row
+    // dead-lettered with no alert, and restoring the secret afterwards then delivered nothing, because
+    // a 'dead' row is never claimed again.
+    const error = "SERVICE_RFP_INGRESS_SECRET_CURRENT is missing or shorter than 32 bytes";
+    const { dead } = await markRetryable(row, error);
+    if (dead) {
+      await reportDelivery({ office: row.office, ok: false, attempts: row.attemptCount, error, terminal: false });
+    }
+    log(
+      `[service-rfp-core] Row ${row.id} has no usable ingress secret; ${dead ? "dead-lettered" : "queued for retry"}`,
+      "sync",
+    );
+    return dead ? "dead" : "pending";
   }
 
   const outcome = await postServiceRfpApproved(
@@ -412,20 +441,39 @@ async function deliver(
 
   if (outcome.kind === "sent") {
     await markSent(row.id, outcome.status, outcome.bidId);
+    // The success is reported to the alerter, not only to the row. The namespaced alert state stays
+    // 'failing' until an ok outcome flips it, so without this no recovery email is ever sent — and the
+    // failure debounce keeps suppressing the NEXT incident as a repeat of one that already cleared,
+    // however many successful deliveries happened in between.
+    await reportDelivery({ office: row.office, ok: true, attempts: row.attemptCount, status: outcome.status });
     log(`[service-rfp-core] Row ${row.id} delivered to Core (bid ${outcome.bidId ?? "unknown"})`, "sync");
     return "sent";
   }
 
   if (outcome.kind === "terminal") {
     await markTerminal(row.id, outcome.error, outcome.status);
-    await raiseAlert({ office: row.office, attempts: row.attemptCount, status: outcome.status, error: outcome.error, terminal: true });
+    await reportDelivery({
+      office: row.office,
+      ok: false,
+      attempts: row.attemptCount,
+      status: outcome.status,
+      error: outcome.error,
+      terminal: true,
+    });
     log(`[service-rfp-core] Row ${row.id} refused by Core: ${outcome.error}`, "sync");
     return "failed";
   }
 
   const { dead } = await markRetryable(row, outcome.error, outcome.status);
   if (dead) {
-    await raiseAlert({ office: row.office, attempts: row.attemptCount, status: outcome.status, error: outcome.error, terminal: false });
+    await reportDelivery({
+      office: row.office,
+      ok: false,
+      attempts: row.attemptCount,
+      status: outcome.status,
+      error: outcome.error,
+      terminal: false,
+    });
   }
   log(`[service-rfp-core] Row ${row.id} not delivered (${outcome.error}); ${dead ? "dead-lettered" : "queued for retry"}`, "sync");
   return dead ? "dead" : "pending";
@@ -475,7 +523,7 @@ export async function handOffServiceRfpApprovalToCore(
         lastError: error,
       });
       if (!inserted) return { status: "duplicate" };
-      await raiseAlert({ office, attempts: 0, error, terminal: true });
+      await reportDelivery({ office, ok: false, attempts: 0, error, terminal: true });
       log(`[service-rfp-core] Service RFP ${input.rfpRequestId} cannot reach Core — ${error}`, "sync");
       return { status: "failed" };
     }
@@ -553,7 +601,7 @@ export async function processServiceRfpCoreOutbox(
           {
             id: Number(row.id),
             attemptCount: Number(row.attempt_count ?? 0),
-            maxAttempts: Number(row.max_attempts ?? MAX_ATTEMPTS),
+            maxAttempts: Number(row.max_attempts ?? SERVICE_RFP_CORE_MAX_ATTEMPTS),
             targetUrl: String(row.target_url),
             body: row.payload as ServiceRfpApprovedBody,
             office: (row.payload as ServiceRfpApprovedBody)?.office ?? null,

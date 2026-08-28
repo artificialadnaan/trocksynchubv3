@@ -256,6 +256,14 @@ export interface PushResultLike {
 export interface RecordPushDeps {
   db?: Querier;
   send?: typeof sendEmail;
+  /**
+   * The email COPY, defaulting to the Bid Board → CRM wording below. Another producer that shares this
+   * debounce and state machine passes its own renderer so the alert names the system that actually
+   * failed: renderPushAlertEmail's branches tell the reader to inspect bid_board_ingestion_inbox and to
+   * check BID_BOARD_SYNC_SECRET, and sent for a different subsystem those instructions are simply
+   * false. See ./service-rfp-core-alert, which forks the copy and reuses everything else.
+   */
+  render?: (input: PushAlertEmailInput) => { subject: string; htmlBody: string };
 }
 
 function realertMinutesFromEnv(): number {
@@ -329,7 +337,7 @@ export async function recordPushOutcomeAndMaybeAlert(
         : args.pushResult.terminalFailure
         ? "terminal_failure"
         : "unconfirmed";
-      const { subject, htmlBody } = renderPushAlertEmail({
+      const { subject, htmlBody } = (deps.render ?? renderPushAlertEmail)({
         kind: decision.action === "alert_recovered" ? "recovered" : failureKind,
         office: args.officeSlug,
         attempts: args.pushResult.attempts,

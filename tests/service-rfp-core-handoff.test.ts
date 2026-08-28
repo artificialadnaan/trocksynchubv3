@@ -6,6 +6,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dbExecuteMock = vi.hoisted(() => vi.fn());
 const approvalRequest = vi.hoisted(() => ({ current: undefined as any }));
 const alertCalls = vi.hoisted(() => [] as any[]);
+// The alerter's SECOND argument. The debounce/state machine is shared with the Bid Board → CRM push;
+// the email copy must not be, so what is passed here is itself an assertion target.
+const alertDeps = vi.hoisted(() => [] as any[]);
 // The single ordered log of outbound side effects. The ordering assertion is on THIS array, never on
 // timing — a timing assertion would pass on a fast machine even if the two calls raced.
 const outboundCalls = vi.hoisted(() => [] as string[]);
@@ -74,10 +77,14 @@ vi.mock("../server/playwright/bidboard.ts", () => ({
 }));
 
 vi.mock("../server/sync/bidboard-crm-alert.ts", () => ({
-  recordPushOutcomeAndMaybeAlert: vi.fn(async (args: any) => {
+  recordPushOutcomeAndMaybeAlert: vi.fn(async (args: any, deps: any) => {
     alertCalls.push(args);
+    alertDeps.push(deps);
     return { action: "alert_failure" };
   }),
+  // service-rfp-core-alert renders through this. Identity, not behaviour: the escaping itself is
+  // covered against the REAL implementation in tests/service-rfp-core-alert.test.ts.
+  escapeHtml: (s: string) => s,
 }));
 
 // A pass-through spy, not a stub: the real handoff still runs. It exists only so the "one source of
@@ -98,6 +105,31 @@ vi.mock("../server/sync/service-rfp-core-outbox.ts", async (importOriginal) => {
 const CRM_DEAL_ID = "9f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
 const CRM_COMPANY_ID = "11111111-2222-4333-8444-555555555555";
 const CRM_PROPERTY_ID = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+const TARGET_URL = "https://core.example.com/webhooks/crm/dallas/service-rfp/v1";
+
+/** A payload as the worker reads it back off a claimed row — already built, already persisted. */
+function storedCorePayload() {
+  return {
+    version: "trock.crm.service-rfp-approved.v1",
+    office: "dallas",
+    occurredAt: "2026-08-01T00:00:00.000Z",
+    rfp: { requestId: 77, approvedAt: "2026-08-01T00:00:00.000Z" },
+    deal: { id: CRM_DEAL_ID, rfpProjectNumber: "DFW-4-12345-aa" },
+    company: { id: CRM_COMPANY_ID, name: "Acme Retail" },
+    primaryContact: { name: "Dana Ruiz", email: "dana@acme.example", businessPhone: null },
+    bid: { title: "Roof leak triage", estimatedValue: null, dueAt: null, description: null, notes: null },
+    property: { id: CRM_PROPERTY_ID, name: "1200 Main St", address: null },
+  };
+}
+
+/**
+ * One claimed row, exactly as claimPendingServiceRfpCoreRows returns it. `max_attempts` is left OFF
+ * on purpose where the ceiling is under test: the worker then falls back to the module's own
+ * constant, so the test measures the shipped ladder rather than a number the fixture supplied.
+ */
+function claimedRow(fields: Record<string, unknown>) {
+  return { id: 501, target_url: TARGET_URL, payload: storedCorePayload(), ...fields };
+}
 
 function makeRequest(overrides: Partial<any> = {}, dealOverrides: Record<string, any> = {}) {
   return {
@@ -160,6 +192,7 @@ describe("service RFP → TROCK Core handoff", () => {
     // Enqueue returns the inserted row; every later statement is an update with no rows.
     dbExecuteMock.mockResolvedValue({ rows: [{ id: 501, attempt_count: 1, max_attempts: 5 }] });
     alertCalls.length = 0;
+    alertDeps.length = 0;
     outboundCalls.length = 0;
     handoffInputs.length = 0;
     coreFetchMock.mockReset();
@@ -415,28 +448,9 @@ describe("service RFP → TROCK Core handoff", () => {
     // so a payload replayed verbatim would 401 as stale on every attempt after the first two — the row
     // would dead-letter for a reason that has nothing to do with the job. approvedAt carries the
     // domain fact and is never rewritten.
-    const stored = {
-      version: "trock.crm.service-rfp-approved.v1",
-      office: "dallas",
-      occurredAt: "2026-08-01T00:00:00.000Z",
-      rfp: { requestId: 77, approvedAt: "2026-08-01T00:00:00.000Z" },
-      deal: { id: CRM_DEAL_ID, rfpProjectNumber: "DFW-4-12345-aa" },
-      company: { id: CRM_COMPANY_ID, name: "Acme Retail" },
-      primaryContact: { name: "Dana Ruiz", email: "dana@acme.example", businessPhone: null },
-      bid: { title: "Roof leak triage", estimatedValue: null, dueAt: null, description: null, notes: null },
-      property: { id: CRM_PROPERTY_ID, name: "1200 Main St", address: null },
-    };
     dbExecuteMock.mockReset();
     dbExecuteMock
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 501,
-          attempt_count: 3,
-          max_attempts: 5,
-          target_url: "https://core.example.com/webhooks/crm/dallas/service-rfp/v1",
-          payload: stored,
-        }],
-      })
+      .mockResolvedValueOnce({ rows: [claimedRow({ attempt_count: 3, max_attempts: 6 })] })
       .mockResolvedValue({ rows: [] });
     const { processServiceRfpCoreOutbox } = await import("../server/sync/service-rfp-core-outbox.ts");
 
@@ -464,5 +478,132 @@ describe("service RFP → TROCK Core handoff", () => {
     // A terminal refusal row has no destination and must never be claimable.
     expect(claim).toContain("target_url IS NOT NULL");
     expect(claim).not.toContain("bidboard_create_outbox");
+  });
+
+  describe("the alert names the system that actually failed, and clears when it recovers", () => {
+    it("renders Core copy, not the Bid Board → CRM push's, for a Core refusal", async () => {
+      coreFetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ reason: "live_project" }), { status: 409 }),
+      );
+
+      await runApproval();
+
+      // The shared debounce is reused deliberately; the WORDING is not reusable. A renderer that
+      // names the CRM push tells the reader to inspect a table holding no row for this incident.
+      const render = alertDeps.at(-1)?.render;
+      expect(render).toBeTypeOf("function");
+      const { subject, htmlBody } = render({
+        kind: "request_rejected",
+        office: "service-rfp-core:dallas",
+        status: 409,
+        error: "Core refused the approval: live_project",
+        now: new Date(),
+      });
+      expect(subject).toContain("TROCK Core");
+      expect(`${subject}\n${htmlBody}`).not.toContain("Bid Board");
+    });
+
+    it("reports a DELIVERED row to the alerter as a success, so a failing state can recover", async () => {
+      await runApproval();
+
+      // Without this the namespaced state stays 'failing' forever: no recovery email is ever sent, and
+      // the failure debounce swallows the NEXT incident as a repeat of one that already cleared.
+      expect(executedSql()).toContain("status = 'sent'");
+      expect(alertCalls).toHaveLength(1);
+      expect(alertCalls[0]).toMatchObject({
+        officeSlug: "service-rfp-core:dallas",
+        pushResult: { ok: true },
+      });
+    });
+  });
+
+  describe("the retry ladder is the one that is declared", () => {
+    it("walks every declared interval — including the two-hour retry — before dead-lettering", async () => {
+      // 404 is Core serving the ingress DARK: the provisioning state the retryable classification
+      // exists for. The last interval is the only thing that carries an approval across a flag flipped
+      // more than ~42 minutes after deploy, so a ladder that dead-letters before reaching it silently
+      // discards exactly the approvals the classification was written to save.
+      coreFetchMock.mockImplementation(async () => new Response("dark", { status: 404 }));
+      const { processServiceRfpCoreOutbox, SERVICE_RFP_CORE_BACKOFF_INTERVALS } = await import(
+        "../server/sync/service-rfp-core-outbox.ts"
+      );
+
+      const scheduled: string[] = [];
+      for (let attempt = 1; attempt <= SERVICE_RFP_CORE_BACKOFF_INTERVALS.length + 1; attempt++) {
+        dbExecuteMock.mockReset();
+        dbExecuteMock
+          .mockResolvedValueOnce({ rows: [claimedRow({ attempt_count: attempt })] })
+          .mockResolvedValue({ rows: [] });
+
+        await processServiceRfpCoreOutbox();
+
+        const statements = executedSql();
+        scheduled.push(
+          statements.includes("status = 'dead'")
+            ? "dead"
+            : SERVICE_RFP_CORE_BACKOFF_INTERVALS.find((interval) => statements.includes(interval)) ?? "none",
+        );
+      }
+
+      expect(scheduled).toEqual([...SERVICE_RFP_CORE_BACKOFF_INTERVALS, "dead"]);
+    });
+
+    it("declares the same ceiling in the migration and the drizzle table as the worker enforces", async () => {
+      const { readFile } = await import("node:fs/promises");
+      const { SERVICE_RFP_CORE_MAX_ATTEMPTS } = await import("../server/sync/service-rfp-core-outbox.ts");
+
+      // The DB value WINS at runtime — the worker reads max_attempts off the claimed row — so a
+      // default below the ladder strands the last interval exactly as the constant did.
+      const migration = await readFile(
+        new URL("../migrations/0025_create_service_rfp_core_outbox.sql", import.meta.url),
+        "utf8",
+      );
+      expect(migration).toContain(`max_attempts integer NOT NULL DEFAULT ${SERVICE_RFP_CORE_MAX_ATTEMPTS}`);
+
+      const schema = await readFile(new URL("../shared/schema.ts", import.meta.url), "utf8");
+      expect(schema).toContain(
+        `maxAttempts: integer("max_attempts").notNull().default(${SERVICE_RFP_CORE_MAX_ATTEMPTS})`,
+      );
+    });
+
+    it("dead-letters AND alerts when the missing-secret retries run out", async () => {
+      // An unprovisioned secret is retryable, but it is not exempt from the ceiling: each claim still
+      // burns an attempt, so the row does stop being retried. Reporting that as 'pending' and skipping
+      // the alert is how an approval goes permanently undelivered with nobody told.
+      delete process.env.SERVICE_RFP_INGRESS_SECRET_CURRENT;
+      dbExecuteMock.mockReset();
+      dbExecuteMock
+        .mockResolvedValueOnce({ rows: [claimedRow({ attempt_count: 6 })] })
+        .mockResolvedValue({ rows: [] });
+      const { processServiceRfpCoreOutbox } = await import("../server/sync/service-rfp-core-outbox.ts");
+
+      const result = await processServiceRfpCoreOutbox();
+
+      expect(vi.mocked(coreFetchMock)).not.toHaveBeenCalled();
+      expect(executedSql()).toContain("status = 'dead'");
+      expect(result).toMatchObject({ processed: 1, sent: 0, failed: 1 });
+      expect(alertCalls).toHaveLength(1);
+      expect(alertCalls[0]).toMatchObject({
+        officeSlug: "service-rfp-core:dallas",
+        pushResult: { ok: false, terminalFailure: true },
+      });
+      expect(alertCalls[0].pushResult.error).toContain("SERVICE_RFP_INGRESS_SECRET_CURRENT");
+    });
+
+    it("keeps the row pending, and silent, while the missing-secret retries remain", async () => {
+      delete process.env.SERVICE_RFP_INGRESS_SECRET_CURRENT;
+      dbExecuteMock.mockReset();
+      dbExecuteMock
+        .mockResolvedValueOnce({ rows: [claimedRow({ attempt_count: 2 })] })
+        .mockResolvedValue({ rows: [] });
+      const { processServiceRfpCoreOutbox } = await import("../server/sync/service-rfp-core-outbox.ts");
+
+      await processServiceRfpCoreOutbox();
+
+      expect(executedSql()).toContain("status = 'pending'");
+      expect(executedSql()).not.toContain("status = 'dead'");
+      // Still provisioning; an email per worker tick would be noise about a knob nobody has set yet.
+      expect(alertCalls).toHaveLength(0);
+    });
   });
 });

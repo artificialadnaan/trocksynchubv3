@@ -104,6 +104,11 @@ export type ServiceRfpIngressOutcome =
  *    contact_email_owned_elsewhere, company_inactive). Retrying cannot change it.
  *  - Any other deterministic 4xx (400/401/413/415) is a bad request or a bad signature; it will not be
  *    accepted as-is, so it is terminal and alerts, matching this repo's `request_rejected` posture.
+ *
+ * The body reads are best-effort by construction: a read that is malformed OR cut short by the
+ * deadline in postServiceRfpApproved yields the same `{}`, so the STATUS decides the outcome in every
+ * case. That is why a 2xx whose body never finished arriving is still `sent` — Core committed on the
+ * status line, and re-POSTing it would create a second bid — it merely carries no bidId.
  */
 async function classifyResponse(response: Response): Promise<ServiceRfpIngressOutcome> {
   if (response.ok) {
@@ -146,6 +151,19 @@ export async function postServiceRfpApproved(
     return { kind: "terminal", error: `CORE_INGRESS_BASE_URL does not form a valid URL: ${input.targetUrl}` };
   }
 
+  // ONE deadline over the WHOLE exchange — connect, headers AND body read. fetchWithTimeout's own
+  // timer stops guarding the moment the Response resolves, which is when the headers land; a Core that
+  // answered 200 and then stalled mid-body would leave classifyResponse's `response.json()` waiting on
+  // undici's five-MINUTE body timeout. This call is awaited in front of the Playwright Bid Board
+  // create, so that would not just delay Core — it would park the whole email approval behind a
+  // stalled socket, which is precisely what the advertised 5 s bound exists to prevent.
+  //
+  // The deadline is owned HERE because only this function knows when the exchange is actually over.
+  // Aborting (rather than abandoning the read) is what releases the connection: the signal is
+  // forwarded onto the controller fetch() was given, so the pending body read rejects and the socket
+  // is destroyed instead of lingering.
+  const deadline = new AbortController();
+  const expiry = setTimeout(() => deadline.abort(), SERVICE_RFP_INGRESS_TIMEOUT_MS);
   try {
     const response = await (deps.fetchImpl ?? fetchWithTimeout)(
       input.targetUrl,
@@ -156,11 +174,16 @@ export async function postServiceRfpApproved(
           "x-trock-signature": signServiceRfpIngress({ path, rawBody, secret: input.secret }),
         },
         body: rawBody,
+        signal: deadline.signal,
       },
       SERVICE_RFP_INGRESS_TIMEOUT_MS,
     );
     return await classifyResponse(response);
   } catch (error: any) {
     return { kind: "retryable", error: error?.message || String(error) };
+  } finally {
+    // Both layers are told the same 5 s; clearing here keeps a fast success from leaving a live timer
+    // behind it.
+    clearTimeout(expiry);
   }
 }

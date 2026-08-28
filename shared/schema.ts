@@ -1164,7 +1164,9 @@ export const serviceRfpCoreOutbox = pgTable("service_rfp_core_outbox", {
   targetUrl: text("target_url"),
   status: text("status").notNull().default("pending"),
   attemptCount: integer("attempt_count").notNull().default(0),
-  maxAttempts: integer("max_attempts").notNull().default(5),
+  /** One more than the backoff-interval count, so the last declared retry can actually run; the DB
+   *  value wins at runtime. Kept in step with SERVICE_RFP_CORE_MAX_ATTEMPTS and migration 0025. */
+  maxAttempts: integer("max_attempts").notNull().default(6),
   lastError: text("last_error"),
   lastStatusCode: integer("last_status_code"),
   /** Core's bid id from a 2xx, so a delivered row names the record it created. */

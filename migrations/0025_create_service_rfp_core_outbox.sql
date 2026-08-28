@@ -18,7 +18,11 @@ CREATE TABLE IF NOT EXISTS service_rfp_core_outbox (
   target_url text,
   status text NOT NULL DEFAULT 'pending',
   attempt_count integer NOT NULL DEFAULT 0,
-  max_attempts integer NOT NULL DEFAULT 5,
+  -- One MORE than the number of backoff intervals the worker declares: five waits describe the gaps
+  -- between six attempts, and this value WINS at runtime (the worker reads it off the claimed row), so
+  -- a default equal to the interval count would dead-letter the row before its last — two-hour — retry
+  -- ever ran. See SERVICE_RFP_CORE_MAX_ATTEMPTS in server/sync/service-rfp-core-outbox.ts.
+  max_attempts integer NOT NULL DEFAULT 6,
   last_error text,
   last_status_code integer,
   core_bid_id text,
