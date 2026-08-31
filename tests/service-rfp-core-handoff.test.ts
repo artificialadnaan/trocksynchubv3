@@ -429,7 +429,15 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(alertCalls[0].pushResult.rejected).toBe(true);
     });
 
-    it("refuses an ATL project number before the POST and alerts", async () => {
+    it("DELIVERS an ATL project number — the prefix is the market, not the office", async () => {
+      // THIS TEST USED TO ASSERT THE OPPOSITE, and the assertion was the bug. The handoff derived a
+      // Core tenant from the project-number prefix and refused anything that was not DFW, so every
+      // Atlanta-prefixed service RFP was rejected as "office_unmapped". Two real approvals were lost
+      // to it before anyone noticed.
+      //
+      // The prefix records the MARKET the work is in. Atlanta jobs are run out of the DFW office like
+      // everything else, so those approvals had an office all along and the refusal was answering a
+      // question nobody asked. One operating office, one tenant.
       approvalRequest.current = makeRequest(
         { projectNumber: "ATL-4-12345-aa" },
         { project_number: "ATL-4-12345-aa" },
@@ -438,13 +446,12 @@ describe("service RFP → TROCK Core handoff", () => {
       const result = await runApproval();
 
       expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["playwright"]);
-      expect(executedSql()).toContain("office_unmapped");
-      expect(executedSql()).toContain("ATL");
-      expect(alertCalls).toHaveLength(1);
-      // Namespaced so a Core refusal cannot share alert state with the Bid Board → CRM push, which
-      // writes the same table under the bare office slug.
-      expect(alertCalls[0].officeSlug).toBe("service-rfp-core:unmapped");
+      // Core is told FIRST, then Procore — the ordering the whole feature exists for.
+      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(executedSql()).not.toContain("office_unmapped");
+      // …and it is delivered to the one tenant, addressed by that tenant's ingress path.
+      const [url] = vi.mocked(coreFetchMock).mock.calls.at(-1) as any[];
+      expect(String(url)).toContain("/webhooks/crm/dallas/service-rfp/v1");
     });
 
     it("refuses, rather than guesses, when the CRM identity uuids are absent", async () => {

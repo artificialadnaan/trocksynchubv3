@@ -35,31 +35,44 @@ export function replaceProjectTypeInNumber(projectNumber: string, newTypeDigit: 
 
 // Same shape as PROJECT_NUMBER_PREFIX_RE but capturing the OFFICE rather than the type digit, so the
 // two readings of a project number stay in one file and cannot drift apart.
-const PROJECT_NUMBER_OFFICE_RE = /^([A-Za-z]{2,4})-\d+-/;
-
-/** Extract the office prefix from a project number (DFW-4-06426-ah → "DFW"), upper-cased. */
-export function parseOfficePrefixFromNumber(projectNumber: string): string | null {
-  const match = projectNumber?.match(PROJECT_NUMBER_OFFICE_RE);
-  return match ? match[1].toUpperCase() : null;
-}
+// parseOfficePrefixFromNumber USED TO LIVE HERE and is deliberately gone.
+//
+// It read the leading letters of a project number as the OFFICE that runs the job, and its only caller
+// used that to pick a Core tenant — which refused every Atlanta-prefixed service RFP and lost two real
+// approvals. The prefix records the MARKET the work is in; Atlanta jobs are run out of DFW.
+//
+// Deleting it rather than leaving it unused is the point. An exported helper called
+// "parseOfficePrefixFromNumber" is a standing invitation to answer an office question with it, and the
+// next reader has no way to know the name is wrong. `parseProjectTypeFromNumber` below still reads the
+// TYPE digit from the same string, which the number genuinely does encode.
 
 /**
- * Office prefix → TROCK Core tenant slug. Core's KNOWN_OFFICES is `["dallas"]`, so DFW is the only
- * office with a tenant today; ATL is mapped EXPLICITLY to null rather than left out, because the two
- * cases are different facts and only one of them is a surprise. An unknown prefix and a known-but-
- * unmapped one both refuse, but the map records which offices we have actually considered.
+ * The TROCK Core tenant that RFP approvals belong to.
  *
- * A refusal here is never a silent drop: the caller writes a terminal outbox row and alerts.
+ * A SINGLE VALUE, and that is the correction. This used to be a prefix → tenant MAP, on the reading
+ * that a project number's prefix names the OFFICE that runs the job — so `ATL-…` was mapped to null
+ * and every Atlanta-prefixed service RFP was refused as "no Core tenant".
+ *
+ * The prefix does not mean that. It records the MARKET the work is in; Atlanta jobs are run out of the
+ * DFW office like everything else. So the refusal was answering a question nobody asked: those
+ * approvals had an office all along, and two real ones were rejected for it.
+ *
+ * Deriving a tenant from the prefix is therefore not a mapping that needs another entry — it is the
+ * wrong input. One operating office, one tenant, stated once. If a second office ever runs its own
+ * jobs, that is a deliberate change here with a real second tenant behind it, not a row added to a
+ * table that was already asking the wrong thing.
  */
-const CORE_OFFICE_TENANTS: Record<string, string | null> = {
-  DFW: "dallas",
-  ATL: null,
-};
+const CORE_RFP_TENANT = "dallas";
 
-/** The Core tenant slug for an office prefix, or null when that office has no Core tenant. */
-export function officeTenantForPrefix(prefix: string | null | undefined): string | null {
-  if (!prefix) return null;
-  return CORE_OFFICE_TENANTS[prefix.trim().toUpperCase()] ?? null;
+/**
+ * The Core tenant an approved RFP is delivered to.
+ *
+ * Takes no argument BY DESIGN. The previous signature accepted the project-number prefix, which is
+ * what made "which office runs this?" look like a lookup on the wrong column; removing the parameter
+ * means a caller cannot reintroduce that reading without changing this function.
+ */
+export function coreRfpTenant(): string {
+  return CORE_RFP_TENANT;
 }
 
 /**

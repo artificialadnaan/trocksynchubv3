@@ -10,7 +10,7 @@
 import { sql } from "drizzle-orm";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { log } from "../index";
-import { officeTenantForPrefix, parseOfficePrefixFromNumber } from "../constants";
+import { coreRfpTenant } from "../constants";
 import {
   SERVICE_RFP_CONTRACT_VERSION,
   buildServiceRfpIngressTargetUrl,
@@ -238,11 +238,11 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
     return { ok: false, reason: "source_system_unsupported", detail: `source system ${input.sourceSystem} has no uuid identity Core can store` };
   }
 
-  const officePrefix = parseOfficePrefixFromNumber(input.projectNumber);
-  const office = officeTenantForPrefix(officePrefix);
-  if (!office) {
-    return { ok: false, reason: "office_unmapped", detail: `office ${officePrefix ?? "unknown"} has no TROCK Core tenant` };
-  }
+  // No office check. There used to be one, deriving the tenant from the project-number prefix and
+  // refusing anything that was not DFW — which rejected two real Atlanta approvals. The prefix records
+  // the MARKET the work is in, not the office that runs it; Atlanta jobs are run out of DFW like the
+  // rest. There is one operating office, so there is nothing here to decide.
+  const office = coreRfpTenant();
 
   const dealId = wireUuid(input.sourceDealId);
   const companyId = wireUuid(input.dealData.crm_company_id);
@@ -548,7 +548,7 @@ export async function handOffServiceRfpApprovalToCore(
     if (!built.ok) {
       // Terminal, and LOUD. Not a silent drop: the row records what was refused and why, and the
       // alert makes the gap visible while the manual creation door is still open.
-      const office = officeTenantForPrefix(parseOfficePrefixFromNumber(input.projectNumber));
+      const office = coreRfpTenant();
       const error = `${built.reason}: ${built.detail}`;
       const inserted = await insertOutboxRow({
         sourceSystem: input.sourceSystem,
