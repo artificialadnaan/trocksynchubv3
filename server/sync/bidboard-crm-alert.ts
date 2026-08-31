@@ -362,7 +362,31 @@ export async function recordPushOutcomeAndMaybeAlert(
     //  - failure: advance last_alerted_at only when the email sent (else re-alert next cycle)
     //  - recovered: only flip to 'ok' when the recovery email sent; if it failed, stay 'failing' so the
     //    recovery notice is retried next successful cycle.
-    let persistedState: PushAlertState = decision.nextState;
+    // A REQUEST REJECTION IS NOT A CHANNEL STATE, and letting it become one produced a false all-clear.
+    //
+    // `rejected` means ONE request was refused deterministically (a 4xx, a 409, a missing identity). It
+    // needs its own manual action and it says nothing about whether the channel can reach the far side.
+    // Folding it into the health machine did two wrong things: it marked the whole office `failing` on one
+    // bad request, and — the harmful half — the next UNRELATED success then read `prevState === 'failing'`,
+    // emitted a RECOVERY email and cleared the incident while the rejected row was still terminal and
+    // still needed a human. An all-clear about something nobody checked.
+    //
+    // So a rejection still ALERTS (the operator must learn about it) but leaves `state` exactly as it was:
+    // a later success cannot find a `failing` it did not cause, and cannot "recover" it. Transport
+    // failures and successes go through the machine untouched.
+    //
+    // Each rejection alerting separately is deliberate rather than a debounce gap: every refused request
+    // needs its own action, so throttling the second one behind the first would hide work. Volume is
+    // bounded by genuinely bad approvals — the terminal transition fires once per row, and terminal rows
+    // do not retry.
+    //
+    // NOTE: this also changes the Bid Board → CRM channel, which feeds this same engine with
+    // `rejected: true` (bidboard-crm-ingestion.ts). That channel had the identical defect; this is the
+    // same fix, not a side effect [Codex #75].
+    const rejectionOnly = args.pushResult.rejected === true && !args.pushResult.ok;
+    let persistedState: PushAlertState = rejectionOnly
+      ? (prior?.state ?? "ok")
+      : decision.nextState;
     let lastAlertedAt: Date | null;
     if (decision.action === "alert_failure") {
       lastAlertedAt = sent ? now : (prior?.last_alerted_at ?? null);

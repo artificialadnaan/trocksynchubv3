@@ -171,3 +171,83 @@ describe("serviceRfpCoreAlertOffice", () => {
     expect(serviceRfpCoreAlertOffice(null)).toBe("service-rfp-core:unmapped");
   });
 });
+
+/**
+ * [Codex #75] A REQUEST REJECTION MUST NOT BECOME A CHANNEL STATE.
+ *
+ * `rejected` means one request was refused deterministically — a 409, a missing identity, a bad body. It
+ * needs its own manual action and says nothing about whether the channel can reach Core. Folding it into
+ * the health machine marked the whole office `failing`, and the next UNRELATED success then read that as a
+ * recovery, emailed an all-clear and closed the incident while the rejected row was still terminal.
+ *
+ * The alert was never the problem; the false recovery was. Driven through the REAL orchestrator (this file
+ * mocks only the pool/email chain), so these exercise the actual read-decide-send-write transition.
+ */
+describe("a rejected approval alerts without claiming the office is unhealthy", () => {
+  const OLD_RECIPIENT = process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+
+  beforeEach(() => {
+    process.env.BIDBOARD_CRM_ALERT_RECIPIENT = "ops@trock.test";
+    poolMock.query.mockReset();
+  });
+  afterEach(() => {
+    if (OLD_RECIPIENT === undefined) delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    else process.env.BIDBOARD_CRM_ALERT_RECIPIENT = OLD_RECIPIENT;
+  });
+
+  /** Serve `priorState` to the SELECT and capture what the UPSERT persists. */
+  function stubPool(priorState: string | null): { written: () => string[] } {
+    const writes: string[] = [];
+    poolMock.query.mockImplementation(async (text: string, params?: any[]) => {
+      if (/CREATE TABLE/i.test(text)) return { rows: [] };
+      if (/^\s*SELECT/i.test(text)) {
+        return priorState === null
+          ? { rows: [] }
+          : { rows: [{ state: priorState, last_alerted_at: null, last_success_at: null }] };
+      }
+      // The upsert: the persisted state is whichever parameter carries it.
+      writes.push(JSON.stringify(params ?? []));
+      return { rows: [] };
+    });
+    return { written: () => writes };
+  }
+
+  it("leaves the channel state untouched for a REJECTION (prior 'ok' stays 'ok')", async () => {
+    const { written } = stubPool("ok");
+    await recordServiceRfpCoreDelivery({
+      office: "dallas",
+      ok: false,
+      attempts: 1,
+      error: "409 live_project",
+      terminal: true,
+    });
+    // The operator is told, but the channel is not marked failing — so nothing can later "recover" it.
+    expect(written().join(" ")).toContain("ok");
+    expect(written().join(" ")).not.toContain("failing");
+  });
+
+  it("does not emit a RECOVERY when an unrelated success follows a rejection", async () => {
+    // Prior state is 'ok' because the rejection above refused to write 'failing'. A success therefore
+    // finds nothing to recover from — which is the whole point: the rejected row is still terminal.
+    stubPool("ok");
+    const after = await recordServiceRfpCoreDelivery({
+      office: "dallas",
+      ok: true,
+      attempts: 1,
+      status: 201,
+    });
+    expect(after).toEqual({ action: "none" });
+  });
+
+  it("still marks the channel FAILING for a real transport failure — the machine is otherwise unchanged", async () => {
+    const { written } = stubPool("ok");
+    await recordServiceRfpCoreDelivery({
+      office: "dallas",
+      ok: false,
+      attempts: 3,
+      error: "ECONNREFUSED",
+      terminal: false,
+    });
+    expect(written().join(" ")).toContain("failing");
+  });
+});
