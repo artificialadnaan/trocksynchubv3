@@ -67,6 +67,12 @@ export function buildServiceRfpIngressTargetUrl(
     return null;
   }
   if (parsed.protocol !== "https:") return null;
+  // …and no QUERY or FRAGMENT. `https://core.example.com?x=1` passes the protocol check, and the ingress
+  // path is then appended AFTER the query — so the request targets `/` carrying a malformed query rather
+  // than the ingress route, and a fragment is never sent at all. This validation exists to keep a
+  // MISCONFIGURATION inert rather than half-working; a base that silently retargets the POST is exactly
+  // the case it is supposed to refuse [CodeRabbit #75].
+  if (parsed.search || parsed.hash) return null;
   return `${trimmed}/webhooks/crm/${encodeURIComponent(office)}/service-rfp/v1`;
 }
 
@@ -192,6 +198,14 @@ export async function postServiceRfpApproved(
           "x-trock-signature": signServiceRfpIngress({ path, rawBody, secret: input.secret }),
         },
         body: rawBody,
+        // NEVER FOLLOW A REDIRECT [CodeRabbit #75 — CWE-319]. fetch follows by default, and 307/308
+        // PRESERVE the method and body — so a redirect to `http:` would replay this POST, putting the
+        // customer's name, contact email and site address on the wire in cleartext. That defeats the
+        // https-only check on the base URL above: validating the configured origin is worthless if the
+        // request can be walked off it mid-flight. `error` makes fetch reject instead, and the catch below
+        // already classifies a transport failure as retryable, so a genuinely relocated ingress surfaces
+        // as a retry rather than a silent downgrade.
+        redirect: "error",
         signal: deadline.signal,
       },
       SERVICE_RFP_INGRESS_TIMEOUT_MS,
