@@ -44,22 +44,32 @@ export function parseOfficePrefixFromNumber(projectNumber: string): string | nul
 }
 
 /**
- * Office prefix → TROCK Core tenant slug. Core's KNOWN_OFFICES is `["dallas"]`, so DFW is the only
- * office with a tenant today; ATL is mapped EXPLICITLY to null rather than left out, because the two
- * cases are different facts and only one of them is a surprise. An unknown prefix and a known-but-
- * unmapped one both refuse, but the map records which offices we have actually considered.
+ * The TROCK Core tenant that RFP approvals belong to.
  *
- * A refusal here is never a silent drop: the caller writes a terminal outbox row and alerts.
+ * A SINGLE VALUE, and that is the correction. This used to be a prefix → tenant MAP, on the reading
+ * that a project number's prefix names the OFFICE that runs the job — so `ATL-…` was mapped to null
+ * and every Atlanta-prefixed service RFP was refused as "no Core tenant".
+ *
+ * The prefix does not mean that. It records the MARKET the work is in; Atlanta jobs are run out of the
+ * DFW office like everything else. So the refusal was answering a question nobody asked: those
+ * approvals had an office all along, and two real ones were rejected for it.
+ *
+ * Deriving a tenant from the prefix is therefore not a mapping that needs another entry — it is the
+ * wrong input. One operating office, one tenant, stated once. If a second office ever runs its own
+ * jobs, that is a deliberate change here with a real second tenant behind it, not a row added to a
+ * table that was already asking the wrong thing.
  */
-const CORE_OFFICE_TENANTS: Record<string, string | null> = {
-  DFW: "dallas",
-  ATL: null,
-};
+const CORE_RFP_TENANT = "dallas";
 
-/** The Core tenant slug for an office prefix, or null when that office has no Core tenant. */
-export function officeTenantForPrefix(prefix: string | null | undefined): string | null {
-  if (!prefix) return null;
-  return CORE_OFFICE_TENANTS[prefix.trim().toUpperCase()] ?? null;
+/**
+ * The Core tenant an approved RFP is delivered to.
+ *
+ * Takes no argument BY DESIGN. The previous signature accepted the project-number prefix, which is
+ * what made "which office runs this?" look like a lookup on the wrong column; removing the parameter
+ * means a caller cannot reintroduce that reading without changing this function.
+ */
+export function coreRfpTenant(): string {
+  return CORE_RFP_TENANT;
 }
 
 /**
