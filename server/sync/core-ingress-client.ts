@@ -72,7 +72,14 @@ export function buildServiceRfpIngressTargetUrl(
   // than the ingress route, and a fragment is never sent at all. This validation exists to keep a
   // MISCONFIGURATION inert rather than half-working; a base that silently retargets the POST is exactly
   // the case it is supposed to refuse [CodeRabbit #75].
-  if (parsed.search || parsed.hash) return null;
+  //
+  // TESTED ON THE RAW STRING, not on parsed.search/parsed.hash [Codex #79]. A base ending in a BARE
+  // delimiter — `https://host?` or `https://host#`, and the `/?` `/#` forms — parses with both of those
+  // as the EMPTY STRING, which is falsy, so a parsed-component check waves it through. The delimiter is
+  // still in `trimmed`, so appending the path yields `https://host?/webhooks/...`: the ingress path lands
+  // inside the query and the request goes to `/` — the exact misrouting this guard exists to stop, from
+  // the input most likely to be a copy-paste accident.
+  if (trimmed.includes("?") || trimmed.includes("#")) return null;
   return `${trimmed}/webhooks/crm/${encodeURIComponent(office)}/service-rfp/v1`;
 }
 

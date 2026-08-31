@@ -56,6 +56,16 @@ describe("a base URL carrying a query or fragment is refused", () => {
     expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com#frag")).toBeNull();
   });
 
+  it("refuses a BARE delimiter, which parses as empty and slips a component check [Codex #79]", () => {
+    // `new URL("https://host?")` reports search === "" — falsy — so a parsed-component guard accepts it,
+    // and the appended path then lands inside the query: `https://host?/webhooks/...` requests `/`.
+    // These are the likeliest copy-paste shapes, so they are the ones a component check must not miss.
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com?")).toBeNull();
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com#")).toBeNull();
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com/?")).toBeNull();
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com/#")).toBeNull();
+  });
+
   it("still accepts an ordinary https base with a path prefix", () => {
     // The guard must not over-reach: a mounted-under-a-prefix Core is a legitimate configuration.
     expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com/api")).toBe(
