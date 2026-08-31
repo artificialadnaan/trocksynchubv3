@@ -135,7 +135,8 @@ export type ServiceRfpIngressOutcome =
  *   • a 2xx whose local "mark sent" write fails leaves the row `pending`, and the worker's redelivery is a
  *     no-op too.
  * The stale claim mattered: read literally it says automatic retry is unsafe, which invites building
- * machinery against a problem Core already solved. `tests/service-rfp-core-redelivery.test.ts` pins both.
+ * machinery against a problem Core already solved. `tests/service-rfp-core-handoff.test.ts` pins both,
+ * across two REAL sends — a builder-level comparison cannot, because stampOccurredAt runs at send time.
  */
 async function classifyResponse(response: Response): Promise<ServiceRfpIngressOutcome> {
   if (response.ok) {
