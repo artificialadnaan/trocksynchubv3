@@ -120,7 +120,22 @@ export type ServiceRfpIngressOutcome =
  * The body reads are best-effort by construction: a read that is malformed OR cut short by the
  * deadline in postServiceRfpApproved yields the same `{}`, so the STATUS decides the outcome in every
  * case. That is why a 2xx whose body never finished arriving is still `sent` — Core committed on the
- * status line, and re-POSTing it would create a second bid — it merely carries no bidId.
+ * status line — it merely carries no bidId.
+ *
+ * WHAT A REPOST ACTUALLY DOES, because the earlier wording here said it "would create a second bid" and
+ * that has not been true since Core's ingress became idempotent. Core keys idempotency on
+ * `serviceRfpSemanticDigest`, an ordered projection of what the delivery MEANS that deliberately EXCLUDES
+ * `occurredAt` — the transport stamp this client re-stamps on every attempt. So a redelivery of the same
+ * approval hashes identically and Core answers `outcome: "noop"` with the SAME bidId; only a genuine
+ * correction (different semantic content) re-enters the newest-wins update path.
+ *
+ * That is load-bearing for the two ambiguous cases this classifier creates, and the reason neither needs an
+ * in-flight state machine or a reconciliation pass:
+ *   • a POST that TIMES OUT after Core committed is retried, and the retry is a no-op;
+ *   • a 2xx whose local "mark sent" write fails leaves the row `pending`, and the worker's redelivery is a
+ *     no-op too.
+ * The stale claim mattered: read literally it says automatic retry is unsafe, which invites building
+ * machinery against a problem Core already solved. `tests/service-rfp-core-redelivery.test.ts` pins both.
  */
 async function classifyResponse(response: Response): Promise<ServiceRfpIngressOutcome> {
   if (response.ok) {
