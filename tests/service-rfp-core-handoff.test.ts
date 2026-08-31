@@ -515,6 +515,52 @@ describe("service RFP → TROCK Core handoff", () => {
     expect(executedSql()).toContain("status = 'sent'");
   });
 
+  it("a REDELIVERY differs from the first send in occurredAt and NOTHING else [Codex #76]", async () => {
+    // THE CLAIM THIS GUARDS: a retry is recognisable to Core as the same approval. Core keys idempotency
+    // on an ordered semantic projection that excludes occurredAt, so if any OTHER field moved between
+    // attempts the retry would read as a CORRECTION — re-entering the newest-wins update path and
+    // overwriting whatever an estimator had changed on the still-pre-award card.
+    //
+    // Asserted across two REAL SENDS rather than two builder calls. The builder never applies
+    // stampOccurredAt (it is module-private, applied at send time), so a builder-only comparison passes
+    // even if that transformation is deleted or starts rewriting a semantic field — which is exactly the
+    // regression this is supposed to catch.
+    // The FIRST send: the ordinary approval path posts to Core.
+    await runApproval();
+    const first = corePostBody();
+    expect(first, "the approval must have POSTed once before we redeliver it").toBeTruthy();
+
+    // …now redeliver the SAME row through the worker.
+    dbExecuteMock.mockReset();
+    dbExecuteMock
+      // The claimed row carries THE BODY THE FIRST SEND STORED — otherwise this compares two different
+      // rows and the assertion is meaningless (the fixture's stub payload nulls half the bid fields).
+      .mockResolvedValueOnce({
+        rows: [claimedRow({ attempt_count: 2, max_attempts: 6, payload: first })],
+      })
+      .mockResolvedValue({ rows: [] });
+    const { processServiceRfpCoreOutbox } = await import("../server/sync/service-rfp-core-outbox.ts");
+    // ADVANCE THE CLOCK between the sends. Both otherwise land in the same millisecond and the stamps
+    // tie, which makes the inequality below flaky rather than false — it would pass or fail on timing.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.parse(first.occurredAt) + 90_000));
+    try {
+      await processServiceRfpCoreOutbox();
+    } finally {
+      vi.useRealTimers();
+    }
+    const second = corePostBody();
+
+    const semantic = (b: any) => {
+      const { occurredAt, ...rest } = b;
+      return rest;
+    };
+    // The transport stamp MOVED — proving stampOccurredAt actually ran on this path…
+    expect(second.occurredAt).not.toBe(first.occurredAt);
+    // …and nothing Core hashes changed with it.
+    expect(semantic(second)).toEqual(semantic(first));
+  });
+
   it("claims only its OWN pending, deliverable rows", async () => {
     // The finding this closes: bidboard_create_outbox's claim query has no type filter, so sharing it
     // would let the Playwright worker claim a Core-shaped row and create a second Procore project.
