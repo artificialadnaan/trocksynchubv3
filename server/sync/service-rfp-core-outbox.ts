@@ -373,7 +373,32 @@ async function insertOutboxRow(input: {
       ${input.status === "pending" ? sql`NOW()` : sql`NULL`},
       NOW() + interval '30 seconds'
     )
-    ON CONFLICT (source_system, source_deal_id, rfp_request_id) DO NOTHING
+    -- A PRE-POST REFUSAL IS THE ONE ROW A RE-APPROVAL MAY REPLACE [Codex #75].
+    --
+    -- DO NOTHING alone made a correctable refusal permanent. A row refused before any POST — missing CRM
+    -- uuids, an office with no Core tenant — holds only the reason, carries target_url NULL, and is never
+    -- claimable (the drain requires target_url IS NOT NULL). Once the data is fixed, re-approving the same
+    -- request hits this unique triple, returns 'duplicate', and delivers nothing: the approval could never
+    -- reach Core again without hand-editing the table.
+    --
+    -- So a refusal row is UPGRADED in place when a later attempt can actually be delivered. The predicate
+    -- is deliberately narrow: only a row that never left (target_url IS NULL) and is not currently in
+    -- flight (status = 'failed'). A row that HAS a target_url has been POSTed or is queued to be, and
+    -- overwriting it is how one approval becomes two bids — the concurrency guard this index exists for.
+    --
+    -- attempt_count RESETS, because the prior attempts were of a body that could not be sent at all; they
+    -- are not evidence about this one, and inheriting them would dead-letter the corrected delivery early.
+    ON CONFLICT (source_system, source_deal_id, rfp_request_id) DO UPDATE
+      SET payload = EXCLUDED.payload,
+          target_url = EXCLUDED.target_url,
+          status = EXCLUDED.status,
+          attempt_count = EXCLUDED.attempt_count,
+          last_error = EXCLUDED.last_error,
+          last_attempt_at = EXCLUDED.last_attempt_at,
+          next_attempt_at = EXCLUDED.next_attempt_at
+      WHERE service_rfp_core_outbox.target_url IS NULL
+        AND service_rfp_core_outbox.status = 'failed'
+        AND EXCLUDED.target_url IS NOT NULL
     RETURNING id, attempt_count, max_attempts
   `);
   const row = rowsOf(result)[0];
