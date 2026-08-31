@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { redriveServiceRfpToCore } from "../sync/service-rfp-core-redrive";
 import express, { type Express, type Request } from "express";
 import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
@@ -236,6 +237,46 @@ export function registerRfpRequestRoutes(app: Express): void {
   // links Procore and advances to estimating, exactly like a normal approval. HMAC-secured (no
   // requireAuth), runs in the background (202), and on a Playwright failure leaves the request
   // re-tryable (it is NOT marked approved) and emits a 'failed' callback to the CRM.
+  // Re-drive a Core delivery that never landed, for an ALREADY-APPROVED request.
+  //
+  // The gap this closes: when a delivery fails for a correctable reason — a customer that existed in
+  // Core's directory without its CRM id, an office the handoff wrongly refused, CRM uuids not yet
+  // deployed — every other entry point refuses the request because it is already `approved`.
+  // processRfpApproval rejects non-pending, override-approve accepts only declined, the force path
+  // rejects approved. So the job never reached Core and the only recovery was editing the outbox by
+  // hand. That happened three times before this existed.
+  //
+  // SAFE TO CALL ON AN APPROVAL THAT ALREADY LANDED. The unique index + upsert guard mean a re-drive
+  // may only replace a row that NEVER LEFT; a sent or queued row is untouched and the caller gets
+  // `duplicate`. Idempotent by construction, which matters because `bid` has no deleted_at — a
+  // duplicate card could not be removed.
+  //
+  // HMAC-signed like override-approve beside it, so the same operator tooling reaches it.
+  app.post("/api/rfp-requests/:id/redrive-core", jsonWithRawBody, asyncHandler(async (req, res) => {
+    const signature = verifyRfpRequestSignature(req);
+    if (!signature.ok) {
+      return res.status(signature.status).json({
+        success: false,
+        error: signature.status === 401 ? "Unauthorized" : "Internal Server Error",
+        message: signature.message,
+      });
+    }
+
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: "Bad Request", message: "Invalid RFP request id" });
+    }
+
+    const outcome = await redriveServiceRfpToCore(id);
+    if (!outcome.ok) {
+      // 409 rather than 400: the request exists and the input was well formed — it is the request's
+      // STATE that makes a re-drive wrong, which is a conflict, and the reason names which state.
+      const status = outcome.reason === "not_found" ? 404 : 409;
+      return res.status(status).json({ success: false, error: outcome.reason, message: outcome.detail });
+    }
+    return res.status(200).json({ success: true, status: outcome.status });
+  }));
+
   app.post("/api/rfp-requests/:id/override-approve", jsonWithRawBody, asyncHandler(async (req, res) => {
     const signature = verifyRfpRequestSignature(req);
     if (!signature.ok) {
