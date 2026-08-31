@@ -37,3 +37,39 @@ describe("service-RFP Core ingress target URL", () => {
     );
   });
 });
+
+/**
+ * [CodeRabbit #75] A base URL that would RETARGET the POST is a misconfiguration, not a usable value.
+ *
+ * The protocol check alone let `https://host?x=1` through, and the ingress path is appended AFTER the
+ * query — so the request goes to `/` carrying a malformed query instead of the ingress route. A fragment
+ * is never transmitted at all. This validation exists to keep a bad configuration INERT rather than
+ * half-working, which is the same reason plain http is refused rather than tolerated.
+ */
+describe("a base URL carrying a query or fragment is refused", () => {
+  it("refuses a query string, which would otherwise swallow the ingress path", () => {
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com?x=1")).toBeNull();
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com/?x=1")).toBeNull();
+  });
+
+  it("refuses a fragment, which is never sent and so can only mislead", () => {
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com#frag")).toBeNull();
+  });
+
+  it("refuses a BARE delimiter, which parses as empty and slips a component check [Codex #79]", () => {
+    // `new URL("https://host?")` reports search === "" — falsy — so a parsed-component guard accepts it,
+    // and the appended path then lands inside the query: `https://host?/webhooks/...` requests `/`.
+    // These are the likeliest copy-paste shapes, so they are the ones a component check must not miss.
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com?")).toBeNull();
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com#")).toBeNull();
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com/?")).toBeNull();
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com/#")).toBeNull();
+  });
+
+  it("still accepts an ordinary https base with a path prefix", () => {
+    // The guard must not over-reach: a mounted-under-a-prefix Core is a legitimate configuration.
+    expect(buildServiceRfpIngressTargetUrl("dallas", "https://core.example.com/api")).toBe(
+      "https://core.example.com/api/webhooks/crm/dallas/service-rfp/v1",
+    );
+  });
+});
