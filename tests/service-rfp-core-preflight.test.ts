@@ -57,12 +57,33 @@ describe("service-RFP outbox startup preflight", () => {
 
   it("says NOTHING when the table is present — the check must not become routine noise", async () => {
     dbExecuteMock.mockResolvedValue({ rows: [{ rc: "service_rfp_core_outbox" }] });
-    const { startServiceRfpCoreOutboxWorker } = await import("../server/sync/service-rfp-core-outbox.ts");
+    const { preflightOutboxTable } = await import("../server/sync/service-rfp-core-outbox.ts");
 
-    startServiceRfpCoreOutboxWorker(60_000);
-    await vi.waitFor(() => expect(logged()).toContain("Worker started"));
+    // AWAIT THE PROBE ITSELF. Waiting for `Worker started` — logged synchronously while the preflight ran
+    // fire-and-forget — could finish before the probe had run at all, so this assertion passed whether or
+    // not the present-table guard worked [Codex #75 confirmed it survived deleting `if (present) return`].
+    // The verdict is the observable completion, so silence here is now silence AFTER a real answer.
+    await expect(preflightOutboxTable()).resolves.toBe("present");
 
     expect(logged()).not.toContain("PROVISIONING ERROR");
+  });
+
+  it("RETRIES after an inconclusive probe, so a boot-time outage does not bury the diagnosis", async () => {
+    // The case this exists for: the database is briefly unreachable at startup AND the table is genuinely
+    // missing. A one-shot probe logs its generic verification failure once and never speaks again, leaving
+    // only the raw `relation ... does not exist` tick noise the preflight was written to replace.
+    dbExecuteMock.mockRejectedValueOnce(new Error("connection terminated"));
+    dbExecuteMock.mockResolvedValue({ rows: [{ rc: null }] });
+    const { startServiceRfpCoreOutboxWorker, resetServiceRfpPreflightForTests } = await import(
+      "../server/sync/service-rfp-core-outbox.ts"
+    );
+    resetServiceRfpPreflightForTests();
+
+    // A short interval so the second probe lands inside the test rather than 30 s later.
+    startServiceRfpCoreOutboxWorker(20);
+    await vi.waitFor(() => expect(logged()).toContain("Could not verify"));
+    // …and the retry reaches the conclusive answer.
+    await vi.waitFor(() => expect(logged()).toContain("PROVISIONING ERROR"), { timeout: 3000 });
   });
 
   it("does not claim the table is missing when the PROBE ITSELF fails", async () => {
