@@ -35,13 +35,16 @@ export function replaceProjectTypeInNumber(projectNumber: string, newTypeDigit: 
 
 // Same shape as PROJECT_NUMBER_PREFIX_RE but capturing the OFFICE rather than the type digit, so the
 // two readings of a project number stay in one file and cannot drift apart.
-const PROJECT_NUMBER_OFFICE_RE = /^([A-Za-z]{2,4})-\d+-/;
-
-/** Extract the office prefix from a project number (DFW-4-06426-ah → "DFW"), upper-cased. */
-export function parseOfficePrefixFromNumber(projectNumber: string): string | null {
-  const match = projectNumber?.match(PROJECT_NUMBER_OFFICE_RE);
-  return match ? match[1].toUpperCase() : null;
-}
+// parseOfficePrefixFromNumber USED TO LIVE HERE and is deliberately gone.
+//
+// It read the leading letters of a project number as the OFFICE that runs the job, and its only caller
+// used that to pick a Core tenant — which refused every Atlanta-prefixed service RFP and lost two real
+// approvals. The prefix records the MARKET the work is in; Atlanta jobs are run out of DFW.
+//
+// Deleting it rather than leaving it unused is the point. An exported helper called
+// "parseOfficePrefixFromNumber" is a standing invitation to answer an office question with it, and the
+// next reader has no way to know the name is wrong. `parseProjectTypeFromNumber` below still reads the
+// TYPE digit from the same string, which the number genuinely does encode.
 
 /**
  * The TROCK Core tenant that RFP approvals belong to.
