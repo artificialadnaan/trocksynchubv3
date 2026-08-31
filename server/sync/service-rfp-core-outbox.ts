@@ -659,8 +659,48 @@ export async function processServiceRfpCoreOutbox(
   }
 }
 
+/**
+ * Assert the outbox TABLE is actually there, once, at startup.
+ *
+ * WHY THIS EXISTS. Migration 0025 creates `service_rfp_core_outbox`, and NOTHING migrates this database on
+ * deploy — so the table can be absent on a service whose code, secret and base URL are all correctly
+ * provisioned. That combination is worse than being unconfigured, because `handOffServiceRfpApprovalToCore`
+ * is deliberately FAIL-OPEN: its catch-all swallows the failed insert, returns `skipped`, and the approval
+ * proceeds to Procore exactly as before. The Core delivery is then dropped with no outbox row, no retry and
+ * no alert — the feature reports healthy and silently does nothing.
+ *
+ * That is not hypothetical; it is what this deployment did the first time it was provisioned, and the only
+ * symptom was a worker tick line. So the check is at STARTUP rather than inside the handoff: it must fire
+ * without waiting for an approval to be lost, and it must be loud enough to read as a provisioning error
+ * rather than as routine noise.
+ *
+ * It never throws. A boot that dies on a missing table would take the whole RFP flow — Procore automation
+ * included — down with it, which trades a silent gap for an outage. Reporting and continuing is the same
+ * fail-open posture the handoff takes, made VISIBLE.
+ */
+async function preflightOutboxTable(): Promise<void> {
+  try {
+    const db = await getDb();
+    const probe = await db.execute<{ rc: string | null }>(
+      sql`select to_regclass('public.service_rfp_core_outbox')::text as rc`,
+    );
+    const present = Boolean((probe as any).rows?.[0]?.rc ?? (probe as any)[0]?.rc);
+    if (present) return;
+    log(
+      "[service-rfp-core] PROVISIONING ERROR: table service_rfp_core_outbox is MISSING. " +
+        "Approved service RFPs will NOT reach TROCK Core, and because the handoff is fail-open they will " +
+        "be dropped silently — no outbox row, no retry, no alert. Apply migrations/0025_create_service_rfp_core_outbox.sql.",
+      "sync",
+    );
+  } catch (error: any) {
+    // A probe that cannot run is not evidence the table is missing, and must not be reported as if it were.
+    log(`[service-rfp-core] Could not verify the outbox table: ${error?.message || error}`, "sync");
+  }
+}
+
 export function startServiceRfpCoreOutboxWorker(intervalMs = 30_000): void {
   if (outboxWorkerTimer) return;
+  void preflightOutboxTable();
   outboxWorkerTimer = setInterval(() => {
     processServiceRfpCoreOutbox().catch((error) => {
       log(`[service-rfp-core] Worker tick failed: ${error?.message || error}`, "sync");
