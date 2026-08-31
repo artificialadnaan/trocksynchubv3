@@ -678,23 +678,52 @@ export async function processServiceRfpCoreOutbox(
  * included — down with it, which trades a silent gap for an outage. Reporting and continuing is the same
  * fail-open posture the handoff takes, made VISIBLE.
  */
-async function preflightOutboxTable(): Promise<void> {
+/** Whether the probe has reached a CONCLUSIVE answer. Inconclusive attempts do not settle it. */
+let outboxPreflightSettled = false;
+
+/** Test seam: forget the settled verdict so each case starts from an unprobed worker. */
+export function resetServiceRfpPreflightForTests(): void {
+  outboxPreflightSettled = false;
+}
+
+/**
+ * Assert the outbox TABLE is there. Returns its verdict so a caller — and a test — can AWAIT it.
+ *
+ * Returning the verdict rather than void is not cosmetic [Codex #75]. The first version was
+ * fire-and-forget, so `Worker started` (logged synchronously) could land before the probe had run at all;
+ * a test that waited for that line and then asserted "no PROVISIONING ERROR" passed whether or not the
+ * present-table guard worked. Codex confirmed it: the test still passed with `if (present) return`
+ * deleted. An assertion that cannot fail is worse than no assertion, because it reads as coverage.
+ *
+ * INCONCLUSIVE IS NOT ABSENT and is not final either. If the connection is down at startup but recovers
+ * while the table really is missing, a one-shot probe would log its generic verification failure once and
+ * never speak again — leaving only the raw `relation ... does not exist` tick noise this exists to
+ * replace, which is exactly the operator experience it was written to prevent. So only a definite
+ * present/absent answer settles it; anything else is retried on the next tick.
+ *
+ * Still never throws: a boot that died here would take the Procore automation down with it.
+ */
+export async function preflightOutboxTable(): Promise<"present" | "missing" | "inconclusive"> {
   try {
     const db = await getDb();
     const probe = await db.execute<{ rc: string | null }>(
       sql`select to_regclass('public.service_rfp_core_outbox')::text as rc`,
     );
     const present = Boolean((probe as any).rows?.[0]?.rc ?? (probe as any)[0]?.rc);
-    if (present) return;
+    outboxPreflightSettled = true;
+    if (present) return "present";
     log(
       "[service-rfp-core] PROVISIONING ERROR: table service_rfp_core_outbox is MISSING. " +
         "Approved service RFPs will NOT reach TROCK Core, and because the handoff is fail-open they will " +
         "be dropped silently — no outbox row, no retry, no alert. Apply migrations/0025_create_service_rfp_core_outbox.sql.",
       "sync",
     );
+    return "missing";
   } catch (error: any) {
-    // A probe that cannot run is not evidence the table is missing, and must not be reported as if it were.
+    // A probe that cannot run is not evidence the table is missing, and must not be reported as if it
+    // were. Left UNSETTLED so the next tick asks again.
     log(`[service-rfp-core] Could not verify the outbox table: ${error?.message || error}`, "sync");
+    return "inconclusive";
   }
 }
 
@@ -702,6 +731,10 @@ export function startServiceRfpCoreOutboxWorker(intervalMs = 30_000): void {
   if (outboxWorkerTimer) return;
   void preflightOutboxTable();
   outboxWorkerTimer = setInterval(() => {
+    // Re-probe until the answer is CONCLUSIVE. A startup probe that could not reach the database proves
+    // nothing, and without this the migration-specific diagnosis would never be emitted for the very
+    // case it exists to catch — a transient outage at boot over a genuinely missing table.
+    if (!outboxPreflightSettled) void preflightOutboxTable();
     processServiceRfpCoreOutbox().catch((error) => {
       log(`[service-rfp-core] Worker tick failed: ${error?.message || error}`, "sync");
     });
