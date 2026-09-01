@@ -171,6 +171,14 @@ function makeRequest(overrides: Partial<any> = {}, dealOverrides: Record<string,
   };
 }
 
+/** Only the UPDATE statements — an INSERT's ON CONFLICT predicate names states it does not SET. */
+function updateStatements(): string {
+  return dbExecuteMock.mock.calls
+    .map((call) => JSON.stringify(call[0]))
+    .filter((text) => /UPDATE/i.test(text) && !/INSERT/i.test(text))
+    .join("\n");
+}
+
 /** Every statement the handoff issued, flattened, so an assertion can name the state it expects. */
 function executedSql(): string {
   return dbExecuteMock.mock.calls.map((call) => JSON.stringify(call[0])).join("\n");
@@ -307,8 +315,12 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
       expect(outboundCalls).toEqual(["core", "playwright"]);
       expect(executedSql()).toContain("status = 'pending'");
-      expect(executedSql()).not.toContain("status = 'sent'");
-      expect(executedSql()).not.toContain("status = 'failed'");
+      // Asserted on the UPDATE statements only. The INSERT's ON CONFLICT predicate legitimately mentions
+      // `status = 'failed'` — it is the guard that lets a corrected re-approval replace a never-sent
+      // refusal row — so a substring match across ALL executed SQL now reads that guard as an outcome.
+      // What these assert is that nothing MARKED the row sent or failed, which is the fail-open property.
+      expect(updateStatements()).not.toContain("status = 'sent'");
+      expect(updateStatements()).not.toContain("status = 'failed'");
     });
 
     it("leaves the row PENDING and still runs Playwright on a Core 500", async () => {
@@ -319,7 +331,8 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
       expect(outboundCalls).toEqual(["core", "playwright"]);
       expect(executedSql()).toContain("status = 'pending'");
-      expect(executedSql()).not.toContain("status = 'failed'");
+      // UPDATEs only — see the note above: the INSERT's ON CONFLICT guard names 'failed' without setting it.
+      expect(updateStatements()).not.toContain("status = 'failed'");
     });
 
     it("leaves the row PENDING and still runs Playwright when the Core call times out", async () => {
@@ -708,6 +721,41 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(executedSql()).not.toContain("status = 'dead'");
       // Still provisioning; an email per worker tick would be noise about a knob nobody has set yet.
       expect(alertCalls).toHaveLength(0);
+    });
+  });
+
+  /**
+   * [Codex #75] A CORRECTABLE REFUSAL MUST NOT BE PERMANENT.
+   *
+   * A row refused BEFORE any POST — missing CRM uuids, an office with no Core tenant — holds only the
+   * reason, carries `target_url` NULL, and is never claimable (the drain requires `target_url IS NOT NULL`).
+   * With `ON CONFLICT DO NOTHING`, re-approving the same request after fixing the data hit the unique triple,
+   * returned `duplicate`, and delivered nothing: the approval could never reach Core again without hand
+   * -editing the table.
+   *
+   * The guard is the interesting half. Only a row that NEVER LEFT may be replaced; one that already carries a
+   * target_url has been POSTed or is queued to be, and overwriting it is how one approval becomes two bids —
+   * which is exactly what this unique index exists to prevent.
+   */
+  describe("a never-sent refusal row can be re-driven by a corrected approval", () => {
+    it("upgrades the row in place, and only when it never left AND the retry can actually be delivered", async () => {
+      await runApproval();
+      const insert = dbExecuteMock.mock.calls
+        .map((call) => JSON.stringify(call[0]))
+        .find((text) => /INSERT INTO service_rfp_core_outbox/i.test(text));
+      expect(insert).toBeDefined();
+      // ASSERTED ON THE PREDICATE, NOT THE WHOLE STATEMENT. The SQL carries a long comment that NAMES
+      // the states it does not set, so a substring match over the statement passes on PROSE — which is
+      // how an earlier version of this test survived narrowing the predicate back [Codex #83].
+      expect(insert).toContain("DO UPDATE");
+      const predicate = String(insert).split("DO UPDATE")[1] ?? "";
+      // A TERMINAL row may be replaced: "failed" covers a Core 4xx that kept its target_url, "dead" an
+      // exhausted ladder. Restricting this to never-sent rows is what missed the motivating case.
+      expect(predicate).toMatch(/status IN \('failed', ?'dead'\)/);
+      // …and only when THIS attempt is deliverable, so a refusal cannot clobber a real queued row.
+      expect(predicate).toContain("EXCLUDED.target_url IS NOT NULL");
+      // "pending" is never replaceable: overwriting an in-flight row races the worker.
+      expect(predicate).not.toContain("'pending'");
     });
   });
 });

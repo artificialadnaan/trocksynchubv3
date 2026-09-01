@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { redriveServiceRfpToCore } from "../sync/service-rfp-core-redrive";
 import express, { type Express, type Request } from "express";
 import { z } from "zod";
 import { asyncHandler } from "../lib/async-handler";
@@ -236,6 +237,101 @@ export function registerRfpRequestRoutes(app: Express): void {
   // links Procore and advances to estimating, exactly like a normal approval. HMAC-secured (no
   // requireAuth), runs in the background (202), and on a Playwright failure leaves the request
   // re-tryable (it is NOT marked approved) and emits a 'failed' callback to the CRM.
+  // Re-drive a Core delivery that never landed, for an ALREADY-APPROVED request.
+  //
+  // The gap this closes: when a delivery fails for a correctable reason — a customer that existed in
+  // Core's directory without its CRM id, an office the handoff wrongly refused, CRM uuids not yet
+  // deployed — every other entry point refuses the request because it is already `approved`.
+  // processRfpApproval rejects non-pending, override-approve accepts only declined, the force path
+  // rejects approved. So the job never reached Core and the only recovery was editing the outbox by
+  // hand. That happened three times before this existed.
+  //
+  // SAFE TO CALL ON AN APPROVAL THAT ALREADY LANDED. The unique index + upsert guard mean a re-drive
+  // may only replace a row that NEVER LEFT; a sent or queued row is untouched and the caller gets
+  // `duplicate`. Idempotent by construction, which matters because `bid` has no deleted_at — a
+  // duplicate card could not be removed.
+  //
+  // HMAC-signed like override-approve beside it, so the same operator tooling reaches it.
+  app.post("/api/rfp-requests/:id/redrive-core", jsonWithRawBody, asyncHandler(async (req, res) => {
+    // A BODY IS REQUIRED, and it carries the id — so the signature is BOUND TO THIS REQUEST.
+    //
+    // The first version verified against an empty buffer to solve a 401 (Express skips its JSON verify
+    // callback when there is no body, leaving rfpRawBody unset). That produced a CONSTANT signature,
+    // identical to the read-only GET /api/rfp/estimators route's, for a STATE-CHANGING endpoint: anyone
+    // who ever saw one legitimate signature could replay it here against any id, without the secret
+    // [Codex #83]. Same defect Core's own ingress domain-separates its MAC to prevent, reintroduced one
+    // service over.
+    //
+    // Signing `{"rfpRequestId":<id>}` binds the signature to the id and gives the parser a body to run
+    // its verify callback on, so the 401 is fixed by the same change that closes the replay.
+    const signature = verifyRfpRequestSignature(req);
+    if (!signature.ok) {
+      return res.status(signature.status).json({
+        success: false,
+        error: signature.status === 401 ? "Unauthorized" : "Internal Server Error",
+        message: signature.message,
+      });
+    }
+
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: "Bad Request", message: "Invalid RFP request id" });
+    }
+
+    // The signed body must NAME the same id as the path, or a captured signature for one request could
+    // still be pointed at another by editing the URL.
+    const bodyId = Number((req.body ?? {}).rfpRequestId);
+    if (bodyId !== id) {
+      return res.status(400).json({
+        success: false,
+        error: "Bad Request",
+        message: "body.rfpRequestId must equal the :id in the path (the signature is bound to it)",
+      });
+    }
+
+    const outcome = await redriveServiceRfpToCore(id);
+    if (!outcome.ok) {
+      // 409 rather than 400: the request exists and the input was well formed — it is the request's
+      // STATE that makes a re-drive wrong, which is a conflict, and the reason names which state.
+      // 503 for an UNREADABLE PRIOR, not 409. A 409 says "the state of this request forbids it", which a
+      // client should stop retrying — but this one is an infrastructure blip, and repeating the identical
+      // call once the database recovers is exactly the right move [Codex #83].
+      const status =
+        outcome.reason === "not_found"
+          ? 404
+          : outcome.reason === "prior_delivery_unreadable"
+            ? 503
+            : 409;
+      return res.status(status).json({ success: false, error: outcome.reason, message: outcome.detail });
+    }
+    // `skipped` means the handoff caught a problem and did NOTHING — Core unconfigured, or an outbox
+    // write that threw. The terminal row was not replaced and nothing was sent or queued, so reporting
+    // 200/success would let operator tooling record a recovery that never happened [Codex #83].
+    // `failed` belongs here too: a retried POST that Core terminally refuses returns it, and the row is
+    // still terminally failed. Excluding it answered 200/success for the case where Core said no AGAIN
+    // [Codex #83]. The only outcomes that mean something reached Core are `sent`, `pending` and
+    // `duplicate` (already delivered).
+    if (outcome.status === "skipped" || outcome.status === "dead" || outcome.status === "failed") {
+      // ONE MESSAGE PER OUTCOME. These three are all "not recovered", but they are not the same event,
+      // and a single sentence asserting the row is unchanged is FALSE for `failed` — there the POST was
+      // sent and Core refused it, so the row did move [Codex #83]. An operator reading "nothing was sent"
+      // about a request Core has now rejected twice would look in exactly the wrong place.
+      const detail =
+        outcome.status === "failed"
+          ? "the retry reached Core and was refused again; the row is terminally failed and its last_error names the reason"
+          : outcome.status === "dead"
+            ? "the row has exhausted its retry ladder and was not re-dispatched"
+            : "nothing was sent or queued — Core is unconfigured or the outbox write failed; the row is unchanged";
+      return res.status(502).json({
+        success: false,
+        error: "redrive_not_recovered",
+        status: outcome.status,
+        message: detail,
+      });
+    }
+    return res.status(200).json({ success: true, status: outcome.status });
+  }));
+
   app.post("/api/rfp-requests/:id/override-approve", jsonWithRawBody, asyncHandler(async (req, res) => {
     const signature = verifyRfpRequestSignature(req);
     if (!signature.ok) {

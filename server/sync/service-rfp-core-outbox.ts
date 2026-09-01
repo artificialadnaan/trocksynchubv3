@@ -373,7 +373,45 @@ async function insertOutboxRow(input: {
       ${input.status === "pending" ? sql`NOW()` : sql`NULL`},
       NOW() + interval '30 seconds'
     )
-    ON CONFLICT (source_system, source_deal_id, rfp_request_id) DO NOTHING
+    -- A PRE-POST REFUSAL IS THE ONE ROW A RE-APPROVAL MAY REPLACE [Codex #75].
+    --
+    -- DO NOTHING alone made a correctable refusal permanent. A row refused before any POST — missing CRM
+    -- uuids, an office with no Core tenant — holds only the reason, carries target_url NULL, and is never
+    -- claimable (the drain requires target_url IS NOT NULL). Once the data is fixed, re-approving the same
+    -- request hits this unique triple, returns 'duplicate', and delivers nothing: the approval could never
+    -- reach Core again without hand-editing the table.
+    --
+    -- So a TERMINAL row is UPGRADED in place when a later attempt can actually be delivered.
+    --
+    -- 'failed' OR 'dead', NOT only the never-sent ones. The first version required 'target_url IS NULL',
+    -- which covered pre-POST refusals and MISSED THE CASE IT WAS WRITTEN FOR: a Core 4xx (a customer not
+    -- yet linked to its CRM id) leaves the row 'failed' WITH a target_url, and an exhausted retry ladder
+    -- leaves it 'dead'. Both are correctable, and both were excluded [Codex #83].
+    --
+    -- 'pending' and 'sent' stay excluded, for different reasons. A pending row is IN FLIGHT and
+    -- overwriting it races the worker. A sent row already delivered — and while re-driving one would be
+    -- harmless, because Core's semantic digest answers 'noop' to an exact redelivery, allowing it invites
+    -- the reading that this is how you resend, which it is not.
+    --
+    -- That idempotency is what makes widening this safe at all: a row that reached Core and lost its
+    -- response can be re-driven without minting a second bid, because Core recognises the delivery.
+    --
+    -- attempt_count RESETS, because the prior attempts were of a body that could not be sent at all; they
+    -- are not evidence about this one, and inheriting them would dead-letter the corrected delivery early.
+    ON CONFLICT (source_system, source_deal_id, rfp_request_id) DO UPDATE
+      SET payload = EXCLUDED.payload,
+          target_url = EXCLUDED.target_url,
+          status = EXCLUDED.status,
+          attempt_count = EXCLUDED.attempt_count,
+          -- …AND THE CEILING WITH IT. A row created under an older, shorter ladder kept its old
+          -- max_attempts, so a re-drive dead-lettered early and never reached the current ladder's final
+          -- two-hour retry — the replacement is a fresh delivery and must get the current budget [Codex #83].
+          max_attempts = EXCLUDED.max_attempts,
+          last_error = EXCLUDED.last_error,
+          last_attempt_at = EXCLUDED.last_attempt_at,
+          next_attempt_at = EXCLUDED.next_attempt_at
+      WHERE service_rfp_core_outbox.status IN ('failed', 'dead')
+        AND EXCLUDED.target_url IS NOT NULL
     RETURNING id, attempt_count, max_attempts
   `);
   const row = rowsOf(result)[0];
@@ -532,6 +570,45 @@ async function deliver(
  * about a HubSpot-sourced RFP while the whole integration is switched off would be noise about a
  * boundary nobody is watching yet.
  */
+/**
+ * Re-queue an EXISTING outbox row with the body it already carries.
+ *
+ * Distinct from the handoff because it deliberately does NOT rebuild: Core keys idempotency on a
+ * semantic digest, so re-sending the stored bytes is what makes a retry recognisably the SAME delivery
+ * rather than a correction. Rebuilding with a newer builder could change the digest and let a recovery
+ * overwrite edits made after the original landed [Codex #83].
+ *
+ * Returns the same vocabulary the handoff does so the caller cannot tell the two paths apart.
+ */
+export async function replayServiceRfpPayload(input: {
+  sourceDealId: string;
+  rfpRequestId: number;
+  payload: any;
+}): Promise<"sent" | "pending" | "failed" | "dead" | "duplicate" | "skipped"> {
+  try {
+    const secret = resolveServiceRfpIngressSecret();
+    const office = String(input.payload?.office ?? coreRfpTenant());
+    const targetUrl = buildServiceRfpIngressTargetUrl(office);
+    if (!secret || !targetUrl) return "skipped";
+
+    const inserted = await insertOutboxRow({
+      sourceSystem: "trock_crm",
+      sourceDealId: input.sourceDealId,
+      rfpRequestId: input.rfpRequestId,
+      payload: input.payload,
+      targetUrl,
+      status: "pending",
+      lastError: null,
+    });
+    if (!inserted) return "duplicate";
+    return await deliver({ ...inserted, targetUrl, body: input.payload, office }, {});
+  } catch (error: any) {
+    // Same fail-open posture as the handoff: a recovery attempt must never throw into its caller.
+    log(`[service-rfp-core] replay failed for RFP request ${input.rfpRequestId}: ${error?.message || error}`, "sync");
+    return "skipped";
+  }
+}
+
 export async function handOffServiceRfpApprovalToCore(
   input: ServiceRfpHandoffInput,
   deps: { fetchImpl?: typeof fetchWithTimeout; secret?: string } = {},
