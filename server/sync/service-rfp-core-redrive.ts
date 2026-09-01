@@ -22,7 +22,7 @@ import { resolveEffectiveRfpProjectType, replaceProjectTypeInNumber } from "../c
 
 export type RedriveOutcome =
   | { ok: true; status: "sent" | "pending" | "failed" | "skipped" | "dead" | "duplicate" }
-  | { ok: false; reason: "not_found" | "not_approved" | "not_trock_crm" | "not_service" | "unbuildable"; detail: string };
+  | { ok: false; reason: "not_found" | "not_approved" | "not_trock_crm" | "not_service" | "unbuildable" | "prior_delivery_unreadable"; detail: string };
 
 /**
  * Re-attempt the Core handoff for an already-approved RFP request.
@@ -39,7 +39,10 @@ export type RedriveOutcome =
  * excludes the transport stamp but INCLUDES this, so a different value turns a recovery into a
  * correction. Falls back to null so a first-ever delivery still stamps normally.
  */
-async function priorPayloadApprovedAt(sourceDealId: string, rfpRequestId: number): Promise<string | null> {
+async function priorPayloadApprovedAt(
+  sourceDealId: string,
+  rfpRequestId: number,
+): Promise<{ kind: "found"; approvedAt: string } | { kind: "none" } | { kind: "inconclusive" }> {
   try {
     const { db } = await import("../db");
     const { sql } = await import("drizzle-orm");
@@ -50,10 +53,17 @@ async function priorPayloadApprovedAt(sourceDealId: string, rfpRequestId: number
        LIMIT 1
     `);
     const rows = (r?.rows ?? r) as Array<{ approved_at: string | null }>;
-    return rows?.[0]?.approved_at ?? null;
+    const found = rows?.[0]?.approved_at ?? null;
+    return found ? { kind: "found", approvedAt: found } : { kind: "none" };
   } catch {
-    // A read that cannot run is not evidence there was no prior delivery; fall back to the request row.
-    return null;
+    // INCONCLUSIVE IS NOT "NO PRIOR DELIVERY" — and the first version of this said exactly that in a
+    // comment and then returned null anyway, which is the fallback it was warning against [Codex #83].
+    //
+    // The cost of getting it wrong is asymmetric. If the SELECT fails transiently and the upsert then
+    // succeeds, a `dead` row from an AMBIGUOUS delivery is rebuilt with request.approvedAt — a later
+    // timestamp — so Core reads a newer semantic event and may overwrite estimator changes made after
+    // the original landed. Refusing costs an operator one retry; guessing silently rewrites their work.
+    return { kind: "inconclusive" };
   }
 }
 
@@ -106,9 +116,20 @@ export async function redriveServiceRfpToCore(rfpRequestId: number): Promise<Red
   // delivered" and sends an operator looking in the wrong place. Naming the real reason is the difference
   // between a recoverable error and a confusing one; this case genuinely needs the approval re-issued.
   // What the ORIGINAL delivery told Core, if a row exists — see approvedAt below.
+  const prior = await priorPayloadApprovedAt(request.sourceDealId, request.id);
+  if (prior.kind === "inconclusive") {
+    return {
+      ok: false,
+      reason: "prior_delivery_unreadable",
+      detail: "could not read the prior outbox payload; re-driving now could send a newer approvedAt and overwrite later edits",
+    };
+  }
   const priorApprovedAt =
-    (await priorPayloadApprovedAt(request.sourceDealId, request.id)) ??
-    (request.approvedAt ? new Date(request.approvedAt).toISOString() : null);
+    prior.kind === "found"
+      ? prior.approvedAt
+      : request.approvedAt
+        ? new Date(request.approvedAt).toISOString()
+        : null;
 
   const probe: any = buildServiceRfpApprovedBody({
     sourceSystem: "trock_crm",

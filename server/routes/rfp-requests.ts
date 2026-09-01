@@ -299,7 +299,11 @@ export function registerRfpRequestRoutes(app: Express): void {
     // `skipped` means the handoff caught a problem and did NOTHING — Core unconfigured, or an outbox
     // write that threw. The terminal row was not replaced and nothing was sent or queued, so reporting
     // 200/success would let operator tooling record a recovery that never happened [Codex #83].
-    if (outcome.status === "skipped" || outcome.status === "dead") {
+    // `failed` belongs here too: a retried POST that Core terminally refuses returns it, and the row is
+    // still terminally failed. Excluding it answered 200/success for the case where Core said no AGAIN
+    // [Codex #83]. The only outcomes that mean something reached Core are `sent`, `pending` and
+    // `duplicate` (already delivered).
+    if (outcome.status === "skipped" || outcome.status === "dead" || outcome.status === "failed") {
       return res.status(502).json({
         success: false,
         error: "redrive_did_not_dispatch",

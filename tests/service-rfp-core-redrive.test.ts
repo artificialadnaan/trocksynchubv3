@@ -13,9 +13,14 @@ const handoffMock = vi.hoisted(() => vi.fn(async () => ({ status: "sent" as cons
 const requestRow = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
-const priorRow = vi.hoisted(() => ({ approvedAt: null as string | null }));
+const priorRow = vi.hoisted(() => ({ approvedAt: null as string | null, throws: false }));
 vi.mock("../server/db.ts", () => ({
-  db: { execute: vi.fn(async () => ({ rows: [{ approved_at: priorRow.approvedAt }] })) },
+  db: {
+    execute: vi.fn(async () => {
+      if (priorRow.throws) throw new Error("connection terminated");
+      return { rows: [{ approved_at: priorRow.approvedAt }] };
+    }),
+  },
   pool: { query: vi.fn(async () => ({ rows: [] })) },
 }));
 vi.mock("../server/storage.ts", () => ({
@@ -51,6 +56,7 @@ beforeEach(() => {
   handoffMock.mockResolvedValue({ status: "sent" } as any);
   requestRow.current = approvedService();
   priorRow.approvedAt = null;
+  priorRow.throws = false;
 });
 
 describe("re-driving a service RFP to Core", () => {
@@ -151,6 +157,17 @@ describe("re-driving a service RFP to Core", () => {
     await redriveServiceRfpToCore(781);
     const arg = handoffMock.mock.calls[0]![0] as any;
     expect(arg.approvedAt.toISOString()).toBe("2026-08-31T18:15:03.843Z");
+  });
+
+  it("ABORTS when the prior payload cannot be read — inconclusive is not 'no prior delivery' [Codex #83]", async () => {
+    // The asymmetry that decides this: if the read fails transiently and the upsert then succeeds, a
+    // `dead` row from an ambiguous delivery is rebuilt with the request row's LATER approvedAt, Core
+    // reads a newer semantic event, and estimator changes made after the original landed are overwritten.
+    // Refusing costs one retry; guessing silently rewrites someone's work.
+    priorRow.throws = true;
+    const out = await redriveServiceRfpToCore(781);
+    expect(out).toMatchObject({ ok: false, reason: "prior_delivery_unreadable" });
+    expect(handoffMock).not.toHaveBeenCalled();
   });
 
   it("passes a DUPLICATE through rather than dressing it as success", async () => {
