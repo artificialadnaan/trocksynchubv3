@@ -16,8 +16,10 @@ vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 vi.mock("../server/storage.ts", () => ({
   storage: { getRfpApprovalRequestById: vi.fn(async () => requestRow.current) },
 }));
+const buildMock = vi.hoisted(() => vi.fn(() => ({ ok: true, office: "dallas", body: {} })));
 vi.mock("../server/sync/service-rfp-core-outbox.ts", () => ({
   handOffServiceRfpApprovalToCore: handoffMock,
+  buildServiceRfpApprovedBody: buildMock,
 }));
 
 const { redriveServiceRfpToCore } = await import("../server/sync/service-rfp-core-redrive.ts");
@@ -39,6 +41,8 @@ function approvedService(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   handoffMock.mockClear();
+  buildMock.mockClear();
+  buildMock.mockReturnValue({ ok: true, office: "dallas", body: {} } as any);
   handoffMock.mockResolvedValue({ status: "sent" } as any);
   requestRow.current = approvedService();
 });
@@ -94,6 +98,32 @@ describe("re-driving a service RFP to Core", () => {
     const out = await redriveServiceRfpToCore(999999);
     expect(out).toMatchObject({ ok: false, reason: "not_found" });
     expect(handoffMock).not.toHaveBeenCalled();
+  });
+
+  it("names an UNBUILDABLE payload instead of returning the misleading `duplicate` [Codex #83]", async () => {
+    // dealData is the snapshot taken when the request was created and is never refreshed, so a refusal
+    // for missing CRM uuids rebuilds identically after the CRM is fixed. Without this the conflict
+    // handler answers `duplicate`, which reads as "already delivered" and sends an operator to the wrong
+    // place — this case genuinely needs the approval re-issued, and must say so.
+    buildMock.mockReturnValue({ ok: false, reason: "missing_crm_identity", detail: "no crm_company_id" } as any);
+    const out = await redriveServiceRfpToCore(781);
+    expect(out).toMatchObject({ ok: false, reason: "unbuildable" });
+    expect(out).toMatchObject({ detail: expect.stringContaining("missing_crm_identity") });
+    expect(handoffMock).not.toHaveBeenCalled();
+  });
+
+  it("RECOMPUTES the project number from the approved type, not the stale column [Codex #83]", async () => {
+    // The approver changed the type to service; processRfpApproval rewrote the number before its own
+    // handoff but persisted only the type, so the column still holds the pre-approval number. Sending
+    // that would have Core and the approval disagree about which job this is.
+    requestRow.current = approvedService({
+      projectNumber: "DFW-2-24326-ae",
+      editedFields: { project_types: "4" },
+      dealData: { project_number: "DFW-2-24326-ae", project_types: "2" },
+    });
+    await redriveServiceRfpToCore(781);
+    const arg = handoffMock.mock.calls[0]![0] as any;
+    expect(arg.projectNumber).toBe("DFW-4-24326-ae");
   });
 
   it("passes a DUPLICATE through rather than dressing it as success", async () => {

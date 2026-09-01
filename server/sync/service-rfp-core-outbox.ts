@@ -381,10 +381,20 @@ async function insertOutboxRow(input: {
     -- request hits this unique triple, returns 'duplicate', and delivers nothing: the approval could never
     -- reach Core again without hand-editing the table.
     --
-    -- So a refusal row is UPGRADED in place when a later attempt can actually be delivered. The predicate
-    -- is deliberately narrow: only a row that never left (target_url IS NULL) and is not currently in
-    -- flight (status = 'failed'). A row that HAS a target_url has been POSTed or is queued to be, and
-    -- overwriting it is how one approval becomes two bids — the concurrency guard this index exists for.
+    -- So a TERMINAL row is UPGRADED in place when a later attempt can actually be delivered.
+    --
+    -- 'failed' OR 'dead', NOT only the never-sent ones. The first version required 'target_url IS NULL',
+    -- which covered pre-POST refusals and MISSED THE CASE IT WAS WRITTEN FOR: a Core 4xx (a customer not
+    -- yet linked to its CRM id) leaves the row 'failed' WITH a target_url, and an exhausted retry ladder
+    -- leaves it 'dead'. Both are correctable, and both were excluded [Codex #83].
+    --
+    -- 'pending' and 'sent' stay excluded, for different reasons. A pending row is IN FLIGHT and
+    -- overwriting it races the worker. A sent row already delivered — and while re-driving one would be
+    -- harmless, because Core's semantic digest answers 'noop' to an exact redelivery, allowing it invites
+    -- the reading that this is how you resend, which it is not.
+    --
+    -- That idempotency is what makes widening this safe at all: a row that reached Core and lost its
+    -- response can be re-driven without minting a second bid, because Core recognises the delivery.
     --
     -- attempt_count RESETS, because the prior attempts were of a body that could not be sent at all; they
     -- are not evidence about this one, and inheriting them would dead-letter the corrected delivery early.
@@ -396,8 +406,7 @@ async function insertOutboxRow(input: {
           last_error = EXCLUDED.last_error,
           last_attempt_at = EXCLUDED.last_attempt_at,
           next_attempt_at = EXCLUDED.next_attempt_at
-      WHERE service_rfp_core_outbox.target_url IS NULL
-        AND service_rfp_core_outbox.status = 'failed'
+      WHERE service_rfp_core_outbox.status IN ('failed', 'dead')
         AND EXCLUDED.target_url IS NOT NULL
     RETURNING id, attempt_count, max_attempts
   `);

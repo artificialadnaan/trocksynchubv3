@@ -253,7 +253,11 @@ export function registerRfpRequestRoutes(app: Express): void {
   //
   // HMAC-signed like override-approve beside it, so the same operator tooling reaches it.
   app.post("/api/rfp-requests/:id/redrive-core", jsonWithRawBody, asyncHandler(async (req, res) => {
-    const signature = verifyRfpRequestSignature(req);
+    // Verified against an EMPTY payload, like the bodyless route above [Codex #83]. This endpoint takes
+    // no body, and Express's JSON parser skips a request that has none — so its `verify` callback never
+    // runs, `rfpRawBody` stays unset, and a correctly-signed empty request 401s. That would have forced
+    // operators to discover an undocumented `{}` body to authenticate a call with no parameters.
+    const signature = verifyRfpRequestSignature(req, Buffer.from(""));
     if (!signature.ok) {
       return res.status(signature.status).json({
         success: false,

@@ -744,13 +744,18 @@ describe("service RFP → TROCK Core handoff", () => {
         .map((call) => JSON.stringify(call[0]))
         .find((text) => /INSERT INTO service_rfp_core_outbox/i.test(text));
       expect(insert).toBeDefined();
-      // Replaces rather than silently dropping…
+      // ASSERTED ON THE PREDICATE, NOT THE WHOLE STATEMENT. The SQL carries a long comment that NAMES
+      // the states it does not set, so a substring match over the statement passes on PROSE — which is
+      // how an earlier version of this test survived narrowing the predicate back [Codex #83].
       expect(insert).toContain("DO UPDATE");
-      // …but ONLY a row that never left: target_url IS NULL and it is not in flight.
-      expect(insert).toContain("target_url IS NULL");
-      expect(insert).toContain("status = 'failed'");
-      // …and only when THIS attempt is actually deliverable, so a second refusal cannot clobber a real one.
-      expect(insert).toContain("EXCLUDED.target_url IS NOT NULL");
+      const predicate = String(insert).split("DO UPDATE")[1] ?? "";
+      // A TERMINAL row may be replaced: "failed" covers a Core 4xx that kept its target_url, "dead" an
+      // exhausted ladder. Restricting this to never-sent rows is what missed the motivating case.
+      expect(predicate).toMatch(/status IN \('failed', ?'dead'\)/);
+      // …and only when THIS attempt is deliverable, so a refusal cannot clobber a real queued row.
+      expect(predicate).toContain("EXCLUDED.target_url IS NOT NULL");
+      // "pending" is never replaceable: overwriting an in-flight row races the worker.
+      expect(predicate).not.toContain("'pending'");
     });
   });
 });

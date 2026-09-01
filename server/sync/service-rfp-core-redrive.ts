@@ -18,11 +18,11 @@
 // It is therefore idempotent by construction rather than by convention, and needs no state of its own.
 // =============================================================================
 
-import { resolveEffectiveRfpProjectType } from "../constants";
+import { resolveEffectiveRfpProjectType, replaceProjectTypeInNumber } from "../constants";
 
 export type RedriveOutcome =
   | { ok: true; status: "sent" | "pending" | "failed" | "skipped" | "dead" | "duplicate" }
-  | { ok: false; reason: "not_found" | "not_approved" | "not_trock_crm" | "not_service"; detail: string };
+  | { ok: false; reason: "not_found" | "not_approved" | "not_trock_crm" | "not_service" | "unbuildable"; detail: string };
 
 /**
  * Re-attempt the Core handoff for an already-approved RFP request.
@@ -51,18 +51,46 @@ export async function redriveServiceRfpToCore(rfpRequestId: number): Promise<Red
 
   const dealData = (request.dealData ?? {}) as Record<string, any>;
   const editedFields = (request.editedFields ?? {}) as Record<string, string>;
-  const projectNumber = request.projectNumber ?? String(dealData.project_number ?? "");
   const typeDigit = resolveEffectiveRfpProjectType(dealData, editedFields);
   if (typeDigit !== "4") {
     return { ok: false, reason: "not_service", detail: `project type ${typeDigit} is not a service job` };
   }
+
+  // THE NUMBER IS RECOMPUTED, not read off the row [Codex #83]. When an approver changes project_types,
+  // processRfpApproval rewrites the number before its handoff but persists only the changed TYPE —
+  // `request.projectNumber` keeps the pre-approval value. Preferring that column let a re-drive pass the
+  // service gate on the edited type while sending Core the OLD non-service number, so the two systems
+  // would disagree about which job this is. Same derivation as the approval path, so they cannot.
+  const storedNumber = request.projectNumber ?? String(dealData.project_number ?? "");
+  const projectNumber = storedNumber ? replaceProjectTypeInNumber(storedNumber, typeDigit) : storedNumber;
 
   // The SAME call the approval path makes, with the SAME inputs — a re-drive that built its payload
   // differently would deliver something the original approval never described.
   // Lazy for the same reason: service-rfp-core-outbox imports `log` from server/index.ts at the top
   // level, so importing IT eagerly drags routes/index.ts and db.ts into this route file's graph. Every
   // dependency in this module is deferred to call time; none of them is needed to define the route.
-  const { handOffServiceRfpApprovalToCore } = await import("./service-rfp-core-outbox");
+  const { handOffServiceRfpApprovalToCore, buildServiceRfpApprovedBody } = await import(
+    "./service-rfp-core-outbox"
+  );
+
+  // ASK WHETHER THE PAYLOAD CAN EVEN BE BUILT, before re-driving [Codex #83]. `dealData` is the snapshot
+  // taken when the request was created and is never refreshed, so if the original refusal was
+  // missing_crm_identity, deploying the CRM uuid fields does NOT change this row — the rebuild refuses
+  // identically. Without this check the conflict handler then returns `duplicate`, which reads as "already
+  // delivered" and sends an operator looking in the wrong place. Naming the real reason is the difference
+  // between a recoverable error and a confusing one; this case genuinely needs the approval re-issued.
+  const probe: any = buildServiceRfpApprovedBody({
+    sourceSystem: "trock_crm",
+    sourceDealId: request.sourceDealId,
+    rfpRequestId: request.id,
+    projectNumber,
+    dealData,
+    editedFieldsOverride: editedFields,
+  } as any);
+  if (!probe.ok) {
+    return { ok: false, reason: "unbuildable", detail: `${probe.reason}: ${probe.detail}` };
+  }
+
   const result = await handOffServiceRfpApprovalToCore({
     sourceSystem: "trock_crm",
     sourceDealId: request.sourceDealId,
