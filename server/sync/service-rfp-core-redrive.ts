@@ -39,30 +39,28 @@ export type RedriveOutcome =
  * excludes the transport stamp but INCLUDES this, so a different value turns a recovery into a
  * correction. Falls back to null so a first-ever delivery still stamps normally.
  */
-async function priorPayloadApprovedAt(
+async function priorPayload(
   sourceDealId: string,
   rfpRequestId: number,
-): Promise<{ kind: "found"; approvedAt: string } | { kind: "none" } | { kind: "inconclusive" }> {
+): Promise<{ kind: "found"; payload: any } | { kind: "none" } | { kind: "inconclusive" }> {
   try {
     const { db } = await import("../db");
     const { sql } = await import("drizzle-orm");
     const r: any = await db.execute(sql`
-      SELECT payload -> 'rfp' ->> 'approvedAt' AS approved_at
+      SELECT payload
         FROM service_rfp_core_outbox
        WHERE source_deal_id = ${sourceDealId} AND rfp_request_id = ${rfpRequestId}
        LIMIT 1
     `);
-    const rows = (r?.rows ?? r) as Array<{ approved_at: string | null }>;
-    const found = rows?.[0]?.approved_at ?? null;
-    return found ? { kind: "found", approvedAt: found } : { kind: "none" };
+    const rows = (r?.rows ?? r) as Array<{ payload: any }>;
+    const payload = rows?.[0]?.payload ?? null;
+    // A pre-POST refusal row stores only the reason, not a body — that is `none`, and must be rebuilt.
+    return payload && payload.version ? { kind: "found", payload } : { kind: "none" };
   } catch {
-    // INCONCLUSIVE IS NOT "NO PRIOR DELIVERY" — and the first version of this said exactly that in a
-    // comment and then returned null anyway, which is the fallback it was warning against [Codex #83].
-    //
-    // The cost of getting it wrong is asymmetric. If the SELECT fails transiently and the upsert then
-    // succeeds, a `dead` row from an AMBIGUOUS delivery is rebuilt with request.approvedAt — a later
-    // timestamp — so Core reads a newer semantic event and may overwrite estimator changes made after
-    // the original landed. Refusing costs an operator one retry; guessing silently rewrites their work.
+    // INCONCLUSIVE IS NOT "NO PRIOR DELIVERY". If the read fails transiently and the upsert then
+    // succeeds, an ambiguous row is re-sent with a DIFFERENT body, Core reads a newer semantic event,
+    // and estimator changes made after the original landed are overwritten. Refusing costs one retry;
+    // guessing silently rewrites their work.
     return { kind: "inconclusive" };
   }
 }
@@ -116,20 +114,36 @@ export async function redriveServiceRfpToCore(rfpRequestId: number): Promise<Red
   // delivered" and sends an operator looking in the wrong place. Naming the real reason is the difference
   // between a recoverable error and a confusing one; this case genuinely needs the approval re-issued.
   // What the ORIGINAL delivery told Core, if a row exists — see approvedAt below.
-  const prior = await priorPayloadApprovedAt(request.sourceDealId, request.id);
+  // AN EXISTING PAYLOAD IS REPLAYED VERBATIM, never rebuilt [Codex #83].
+  //
+  // Core keys idempotency on a semantic digest of the body. Rebuilding with the CURRENTLY DEPLOYED
+  // builder means any change to mapping or normalisation since the original delivery produces a
+  // different digest — so a recovery of a row that may already have committed reads to Core as a
+  // CORRECTION, re-enters the newest-wins update path, and can overwrite an estimator's edits. Sending
+  // the stored bytes back makes the retry recognisably the same delivery, which is the entire basis on
+  // which re-driving an ambiguous row is safe at all.
+  //
+  // Only the transport stamp moves, and the worker re-stamps that at send time because Core enforces a
+  // five-minute event-age window. That field is excluded from the digest precisely so it can.
+  const prior = await priorPayload(request.sourceDealId, request.id);
   if (prior.kind === "inconclusive") {
     return {
       ok: false,
       reason: "prior_delivery_unreadable",
-      detail: "could not read the prior outbox payload; re-driving now could send a newer approvedAt and overwrite later edits",
+      detail: "could not read the prior outbox payload; re-driving now could send a different body and overwrite later edits",
     };
   }
-  const priorApprovedAt =
-    prior.kind === "found"
-      ? prior.approvedAt
-      : request.approvedAt
-        ? new Date(request.approvedAt).toISOString()
-        : null;
+  if (prior.kind === "found") {
+    const { replayServiceRfpPayload } = await import("./service-rfp-core-outbox");
+    const status = await replayServiceRfpPayload({
+      sourceDealId: request.sourceDealId,
+      rfpRequestId: request.id,
+      payload: prior.payload,
+    });
+    const { log } = await import("../index");
+    log(`[service-rfp-core] re-drive (replay) of RFP request ${rfpRequestId} -> ${status}`, "sync");
+    return { ok: true, status };
+  }
 
   const probe: any = buildServiceRfpApprovedBody({
     sourceSystem: "trock_crm",
@@ -158,7 +172,7 @@ export async function redriveServiceRfpToCore(rfpRequestId: number): Promise<Red
     // NOT that value: the normal handoff runs before Playwright and lets the builder stamp the time,
     // while processRfpApproval persists this column only after that multi-minute create finishes
     // [Codex #83]. The gap matters most for a `dead` row, where Core may have committed the original.
-    ...(priorApprovedAt ? { approvedAt: new Date(priorApprovedAt) } : {}),
+    ...(request.approvedAt ? { approvedAt: new Date(request.approvedAt) } : {}),
   } as any);
 
   // `log` is imported lazily for the same reason as `storage`: server/index.ts reaches routes/index.ts

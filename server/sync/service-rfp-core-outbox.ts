@@ -403,6 +403,10 @@ async function insertOutboxRow(input: {
           target_url = EXCLUDED.target_url,
           status = EXCLUDED.status,
           attempt_count = EXCLUDED.attempt_count,
+          -- …AND THE CEILING WITH IT. A row created under an older, shorter ladder kept its old
+          -- max_attempts, so a re-drive dead-lettered early and never reached the current ladder's final
+          -- two-hour retry — the replacement is a fresh delivery and must get the current budget [Codex #83].
+          max_attempts = EXCLUDED.max_attempts,
           last_error = EXCLUDED.last_error,
           last_attempt_at = EXCLUDED.last_attempt_at,
           next_attempt_at = EXCLUDED.next_attempt_at
@@ -566,6 +570,45 @@ async function deliver(
  * about a HubSpot-sourced RFP while the whole integration is switched off would be noise about a
  * boundary nobody is watching yet.
  */
+/**
+ * Re-queue an EXISTING outbox row with the body it already carries.
+ *
+ * Distinct from the handoff because it deliberately does NOT rebuild: Core keys idempotency on a
+ * semantic digest, so re-sending the stored bytes is what makes a retry recognisably the SAME delivery
+ * rather than a correction. Rebuilding with a newer builder could change the digest and let a recovery
+ * overwrite edits made after the original landed [Codex #83].
+ *
+ * Returns the same vocabulary the handoff does so the caller cannot tell the two paths apart.
+ */
+export async function replayServiceRfpPayload(input: {
+  sourceDealId: string;
+  rfpRequestId: number;
+  payload: any;
+}): Promise<"sent" | "pending" | "failed" | "dead" | "duplicate" | "skipped"> {
+  try {
+    const secret = resolveServiceRfpIngressSecret();
+    const office = String(input.payload?.office ?? coreRfpTenant());
+    const targetUrl = buildServiceRfpIngressTargetUrl(office);
+    if (!secret || !targetUrl) return "skipped";
+
+    const inserted = await insertOutboxRow({
+      sourceSystem: "trock_crm",
+      sourceDealId: input.sourceDealId,
+      rfpRequestId: input.rfpRequestId,
+      payload: input.payload,
+      targetUrl,
+      status: "pending",
+      lastError: null,
+    });
+    if (!inserted) return "duplicate";
+    return await deliver({ ...inserted, targetUrl, body: input.payload, office }, {});
+  } catch (error: any) {
+    // Same fail-open posture as the handoff: a recovery attempt must never throw into its caller.
+    log(`[service-rfp-core] replay failed for RFP request ${input.rfpRequestId}: ${error?.message || error}`, "sync");
+    return "skipped";
+  }
+}
+
 export async function handOffServiceRfpApprovalToCore(
   input: ServiceRfpHandoffInput,
   deps: { fetchImpl?: typeof fetchWithTimeout; secret?: string } = {},

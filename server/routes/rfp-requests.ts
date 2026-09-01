@@ -293,7 +293,15 @@ export function registerRfpRequestRoutes(app: Express): void {
     if (!outcome.ok) {
       // 409 rather than 400: the request exists and the input was well formed — it is the request's
       // STATE that makes a re-drive wrong, which is a conflict, and the reason names which state.
-      const status = outcome.reason === "not_found" ? 404 : 409;
+      // 503 for an UNREADABLE PRIOR, not 409. A 409 says "the state of this request forbids it", which a
+      // client should stop retrying — but this one is an infrastructure blip, and repeating the identical
+      // call once the database recovers is exactly the right move [Codex #83].
+      const status =
+        outcome.reason === "not_found"
+          ? 404
+          : outcome.reason === "prior_delivery_unreadable"
+            ? 503
+            : 409;
       return res.status(status).json({ success: false, error: outcome.reason, message: outcome.detail });
     }
     // `skipped` means the handoff caught a problem and did NOTHING — Core unconfigured, or an outbox

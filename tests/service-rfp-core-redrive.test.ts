@@ -13,12 +13,12 @@ const handoffMock = vi.hoisted(() => vi.fn(async () => ({ status: "sent" as cons
 const requestRow = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
-const priorRow = vi.hoisted(() => ({ approvedAt: null as string | null, throws: false }));
+const priorRow = vi.hoisted(() => ({ payload: null as any, throws: false }));
 vi.mock("../server/db.ts", () => ({
   db: {
     execute: vi.fn(async () => {
       if (priorRow.throws) throw new Error("connection terminated");
-      return { rows: [{ approved_at: priorRow.approvedAt }] };
+      return { rows: [{ payload: priorRow.payload }] };
     }),
   },
   pool: { query: vi.fn(async () => ({ rows: [] })) },
@@ -27,9 +27,11 @@ vi.mock("../server/storage.ts", () => ({
   storage: { getRfpApprovalRequestById: vi.fn(async () => requestRow.current) },
 }));
 const buildMock = vi.hoisted(() => vi.fn(() => ({ ok: true, office: "dallas", body: {} })));
+const replayMock = vi.hoisted(() => vi.fn(async () => "sent" as const));
 vi.mock("../server/sync/service-rfp-core-outbox.ts", () => ({
   handOffServiceRfpApprovalToCore: handoffMock,
   buildServiceRfpApprovedBody: buildMock,
+  replayServiceRfpPayload: replayMock,
 }));
 
 const { redriveServiceRfpToCore } = await import("../server/sync/service-rfp-core-redrive.ts");
@@ -55,8 +57,10 @@ beforeEach(() => {
   buildMock.mockReturnValue({ ok: true, office: "dallas", body: {} } as any);
   handoffMock.mockResolvedValue({ status: "sent" } as any);
   requestRow.current = approvedService();
-  priorRow.approvedAt = null;
+  priorRow.payload = null;
   priorRow.throws = false;
+  replayMock.mockClear();
+  replayMock.mockResolvedValue('sent' as any);
 });
 
 describe("re-driving a service RFP to Core", () => {
@@ -138,25 +142,30 @@ describe("re-driving a service RFP to Core", () => {
     expect(arg.projectNumber).toBe("DFW-4-24326-ae");
   });
 
-  it("carries the ORIGINAL delivery's approvedAt, not the request row's [Codex #83]", async () => {
-    // The normal handoff runs BEFORE Playwright and lets the builder stamp the time; processRfpApproval
-    // persists request.approvedAt only after that multi-minute create. They differ, and approvedAt is in
-    // Core's semantic digest — so re-driving with the row's value makes the retry look like a NEWER
-    // correction and outrank an edit somebody made in between.
-    priorRow.approvedAt = "2026-08-31T18:10:00.000Z";
-    requestRow.current = approvedService({ approvedAt: "2026-08-31T18:45:00.000Z" });
+  it("REPLAYS a stored payload verbatim instead of rebuilding it [Codex #83]", async () => {
+    // Core keys idempotency on a semantic digest of the body, so rebuilding with the CURRENTLY deployed
+    // builder means any mapping change since the original delivery yields a different digest — and a
+    // recovery of a row that may already have committed then reads as a CORRECTION, re-entering the
+    // newest-wins update path over an estimator's edits. Sending the stored bytes back is what makes the
+    // retry recognisably the same delivery.
+    priorRow.payload = { version: "trock.crm.service-rfp-approved.v1", office: "dallas", bid: { title: "as sent" } };
 
-    await redriveServiceRfpToCore(781);
+    const out = await redriveServiceRfpToCore(781);
 
-    const arg = handoffMock.mock.calls[0]![0] as any;
-    expect(arg.approvedAt.toISOString()).toBe("2026-08-31T18:10:00.000Z");
+    expect(out).toEqual({ ok: true, status: "sent" });
+    expect(replayMock).toHaveBeenCalledTimes(1);
+    expect((replayMock.mock.calls[0]![0] as any).payload).toEqual(priorRow.payload);
+    // The rebuild path must NOT run: that is the whole point.
+    expect(handoffMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to the request row when there is no prior delivery", async () => {
-    priorRow.approvedAt = null;
+  it("builds a fresh body when there is no prior delivery to replay", async () => {
+    // A pre-POST refusal row stores only the reason, not a body — there is nothing to replay, so the
+    // ordinary handoff builds one.
+    priorRow.payload = null;
     await redriveServiceRfpToCore(781);
-    const arg = handoffMock.mock.calls[0]![0] as any;
-    expect(arg.approvedAt.toISOString()).toBe("2026-08-31T18:15:03.843Z");
+    expect(handoffMock).toHaveBeenCalledTimes(1);
+    expect(replayMock).not.toHaveBeenCalled();
   });
 
   it("ABORTS when the prior payload cannot be read — inconclusive is not 'no prior delivery' [Codex #83]", async () => {
