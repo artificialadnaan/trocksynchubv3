@@ -253,11 +253,18 @@ export function registerRfpRequestRoutes(app: Express): void {
   //
   // HMAC-signed like override-approve beside it, so the same operator tooling reaches it.
   app.post("/api/rfp-requests/:id/redrive-core", jsonWithRawBody, asyncHandler(async (req, res) => {
-    // Verified against an EMPTY payload, like the bodyless route above [Codex #83]. This endpoint takes
-    // no body, and Express's JSON parser skips a request that has none — so its `verify` callback never
-    // runs, `rfpRawBody` stays unset, and a correctly-signed empty request 401s. That would have forced
-    // operators to discover an undocumented `{}` body to authenticate a call with no parameters.
-    const signature = verifyRfpRequestSignature(req, Buffer.from(""));
+    // A BODY IS REQUIRED, and it carries the id — so the signature is BOUND TO THIS REQUEST.
+    //
+    // The first version verified against an empty buffer to solve a 401 (Express skips its JSON verify
+    // callback when there is no body, leaving rfpRawBody unset). That produced a CONSTANT signature,
+    // identical to the read-only GET /api/rfp/estimators route's, for a STATE-CHANGING endpoint: anyone
+    // who ever saw one legitimate signature could replay it here against any id, without the secret
+    // [Codex #83]. Same defect Core's own ingress domain-separates its MAC to prevent, reintroduced one
+    // service over.
+    //
+    // Signing `{"rfpRequestId":<id>}` binds the signature to the id and gives the parser a body to run
+    // its verify callback on, so the 401 is fixed by the same change that closes the replay.
+    const signature = verifyRfpRequestSignature(req);
     if (!signature.ok) {
       return res.status(signature.status).json({
         success: false,
@@ -271,12 +278,34 @@ export function registerRfpRequestRoutes(app: Express): void {
       return res.status(400).json({ success: false, error: "Bad Request", message: "Invalid RFP request id" });
     }
 
+    // The signed body must NAME the same id as the path, or a captured signature for one request could
+    // still be pointed at another by editing the URL.
+    const bodyId = Number((req.body ?? {}).rfpRequestId);
+    if (bodyId !== id) {
+      return res.status(400).json({
+        success: false,
+        error: "Bad Request",
+        message: "body.rfpRequestId must equal the :id in the path (the signature is bound to it)",
+      });
+    }
+
     const outcome = await redriveServiceRfpToCore(id);
     if (!outcome.ok) {
       // 409 rather than 400: the request exists and the input was well formed — it is the request's
       // STATE that makes a re-drive wrong, which is a conflict, and the reason names which state.
       const status = outcome.reason === "not_found" ? 404 : 409;
       return res.status(status).json({ success: false, error: outcome.reason, message: outcome.detail });
+    }
+    // `skipped` means the handoff caught a problem and did NOTHING — Core unconfigured, or an outbox
+    // write that threw. The terminal row was not replaced and nothing was sent or queued, so reporting
+    // 200/success would let operator tooling record a recovery that never happened [Codex #83].
+    if (outcome.status === "skipped" || outcome.status === "dead") {
+      return res.status(502).json({
+        success: false,
+        error: "redrive_did_not_dispatch",
+        status: outcome.status,
+        message: "the re-drive did not send or queue anything; the row is unchanged",
+      });
     }
     return res.status(200).json({ success: true, status: outcome.status });
   }));

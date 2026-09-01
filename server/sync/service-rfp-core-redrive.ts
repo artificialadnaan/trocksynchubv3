@@ -31,6 +31,32 @@ export type RedriveOutcome =
  * the original approval would not have: the request must exist, be APPROVED (a pending one still has
  * its normal path), come from the CRM (Core stores uuid identities), and be a SERVICE job.
  */
+
+/**
+ * The `rfp.approvedAt` the ORIGINAL outbox row carried, or null when no row exists yet.
+ *
+ * Read rather than recomputed because it is the one field a re-drive must not move: Core's digest
+ * excludes the transport stamp but INCLUDES this, so a different value turns a recovery into a
+ * correction. Falls back to null so a first-ever delivery still stamps normally.
+ */
+async function priorPayloadApprovedAt(sourceDealId: string, rfpRequestId: number): Promise<string | null> {
+  try {
+    const { db } = await import("../db");
+    const { sql } = await import("drizzle-orm");
+    const r: any = await db.execute(sql`
+      SELECT payload -> 'rfp' ->> 'approvedAt' AS approved_at
+        FROM service_rfp_core_outbox
+       WHERE source_deal_id = ${sourceDealId} AND rfp_request_id = ${rfpRequestId}
+       LIMIT 1
+    `);
+    const rows = (r?.rows ?? r) as Array<{ approved_at: string | null }>;
+    return rows?.[0]?.approved_at ?? null;
+  } catch {
+    // A read that cannot run is not evidence there was no prior delivery; fall back to the request row.
+    return null;
+  }
+}
+
 export async function redriveServiceRfpToCore(rfpRequestId: number): Promise<RedriveOutcome> {
   // `storage` is imported LAZILY, matching service-rfp-core-outbox's getDb(). A top-level import pulls
   // server/db.ts into the graph of everything that reaches this module — including the route file — and
@@ -79,6 +105,11 @@ export async function redriveServiceRfpToCore(rfpRequestId: number): Promise<Red
   // identically. Without this check the conflict handler then returns `duplicate`, which reads as "already
   // delivered" and sends an operator looking in the wrong place. Naming the real reason is the difference
   // between a recoverable error and a confusing one; this case genuinely needs the approval re-issued.
+  // What the ORIGINAL delivery told Core, if a row exists — see approvedAt below.
+  const priorApprovedAt =
+    (await priorPayloadApprovedAt(request.sourceDealId, request.id)) ??
+    (request.approvedAt ? new Date(request.approvedAt).toISOString() : null);
+
   const probe: any = buildServiceRfpApprovedBody({
     sourceSystem: "trock_crm",
     sourceDealId: request.sourceDealId,
@@ -98,9 +129,15 @@ export async function redriveServiceRfpToCore(rfpRequestId: number): Promise<Red
     projectNumber,
     dealData,
     editedFieldsOverride: editedFields,
-    // approvedAt is deliberately NOT re-stamped: it is Core's newest-wins ordering key, and moving it
-    // would make a recovery look like a newer round than an edit somebody made in between.
-    ...(request.approvedAt ? { approvedAt: new Date(request.approvedAt) } : {}),
+    // approvedAt COMES FROM THE PRIOR PAYLOAD when there is one, and only falls back to the request row.
+    //
+    // It is Core's newest-wins ordering key and part of the semantic digest, so a re-drive must carry the
+    // SAME value the original delivery did or Core reads the retry as a newer CORRECTION — re-entering
+    // the update path and outranking whatever an estimator changed in between. `request.approvedAt` is
+    // NOT that value: the normal handoff runs before Playwright and lets the builder stamp the time,
+    // while processRfpApproval persists this column only after that multi-minute create finishes
+    // [Codex #83]. The gap matters most for a `dead` row, where Core may have committed the original.
+    ...(priorApprovedAt ? { approvedAt: new Date(priorApprovedAt) } : {}),
   } as any);
 
   // `log` is imported lazily for the same reason as `storage`: server/index.ts reaches routes/index.ts

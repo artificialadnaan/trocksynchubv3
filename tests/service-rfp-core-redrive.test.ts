@@ -13,6 +13,11 @@ const handoffMock = vi.hoisted(() => vi.fn(async () => ({ status: "sent" as cons
 const requestRow = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
+const priorRow = vi.hoisted(() => ({ approvedAt: null as string | null }));
+vi.mock("../server/db.ts", () => ({
+  db: { execute: vi.fn(async () => ({ rows: [{ approved_at: priorRow.approvedAt }] })) },
+  pool: { query: vi.fn(async () => ({ rows: [] })) },
+}));
 vi.mock("../server/storage.ts", () => ({
   storage: { getRfpApprovalRequestById: vi.fn(async () => requestRow.current) },
 }));
@@ -45,6 +50,7 @@ beforeEach(() => {
   buildMock.mockReturnValue({ ok: true, office: "dallas", body: {} } as any);
   handoffMock.mockResolvedValue({ status: "sent" } as any);
   requestRow.current = approvedService();
+  priorRow.approvedAt = null;
 });
 
 describe("re-driving a service RFP to Core", () => {
@@ -124,6 +130,27 @@ describe("re-driving a service RFP to Core", () => {
     await redriveServiceRfpToCore(781);
     const arg = handoffMock.mock.calls[0]![0] as any;
     expect(arg.projectNumber).toBe("DFW-4-24326-ae");
+  });
+
+  it("carries the ORIGINAL delivery's approvedAt, not the request row's [Codex #83]", async () => {
+    // The normal handoff runs BEFORE Playwright and lets the builder stamp the time; processRfpApproval
+    // persists request.approvedAt only after that multi-minute create. They differ, and approvedAt is in
+    // Core's semantic digest — so re-driving with the row's value makes the retry look like a NEWER
+    // correction and outrank an edit somebody made in between.
+    priorRow.approvedAt = "2026-08-31T18:10:00.000Z";
+    requestRow.current = approvedService({ approvedAt: "2026-08-31T18:45:00.000Z" });
+
+    await redriveServiceRfpToCore(781);
+
+    const arg = handoffMock.mock.calls[0]![0] as any;
+    expect(arg.approvedAt.toISOString()).toBe("2026-08-31T18:10:00.000Z");
+  });
+
+  it("falls back to the request row when there is no prior delivery", async () => {
+    priorRow.approvedAt = null;
+    await redriveServiceRfpToCore(781);
+    const arg = handoffMock.mock.calls[0]![0] as any;
+    expect(arg.approvedAt.toISOString()).toBe("2026-08-31T18:15:03.843Z");
   });
 
   it("passes a DUPLICATE through rather than dressing it as success", async () => {
