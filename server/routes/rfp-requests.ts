@@ -304,11 +304,21 @@ export function registerRfpRequestRoutes(app: Express): void {
     // [Codex #83]. The only outcomes that mean something reached Core are `sent`, `pending` and
     // `duplicate` (already delivered).
     if (outcome.status === "skipped" || outcome.status === "dead" || outcome.status === "failed") {
+      // ONE MESSAGE PER OUTCOME. These three are all "not recovered", but they are not the same event,
+      // and a single sentence asserting the row is unchanged is FALSE for `failed` — there the POST was
+      // sent and Core refused it, so the row did move [Codex #83]. An operator reading "nothing was sent"
+      // about a request Core has now rejected twice would look in exactly the wrong place.
+      const detail =
+        outcome.status === "failed"
+          ? "the retry reached Core and was refused again; the row is terminally failed and its last_error names the reason"
+          : outcome.status === "dead"
+            ? "the row has exhausted its retry ladder and was not re-dispatched"
+            : "nothing was sent or queued — Core is unconfigured or the outbox write failed; the row is unchanged";
       return res.status(502).json({
         success: false,
-        error: "redrive_did_not_dispatch",
+        error: "redrive_not_recovered",
         status: outcome.status,
-        message: "the re-drive did not send or queue anything; the row is unchanged",
+        message: detail,
       });
     }
     return res.status(200).json({ success: true, status: outcome.status });
