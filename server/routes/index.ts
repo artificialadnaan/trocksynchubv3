@@ -46,6 +46,7 @@ import { startRfpReportScheduler } from "../cron/reportScheduler";
 import { startReconciliationScheduler } from "../cron/reconciliationScheduler";
 import { startSyncMappingsReconcileScheduler } from "../cron/syncMappingsReconcileScheduler";
 import { startCleanupScheduler } from "../cron/cleanupScheduler";
+import { startDataRetentionScheduler } from "../cron/dataRetentionScheduler";
 import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
 import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
@@ -120,6 +121,8 @@ export async function registerRoutes(
   startReconciliationScheduler();
   startSyncMappingsReconcileScheduler();
   startCleanupScheduler();
+  // Hourly check; deletes nothing unless automation_config.data_retention.enabled is true (off by default).
+  startDataRetentionScheduler();
   startWebhookRetryScheduler();
   startAlertScheduler();
   startBidBoardCallbackWorker();

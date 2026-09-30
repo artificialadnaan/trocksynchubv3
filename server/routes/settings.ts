@@ -7,6 +7,8 @@ import { triggerPostSyncProcoreUpdates } from "../hubspot-procore-sync";
 import { processNewDealWebhook } from "../deal-project-number";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation } from "../bidboard-automation";
 import { runBidBoardStageSync } from "../sync";
+import { recordPollingAuthExpiry, POLLING_JOBS } from "../polling-auth-alert";
+import { DATA_RETENTION_CONFIG_KEY } from "../data-retention";
 
 // ─── HubSpot polling state ────────────────────────────────────────────────────
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
@@ -204,15 +206,8 @@ async function runPollingCycle() {
     if (isAuthError) {
       console.error('[Polling] HubSpot auth failed (token expired or invalid) — disabling polling. Please reconnect HubSpot.');
       stopPolling();
-      try {
-        await storage.upsertAutomationConfig({
-          key: "hubspot_polling",
-          value: { enabled: false, intervalMinutes: 10, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
-          description: "Automatic HubSpot polling sync configuration",
-        });
-      } catch (err) {
-        console.warn('[Polling] Failed to disable HubSpot polling config on auth expiry:', err);
-      }
+      // Persists the disable AND alerts once per disable event (audit row + ops email). Never throws.
+      await recordPollingAuthExpiry({ job: "hubspot_polling", error: e.message ?? String(e) });
     }
     console.error('[Polling] HubSpot sync failed:', e.message);
     lastPollAt = new Date();
@@ -275,15 +270,8 @@ async function runProcorePollingCycle() {
     if (isAuthError) {
       console.error('[ProcorePolling] Procore auth failed — disabling polling. Please re-authenticate Procore.');
       stopProcorePolling();
-      try {
-        await storage.upsertAutomationConfig({
-          key: "procore_polling",
-          value: { enabled: false, intervalMinutes: 15, disabledReason: 'auth_expired', disabledAt: new Date().toISOString() },
-          description: "Automatic Procore data polling sync configuration",
-        });
-      } catch (err) {
-        console.warn('[ProcorePolling] Failed to disable Procore polling config on auth expiry:', err);
-      }
+      // Persists the disable AND alerts once per disable event (audit row + ops email). Never throws.
+      await recordPollingAuthExpiry({ job: "procore_polling", error: e.message ?? String(e) });
     }
     console.error('[ProcorePolling] Procore sync failed:', e.message);
     lastProcorePollAt = new Date();
@@ -742,6 +730,24 @@ async function seedEstimatorList() {
   }
 }
 
+// ─── Admin gate ───────────────────────────────────────────────────────────────
+/**
+ * A logged-in session whose user has role 'admin'. The session only carries userId, so the role is read
+ * from the users row on each request. NOTE: users.role defaults to 'admin', so every account created
+ * through /api/auth/register passes; the gate becomes meaningful once non-admin roles are assigned.
+ */
+export async function requireAdmin(req: any, res: any, next: any) {
+  const userId = req.session?.userId;
+  if (!userId) return res.status(401).json({ message: "Unauthorized" });
+  try {
+    const user = await storage.getUser(userId);
+    if (!user || user.role !== "admin") return res.status(403).json({ message: "Admin only" });
+    return next();
+  } catch (e: any) {
+    return res.status(500).json({ message: e.message });
+  }
+}
+
 // ─── Route registration ───────────────────────────────────────────────────────
 export function registerSettingsRoutes(app: Express, requireAuth: any) {
   app.get("/api/health", (_req, res) => {
@@ -813,6 +819,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
           change_order_polling: { type: 'polling', enabled: getEnabled('sync_change_orders'), active: changeOrderPollingTimer !== null, lastRunAt: lastChangeOrderPollAt?.toISOString() || null, description: 'Procore approved COs → HubSpot deal amounts' },
           portfolio_auto_trigger: { type: 'config', enabled: getEnabled('portfolio_auto_trigger'), description: 'Auto-trigger Phase 2 on Procore project webhook (no Phase 1 required)' },
           procore_hubspot_stage_sync: { type: 'config', enabled: getEnabled('procore_hubspot_stage_sync'), description: 'Bi-directional Procore↔HubSpot stage sync' },
+          data_retention: { type: 'maintenance', enabled: getEnabled(DATA_RETENTION_CONFIG_KEY), description: 'Batched pruning of expired idempotency_keys and old BidBoard automation logs / stage-sync runs (off by default)' },
         },
         hint: 'Each automation is independently controlled. Enable webhook processing first, then individual features within it.',
       });
@@ -955,6 +962,58 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       }
       runProcorePollingCycle();
       res.json({ message: "Procore sync triggered", running: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Admin: re-enable a poller that auto-disabled (e.g. auth_expired) ───────
+  // The explicit, audited way back after recordPollingAuthExpiry turned a poller off. Rewrites the row
+  // WITHOUT disabledReason/disabledAt (so the next expiry is a new, alerting event), keeps the stored
+  // interval, restarts the timer in this process, and records who did it. It does not test the
+  // credentials: if they are still bad, the next cycle disables it again and alerts again.
+  app.post("/api/settings/polling/:job/enable", requireAuth, requireAdmin, async (req: any, res) => {
+    try {
+      const slug = String(req.params.job);
+      if (!Object.prototype.hasOwnProperty.call(POLLING_JOBS, slug)) {
+        return res.status(404).json({ error: `Unknown polling job '${slug}'. Expected one of: ${Object.keys(POLLING_JOBS).join(", ")}` });
+      }
+      const job = POLLING_JOBS[slug as keyof typeof POLLING_JOBS];
+      const prior = ((await storage.getAutomationConfig(job.key))?.value as any) ?? null;
+      const intervalMinutes = resolveRolePollingInterval(prior?.intervalMinutes, job.defaultIntervalMinutes);
+
+      await storage.upsertAutomationConfig({
+        key: job.key,
+        value: { enabled: true, intervalMinutes },
+        description: job.description,
+      });
+      if (job.key === "procore_polling") {
+        startProcorePolling(intervalMinutes);
+      } else {
+        startPolling(intervalMinutes);
+      }
+
+      const previous = {
+        enabled: prior?.enabled === true,
+        disabledReason: prior?.disabledReason ?? null,
+        disabledAt: prior?.disabledAt ?? null,
+      };
+      try {
+        await storage.createAuditLog({
+          action: "polling_reenabled",
+          entityType: job.key,
+          source: "admin",
+          status: "success",
+          category: "system",
+          userId: req.session?.userId ?? null,
+          details: { job: job.key, intervalMinutes, previous },
+        });
+      } catch (auditErr: any) {
+        console.error(`[Polling] ${job.key} re-enabled but the audit row failed:`, auditErr?.message ?? auditErr);
+      }
+
+      console.log(`[Polling] ${job.key} re-enabled by admin (every ${intervalMinutes} min; previous reason: ${previous.disabledReason ?? "none"})`);
+      res.json({ success: true, job: job.key, enabled: true, intervalMinutes, previous });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
