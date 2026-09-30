@@ -2,6 +2,7 @@ import type { Express, RequestHandler } from "express";
 import path from "path";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
+import { requireInternalSecret } from "../internal-auth";
 
 const DOWNLOADS_DIR = path.join(process.cwd(), "data", "portfolio-automation-downloads");
 const PLAYWRIGHT_STORAGE = process.env.PLAYWRIGHT_STORAGE_DIR || ".playwright-storage";
@@ -280,12 +281,7 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
   }));
 
   // ═══ Internal test trigger (no auth, secured by secret) ─────────────────────
-  app.post("/api/internal/portfolio-trigger", asyncHandler(async (req, res) => {
-    const secret = req.headers["x-internal-secret"] || req.body?.secret;
-    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
-      return res.status(403).json({ error: "Invalid secret" });
-    }
-
+  app.post("/api/internal/portfolio-trigger", requireInternalSecret, asyncHandler(async (req, res) => {
     const { bidboardProjectId } = req.body || {};
     if (!bidboardProjectId) return res.status(400).json({ error: "bidboardProjectId required" });
 
@@ -318,11 +314,7 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
   }));
 
   // ═══ Internal Phase 2 trigger (no auth, secured by secret) ─────────────────
-  app.post("/api/internal/portfolio-phase2", asyncHandler(async (req, res) => {
-    const secret = req.headers["x-internal-secret"] || req.body?.secret;
-    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
-      return res.status(403).json({ error: "Invalid secret" });
-    }
+  app.post("/api/internal/portfolio-phase2", requireInternalSecret, asyncHandler(async (req, res) => {
     const { companyId, portfolioProjectId, bidboardProjectId } = req.body || {};
     if (!companyId || !portfolioProjectId) {
       return res.status(400).json({ error: "companyId and portfolioProjectId required" });
