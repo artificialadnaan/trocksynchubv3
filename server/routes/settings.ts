@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { storage } from "../storage";
+import { requireInternalSecret } from "../internal-auth";
 import { sanitizeEstimatorList, validateEstimatorList } from "../../shared/estimators";
 import { syncProcoreRoleAssignments, syncProcoreRoleAssignmentsBatch, runFullProcoreSync } from "../procore";
 import { runFullHubSpotSync } from "../hubspot";
@@ -1363,12 +1364,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
   });
 
   // ── Internal: enable all automations (secret-gated, no session auth) ──────
-  app.post("/api/internal/enable-all-automations", async (req, res) => {
-    const secret = req.headers["x-internal-secret"] || req.body?.secret;
-    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
-      return res.status(403).json({ error: "Invalid secret" });
-    }
-
+  app.post("/api/internal/enable-all-automations", requireInternalSecret, async (req, res) => {
     const results: Record<string, string> = {};
 
     try {
@@ -1506,12 +1502,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
   });
 
   // ── Internal: send test stage notification email ──────────────────────────
-  app.post("/api/internal/test-stage-notification", async (req, res) => {
-    const secret = req.headers["x-internal-secret"] || req.body?.secret;
-    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
-      return res.status(403).json({ error: "Invalid secret" });
-    }
-
+  app.post("/api/internal/test-stage-notification", requireInternalSecret, async (req, res) => {
     try {
       const { sendEmail } = await import('../email-service');
       const { buildStageNotificationEmail } = await import('../stage-notifications');
@@ -1526,12 +1517,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
   });
 
   // ── Internal: trigger change order sync for a specific project ────────────
-  app.post("/api/internal/sync-change-orders", async (req, res) => {
-    const secret = req.headers["x-internal-secret"] || req.body?.secret;
-    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
-      return res.status(403).json({ error: "Invalid secret" });
-    }
-
+  app.post("/api/internal/sync-change-orders", requireInternalSecret, async (req, res) => {
     try {
       const { projectNumber, portfolioProjectId } = req.body || {};
       let projectId = portfolioProjectId;
@@ -1648,12 +1634,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
   });
 
   // ── Internal: debug webhook + RFP status for a deal ───────────────────────
-  app.post("/api/internal/debug-deal", async (req, res) => {
-    const secret = req.headers["x-internal-secret"] || req.body?.secret;
-    if (secret !== (process.env.INTERNAL_API_SECRET || "synchub-test-2026")) {
-      return res.status(403).json({ error: "Invalid secret" });
-    }
-
+  app.post("/api/internal/debug-deal", requireInternalSecret, async (req, res) => {
     try {
       const { dealId } = req.body || {};
       if (!dealId) return res.status(400).json({ error: "Provide dealId" });
