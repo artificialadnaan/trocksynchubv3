@@ -64,11 +64,20 @@ const NOTES = PROCORE_SELECTORS.bidboard.newUi.notes;
  * suite: it reports green for the exact hazard it exists to catch.
  */
 function installedChromiumPath(): string | undefined {
+  // PLAYWRIGHT_BROWSERS_PATH=0 means "inside the package", not a directory named "0"; and a root that is a FILE
+  // would make readdirSync throw out of beforeAll, replacing the intended message below with an fs error.
+  const isDirectory = (dir: string) => {
+    try {
+      return fs.statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  };
   const roots = [
-    process.env.PLAYWRIGHT_BROWSERS_PATH,
+    process.env.PLAYWRIGHT_BROWSERS_PATH === "0" ? undefined : process.env.PLAYWRIGHT_BROWSERS_PATH,
     path.join(os.homedir(), "Library/Caches/ms-playwright"),
     path.join(os.homedir(), ".cache/ms-playwright"),
-  ].filter((dir): dir is string => Boolean(dir) && fs.existsSync(dir!));
+  ].filter((dir): dir is string => Boolean(dir) && isDirectory(dir!));
   const relatives = [
     "chrome-headless-shell-mac-arm64/chrome-headless-shell",
     "chrome-headless-shell-linux64/chrome-headless-shell",

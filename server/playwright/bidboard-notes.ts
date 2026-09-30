@@ -626,11 +626,13 @@ export async function resolveNotesSectionByAnchor(
     }
     if (best) return { ok: true, locator: best.locator, selector: describeClimb(best.depth, "ok") };
   }
-  if (contaminatedSelector) {
-    return { ok: false, reason: "contaminated", selector: contaminatedSelector };
-  }
+  // Unknown BEFORE contaminated: a failed query may have hidden the real card while a decoy label produced the
+  // contaminated verdict, and the operator's next step differs (re-run, versus fix a wrapper). Both decline.
   if (sawUnreadable) {
     return { ok: false, reason: "unreadable", selector: null };
+  }
+  if (contaminatedSelector) {
+    return { ok: false, reason: "contaminated", selector: contaminatedSelector };
   }
   return { ok: false, reason: "not-found" };
 }
@@ -698,7 +700,9 @@ export async function resolveNotesSection(
         ok: false,
         reason: "contaminated",
         selector: anchored.selector,
-        message: `Resolved "Notes section"${where} (${anchored.selector}) is not the Notes card but a page-level wrapper — refusing to act inside it`,
+        // The selector is describeClimb's text, which names the actual rejection (the description / Create New
+        // Project, or a page-level container), so the message does not assume which one it was.
+        message: `Resolved "Notes section"${where} (${anchored.selector}) is not a usable Notes card — refusing to act inside it`,
       };
     }
     // "We could not tell" is NOT "it is not there". Production declines on both (its safe direction),
@@ -941,7 +945,10 @@ export async function cancelEditor(page: Page, editor?: Locator): Promise<Cancel
   /** The most recent visibility reading: true = still open, false = gone, null = could not tell. */
   let lastReading: boolean | null = null;
 
-  for (let attempt = 1; attempt <= CANCEL_MAX_ATTEMPTS; attempt++) {
+  // Without an editor locator nothing can be verified, so extra presses are blind: they only add delay under the
+  // browser lock and can dismiss UI another job left open on the shared page. One Escape, then report unknown.
+  const maxAttempts = editor ? CANCEL_MAX_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     attempts = attempt;
     try {
       await page.keyboard.press("Escape");

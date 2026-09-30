@@ -555,6 +555,18 @@ describe("postBidBoardProjectNote", () => {
     expect(dom.fills).toEqual([]);
   });
 
+  it("after an add click that opened no editor, presses Escape ONCE — never a blind retry loop on the shared page", async () => {
+    const dom = notesFixture();
+    node(dom, "addBtn")!.onClick = undefined; // the click lands, but no editor ever renders
+    const result = await postBidBoardProjectNote(makePage(dom), "9001", NOTE, "DFW-2-12345-ab", FAST);
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/Note editor not found/i);
+    expect(dom.actions).toEqual(["click:addBtn"]);
+    // With no editor locator nothing can be verified, so further presses would only be blind.
+    expect(dom.keys).toEqual(["Escape"]);
+  });
+
   it("refuses a page-level wrapper masquerading as the Notes section", async () => {
     // A container that also holds the description field is not the Notes card — acting inside it would
     // make every "scoped" search below it unscoped in practice.
@@ -928,7 +940,7 @@ describe("shared resolvers (production and prober call these same functions)", (
         FAST_SECTION,
       );
       expect(result).toMatchObject({ ok: false, reason: "contaminated" });
-      expect((result as any).message).toMatch(/page-level wrapper/i);
+      expect((result as any).message).toMatch(/holds the Project Description or a Create New Project button/i);
     });
 
     it("prefers a real aid-notes match over the anchor when both exist", async () => {
@@ -1102,6 +1114,33 @@ describe("shared resolvers (production and prober call these same functions)", (
       expect(anchorCounts).toBe(2);
     });
 
+    it("reports UNREADABLE over contaminated when one label's climb failed and another's was contaminated", async () => {
+      // A failed query may have hidden the real card while a decoy produced "contaminated"; the operator must be
+      // told to re-run, not to go and fix a wrapper.
+      let anchorCounts = 0;
+      const dom: FakeDom = {
+        nodes: [
+          { id: "body", tag: "body", matches: [] },
+          { id: "decoyCard", parent: "body", matches: [], text: "" },
+          { id: "decoyLabel", parent: "decoyCard", matches: [NOTES_LABEL], text: "Notes" },
+          { id: "decoyPlus", parent: "decoyCard", matches: ['button:has(svg[data-qa="ci-Plus"])'] },
+          { id: "desc", parent: "decoyCard", matches: ['[name*="description" i]'], attrs: { name: "description" } },
+          { id: "realCard", parent: "body", matches: [], text: "" },
+          { id: "realLabel", parent: "realCard", matches: [NOTES_LABEL], text: "Notes" },
+          { id: "realPlus", parent: "realCard", matches: ['button:has(svg[data-qa="ci-Plus"])'] },
+        ],
+        actions: [],
+        fills: [],
+        keys: [],
+        fail: {
+          count: (selector) =>
+            selector === PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor && ++anchorCounts === 2,
+        },
+      };
+      const result = await resolveNotesSectionByAnchor(makePage(dom));
+      expect(result).toMatchObject({ ok: false, reason: "unreadable" });
+    });
+
     it("reports not-found (not contaminated) when no anchor button exists at all", async () => {
       const result = await resolveNotesSectionByAnchor(makePage(notesFixture({ withoutSection: true })));
       expect(result).toEqual({ ok: false, reason: "not-found" });
@@ -1242,7 +1281,7 @@ describe("probeBidBoardNotesUi (the prober's wiring)", () => {
     expect(result.sectionVerdict).toMatchObject({ ok: false, reason: "contaminated" });
     expect(result.looseSectionOnly).toBe(false);
     expect(result.matchedAddButton).toBeNull();
-    expect(result.editorProbeSkippedReason).toMatch(/page-level wrapper/i);
+    expect(result.editorProbeSkippedReason).toMatch(/holds the Project Description or a Create New Project button/i);
   });
 
   it("contaminated dialog: falls back to the section, matching production's dialog-then-section order", async () => {
