@@ -132,6 +132,25 @@ describe("POST /api/settings/polling/:job/enable", () => {
     expect(mocks.storage.createAuditLog).not.toHaveBeenCalled();
   });
 
+  it("only an admin may write data_retention through the generic config route; other keys keep the signed-in rule", async () => {
+    const { app, store } = await setup({});
+    const put = app.routes["PUT /api/automation-config"];
+
+    for (const key of ["data_retention", " Data_Retention "]) {
+      const viewer = await invokeRoute(put, { body: { key, value: { enabled: true } }, session: { userId: "viewer-1" } });
+      expect(viewer.status).toHaveBeenCalledWith(403);
+    }
+    expect(Object.keys(store).filter((k) => /retention/i.test(k))).toEqual([]);
+
+    const admin = await invokeRoute(put, { body: { key: "data_retention", value: { enabled: true } }, session: { userId: "admin-1" } });
+    expect(admin.status).not.toHaveBeenCalledWith(403);
+    expect(store.data_retention).toEqual({ enabled: true });
+
+    const other = await invokeRoute(put, { body: { key: "portfolio_auto_trigger", value: { enabled: true } }, session: { userId: "viewer-1" } });
+    expect(other.status).not.toHaveBeenCalledWith(403);
+    expect(store.portfolio_auto_trigger).toEqual({ enabled: true });
+  });
+
   it("for an admin: clears disabledReason, keeps the interval, restarts the timer and audits", async () => {
     const { app, store, status } = await setup({ procore_polling: { ...DISABLED_ROW } });
     expect((await status()).procore_polling.active).toBe(false);

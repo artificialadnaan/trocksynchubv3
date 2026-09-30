@@ -114,7 +114,9 @@ export function resolveDataRetentionConfig(raw: unknown): DataRetentionConfig {
       3650,
     ),
     batchSize: clampInt(v.batchSize, d.batchSize, 1, 5000),
-    maxBatchesPerRun: clampInt(v.maxBatchesPerRun, d.maxBatchesPerRun, 1, 500),
+    // Floored at one batch per table: the tables are visited round-robin from the first, so a smaller cap would end
+    // every run before the later tables and starve them for as long as the earlier ones have a backlog.
+    maxBatchesPerRun: clampInt(v.maxBatchesPerRun, d.maxBatchesPerRun, RETENTION_TARGETS.length, 500),
     intervalHours: clampInt(v.intervalHours, d.intervalHours, 1, 24 * 30),
   };
 }
@@ -175,11 +177,16 @@ export async function runDataRetention(
   const errors: Partial<Record<RetentionTable, string>> = {};
   const done = new Set<RetentionTable>();
   let batches = 0;
+  // Re-applied here like the grace floor: every run gives each table at least one batch before the cap.
+  const maxBatches = Math.max(
+    RETENTION_TARGETS.length,
+    Number.isFinite(config.maxBatchesPerRun) ? config.maxBatchesPerRun : RETENTION_TARGETS.length,
+  );
 
   outer: while (done.size < RETENTION_TARGETS.length) {
     for (const target of RETENTION_TARGETS) {
       if (done.has(target.table)) continue;
-      if (batches >= config.maxBatchesPerRun) break outer;
+      if (batches >= maxBatches) break outer;
       if (batches > 0) await sleep(DATA_RETENTION_BATCH_PAUSE_MS);
       batches++;
       try {
@@ -223,7 +230,7 @@ export async function runDataRetention(
         retentionDays: config.retentionDays,
         idempotencyKeyGraceDays: graceDays,
         batchSize: config.batchSize,
-        maxBatchesPerRun: config.maxBatchesPerRun,
+        maxBatchesPerRun: maxBatches,
         windowCutoff: windowCutoff.toISOString(),
         expiredCutoff: expiredCutoff.toISOString(),
       },

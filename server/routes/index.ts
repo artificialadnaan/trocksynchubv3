@@ -47,6 +47,7 @@ import { startReconciliationScheduler } from "../cron/reconciliationScheduler";
 import { startSyncMappingsReconcileScheduler } from "../cron/syncMappingsReconcileScheduler";
 import { startCleanupScheduler } from "../cron/cleanupScheduler";
 import { startDataRetentionScheduler } from "../cron/dataRetentionScheduler";
+import { resendPendingPollingAlerts } from "../polling-auth-alert";
 import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
 import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
@@ -123,6 +124,9 @@ export async function registerRoutes(
   startCleanupScheduler();
   // Hourly check; deletes nothing unless automation_config.data_retention.enabled is true (off by default).
   startDataRetentionScheduler();
+  // A polling auth-expiry alert whose email failed before a restart gets one more try (polling stays off, so no
+  // cycle would reach it again). Delayed so boot is not held up; never throws.
+  setTimeout(() => void resendPendingPollingAlerts(), 60_000).unref?.();
   startWebhookRetryScheduler();
   startAlertScheduler();
   startBidBoardCallbackWorker();

@@ -838,7 +838,11 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     }
   });
 
-  app.put("/api/automation-config", requireAuth, async (req, res) => {
+  // data_retention permanently deletes rows once enabled, so only an admin may write it here. Every other key keeps
+  // the existing signed-in rule. The key is compared as the scheduler reads it, trimmed and case-folded.
+  const requireAdminForRetention = (req: any, res: any, next: any) =>
+    String(req.body?.key ?? "").trim().toLowerCase() === DATA_RETENTION_CONFIG_KEY ? requireAdmin(req, res, next) : next();
+  app.put("/api/automation-config", requireAuth, requireAdminForRetention, async (req, res) => {
     try {
       const config = await storage.upsertAutomationConfig(req.body);
       res.json(config);
@@ -1391,49 +1395,15 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       }
 
       // HubSpot polling — 15 min
+      // The SAME cycles the Settings toggle and boot start, so an expired credential disables the job and alerts
+      // (recordPollingAuthExpiry) instead of being logged and retried forever by a private copy of the loop.
       await storage.upsertAutomationConfig({ key: "hubspot_polling", value: { enabled: true, intervalMinutes: 15 }, description: "HubSpot polling (auto-enabled)" });
-      if (!pollingTimer) {
-        pollingTimer = setInterval(async () => {
-          if (pollingRunning) return;
-          pollingRunning = true;
-          try {
-            const result = await runFullHubSpotSync();
-            lastPollAt = new Date();
-            lastPollResult = result;
-          } catch (e: any) { console.error("[HubSpotPolling] Error:", e.message); }
-          finally { pollingRunning = false; }
-        }, 15 * 60 * 1000);
-        setTimeout(async () => {
-          if (pollingRunning) return;
-          pollingRunning = true;
-          try { const r = await runFullHubSpotSync(); lastPollAt = new Date(); lastPollResult = r; }
-          catch (e: any) { console.error("[HubSpotPolling] Error:", e.message); }
-          finally { pollingRunning = false; }
-        }, 30000);
-      }
+      if (!pollingTimer) startPolling(15);
       results["hubspot_polling"] = "enabled (15 min)";
 
       // Procore polling — 15 min
       await storage.upsertAutomationConfig({ key: "procore_polling", value: { enabled: true, intervalMinutes: 15 }, description: "Procore polling (auto-enabled)" });
-      if (!procorePollingTimer) {
-        procorePollingTimer = setInterval(async () => {
-          if (procorePollingRunning) return;
-          procorePollingRunning = true;
-          try {
-            const result = await runFullProcoreSync();
-            lastProcorePollAt = new Date();
-            lastProcorePollResult = result;
-          } catch (e: any) { console.error("[ProcorePolling] Error:", e.message); }
-          finally { procorePollingRunning = false; }
-        }, 15 * 60 * 1000);
-        setTimeout(async () => {
-          if (procorePollingRunning) return;
-          procorePollingRunning = true;
-          try { const r = await runFullProcoreSync(); lastProcorePollAt = new Date(); lastProcorePollResult = r; }
-          catch (e: any) { console.error("[ProcorePolling] Error:", e.message); }
-          finally { procorePollingRunning = false; }
-        }, 30000);
-      }
+      if (!procorePollingTimer) startProcorePolling(15);
       results["procore_polling"] = "enabled (15 min)";
 
       // Role assignment polling — 30 min

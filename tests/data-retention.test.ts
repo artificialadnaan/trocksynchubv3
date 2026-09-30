@@ -152,6 +152,18 @@ describe("data retention — the run", () => {
     expect(out!.deleted).toEqual({ idempotency_keys: 3000, bidboard_automation_logs: 2000, bidboard_stage_sync_runs: 2000 });
   });
 
+  it("a cap below one batch per table is raised to it, so later tables are never starved by an earlier backlog", async () => {
+    for (const cap of [0, 1, 2, -3, "1"]) {
+      expect(resolveDataRetentionConfig({ enabled: true, maxBatchesPerRun: cap }).maxBatchesPerRun).toBe(RETENTION_TARGETS.length);
+    }
+    // ...and the run re-applies it for a config that skipped the resolver.
+    const remaining = { idempotency_keys: 50_000, bidboard_automation_logs: 50_000, bidboard_stage_sync_runs: 50_000 };
+    const q = fakeQuerier(remaining);
+    const out = await runDataRetention({ ...ENABLED, batchSize: 1000, maxBatchesPerRun: 1 }, { db: q, sleep: noSleep, now: () => NOW });
+    expect(out!.deleted).toEqual({ idempotency_keys: 1000, bidboard_automation_logs: 1000, bidboard_stage_sync_runs: 1000 });
+    expect(mocks.storage.createAuditLog.mock.calls[0][0].details.maxBatchesPerRun).toBe(RETENTION_TARGETS.length);
+  });
+
   it("writes exactly one audit_logs row per run with the per-table counts", async () => {
     const q = fakeQuerier({ idempotency_keys: 12, bidboard_automation_logs: 3, bidboard_stage_sync_runs: 1 });
     await runDataRetention({ ...ENABLED, batchSize: 100 }, { db: q, sleep: noSleep, now: () => NOW });

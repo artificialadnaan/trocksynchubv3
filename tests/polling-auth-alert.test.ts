@@ -100,12 +100,13 @@ describe("recordPollingAuthExpiry", () => {
       { recipient: RECIPIENT, now: () => new Date("2026-06-10T08:00:00Z") },
     );
 
-    expect(out).toEqual({ newEvent: true, disabledAt: "2026-06-10T08:00:00.000Z", alert: "sent" });
+    expect(out).toEqual({ newEvent: true, disabledAt: "2026-06-10T08:00:00.000Z", persisted: true, alert: "sent" });
     expect(rows.procore_polling).toEqual({
       enabled: false,
       intervalMinutes: 17,
       disabledReason: "auth_expired",
       disabledAt: "2026-06-10T08:00:00.000Z",
+      disabledError: "Request failed with status code 401",
     });
 
     expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
@@ -148,7 +149,7 @@ describe("recordPollingAuthExpiry", () => {
     const third = await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { ...deps, now: () => new Date("2026-06-11T09:30:00Z") });
 
     expect(first.alert).toBe("sent");
-    expect(second).toEqual({ newEvent: false, disabledAt: "2026-06-10T08:00:00.000Z", alert: "already_sent" });
+    expect(second).toEqual({ newEvent: false, disabledAt: "2026-06-10T08:00:00.000Z", persisted: true, alert: "already_sent" });
     expect(third.alert).toBe("already_sent");
     expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
     expect(mocks.storage.createAuditLog).toHaveBeenCalledTimes(1);
@@ -177,7 +178,7 @@ describe("recordPollingAuthExpiry", () => {
     rows.procore_polling = { enabled: true, intervalMinutes: 17 }; // what the re-enable endpoint writes
     const again = await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { recipient: RECIPIENT, now: () => new Date("2026-10-01T08:00:00Z") });
 
-    expect(again).toEqual({ newEvent: true, disabledAt: "2026-10-01T08:00:00.000Z", alert: "sent" });
+    expect(again).toEqual({ newEvent: true, disabledAt: "2026-10-01T08:00:00.000Z", persisted: true, alert: "sent" });
     expect(mocks.sendEmail).toHaveBeenCalledTimes(2);
   });
 
@@ -212,6 +213,92 @@ describe("recordPollingAuthExpiry", () => {
       emailRecipientConfigured: false,
     });
     expect(structured[0].reenable).toContain("/api/settings/polling/hubspot/enable");
+  });
+
+  it("a failed send schedules bounded retries of the SAME event, which never rewrite the row", async () => {
+    const { rows } = backedStore({ procore_polling: { enabled: true, intervalMinutes: 17 } });
+    const { recordPollingAuthExpiry, POLLING_ALERT_RETRY_DELAYS_MS } = await import("../server/polling-auth-alert.ts");
+    mocks.sendEmail.mockResolvedValue({ success: false, provider: "gmail" });
+    const scheduled: { fn: () => void; ms: number }[] = [];
+    const scheduleRetry = (fn: () => void, ms: number) => void scheduled.push({ fn, ms });
+    const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T08:00:00Z"), scheduleRetry };
+
+    const first = await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
+    expect(first.alert).toBe("send_failed");
+    expect(scheduled.map((s) => s.ms)).toEqual([POLLING_ALERT_RETRY_DELAYS_MS[0]]);
+    const writes = mocks.storage.upsertAutomationConfig.mock.calls.length;
+
+    // Each retry fails too, until the schedule runs out.
+    for (let i = 0; i < POLLING_ALERT_RETRY_DELAYS_MS.length; i++) {
+      scheduled[i]!.fn();
+      await vi.waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledTimes(i + 2));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect(scheduled.map((s) => s.ms)).toEqual([...POLLING_ALERT_RETRY_DELAYS_MS]);
+    expect(mocks.storage.upsertAutomationConfig.mock.calls.length).toBe(writes);
+    expect(rows.procore_polling.disabledAt).toBe("2026-06-10T08:00:00.000Z");
+    expect(mocks.storage.createAuditLog).toHaveBeenCalledTimes(1);
+  });
+
+  it("a retry that succeeds banks the email once", async () => {
+    backedStore({ hubspot_polling: { enabled: true } });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    mocks.sendEmail.mockResolvedValueOnce({ success: false, provider: "gmail" });
+    const scheduled: (() => void)[] = [];
+    await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401" }, { recipient: RECIPIENT, scheduleRetry: (fn) => void scheduled.push(fn) });
+    scheduled[0]!();
+    await vi.waitFor(() => expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(1));
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(2);
+    expect(scheduled).toHaveLength(1);
+  });
+
+  it("an UNSAVED disable is not reported as durable: its own audit action, log event and email, and no rewrite later", async () => {
+    const { rows } = backedStore({ procore_polling: { enabled: true, intervalMinutes: 17 } });
+    mocks.storage.upsertAutomationConfig.mockRejectedValue(new Error("connection reset"));
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    mocks.sendEmail.mockResolvedValueOnce({ success: false, provider: "gmail" });
+    const scheduled: (() => void)[] = [];
+
+    const out = await recordPollingAuthExpiry(
+      { job: "procore_polling", error: "401" },
+      { recipient: RECIPIENT, scheduleRetry: (fn) => void scheduled.push(fn) },
+    );
+    expect(out).toMatchObject({ newEvent: true, persisted: false, alert: "send_failed" });
+    expect(rows.procore_polling).toEqual({ enabled: true, intervalMinutes: 17 });
+    expect(mocks.storage.upsertAutomationConfig).toHaveBeenCalledTimes(3);
+    expect(mocks.storage.createAuditLog.mock.calls.map((c) => c[0].action)).toEqual(["polling_auto_disable_not_saved"]);
+    const structured = errorSpy.mock.calls
+      .map((c) => c[0])
+      .filter((m) => typeof m === "string" && m.startsWith("{"))
+      .map((m) => JSON.parse(m as string));
+    expect(structured.map((e) => [e.event, e.persisted])).toEqual([["polling_auto_disable_not_saved", false]]);
+
+    // The retry resends the "not saved" alert only: it never writes the row, which an admin may have re-enabled.
+    scheduled[0]!();
+    await vi.waitFor(() => expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(1));
+    expect(mocks.storage.upsertAutomationConfig).toHaveBeenCalledTimes(3);
+    expect(mocks.storage.createAuditLog).toHaveBeenCalledTimes(1);
+    const mail = mocks.sendEmail.mock.calls[1][0];
+    expect(mail.subject).toMatch(/NOT saved/);
+    expect(mail.htmlBody).toContain("next restart or deploy starts polling again");
+    expect(mocks.storage.createEmailSendLog.mock.calls[0][0].dedupeKey).toMatch(/^polling_auto_disable_not_saved:procore_polling:/);
+  });
+
+  it("at boot, a saved disable whose email never went out is sent once; a banked or re-enabled one is not", async () => {
+    const { sentKeys } = backedStore({
+      procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z", disabledError: "401 from Procore" },
+      hubspot_polling: { enabled: true, intervalMinutes: 11 },
+    });
+    const { resendPendingPollingAlerts } = await import("../server/polling-auth-alert.ts");
+
+    await resendPendingPollingAlerts({ recipient: RECIPIENT });
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
+    expect(mocks.sendEmail.mock.calls[0][0].htmlBody).toContain("401 from Procore");
+    expect(sentKeys.has("polling_auto_disabled:procore_polling:2026-06-10T08:00:00.000Z")).toBe(true);
+    expect(mocks.storage.createAuditLog).not.toHaveBeenCalled();
+
+    await resendPendingPollingAlerts({ recipient: RECIPIENT });
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
   });
 
   it("never throws, even when storage is down", async () => {
@@ -250,6 +337,33 @@ async function invokeRoute(handlers: any[], req: Record<string, unknown> = {}) {
 }
 
 const passAuth = (_req: any, _res: any, next: any) => next();
+
+describe("enable-all-automations → alert", () => {
+  it("starts the SAME cycles as Settings: an expired token there disables both pollers and alerts", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("BIDBOARD_CRM_ALERT_RECIPIENT", RECIPIENT);
+      vi.stubEnv("INTERNAL_API_SECRET", "test-internal-secret");
+      const { rows } = backedStore({});
+      mocks.runFullProcoreSync.mockRejectedValue(new Error("Request failed with status code 401"));
+      mocks.runFullHubSpotSync.mockRejectedValue(new Error("EXPIRED_AUTHENTICATION"));
+      const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+      const app = createFakeApp();
+      registerSettingsRoutes(app as any, passAuth);
+
+      await invokeRoute(app.routes["POST /api/internal/enable-all-automations"], {
+        body: {},
+        headers: { "x-internal-secret": "test-internal-secret" },
+      });
+      await vi.advanceTimersByTimeAsync(91_000);
+      expect(rows.hubspot_polling).toMatchObject({ enabled: false, disabledReason: "auth_expired" });
+      expect(rows.procore_polling).toMatchObject({ enabled: false, disabledReason: "auth_expired" });
+      expect(mocks.storage.createAuditLog.mock.calls.filter((c) => c[0].action === "polling_auto_disabled")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("polling cycles → alert", () => {
   it.each([
