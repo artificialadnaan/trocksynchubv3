@@ -128,8 +128,11 @@ export interface PollingAuthExpiryDeps {
   now?: () => Date;
   /** Runs a retry later. Defaults to an unref'd setTimeout, so a pending retry never holds the process open. */
   scheduleRetry?: (fn: () => void, ms: number) => void;
-  /** Internal: which retry this is, and the event it belongs to. */
-  retry?: { attempt: number; disabledAt: string };
+  /**
+   * Internal: a resend of one known event (a scheduled retry, or the boot check). It sends only while the stored row
+   * still describes that event, and it never writes the row.
+   */
+  retry?: { attempt: number; disabledAt: string; persisted: boolean };
 }
 
 /**
@@ -149,7 +152,8 @@ export interface PollingAuthExpiryResult {
   disabledAt: string;
   /** false when the disabled row could not be saved; the alert says so and names the manual fix. */
   persisted: boolean;
-  alert: "sent" | "already_sent" | "no_recipient" | "send_failed";
+  /** superseded: a resend found the event gone (re-enabled, or replaced by a newer disable), so it sent nothing. */
+  alert: "sent" | "already_sent" | "no_recipient" | "send_failed" | "superseded";
 }
 
 function defaultScheduleRetry(fn: () => void, ms: number): void {
@@ -166,7 +170,10 @@ export async function recordPollingAuthExpiry(
   if (result.alert === "send_failed" && attempt < POLLING_ALERT_RETRY_DELAYS_MS.length) {
     try {
       (deps.scheduleRetry ?? defaultScheduleRetry)(() => {
-        void recordPollingAuthExpiry(args, { ...deps, retry: { attempt: attempt + 1, disabledAt: result.disabledAt } });
+        void recordPollingAuthExpiry(args, {
+          ...deps,
+          retry: { attempt: attempt + 1, disabledAt: result.disabledAt, persisted: result.persisted },
+        });
       }, POLLING_ALERT_RETRY_DELAYS_MS[attempt]!);
     } catch (err) {
       console.warn(`[PollingAlert] Could not schedule a retry for ${args.job}:`, err instanceof Error ? err.message : err);
@@ -189,7 +196,9 @@ export async function resendPendingPollingAlerts(deps: PollingAuthExpiryDeps = {
       if (!recipient) continue;
       if (await storage.checkEmailDedupeKey(`polling_auto_disabled:${job.key}:${prior.disabledAt}`)) continue;
       const error = typeof prior.disabledError === "string" ? prior.disabledError : "(recorded before a restart)";
-      await recordPollingAuthExpiry({ job: job.key, error }, deps);
+      // Bound to THIS event: if an admin re-enables between the read above and the send, the resend finds the row
+      // changed and stops, rather than treating the enabled row as a new expiry and disabling it again.
+      await recordPollingAuthExpiry({ job: job.key, error }, { ...deps, retry: { attempt: 0, disabledAt: prior.disabledAt, persisted: true } });
     } catch (err) {
       console.warn(`[PollingAlert] Pending-alert check failed for ${job.key}:`, err instanceof Error ? err.message : err);
     }
@@ -223,13 +232,20 @@ async function recordOnce(
       typeof prior.disabledAt === "string" &&
       prior.disabledAt !== "";
 
-    if (alreadyDisabledForAuth) {
+    if (deps.retry) {
+      // A resend of a known event: never writes the row and never audits. A SAVED event is resent only while the row
+      // still holds its disabledAt; an UNSAVED one only while no saved disable has taken its place. Anything else
+      // means an admin re-enabled or a newer event exists, and this resend is stale.
+      const r = deps.retry;
+      const current = r.persisted
+        ? alreadyDisabledForAuth && prior.disabledAt === r.disabledAt
+        : !alreadyDisabledForAuth;
+      if (!current) return { newEvent: false, disabledAt: r.disabledAt, persisted: r.persisted, alert: "superseded" };
+      newEvent = false;
+      persisted = r.persisted;
+    } else if (alreadyDisabledForAuth) {
       newEvent = false;
       disabledAt = prior.disabledAt;
-    } else if (deps.retry) {
-      // A retry of an event whose disable was never saved: resend its alert only. No write, no new audit row.
-      newEvent = false;
-      persisted = false;
     } else {
       const priorInterval = Number(prior?.intervalMinutes);
       persisted = false;
@@ -313,14 +329,25 @@ async function recordOnce(
     }
     if (!sent) return { newEvent, disabledAt, persisted, alert: "send_failed" };
 
-    await storage.createEmailSendLog({
-      templateKey: "polling_auto_disabled_alert",
-      recipientEmail: recipient,
-      subject,
-      dedupeKey,
-      status: "sent",
-      metadata: { job: job.key, disabledAt, persisted },
-    });
+    // DELIVERED from here on. A failure to bank the dedupe row is not a failed send: retrying would email the recipient
+    // again. It is logged instead (the boot check may then send one more copy after a restart).
+    let banked = false;
+    for (let i = 0; i < PERSIST_ATTEMPTS && !banked; i++) {
+      try {
+        await storage.createEmailSendLog({
+          templateKey: "polling_auto_disabled_alert",
+          recipientEmail: recipient,
+          subject,
+          dedupeKey,
+          status: "sent",
+          metadata: { job: job.key, disabledAt, persisted },
+        });
+        banked = true;
+      } catch (err) {
+        console.warn(`[PollingAlert] ${job.key} alert delivered but its send log failed (attempt ${i + 1}):`, err instanceof Error ? err.message : err);
+      }
+    }
+    if (!banked) console.error(`[PollingAlert] ${job.key} alert delivered but never logged; a restart may send it once more`);
     console.log(`[PollingAlert] ${job.key} auto-disable alert email sent (disabledAt=${disabledAt}, persisted=${persisted})`);
     return { newEvent, disabledAt, persisted, alert: "sent" };
   } catch (err) {

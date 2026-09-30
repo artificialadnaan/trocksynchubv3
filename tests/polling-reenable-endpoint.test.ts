@@ -151,6 +151,31 @@ describe("POST /api/settings/polling/:job/enable", () => {
     expect(store.portfolio_auto_trigger).toEqual({ enabled: true });
   });
 
+  it("every other door that re-enables an auth-disabled job needs an admin too; ordinary writes do not", async () => {
+    const { app, store } = await setup({ procore_polling: { ...DISABLED_ROW }, hubspot_polling: { ...DISABLED_ROW } });
+    const viewer = { session: { userId: "viewer-1" } };
+
+    const toggle = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], { ...viewer, body: { enabled: true, intervalMinutes: 20 } });
+    expect(toggle.status).toHaveBeenCalledWith(403);
+    const hub = await invokeRoute(app.routes["POST /api/automation/polling/config"], { ...viewer, body: { enabled: true } });
+    expect(hub.status).toHaveBeenCalledWith(403);
+    const put = await invokeRoute(app.routes["PUT /api/automation-config"], { ...viewer, body: { key: "hubspot_polling", value: { enabled: true, intervalMinutes: 11 } } });
+    expect(put.status).toHaveBeenCalledWith(403);
+    expect(store.procore_polling).toEqual(DISABLED_ROW);
+    expect(store.hubspot_polling).toEqual(DISABLED_ROW);
+
+    // Turning it OFF is not a re-enable, and a job that was not auth-disabled keeps the signed-in rule.
+    const off = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], { ...viewer, body: { enabled: false, intervalMinutes: 20 } });
+    expect(off.status).not.toHaveBeenCalledWith(403);
+    const plain = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], { ...viewer, body: { enabled: true, intervalMinutes: 20 } });
+    expect(plain.status).not.toHaveBeenCalledWith(403);
+    expect(store.procore_polling).toMatchObject({ enabled: true });
+
+    const admin = await invokeRoute(app.routes["POST /api/automation/polling/config"], { session: { userId: "admin-1" }, body: { enabled: true } });
+    expect(admin.status).not.toHaveBeenCalledWith(403);
+    expect(store.hubspot_polling).toMatchObject({ enabled: true });
+  });
+
   it("for an admin: clears disabledReason, keeps the interval, restarts the timer and audits", async () => {
     const { app, store, status } = await setup({ procore_polling: { ...DISABLED_ROW } });
     expect((await status()).procore_polling.active).toBe(false);

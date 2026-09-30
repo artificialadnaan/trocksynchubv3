@@ -749,6 +749,25 @@ export async function requireAdmin(req: any, res: any, next: any) {
   }
 }
 
+/**
+ * Clearing an auth_expired disable restarts polling against credentials that were rejected, so it takes an admin
+ * through every door that can do it: the Settings toggle routes and the generic config PUT, as well as the audited
+ * POST /api/settings/polling/:job/enable. Any write that does not re-enable an auth-disabled job keeps the signed-in rule.
+ */
+export function requireAdminToClearAuthDisable(keyOf: (req: any) => string | null, enabling: (req: any) => boolean) {
+  return async (req: any, res: any, next: any) => {
+    try {
+      const key = keyOf(req);
+      if (!key || !enabling(req)) return next();
+      const row: any = (await storage.getAutomationConfig(key))?.value;
+      if (row?.disabledReason !== "auth_expired") return next();
+      return requireAdmin(req, res, next);
+    } catch (e: any) {
+      return res.status(500).json({ message: e.message });
+    }
+  };
+}
+
 // ─── Route registration ───────────────────────────────────────────────────────
 export function registerSettingsRoutes(app: Express, requireAuth: any) {
   app.get("/api/health", (_req, res) => {
@@ -840,16 +859,24 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
 
   // data_retention permanently deletes rows once enabled, so only an admin may write it here. Every other key keeps
   // the existing signed-in rule. The key is compared as the scheduler reads it, trimmed and case-folded.
+  const configKey = (req: any) => String(req.body?.key ?? "").trim().toLowerCase();
   const requireAdminForRetention = (req: any, res: any, next: any) =>
-    String(req.body?.key ?? "").trim().toLowerCase() === DATA_RETENTION_CONFIG_KEY ? requireAdmin(req, res, next) : next();
-  app.put("/api/automation-config", requireAuth, requireAdminForRetention, async (req, res) => {
-    try {
-      const config = await storage.upsertAutomationConfig(req.body);
-      res.json(config);
-    } catch (e: any) {
-      res.status(400).json({ message: e.message });
-    }
-  });
+    configKey(req) === DATA_RETENTION_CONFIG_KEY ? requireAdmin(req, res, next) : next();
+  const pollingKey = (req: any) => (configKey(req) === "hubspot_polling" || configKey(req) === "procore_polling" ? configKey(req) : null);
+  app.put(
+    "/api/automation-config",
+    requireAuth,
+    requireAdminForRetention,
+    requireAdminToClearAuthDisable(pollingKey, (req) => Boolean(req.body?.value?.enabled)),
+    async (req, res) => {
+      try {
+        const config = await storage.upsertAutomationConfig(req.body);
+        res.json(config);
+      } catch (e: any) {
+        res.status(400).json({ message: e.message });
+      }
+    },
+  );
 
   app.get("/api/poll-jobs", requireAuth, async (_req, res) => {
     try {
@@ -888,7 +915,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     }
   });
 
-  app.post("/api/automation/polling/config", requireAuth, async (req, res) => {
+  app.post("/api/automation/polling/config", requireAuth, requireAdminToClearAuthDisable(() => "hubspot_polling", (req) => Boolean(req.body?.enabled)), async (req, res) => {
     try {
       const { enabled, intervalMinutes } = req.body;
       const interval = intervalMinutes || 10;
@@ -940,7 +967,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     }
   });
 
-  app.post("/api/automation/procore-polling/config", requireAuth, async (req, res) => {
+  app.post("/api/automation/procore-polling/config", requireAuth, requireAdminToClearAuthDisable(() => "procore_polling", (req) => Boolean(req.body?.enabled)), async (req, res) => {
     try {
       const { enabled, intervalMinutes } = req.body;
       const interval = intervalMinutes || 15;

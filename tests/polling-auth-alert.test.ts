@@ -301,6 +301,54 @@ describe("recordPollingAuthExpiry", () => {
     expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
   });
 
+  it("a retry after an admin re-enable, or after a newer disable, is superseded: no email, no write", async () => {
+    const { rows } = backedStore({ procore_polling: { enabled: true, intervalMinutes: 17 } });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    mocks.sendEmail.mockResolvedValueOnce({ success: false, provider: "gmail" });
+    const scheduled: (() => void)[] = [];
+    const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T08:00:00Z"), scheduleRetry: (fn: () => void) => void scheduled.push(fn) };
+    await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
+    const writes = mocks.storage.upsertAutomationConfig.mock.calls.length;
+
+    rows.procore_polling = { enabled: true, intervalMinutes: 17 }; // the admin re-enable
+    const stale = recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { ...deps, retry: { attempt: 1, disabledAt: "2026-06-10T08:00:00.000Z", persisted: true } });
+    await expect(stale).resolves.toMatchObject({ alert: "superseded", persisted: true });
+
+    rows.procore_polling = { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-07-01T08:00:00.000Z" };
+    const replaced = await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { ...deps, retry: { attempt: 1, disabledAt: "2026-06-10T08:00:00.000Z", persisted: true } });
+    expect(replaced.alert).toBe("superseded");
+
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.upsertAutomationConfig.mock.calls.length).toBe(writes);
+  });
+
+  it("the boot check is bound to the event it read: a re-enable in between leaves the row alone", async () => {
+    const disabled = { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" };
+    backedStore({});
+    let reads = 0;
+    // The boot scan reads the disabled row; by the time the resend reads it, an admin has re-enabled the job.
+    mocks.storage.getAutomationConfig.mockImplementation(async (key: string) =>
+      key === "procore_polling" ? { key, value: reads++ === 0 ? disabled : { enabled: true, intervalMinutes: 17 } } : undefined,
+    );
+    const { resendPendingPollingAlerts } = await import("../server/polling-auth-alert.ts");
+    await resendPendingPollingAlerts({ recipient: RECIPIENT });
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+    expect(mocks.storage.upsertAutomationConfig).not.toHaveBeenCalled();
+    expect(mocks.storage.createAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("a delivered email whose send log fails is NOT retried (the recipient already has it)", async () => {
+    backedStore({ hubspot_polling: { enabled: true } });
+    mocks.storage.createEmailSendLog.mockRejectedValue(new Error("db blip"));
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const scheduled: (() => void)[] = [];
+    const out = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401" }, { recipient: RECIPIENT, scheduleRetry: (fn) => void scheduled.push(fn) });
+    expect(out.alert).toBe("sent");
+    expect(scheduled).toHaveLength(0);
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(3);
+  });
+
   it("never throws, even when storage is down", async () => {
     mocks.storage.getAutomationConfig.mockRejectedValue(new Error("db down"));
     mocks.storage.upsertAutomationConfig.mockRejectedValue(new Error("db down"));
