@@ -612,6 +612,47 @@ describe("postBidBoardProjectNote in a shared column, Create found from the note
   });
 });
 
+describe("the Create climb stays inside the composer, against real Chromium", () => {
+  it("THE round-2 finding: a Notes composer with no Create declines — never the neighbouring card's Create", async () => {
+    // CodeRabbit on 7895d55: the Tasks card has a Create and NO text field, so a one-field rule alone let the climb
+    // from the note field rise into the column and press it.
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+        <div id="tasksCard"><h3>Tasks</h3><button id="taskCreate" type="submit">Create</button></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+      <script>
+        document.getElementById('taskCreate').addEventListener('click', () => {
+          document.getElementById('taskCreate').dataset.clicked = 'yes';
+        });
+        document.getElementById('notesPlus').addEventListener('click', () => {
+          const card = document.getElementById('notesCard');
+          if (card.querySelector('textarea')) return;
+          const composer = document.createElement('div');
+          const field = document.createElement('textarea');
+          field.name = 'value';
+          field.placeholder = 'Enter note';
+          composer.append(field); // no Create in the composer
+          card.appendChild(composer);
+        });
+      </script>
+    `);
+    navigateToProjectMock.mockResolvedValue(true);
+
+    const NOTE_TEXT = [`${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab (as of Sep 30, 2026)`, "", "Owner confirmed scope."].join("\n");
+    const result = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 500,
+      overallTimeoutMs: 10000,
+      stepTimeoutMs: 300,
+    });
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/Create button not found/i);
+    expect(await page.locator("#taskCreate").getAttribute("data-clicked")).toBeNull();
+  });
+});
+
 describe("resolveNotesSection polling, against real Chromium", () => {
   it("THE round-1 P2: finds a structural card at once, instead of first waiting out the precise tier", async () => {
     await page.setContent(`

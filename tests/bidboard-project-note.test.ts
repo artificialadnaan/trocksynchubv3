@@ -333,9 +333,15 @@ function notesFixture(opts: {
       dom.nodes.push({ id: "createBtn", parent: "notesSection", matches: ['button.aid-confirmButton'], role: "button", name: "Create", onClick: saveNote });
       return;
     }
+    // The anchor-only page is the live layout: the "+" opens a COMPOSER inside the card, holding the field and
+    // its Create — the structural path looks for Create only inside it, never up in the card beside the "+".
+    const editorParent = opts.editorOutsideSection ? "page" : opts.anchorOnly ? "composer" : "notesSection";
+    if (opts.anchorOnly && !opts.editorOutsideSection) {
+      dom.nodes.push({ id: "composer", parent: "notesSection", matches: [], text: "" });
+    }
     dom.nodes.push({
       id: "editor",
-      parent: opts.editorOutsideSection ? "page" : "notesSection",
+      parent: editorParent,
       // Found by the PRECISE selector either way; the description case differs only in its attributes,
       // which is exactly what the last-line-of-defence attribute check has to catch. The anchor-only page
       // is the LIVE layout, whose editor is the confirmed field — the only one the structural path types into.
@@ -352,7 +358,7 @@ function notesFixture(opts: {
     if (opts.createButtonRoleOnly) {
       dom.nodes.push({
         id: "createBtn",
-        parent: opts.editorOutsideSection ? "page" : "notesSection",
+        parent: editorParent,
         matches: [],
         role: "button",
         name: "Create",
@@ -370,7 +376,7 @@ function notesFixture(opts: {
     } else {
       dom.nodes.push({
         id: "createBtn",
-        parent: opts.editorOutsideSection ? "page" : "notesSection",
+        parent: editorParent,
         matches: ['button.aid-confirmButton'],
         role: "button",
         name: "Create",

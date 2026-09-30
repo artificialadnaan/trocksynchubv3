@@ -822,9 +822,8 @@ const EDITABLE_FIELD = 'textarea:not([aria-hidden="true"]), [contenteditable="tr
 
 /**
  * The Create control for a note typed into a STRUCTURALLY-found card: the innermost ancestor of the note field that
- * holds a visible Create candidate, provided that ancestor still holds exactly ONE text field (the note's) and
- * exactly ONE visible Create candidate. A second field means the climb has left the composer; two Creates are
- * ambiguous. Either way it declines — Create was never confirmed on the live page, and the card's container may
+ * holds a visible Create candidate, provided that ancestor is still INSIDE the composer — it holds neither the
+ * card's "+" nor a second text field — and holds exactly ONE visible Create candidate. Two Creates are ambiguous. Either way it declines — Create was never confirmed on the live page, and the card's container may
  * hold other cards, so "the first Create in the card" is not specific enough to click.
  */
 async function resolveCreateNearInput(input: Locator): Promise<{ locator: Locator; selector: string } | null | "unreadable"> {
@@ -835,6 +834,11 @@ async function resolveCreateNearInput(input: Locator): Promise<{ locator: Locato
     const exists = await node.count().catch(() => null);
     if (exists === null) return "unreadable";
     if (exists === 0) return null;
+    // The COMPOSER boundary: an ancestor holding the Notes "+" is the card (or wider), where a neighbouring card's
+    // Create is reachable even without a text field of its own. Create must be found strictly inside the composer.
+    const anchors = await node.locator(PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor).count().catch(() => null);
+    if (anchors === null) return "unreadable";
+    if (anchors > 0) return null;
     const fields = await node.locator(EDITABLE_FIELD).count().catch(() => null);
     if (fields === null) return "unreadable";
     if (fields > 1) return null;
