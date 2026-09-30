@@ -25,8 +25,14 @@ export const DATA_RETENTION_CONFIG_KEY = "data_retention";
 
 export interface DataRetentionConfig {
   enabled: boolean;
-  /** Age window for the log tables. idempotency_keys ignores it: those rows carry their own expires_at. */
+  /** Age window for the log tables. idempotency_keys uses its own grace window below. */
   retentionDays: number;
+  /**
+   * How long AFTER expires_at an idempotency key is kept. A key is pruned only once
+   * expires_at < now − idempotencyKeyGraceDays, so a late webhook replay within that window is still
+   * deduplicated. Floored at IDEMPOTENCY_KEY_GRACE_DAYS_MIN.
+   */
+  idempotencyKeyGraceDays: number;
   batchSize: number;
   maxBatchesPerRun: number;
   intervalHours: number;
@@ -35,22 +41,33 @@ export interface DataRetentionConfig {
 export const DATA_RETENTION_DEFAULTS: Readonly<DataRetentionConfig> = Object.freeze({
   enabled: false,
   retentionDays: 90,
+  idempotencyKeyGraceDays: 30,
   batchSize: 1000,
   maxBatchesPerRun: 20,
   intervalHours: 24,
 });
 
+/**
+ * The floor on idempotencyKeyGraceDays. checkIdempotencyKey ignores expiry, so a stored key dedupes a
+ * replay for as long as it exists; pruning a key the moment it expires would let a webhook redelivered
+ * a week later be processed twice. Keys are kept at least this many days past expires_at, whatever the
+ * config says.
+ */
+export const IDEMPOTENCY_KEY_GRACE_DAYS_MIN = 30;
+
 /** Pause between batches, so a run never holds the database busy back-to-back. */
 export const DATA_RETENTION_BATCH_PAUSE_MS = 500;
 
 /**
- * The ONLY statements this job can run. `$1` is the cutoff instant, `$2` the batch size.
+ * The ONLY statements this job can run. `$1` is the cutoff instant, `$2` the batch size. For
+ * idempotency_keys the cutoff is now − idempotencyKeyGraceDays (≥ 30 days), i.e. the statement is
+ * `expires_at < now() - interval '<grace> days'`, bound as a parameter.
  * `ORDER BY id LIMIT` inside the subquery is what makes each statement small and deterministic.
  */
 export const RETENTION_TARGETS = Object.freeze([
   Object.freeze({
     table: "idempotency_keys" as const,
-    rule: "expired" as const,
+    rule: "expired_beyond_grace" as const,
     sql:
       "DELETE FROM idempotency_keys WHERE id IN " +
       "(SELECT id FROM idempotency_keys WHERE expires_at < $1 ORDER BY id LIMIT $2)",
@@ -90,6 +107,12 @@ export function resolveDataRetentionConfig(raw: unknown): DataRetentionConfig {
   return {
     enabled: v.enabled === true,
     retentionDays: clampInt(v.retentionDays, d.retentionDays, 30, 3650),
+    idempotencyKeyGraceDays: clampInt(
+      v.idempotencyKeyGraceDays,
+      d.idempotencyKeyGraceDays,
+      IDEMPOTENCY_KEY_GRACE_DAYS_MIN,
+      3650,
+    ),
     batchSize: clampInt(v.batchSize, d.batchSize, 1, 5000),
     maxBatchesPerRun: clampInt(v.maxBatchesPerRun, d.maxBatchesPerRun, 1, 500),
     intervalHours: clampInt(v.intervalHours, d.intervalHours, 1, 24 * 30),
@@ -136,8 +159,17 @@ export async function runDataRetention(
   const now = (deps.now ?? (() => new Date()))();
   const started = Date.now();
 
-  const windowCutoff = new Date(now.getTime() - config.retentionDays * 24 * 60 * 60 * 1000);
-  const cutoffFor = (rule: (typeof RETENTION_TARGETS)[number]["rule"]) => (rule === "expired" ? now : windowCutoff);
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const windowCutoff = new Date(now.getTime() - config.retentionDays * DAY_MS);
+  // The floor is re-applied here, not only in resolveDataRetentionConfig, so a caller passing an
+  // unresolved config still cannot prune a key that expired less than IDEMPOTENCY_KEY_GRACE_DAYS_MIN ago.
+  const graceDays = Math.max(
+    IDEMPOTENCY_KEY_GRACE_DAYS_MIN,
+    Number.isFinite(config.idempotencyKeyGraceDays) ? config.idempotencyKeyGraceDays : IDEMPOTENCY_KEY_GRACE_DAYS_MIN,
+  );
+  const expiredCutoff = new Date(now.getTime() - graceDays * DAY_MS);
+  const cutoffFor = (rule: (typeof RETENTION_TARGETS)[number]["rule"]) =>
+    rule === "expired_beyond_grace" ? expiredCutoff : windowCutoff;
 
   const deleted = Object.fromEntries(RETENTION_TARGETS.map((t) => [t.table, 0])) as Record<RetentionTable, number>;
   const errors: Partial<Record<RetentionTable, string>> = {};
@@ -189,10 +221,11 @@ export async function runDataRetention(
         capped,
         errors,
         retentionDays: config.retentionDays,
+        idempotencyKeyGraceDays: graceDays,
         batchSize: config.batchSize,
         maxBatchesPerRun: config.maxBatchesPerRun,
         windowCutoff: windowCutoff.toISOString(),
-        expiredCutoff: now.toISOString(),
+        expiredCutoff: expiredCutoff.toISOString(),
       },
       errorMessage: status === "error" ? Object.entries(errors).map(([t, m]) => `${t}: ${m}`).join("; ") : null,
       durationMs: result.durationMs,

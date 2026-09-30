@@ -819,7 +819,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
           change_order_polling: { type: 'polling', enabled: getEnabled('sync_change_orders'), active: changeOrderPollingTimer !== null, lastRunAt: lastChangeOrderPollAt?.toISOString() || null, description: 'Procore approved COs → HubSpot deal amounts' },
           portfolio_auto_trigger: { type: 'config', enabled: getEnabled('portfolio_auto_trigger'), description: 'Auto-trigger Phase 2 on Procore project webhook (no Phase 1 required)' },
           procore_hubspot_stage_sync: { type: 'config', enabled: getEnabled('procore_hubspot_stage_sync'), description: 'Bi-directional Procore↔HubSpot stage sync' },
-          data_retention: { type: 'maintenance', enabled: getEnabled(DATA_RETENTION_CONFIG_KEY), description: 'Batched pruning of expired idempotency_keys and old BidBoard automation logs / stage-sync runs (off by default)' },
+          data_retention: { type: 'maintenance', enabled: getEnabled(DATA_RETENTION_CONFIG_KEY), description: 'Batched pruning of idempotency_keys expired more than 30 days ago and old BidBoard automation logs / stage-sync runs (off by default)' },
         },
         hint: 'Each automation is independently controlled. Enable webhook processing first, then individual features within it.',
       });

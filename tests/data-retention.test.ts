@@ -19,6 +19,7 @@ vi.mock("../server/db.ts", () => ({ pool: mocks.pool, db: {} }));
 const {
   RETENTION_TARGETS,
   DATA_RETENTION_DEFAULTS,
+  IDEMPOTENCY_KEY_GRACE_DAYS_MIN,
   resolveDataRetentionConfig,
   runDataRetention,
 } = await import("../server/data-retention.ts");
@@ -64,12 +65,31 @@ describe("data retention — configuration", () => {
 
   it("defaults to a 90-day window and clamps junk so a stray 0 cannot delete every log", () => {
     const d = resolveDataRetentionConfig({ enabled: true });
-    expect(d).toEqual({ enabled: true, retentionDays: 90, batchSize: 1000, maxBatchesPerRun: 20, intervalHours: 24 });
-    const junk = resolveDataRetentionConfig({ enabled: true, retentionDays: 0, batchSize: -5, maxBatchesPerRun: 1e9, intervalHours: "x" });
+    expect(d).toEqual({ enabled: true, retentionDays: 90, idempotencyKeyGraceDays: 30, batchSize: 1000, maxBatchesPerRun: 20, intervalHours: 24 });
+    const junk = resolveDataRetentionConfig({ enabled: true, retentionDays: 0, idempotencyKeyGraceDays: 0, batchSize: -5, maxBatchesPerRun: 1e9, intervalHours: "x" });
     expect(junk.retentionDays).toBe(30);
+    expect(junk.idempotencyKeyGraceDays).toBe(30);
     expect(junk.batchSize).toBe(1);
     expect(junk.maxBatchesPerRun).toBe(500);
     expect(junk.intervalHours).toBe(24);
+  });
+});
+
+describe("data retention — idempotency key grace window", () => {
+  it("floors the grace window at 30 days: config can lengthen it, never shorten it", () => {
+    expect(IDEMPOTENCY_KEY_GRACE_DAYS_MIN).toBe(30);
+    expect(DATA_RETENTION_DEFAULTS.idempotencyKeyGraceDays).toBe(30);
+    for (const g of [0, 1, 7, 29, -5, "10"]) {
+      expect(resolveDataRetentionConfig({ enabled: true, idempotencyKeyGraceDays: g }).idempotencyKeyGraceDays).toBe(30);
+    }
+    expect(resolveDataRetentionConfig({ enabled: true, idempotencyKeyGraceDays: 45 }).idempotencyKeyGraceDays).toBe(45);
+  });
+
+  it("the run re-applies the floor even when handed an unresolved config below it", async () => {
+    const q = fakeQuerier({});
+    await runDataRetention({ ...ENABLED, idempotencyKeyGraceDays: 0 }, { db: q, sleep: noSleep, now: () => NOW });
+    const c = q.calls.find((x) => x.text.startsWith("DELETE FROM idempotency_keys "))!;
+    expect((c.params[0] as Date).getTime()).toBe(NOW.getTime() - 30 * DAY);
   });
 });
 
@@ -95,11 +115,11 @@ describe("data retention — the run", () => {
     expect(RETENTION_TARGETS.map((t) => t.table)).toEqual(["idempotency_keys", "bidboard_automation_logs", "bidboard_stage_sync_runs"]);
   });
 
-  it("uses now() for expired idempotency keys and now − retentionDays for the log tables", async () => {
+  it("uses now − 30 days for idempotency keys and now − retentionDays for the log tables", async () => {
     const q = fakeQuerier({});
     await runDataRetention({ ...ENABLED, retentionDays: 90 }, { db: q, sleep: noSleep, now: () => NOW });
     const cutoff = (t: string) => (q.calls.find((c) => c.text.startsWith(`DELETE FROM ${t} `))!.params[0] as Date).getTime();
-    expect(cutoff("idempotency_keys")).toBe(NOW.getTime());
+    expect(cutoff("idempotency_keys")).toBe(NOW.getTime() - 30 * DAY);
     expect(cutoff("bidboard_automation_logs")).toBe(NOW.getTime() - 90 * DAY);
     expect(cutoff("bidboard_stage_sync_runs")).toBe(NOW.getTime() - 90 * DAY);
   });
@@ -146,6 +166,8 @@ describe("data retention — the run", () => {
       details: {
         deleted: { idempotency_keys: 12, bidboard_automation_logs: 3, bidboard_stage_sync_runs: 1 },
         retentionDays: 90,
+        idempotencyKeyGraceDays: 30,
+        expiredCutoff: new Date(NOW.getTime() - 30 * DAY).toISOString(),
         batchSize: 100,
         capped: false,
       },
@@ -214,12 +236,15 @@ describe("data retention — shipped SQL against real Postgres (PGlite)", () => 
     `);
   });
 
-  it("deletes only expired keys and rows older than the window; never touches other tables", async () => {
+  it("deletes only keys expired more than 30 days ago and rows older than the window; never touches other tables", async () => {
     const at = (ms: number) => new Date(NOW.getTime() + ms).toISOString();
     for (let i = 0; i < 25; i++) {
-      await pg.query(`INSERT INTO idempotency_keys (key, expires_at) VALUES ($1, $2)`, [`old-${i}`, at(-DAY)]);
+      await pg.query(`INSERT INTO idempotency_keys (key, expires_at) VALUES ($1, $2)`, [`old-${i}`, at(-40 * DAY)]);
     }
-    await pg.query(`INSERT INTO idempotency_keys (key, expires_at) VALUES ('live', $1), ('no-expiry', NULL)`, [at(DAY)]);
+    await pg.query(
+      `INSERT INTO idempotency_keys (key, expires_at) VALUES ('live', $1), ('no-expiry', NULL), ('expired-10d', $2), ('expired-29d', $3)`,
+      [at(DAY), at(-10 * DAY), at(-29 * DAY)],
+    );
     for (let i = 0; i < 7; i++) {
       await pg.query(`INSERT INTO bidboard_automation_logs (action, created_at) VALUES ('x', $1)`, [at(-100 * DAY)]);
     }
@@ -230,7 +255,13 @@ describe("data retention — shipped SQL against real Postgres (PGlite)", () => 
     const out = await runDataRetention({ ...ENABLED, batchSize: 10, maxBatchesPerRun: 100 }, { db, sleep: noSleep, now: () => NOW });
 
     expect(out!.deleted).toEqual({ idempotency_keys: 25, bidboard_automation_logs: 7, bidboard_stage_sync_runs: 1 });
-    expect((await pg.query(`SELECT key FROM idempotency_keys ORDER BY key`)).rows.map((r: any) => r.key)).toEqual(["live", "no-expiry"]);
+    // expired 10 and 29 days ago: kept, so a late replay is still deduplicated; expired 40 days ago: pruned
+    expect((await pg.query(`SELECT key FROM idempotency_keys ORDER BY key`)).rows.map((r: any) => r.key)).toEqual([
+      "expired-10d",
+      "expired-29d",
+      "live",
+      "no-expiry",
+    ]);
     expect((await pg.query(`SELECT action FROM bidboard_automation_logs ORDER BY action`)).rows.map((r: any) => r.action)).toEqual(["recent", "undated"]);
     expect((await pg.query(`SELECT count(*)::int AS n FROM bidboard_stage_sync_runs`)).rows[0]).toEqual({ n: 1 });
     expect((await pg.query(`SELECT count(*)::int AS n FROM webhook_logs`)).rows[0]).toEqual({ n: 1 });
