@@ -79,6 +79,8 @@ const NOTE_TEXT_READ_TIMEOUT_MS = 5000;
  * caller's remaining budget so the climb cannot outlive the step that owns the browser lock.
  */
 const ANCHOR_RESOLVE_TIMEOUT_MS = 5000;
+/** Between passes of the combined precise + structural section poll in resolveNotesSection. */
+const SECTION_POLL_INTERVAL_MS = 250;
 
 /**
  * Defensive cap applied immediately before typing. The CRM already caps the note (MAX_NOTE_CHARS), but
@@ -438,7 +440,11 @@ async function countWithin(container: Locator, selector: string): Promise<number
  * verdict.
  */
 export type NotesSectionResolution =
-  | { ok: true; locator: Locator; selector: string }
+  /**
+   * `structural`: found by the label climb rather than a precise card hook. The climb proves the container holds
+   * exactly one "+", not that it holds nothing else, so every later step acts ONLY on confirmed hooks.
+   */
+  | { ok: true; locator: Locator; selector: string; structural: boolean }
   | {
       ok: false;
       reason: "not-found" | "loose-only" | "contaminated" | "unreadable";
@@ -577,6 +583,7 @@ export async function resolveNotesSectionByAnchor(
 
     let node: Locator = label;
     let best: { locator: Locator; depth: number } | null = null;
+    let climbUnreadable = false;
     for (let depth = 1; depth <= ANCHOR_CLIMB_LIMIT; depth += 1) {
       node = node.locator("xpath=..");
       // One climb past <html> resolves to the document node, which is not an element — Playwright
@@ -584,7 +591,7 @@ export async function resolveNotesSectionByAnchor(
       // answering about nothing at all.
       const exists = await node.count().catch(() => null);
       if (exists === null) {
-        sawUnreadable = true;
+        climbUnreadable = true;
         break;
       }
       if (exists === 0) break;
@@ -600,7 +607,7 @@ export async function resolveNotesSectionByAnchor(
       // in a title row whose sibling holds the button. It is monotone in the same way — once a container
       // contains the "+", no wider one stops containing it — so this cannot loop back on itself.
       if (verdict === "too-narrow" && !best) continue;
-      if (verdict === "unreadable") sawUnreadable = true;
+      if (verdict === "unreadable") climbUnreadable = true;
       if (verdict === "contaminated" && !best && !contaminatedSelector) {
         contaminatedSelector = describeClimb(depth, "contaminated");
       }
@@ -608,6 +615,14 @@ export async function resolveNotesSectionByAnchor(
         contaminatedSelector = describeClimb(depth, "page-level");
       }
       break;
+    }
+    // FAIL CLOSED on an unknown above a good ancestor. `best` may be the card's HEADER (the label's row, which holds
+    // the "+" but not the note rows); the query that failed was the one that would have widened it to the card. An
+    // unknown there is not "stop here": returning the header would blind the idempotency read and post a duplicate.
+    if (climbUnreadable) {
+      if (best) return { ok: false, reason: "unreadable", selector: describeClimb(best.depth, "ok") };
+      sawUnreadable = true;
+      continue;
     }
     if (best) return { ok: true, locator: best.locator, selector: describeClimb(best.depth, "ok") };
   }
@@ -642,7 +657,29 @@ export async function resolveNotesSection(
 ): Promise<NotesSectionResolution> {
   const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
   const where = options?.projectLabel ? ` on project ${options.projectLabel}` : "";
-  const precise = await firstVisible(page, selectors.section.precise, options?.timeoutMs ?? SECTION_TIMEOUT_MS);
+  // The precise tier and the structural climb are tried TOGETHER on each pass, until the timeout. The precise
+  // hooks are guesses that the live page (2026-08-18) does not carry; polling them alone for the whole timeout
+  // before the climb added a guaranteed SECTION_TIMEOUT_MS to every post, holding the global browser lock. The
+  // poll is still a wait: a page that has not rendered its Notes card yet is looked at again, by both strategies.
+  const pollUntil = Date.now() + (options?.timeoutMs ?? SECTION_TIMEOUT_MS);
+  let precise: { locator: Locator; selector: string } | null = null;
+  let anchored: NotesAnchorResolution = { ok: false, reason: "not-found" };
+  for (;;) {
+    precise = await firstVisible(page, selectors.section.precise, 0);
+    if (precise) break;
+    anchored = await resolveNotesSectionByAnchor(page, {
+      timeoutMs:
+        options?.deadlineAt === undefined
+          ? ANCHOR_RESOLVE_TIMEOUT_MS
+          : Math.min(ANCHOR_RESOLVE_TIMEOUT_MS, Math.max(0, options.deadlineAt - Date.now())),
+    });
+    if (anchored.ok) {
+      return { ok: true, locator: anchored.locator, selector: anchored.selector, structural: true };
+    }
+    const now = Date.now();
+    if (now >= pollUntil || (options?.deadlineAt !== undefined && now >= options.deadlineAt)) break;
+    await new Promise((resolve) => setTimeout(resolve, SECTION_POLL_INTERVAL_MS));
+  }
   if (!precise) {
     // Before reporting a refusal, try the structural anchor. It is attempted only AFTER the precise
     // tier so a real hook (if Procore ever ships one) still wins on speed, and it is validated by the
@@ -652,15 +689,6 @@ export async function resolveNotesSection(
     // `deadlineAt` is the caller's OVERALL step deadline, so the climb is clamped by what is left after
     // the precise poll rather than getting a fresh budget of its own. Without it this ran unbounded and
     // in full even when the step had ~0ms left, on a page held by the global browser lock.
-    const anchored = await resolveNotesSectionByAnchor(page, {
-      timeoutMs:
-        options?.deadlineAt === undefined
-          ? ANCHOR_RESOLVE_TIMEOUT_MS
-          : Math.min(ANCHOR_RESOLVE_TIMEOUT_MS, Math.max(0, options.deadlineAt - Date.now())),
-    });
-    if (anchored.ok) {
-      return { ok: true, locator: anchored.locator, selector: anchored.selector };
-    }
     // A structurally-located-but-too-wide card is a different, more actionable diagnosis than "nothing
     // matched" — collapsing it into not-found/loose-only would send an operator hunting for a missing
     // selector when the real problem is a page-level wrapper. Reported the same way the precise-tier
@@ -710,7 +738,7 @@ export async function resolveNotesSection(
       message: `Resolved "Notes section"${where} (${precise.selector}) also contains the Project Description or a Create New Project button — refusing to act inside a page-level wrapper`,
     };
   }
-  return { ok: true, locator: precise.locator, selector: precise.selector };
+  return { ok: true, locator: precise.locator, selector: precise.selector, structural: false };
 }
 
 /**
@@ -762,10 +790,15 @@ export async function resolveNoteEditorInput(
   page: Scope,
   section: Locator,
   timeoutMs: number,
+  options?: { confirmedOnly?: boolean },
 ): Promise<NoteEditorResolution> {
   const scopes = await resolveEditorScopes(page, section);
+  const notes = PROCORE_SELECTORS.bidboard.newUi.notes;
+  // A structurally-found card may share its container with other cards, so only the CONFIRMED note field is
+  // specific enough to type into there — never a bare contenteditable that another card could also render.
+  const candidates = options?.confirmedOnly ? [notes.confirmed.input] : actableCandidates(notes.input);
   const input = await firstVisibleAcross(
-    scopes.map(({ scope }) => ({ scope, candidates: actableCandidates(PROCORE_SELECTORS.bidboard.newUi.notes.input) })),
+    scopes.map(({ scope }) => ({ scope, candidates })),
     timeoutMs,
   );
   if (!input) return { scopes, input: null, editorScope: null, editorScopeLabel: null };
@@ -778,11 +811,63 @@ export async function resolveNoteEditorInput(
   };
 }
 
-/** Resolve the Create control INSIDE the already-fixed editor scope. Polled, like every other lookup. */
+/** How far above the note field the Create control may sit (field → form → composer → …). */
+const CREATE_CLIMB_LIMIT = 6;
+/** A text-entry field. A second one inside an ancestor means the climb has left the note composer. */
+const EDITABLE_FIELD = 'textarea:not([aria-hidden="true"]), [contenteditable="true"]';
+
+/**
+ * The Create control for a note typed into a STRUCTURALLY-found card: the innermost ancestor of the note field that
+ * holds a visible Create candidate, provided that ancestor still holds exactly ONE text field (the note's) and
+ * exactly ONE visible Create candidate. A second field means the climb has left the composer; two Creates are
+ * ambiguous. Either way it declines — Create was never confirmed on the live page, and the card's container may
+ * hold other cards, so "the first Create in the card" is not specific enough to click.
+ */
+async function resolveCreateNearInput(input: Locator): Promise<{ locator: Locator; selector: string } | null | "unreadable"> {
+  const candidates = actableCandidates(PROCORE_SELECTORS.bidboard.newUi.notes.createButton).join(", ");
+  let node = input;
+  for (let depth = 1; depth <= CREATE_CLIMB_LIMIT; depth += 1) {
+    node = node.locator("xpath=..");
+    const exists = await node.count().catch(() => null);
+    if (exists === null) return "unreadable";
+    if (exists === 0) return null;
+    const fields = await node.locator(EDITABLE_FIELD).count().catch(() => null);
+    if (fields === null) return "unreadable";
+    if (fields > 1) return null;
+    const css = node.locator(candidates).filter({ visible: true });
+    const cssCount = await css.count().catch(() => null);
+    if (cssCount === null) return "unreadable";
+    if (cssCount > 1) return null;
+    if (cssCount === 1) return { locator: css.first(), selector: `note field ⇑${depth} — ${candidates}` };
+    const role = node.getByRole(CREATE_BUTTON_ROLE.role, { name: CREATE_BUTTON_ROLE.name }).filter({ visible: true });
+    const roleCount = await role.count().catch(() => null);
+    if (roleCount === null) return "unreadable";
+    if (roleCount > 1) return null;
+    if (roleCount === 1) return { locator: role.first(), selector: `note field ⇑${depth} — ${ROLE_MATCH_LABEL}` };
+  }
+  return null;
+}
+
+/**
+ * Resolve the Create control INSIDE the already-fixed editor scope. Polled, like every other lookup. With `nearInput`
+ * (a structurally-found card), it is found by climbing from the confirmed note field instead — see
+ * resolveCreateNearInput — and an unreadable step declines at once.
+ */
 export async function resolveNoteCreateControl(
   editorScope: Scope,
   timeoutMs: number,
+  options?: { nearInput?: Locator },
 ): Promise<{ locator: Locator; selector: string } | null> {
+  if (options?.nearInput) {
+    const until = Date.now() + timeoutMs;
+    for (;;) {
+      const hit = await resolveCreateNearInput(options.nearInput);
+      if (hit === "unreadable") return null;
+      if (hit) return hit;
+      if (Date.now() >= until) return null;
+      await new Promise((resolve) => setTimeout(resolve, SECTION_POLL_INTERVAL_MS));
+    }
+  }
   const hit = await firstVisibleAcross(
     [
       {
@@ -1042,7 +1127,12 @@ export async function postBidBoardProjectNote(
 
     if (outOfTime()) return await fail(`Timed out before opening the note editor on project ${projectId}`);
 
-    const addButton = await find(section.locator, actableCandidates(selectors.addButton), CONTROL_TIMEOUT_MS);
+    // A structurally-found card: only the confirmed "+" (which the climb proved is the card's only one).
+    const addButton = await find(
+      section.locator,
+      section.structural ? [selectors.confirmed.addButton] : actableCandidates(selectors.addButton),
+      CONTROL_TIMEOUT_MS,
+    );
     if (!addButton) {
       return await fail(
         `Add-note control not found on project ${projectId} (selectors may need updating)`,
@@ -1076,7 +1166,9 @@ export async function postBidBoardProjectNote(
     // loose-only sections, contaminated containers, cross-deal mappings and deadline exhaustion — and
     // a note that doesn't post is a non-event, while filling the wrong field on a live Procore project
     // is not.
-    const editor = await resolveNoteEditorInput(page, section.locator, stepBudget(CONTROL_TIMEOUT_MS));
+    const editor = await resolveNoteEditorInput(page, section.locator, stepBudget(CONTROL_TIMEOUT_MS), {
+      confirmedOnly: section.structural,
+    });
     const input = editor.input;
     if (!input) {
       return await fail(
@@ -1114,7 +1206,11 @@ export async function postBidBoardProjectNote(
     // Resolved only NOW, after the body is typed — a Procore editor may not render or enable Create
     // until the note is non-empty. Same shared helper the prober calls, so the scope fixing and the
     // polling cannot drift apart.
-    const createButton = await resolveNoteCreateControl(editorScope, stepBudget(CONTROL_TIMEOUT_MS));
+    const createButton = await resolveNoteCreateControl(
+      editorScope,
+      stepBudget(CONTROL_TIMEOUT_MS),
+      section.structural ? { nearInput: input.locator } : undefined,
+    );
     if (!createButton) {
       return await fail(
         `Note Create button not found on project ${projectId} (selectors may need updating)`,

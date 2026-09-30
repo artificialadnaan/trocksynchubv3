@@ -472,4 +472,170 @@ describe("postBidBoardProjectNote end to end, against real Chromium", () => {
     expect(await page.locator(".aid-note").count()).toBe(0);
     expect(await page.locator('textarea[name="description"]').inputValue()).toBe("Existing project description");
   });
+
+  /**
+   * Codex round 1 on #73 (P1): the climb keeps the OUTERMOST ancestor with exactly one "+", so a column that holds
+   * the Notes card AND a card with no "+" of its own resolves to the whole column. The generic editor/Create tiers
+   * could then reach the neighbouring card. The Tasks card here has both a contenteditable and a Create submit.
+   */
+  const columnWithTasksCard = (composer: "confirmed" | "none") => `
+    <div id="col">
+      <div id="notesCard" class="notes-card">
+        <div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div>
+        <div class="rows"></div>
+      </div>
+      <div id="tasksCard">
+        <h3>Tasks</h3>
+        <div id="taskBox" contenteditable="true"></div>
+        <button id="taskCreate" type="submit">Create</button>
+      </div>
+    </div>
+    ${DESCRIPTION_FIELD}
+    <script>
+      document.getElementById('taskCreate').addEventListener('click', () => {
+        document.getElementById('taskCreate').dataset.clicked = 'yes';
+      });
+      document.getElementById('notesPlus').addEventListener('click', () => {
+        if (${JSON.stringify(composer)} === 'none') return; // the editor never renders
+        const card = document.getElementById('notesCard');
+        if (card.querySelector('textarea')) return;
+        const composer = document.createElement('div');
+        composer.className = 'composer';
+        composer.innerHTML =
+          '<textarea name="value" placeholder="Enter note"></textarea>' +
+          '<button class="aid-confirmButton">Create</button>';
+        card.appendChild(composer);
+        composer.querySelector('button').addEventListener('click', () => {
+          const row = document.createElement('div');
+          row.className = 'aid-note';
+          row.textContent = 'Colby Burling \\u00b7 Sep 30, 2026\\n' + composer.querySelector('textarea').value;
+          card.querySelector('.rows').appendChild(row);
+          composer.remove();
+        });
+      });
+    </script>
+  `;
+
+  it("THE round-1 P1: a column-wide card posts only through the confirmed editor and its own Create", async () => {
+    await page.setContent(columnWithTasksCard("confirmed"));
+    navigateToProjectMock.mockResolvedValue(true);
+
+    const result = await postBidBoardProjectNote(page, "9001", NOTE, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 4000,
+      overallTimeoutMs: 20000,
+      stepTimeoutMs: 2000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    expect(await page.locator("#notesCard .aid-note").innerText()).toContain("Owner confirmed scope");
+    // The neighbouring card is exactly as it was: nothing typed, its Create never pressed.
+    expect(await page.locator("#taskBox").innerText()).toBe("");
+    expect(await page.locator("#taskCreate").getAttribute("data-clicked")).toBeNull();
+    expect(await page.locator('textarea[name="description"]').inputValue()).toBe("Existing project description");
+  });
+
+  it("THE round-1 P1: when the Notes editor never opens, it declines rather than typing into a neighbouring card", async () => {
+    await page.setContent(columnWithTasksCard("none"));
+    navigateToProjectMock.mockResolvedValue(true);
+
+    const result = await postBidBoardProjectNote(page, "9001", NOTE, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 500,
+      overallTimeoutMs: 10000,
+      stepTimeoutMs: 300,
+    });
+
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/Note editor not found/i);
+    expect(await page.locator("#taskBox").innerText()).toBe("");
+    expect(await page.locator("#taskCreate").getAttribute("data-clicked")).toBeNull();
+  });
+});
+
+describe("postBidBoardProjectNote in a shared column, Create found from the note field, against real Chromium", () => {
+  it("THE round-1 P1: clicks the composer's own Create, not an earlier card's Create in the same column", async () => {
+    // Tasks comes FIRST, and the composer's Create is a plain button: the generic `button:has-text("Create")` tier,
+    // searched across the column, would press the Tasks card's Create before the composer's.
+    await page.setContent(`
+      <div id="col">
+        <div id="tasksCard"><h3>Tasks</h3><button id="taskCreate">Create</button></div>
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+      <script>
+        document.getElementById('taskCreate').addEventListener('click', () => {
+          document.getElementById('taskCreate').dataset.clicked = 'yes';
+        });
+        document.getElementById('notesPlus').addEventListener('click', () => {
+          const card = document.getElementById('notesCard');
+          if (card.querySelector('textarea')) return;
+          const composer = document.createElement('div');
+          const field = document.createElement('textarea');
+          field.name = 'value';
+          field.placeholder = 'Enter note';
+          const create = document.createElement('button');
+          create.textContent = 'Create';
+          composer.append(field, create);
+          card.appendChild(composer);
+          create.addEventListener('click', () => {
+            const row = document.createElement('div');
+            row.className = 'aid-note';
+            row.textContent = field.value;
+            card.querySelector('.rows').appendChild(row);
+            composer.remove();
+          });
+        });
+      </script>
+    `);
+    navigateToProjectMock.mockResolvedValue(true);
+    const NOTE_TEXT = [`${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab (as of Sep 30, 2026)`, "", "Owner confirmed scope."].join("\n");
+
+    const result = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 4000,
+      overallTimeoutMs: 20000,
+      stepTimeoutMs: 2000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    expect(await page.locator("#taskCreate").getAttribute("data-clicked")).toBeNull();
+    expect(await page.locator("#notesCard .aid-note").innerText()).toContain("Owner confirmed scope");
+  });
+});
+
+describe("resolveNotesSection polling, against real Chromium", () => {
+  it("THE round-1 P2: finds a structural card at once, instead of first waiting out the precise tier", async () => {
+    await page.setContent(`
+      <div id="card"><div class="hdr"><h3>Notes</h3>${PLUS("plus")}</div><div class="rows"></div></div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const started = Date.now();
+    const result = await resolveNotesSection(page, { timeoutMs: 8000 });
+    expect(result).toMatchObject({ ok: true, structural: true });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("still WAITS for a Notes card that renders late — the poll is still a poll", async () => {
+    await page.setContent(`
+      ${DESCRIPTION_FIELD}
+      <script>
+        setTimeout(() => {
+          const card = document.createElement('div');
+          card.id = 'card';
+          const hdr = document.createElement('div');
+          const h3 = document.createElement('h3');
+          h3.textContent = 'Notes';
+          const plus = document.createElement('button');
+          const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svg.setAttribute('data-qa', 'ci-Plus');
+          plus.appendChild(svg);
+          hdr.append(h3, plus);
+          card.appendChild(hdr);
+          document.body.appendChild(card);
+        }, 700);
+      </script>
+    `);
+    const result = await resolveNotesSection(page, { timeoutMs: 5000 });
+    expect(result).toMatchObject({ ok: true, structural: true });
+  });
 });

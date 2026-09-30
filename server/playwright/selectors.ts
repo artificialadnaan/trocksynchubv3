@@ -62,6 +62,11 @@ function stageTabSelectorFor(labels: readonly string[]): string {
  * constant, rather than as two independently-editable literal strings.
  */
 const BIDBOARD_NOTES_ADD_BUTTON_ANCHOR = 'button:has(svg[data-qa="ci-Plus"])';
+/**
+ * The note body field, CONFIRMED against a live project (2026-08-18) — see `input.precise[0]`, which is this same
+ * literal. Declared once so the structural path (which acts ONLY on confirmed hooks) and the tiered list cannot drift.
+ */
+const BIDBOARD_NOTES_INPUT_CONFIRMED = 'textarea[name="value"][placeholder="Enter note"]:not([aria-hidden="true"])';
 
 export const PROCORE_SELECTORS = {
   // Login page - Procore uses a two-step login flow
@@ -212,6 +217,17 @@ export const PROCORE_SELECTORS = {
          */
         sectionAnchor: BIDBOARD_NOTES_ADD_BUTTON_ANCHOR,
         /**
+         * The ONLY hooks the automation acts on when the Notes card was found by the structural climb rather than
+         * by a precise card hook. That climb proves the card holds exactly one "+", not that it holds nothing else,
+         * so the generic tiers (a bare contenteditable, a "+"-text button) could reach a neighbouring card inside
+         * the same container. Only hooks confirmed on the live page are specific enough to act on there; the Create
+         * control, never confirmed, is found by climbing from the confirmed input instead (resolveNoteCreateControl).
+         */
+        confirmed: {
+          addButton: BIDBOARD_NOTES_ADD_BUTTON_ANCHOR,
+          input: BIDBOARD_NOTES_INPUT_CONFIRMED,
+        },
+        /**
          * The Notes card's own label — where the climb STARTS.
          *
          * Anchoring the climb here rather than on the "+" is what keeps the resolved card the RIGHT
@@ -305,7 +321,7 @@ export const PROCORE_SELECTORS = {
             //
             // Deliberately NOT `textarea[name="value"]` on its own: `value` is a generic MUI field name
             // that says nothing about this being the note body.
-            'textarea[name="value"][placeholder="Enter note"]:not([aria-hidden="true"])',
+            BIDBOARD_NOTES_INPUT_CONFIRMED,
             'textarea[name="note"]',
             'textarea[name="body"]',
             'textarea[name="content"]',

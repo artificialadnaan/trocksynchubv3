@@ -230,6 +230,9 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): an
           : makeLocator(dom, () => matchNodes(dom, nested, resolve().map((n) => n.id)), nested),
     getByRole: (role: string, opts?: { name?: RegExp | string }) =>
       makeLocator(dom, () => matchRole(dom, role, opts, resolve().map((n) => n.id))),
+    // Only the `visible` filter is modelled — the structural Create climb counts VISIBLE candidates.
+    filter: (opts?: { visible?: boolean }) =>
+      makeLocator(dom, () => resolve().filter((n) => opts?.visible !== true || !n.hidden), selector),
   };
   return locator;
 }
@@ -334,9 +337,16 @@ function notesFixture(opts: {
       id: "editor",
       parent: opts.editorOutsideSection ? "page" : "notesSection",
       // Found by the PRECISE selector either way; the description case differs only in its attributes,
-      // which is exactly what the last-line-of-defence attribute check has to catch.
-      matches: ['textarea[name="note"]', 'textarea'],
-      attrs: opts.editorLooksLikeDescription ? { name: "project_description" } : { name: "note" },
+      // which is exactly what the last-line-of-defence attribute check has to catch. The anchor-only page
+      // is the LIVE layout, whose editor is the confirmed field — the only one the structural path types into.
+      matches: opts.anchorOnly
+        ? [PROCORE_SELECTORS.bidboard.newUi.notes.confirmed.input, 'textarea']
+        : ['textarea[name="note"]', 'textarea'],
+      attrs: opts.editorLooksLikeDescription
+        ? { name: "project_description" }
+        : opts.anchorOnly
+          ? { name: "value", placeholder: "Enter note" }
+          : { name: "note" },
       text: "",
     });
     if (opts.createButtonRoleOnly) {
@@ -1063,6 +1073,33 @@ describe("shared resolvers (production and prober call these same functions)", (
       // NOT "not-found". This module keeps `VisibleMatch.probeFailed` for exactly this distinction, and
       // records that dropping a failure flag once caused the duplicate-note bug.
       expect(unreadable).toMatchObject({ ok: false, reason: "unreadable" });
+    });
+
+    it("THE round-1 P2: fails CLOSED when the query that would widen past a good header is unreadable", async () => {
+      // The label's row passes (it holds the "+"), so `best` is the HEADER — which does not hold the note rows.
+      // The next step up would have reached the card; its "+" count throws. Returning the header anyway would
+      // blind the idempotency read and post a duplicate, so an unknown above `best` must win over success.
+      let anchorCounts = 0;
+      const dom: FakeDom = {
+        nodes: [
+          { id: "body", tag: "body", matches: [] },
+          { id: "card", parent: "body", matches: [], text: "" },
+          { id: "header", parent: "card", matches: [], text: "" },
+          { id: "notesLabel", parent: "header", matches: [NOTES_LABEL], text: "Notes" },
+          { id: "addBtn", parent: "header", matches: ['button:has(svg[data-qa="ci-Plus"])'] },
+          { id: "rows", parent: "card", matches: [], text: `${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab` },
+        ],
+        actions: [],
+        fills: [],
+        keys: [],
+        fail: {
+          count: (selector) =>
+            selector === PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor && ++anchorCounts >= 2,
+        },
+      };
+      const result = await resolveNotesSectionByAnchor(makePage(dom));
+      expect(result).toMatchObject({ ok: false, reason: "unreadable" });
+      expect(anchorCounts).toBe(2);
     });
 
     it("reports not-found (not contaminated) when no anchor button exists at all", async () => {
