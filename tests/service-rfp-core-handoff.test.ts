@@ -517,6 +517,87 @@ describe("service RFP → TROCK Core handoff", () => {
     });
   });
 
+  describe("a deal with no usable contact email still reaches Core, with primaryContact: null", () => {
+    /** The exact bytes POSTed — `null` must be ON THE WIRE, not merely absent from a parsed object. */
+    function corePostRawBody(): string {
+      const call = vi.mocked(coreFetchMock).mock.calls.at(-1) as any[] | undefined;
+      return call ? String(call[1].body) : "";
+    }
+
+    it("POSTs primaryContact: null, rather than refusing, when the deal has no contact email", async () => {
+      approvalRequest.current = makeRequest({}, { client_email: "" });
+
+      const result = await runApproval();
+
+      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(executedSql()).not.toContain("missing_required_field");
+      // The KEY is present and explicitly null: Core's parser demands the exact key set.
+      expect(corePostRawBody()).toContain('"primaryContact":null');
+      expect(corePostBody()).toHaveProperty("primaryContact", null);
+    });
+
+    it("sends null for a NAME with no email — Core requires an email on any contact it is sent", async () => {
+      approvalRequest.current = makeRequest({}, { contact_name: "Dana Ruiz", client_email: "dana at acme" });
+
+      await runApproval();
+
+      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(corePostBody().primaryContact).toBeNull();
+      expect(executedSql()).not.toContain("missing_required_field");
+    });
+
+    it("sends null when the deal has no contact at all", async () => {
+      approvalRequest.current = makeRequest({}, { contact_name: null, client_email: null, client_phone: null });
+
+      await runApproval();
+
+      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(corePostBody().primaryContact).toBeNull();
+    });
+
+    it("leaves a deal WITH a valid contact email unchanged", async () => {
+      await runApproval();
+
+      expect(corePostBody().primaryContact).toEqual({
+        name: "Dana Ruiz",
+        email: "Dana.Ruiz@acme.example",
+        businessPhone: "214-555-0134",
+      });
+    });
+
+    it("still refuses a valid email with no contact NAME, rather than dropping a real address", async () => {
+      approvalRequest.current = makeRequest({}, { contact_name: "" });
+
+      await runApproval();
+
+      expect(outboundCalls).toEqual(["playwright"]);
+      expect(executedSql()).toContain("missing_required_field");
+      expect(executedSql()).toContain("contact name");
+    });
+
+    it("still refuses a missing COMPANY name before the POST, with or without a contact", async () => {
+      approvalRequest.current = makeRequest({}, { company_name: "", client_email: "" });
+
+      await runApproval();
+
+      expect(outboundCalls).toEqual(["playwright"]);
+      expect(executedSql()).toContain("missing_required_field");
+      expect(executedSql()).toContain("company name");
+      expect(executedSql()).not.toContain("contact email");
+    });
+
+    it("still refuses a missing PROPERTY identity before the POST, with or without a contact", async () => {
+      approvalRequest.current = makeRequest({}, { crm_property_id: null, client_email: "" });
+
+      await runApproval();
+
+      expect(outboundCalls).toEqual(["playwright"]);
+      expect(executedSql()).toContain("missing_crm_identity");
+      expect(executedSql()).toContain("non-canonical: property");
+    });
+  });
+
   it("posts nothing when a concurrent re-entry already owns the approval", async () => {
     // ON CONFLICT DO NOTHING returns no row: the other in-flight call owns this approval, and a second
     // POST would be a second delivery. processRfpApproval is not idempotent, so this is reachable.

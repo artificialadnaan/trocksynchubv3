@@ -38,7 +38,11 @@ export interface ServiceRfpApprovedBody {
   rfp: { requestId: number; approvedAt: string };
   deal: { id: string; rfpProjectNumber: string };
   company: { id: string; name: string };
-  primaryContact: { name: string; email: string; businessPhone: string | null };
+  /**
+   * Null when the CRM deal has no usable contact email. Always PRESENT (Core checks the exact key set),
+   * never omitted. Requires a Core that accepts the null: an older one answers 400.
+   */
+  primaryContact: { name: string; email: string; businessPhone: string | null } | null;
   bid: {
     title: string;
     estimatedValue: string | null;
