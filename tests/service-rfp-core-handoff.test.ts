@@ -288,6 +288,44 @@ describe("service RFP → TROCK Core handoff", () => {
     });
   });
 
+  it("names the job site with the CRM property's NAME, the street staying in the address", async () => {
+    approvalRequest.current = makeRequest({}, { crm_property_name: "Tides North Dallas" });
+    await runApproval();
+    expect(corePostBody().property).toEqual({
+      id: CRM_PROPERTY_ID,
+      name: "Tides North Dallas",
+      address: { line1: "1200 Main St", line2: null, city: "Dallas", state: "TX", postalCode: "75201", country: "US" },
+    });
+  });
+
+  it("keeps the CRM property name through the intake schema (zod would strip an undeclared key)", async () => {
+    const { rfpRequestBodySchema } = await import("../server/routes/rfp-requests.ts");
+    const parsed = rfpRequestBodySchema.safeParse({
+      sourceSystem: "trock_crm",
+      sourceDealId: CRM_DEAL_ID,
+      sourceEventId: "evt-1",
+      deal: {
+        name: "Tides North Dallas - Roof leak",
+        projectNumber: "DFW-4-12345-aa",
+        projectType: "4",
+        amount: null,
+        estimator: null,
+        propertyId: CRM_PROPERTY_ID,
+        propertyName: "Tides North Dallas",
+        companyName: "Acme Retail",
+        contactName: null,
+        clientEmail: null,
+        clientPhone: null,
+        address: { street: "1200 Main St", city: "Dallas", state: "TX", zip: "75201", country: "US" },
+        description: null,
+        dueDate: null,
+        workflowRoute: null,
+      },
+      attachments: [],
+    });
+    expect(parsed.success && parsed.data.deal.propertyName).toBe("Tides North Dallas");
+  });
+
   it("enqueues nothing at all for a NON-service approval", async () => {
     approvalRequest.current = makeRequest(
       { projectNumber: "DFW-2-12345-aa" },

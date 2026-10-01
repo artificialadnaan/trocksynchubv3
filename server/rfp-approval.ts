@@ -54,6 +54,8 @@ export interface NormalizedRfpRequestInput {
      */
     companyId?: string | null;
     propertyId?: string | null;
+    /** The CRM property's name: what TROCK Core names the job site (absent on bodies predating the CRM field). */
+    propertyName?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -1007,6 +1009,8 @@ function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { owner
     // these must read as "not supplied" and take the terminal-skip path.
     crm_company_id: input.deal.companyId || null,
     crm_property_id: input.deal.propertyId || null,
+    // The job site's NAME for the Core handoff (null when the CRM sent none: the handoff falls back to the street).
+    crm_property_name: input.deal.propertyName || null,
     bid_due_date: input.deal.dueDate || '',
     due_date: input.deal.dueDate || '',
     workflowRoute: input.deal.workflowRoute || '',
