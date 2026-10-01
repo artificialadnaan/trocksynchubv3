@@ -38,6 +38,9 @@ export const rfpRequestBodySchema = z.object({
     // is loud, not silent — the Core handoff records a terminal row and alerts.
     companyId: z.string().trim().nullable().optional().catch(undefined),
     propertyId: z.string().trim().nullable().optional().catch(undefined),
+    // The CRM property's NAME ("Tides North Dallas"), which TROCK Core names the job site with. Soft like the ids:
+    // a malformed value is dropped (the handoff then falls back to the street address), never a 422.
+    propertyName: z.string().trim().nullable().optional().catch(undefined),
     companyName: z.string().trim().nullable(),
     contactName: z.string().trim().nullable(),
     clientEmail: z.string().trim().email().nullable(),

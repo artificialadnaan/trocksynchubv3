@@ -289,12 +289,13 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
       ? { line1, line2: null, city, state, postalCode, country: wireCountry(effectiveField(input, "country")) }
       : null;
 
-  // The CRM's RFP payload carries the property's uuid but not its NAME, so the name is derived. It is
-  // display-only — the property is resolved by crm_property_id — and the street address is the most
-  // useful label for a job site; the bid title is the same fallback Core's own attach-project door
-  // uses when it has nothing better.
+  // The job site's NAME as the CRM has it ("Tides North Dallas"): Core names the property (and the QuickBooks
+  // Customer:Property:Job) with it, and the street stays in `address`. A request stored before the CRM sent the
+  // name falls back to the street address, then the bid title (Core's own attach-project fallback). The property
+  // itself is resolved by crm_property_id either way.
   const propertyName =
-    wireString(effectiveField(input, "address"), MAX.propertyName)
+    wireString(effectiveField(input, "crm_property_name"), MAX.propertyName)
+    ?? wireString(effectiveField(input, "address"), MAX.propertyName)
     ?? wireString(input.dealData.project_location, MAX.propertyName)
     ?? title;
 
