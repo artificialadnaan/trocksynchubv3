@@ -594,8 +594,9 @@ const rfpApproverCache = new Map<string, { timestamp: number; recipients: string
  */
 function hardcodedRfpSafetyNetRecipients(type: string): string[] {
   if (type === '4') {
-    // Project type 4: James + Colby
-    return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+    // Project type 4 (service): Kason + Andrew, the owner's service approvers (2026-10-01; migration 0026). Kept equal
+    // to the configured row so a config-read failure never emails people the live check would then refuse.
+    return ['kreeder@trockgc.com', 'agreen@trockgc.com'];
   }
   // All other project types: Sidney + James + Tim (non-service routing — kept in sync with main's #45 change)
   return ['sgibson@trockgc.com', 'jhelms@trockgc.com', 'tmitchell@trockgc.com'];
