@@ -55,6 +55,8 @@ async function priorPayload(
     const rows = (r?.rows ?? r) as Array<{ payload: any }>;
     const payload = rows?.[0]?.payload ?? null;
     // A pre-POST refusal row stores only the reason, not a body — that is `none`, and must be rebuilt.
+    // That rebuild is what recovers the old "contact email" refusals: the current builder sends
+    // `primaryContact: null` for them instead of refusing.
     return payload && payload.version ? { kind: "found", payload } : { kind: "none" };
   } catch {
     // INCONCLUSIVE IS NOT "NO PRIOR DELIVERY". If the read fails transiently and the upsert then

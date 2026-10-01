@@ -258,14 +258,20 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
   const title = wireString(effectiveField(input, "dealname"), MAX.title);
   const companyName = wireString(effectiveField(input, "company_name"), MAX.companyName);
   const contactName = wireString(effectiveField(input, "contact_name"), MAX.contactName);
-  const contactEmail = wireString(effectiveField(input, "client_email"), MAX.email);
+  const rawContactEmail = wireString(effectiveField(input, "client_email"), MAX.email);
+  // THE CONTACT IS OPTIONAL, keyed on its EMAIL. A deal with no usable primary-contact email used to be
+  // refused here, before any POST — 24 approvals were lost that way. Core now accepts `primaryContact: null`
+  // and attaches its per-company "No contact on CRM deal" placeholder instead. Email is the key because
+  // Core requires one on any contact it is sent: a name with no email therefore still goes as null, not
+  // as a half contact Core would 400. A NAME is still required when an email is present, so a real
+  // address is never silently dropped for the lack of a name.
+  const contactEmail = rawContactEmail && EMAIL_RE.test(rawContactEmail) ? rawContactEmail : null;
   const rfpProjectNumber = wireString(input.projectNumber, MAX.projectNumber);
-  if (!title || !companyName || !contactName || !contactEmail || !EMAIL_RE.test(contactEmail) || !rfpProjectNumber) {
+  if (!title || !companyName || (contactEmail && !contactName) || !rfpProjectNumber) {
     const missing = [
       !title && "bid title",
       !companyName && "company name",
-      !contactName && "contact name",
-      (!contactEmail || !EMAIL_RE.test(contactEmail)) && "contact email",
+      contactEmail && !contactName && "contact name",
       !rfpProjectNumber && "project number",
     ].filter(Boolean).join(", ");
     return { ok: false, reason: "missing_required_field", detail: `Core requires: ${missing}` };
@@ -311,11 +317,19 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
       rfp: { requestId: input.rfpRequestId, approvedAt: approvedAt.toISOString() },
       deal: { id: dealId, rfpProjectNumber },
       company: { id: companyId, name: companyName },
-      primaryContact: {
-        name: contactName,
-        email: contactEmail,
-        businessPhone: wireString(effectiveField(input, "client_phone"), MAX.phone),
-      },
+      // NULL, NOT OMITTED, when there is no usable email: Core's parser demands the exact key set, so the
+      // key is always present and an absent contact is an explicit `null` (JSON.stringify keeps it).
+      //
+      // DEPLOY ORDER: Core must ship its nullable-primaryContact parser BEFORE this. An older Core answers
+      // `null` with a 400, which the outbox records as a terminal failure; a re-drive recovers those rows
+      // once Core is deployed (see ./service-rfp-core-redrive).
+      primaryContact: contactEmail && contactName
+        ? {
+            name: contactName,
+            email: contactEmail,
+            businessPhone: wireString(effectiveField(input, "client_phone"), MAX.phone),
+          }
+        : null,
       bid: {
         title,
         estimatedValue: wireMoney(effectiveField(input, "amount")),

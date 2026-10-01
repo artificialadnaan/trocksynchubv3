@@ -50,6 +50,30 @@ describe("the approved-RFP POST refuses to be redirected", () => {
     expect(init.method).toBe("POST");
   });
 
+  it("sends and SIGNS an explicit `\"primaryContact\":null` when the deal has no contact", async () => {
+    // Core checks the exact key set, so an absent contact is a present key holding null — never a
+    // dropped key. The signature must cover those same bytes.
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ bidId: "bid-1" }), { status: 201, headers: { "Content-Type": "application/json" } }),
+    );
+    const { signServiceRfpIngress } = await import("../server/sync/core-ingress-client.ts");
+
+    const outcome = await postServiceRfpApproved({
+      targetUrl: "https://core.example.com/webhooks/crm/dallas/service-rfp/v1",
+      body: { ...BODY, primaryContact: null },
+      secret: "x".repeat(64),
+    });
+
+    expect(outcome.kind).toBe("sent");
+    const init = fetchMock.mock.calls[0]![1];
+    expect(init.body).toContain('"company":{"id":"22222222-2222-4222-8222-222222222222","name":"Acme"},"primaryContact":null,"bid":');
+    expect(JSON.parse(init.body)).toHaveProperty("primaryContact", null);
+    expect(init.headers["x-trock-signature"]).toBe(
+      signServiceRfpIngress({ path: "/webhooks/crm/dallas/service-rfp/v1", rawBody: init.body, secret: "x".repeat(64) }),
+    );
+  });
+
   it("classifies a redirect refusal as RETRYABLE, so a relocated ingress is not dead-lettered", async () => {
     // Node rejects the fetch when redirect:'error' meets a 3xx; the existing catch turns any transport
     // failure into a retryable outcome. A genuinely relocated Core is then a provisioning fix plus a
