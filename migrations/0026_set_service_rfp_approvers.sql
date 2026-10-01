@@ -1,15 +1,16 @@
--- Service RFP approvers (project_type '4'): the two people the owner named. Both get the approval email; EITHER
--- approves (one approvedBy; isAuthorizedRfpApprover accepts any listed email). Service board spec 2026-10-01, P1-3.
+-- Service RFP approvers (project_type '4'): Kason Reeder and Andrew Green, named by the owner 2026-10-01.
+-- Both get the approval email; EITHER approves (one approvedBy; isAuthorizedRfpApprover accepts any listed email).
+-- Service board spec 2026-10-01, P1-3.
 --
 -- REPLACES the service list (today: the 0017 seed / the "James + Colby" safety net), it does not append: the spec
 -- names exactly who approves sales-referred service RFPs. Non-service routing (every project_type <> '4') is
 -- untouched.
 --
 -- IMPORTANT: this repo does NOT auto-apply migrations on deploy (see 0022). The owner runs it against prod via
--- `railway connect Postgres`, after the two placeholder emails below are replaced with the real ones.
+-- `railway connect Postgres`.
 --
--- FAIL-SAFE: while either placeholder is still in the file, the block RAISEs and writes nothing, so a placeholder
--- address can never become a service approver (which would send service RFP approvals to nobody).
+-- FAIL-SAFE: a malformed address RAISEs and writes nothing, so a typo can never become the only service approvers
+-- (which would send service RFP approvals to nobody).
 --
 -- FIRST run this census to see what will change (every service row, active or not; a source-specific row shadows
 -- the general one in selectConfiguredRfpRecipients, so ALL of them are set, not only source_system IS NULL):
@@ -24,11 +25,10 @@
 
 DO $$
 DECLARE
-  -- REPLACE BOTH before running. Lower-case, exact addresses.
-  service_approvers text[] := ARRAY['REPLACE_WITH_FIRST_APPROVER_EMAIL', 'REPLACE_WITH_SECOND_APPROVER_EMAIL'];
+  service_approvers text[] := ARRAY['kreeder@trockgc.com', 'agreen@trockgc.com'];
 BEGIN
   IF EXISTS (SELECT 1 FROM unnest(service_approvers) AS e WHERE e LIKE 'REPLACE_WITH_%' OR e NOT LIKE '%_@_%.__%') THEN
-    RAISE EXCEPTION 'service RFP approvers not set: replace both placeholder emails in this migration before running it';
+    RAISE EXCEPTION 'service RFP approvers malformed: fix the addresses in this migration before running it';
   END IF;
 
   -- Every existing service row (any source system), so no source-specific row keeps the old list.
