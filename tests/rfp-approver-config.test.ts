@@ -93,7 +93,8 @@ describe("getRfpReviewRecipients", () => {
   it("falls back to the hardcoded safety-net recipients when config is missing", async () => {
     const { getRfpReviewRecipients } = await import("../server/rfp-approval.ts");
 
-    await expect(getRfpReviewRecipients("4", "hubspot")).resolves.toEqual(["jhelms@trockgc.com", "cburling@trockgc.com"]);
+    // Service (type 4): the owner's approvers since migration 0026 (2026-10-01), kept equal to the configured row.
+    await expect(getRfpReviewRecipients("4", "hubspot")).resolves.toEqual(["kreeder@trockgc.com", "agreen@trockgc.com"]);
     await expect(getRfpReviewRecipients("2", "hubspot")).resolves.toEqual(["sgibson@trockgc.com", "jhelms@trockgc.com", "tmitchell@trockgc.com"]);
   });
 });
