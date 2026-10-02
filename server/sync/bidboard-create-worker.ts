@@ -856,22 +856,35 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
 // adopt is the only way it reaches one). Mirrors processRfpApproval's handoff, with a REAL rfp_approval_requests id:
 // Core requires rfp.requestId to be a positive safe integer and orders by (approvedAt, requestId), so a synthetic or
 // hashed id is not an option.
+//   - eligibility: the adopt itself runs BEFORE the create path's eligibility recheck (an existing project must
+//     never be flipped to 'failed'), but a Core card is new work — so the SAME check gates the handoff. A deal that
+//     was deleted or left Opportunity while the command waited gets its adopt callback and no Core card.
 //   - request: the row THIS command already recorded (keyed on the CRM's sourceEventId, so a retried/reclaimed
-//     command reuses it). Otherwise it depends on the deal's LATEST request:
-//       'pending' / 'override_approving' -> NO handoff and no row. That request's own approval hands off through
-//         processRfpApproval with the reviewer's edits; taking its id here would turn that later delivery into a
-//         duplicate in the Core outbox and the edits would never reach Core.
-//       'approved' -> reuse its id (the Core outbox dedupes on (source_system, source_deal_id, rfp_request_id)).
-//       none, or declined / any other status -> record a new 'approved' row for this vote. A declined request's id
-//         must not carry an override that effectively approves.
-//   - approvedAt: callbackAt — the command's receipt time, which this worker already treats as the vote moment (AA3)
-//     and which is stable across reclaims. It is the OVERRIDE's time, so it orders after the vote it overrides.
+//     command reuses it and the Core outbox dedupes on (source_system, source_deal_id, rfp_request_id)). Otherwise:
+//       latest request 'pending' / 'override_approving' -> NO handoff and no row. That request's own approval hands
+//         off through processRfpApproval with the reviewer's edits; taking its id here would turn that later delivery
+//         into a duplicate in the Core outbox and the edits would never reach Core.
+//       anything else (none, approved, declined, ...) -> record a new 'approved' row for THIS vote. A distinct vote
+//         needs its own id: an earlier approval's id would make it a duplicate and its newer data would never reach
+//         Core, and a declined request's id must not carry an override that effectively approves.
+//   - approvedAt: a NEW row takes callbackAt — the command's receipt time, which this worker already treats as the
+//     vote moment (AA3); it is the OVERRIDE's time, so it orders after the vote it overrides. A REUSED row keeps the
+//     approved_at it was recorded with: a re-queue refreshes the command's created_at (enqueueBidboardCreateCommand),
+//     and the same approval must not be re-dated.
 //   - dealData: rebuilt from this vote's body by the approval's own normalizer, so crm_company_id / crm_property_id /
 //     crm_property_name reach Core (the worker's normalizedDealData above does not carry them).
 // FAIL-OPEN: never throws. The adopt outcome and its 'created' callback are already settled and must not change.
 async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboardProjectId: string, callbackAt?: string): Promise<void> {
   try {
-    const approvedAt = callbackAt ? new Date(callbackAt) : new Date();
+    const eligibility = await checkRfpApprovalSourceEligibility({
+      sourceSystem: input.sourceSystem,
+      sourceDealId: input.sourceDealId,
+    });
+    if (!eligibility.eligible) {
+      log(`[bidboard-create] Adopted service deal ${input.sourceDealId} is no longer eligible (${eligibility.reason || "ineligible"}); not handing it to Core`, "sync");
+      return;
+    }
+    const voteAt = callbackAt ? new Date(callbackAt) : new Date();
     const dealData = normalizedDealData(
       input,
       { ownerName: input.deal.ownerName ?? "", ownerEmail: input.deal.ownerEmail ?? "" },
@@ -886,7 +899,6 @@ async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboa
     }
     const request =
       ownRequest
-      ?? (latest?.status === "approved" ? latest : undefined)
       ?? (await storage.createRfpApprovalRequest({
         sourceSystem: input.sourceSystem,
         sourceDealId: input.sourceDealId,
@@ -899,9 +911,10 @@ async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboa
         status: "approved",
         dealData,
         approvedBy: "trock_crm vote (create-from-rfp)",
-        approvedAt,
+        approvedAt: voteAt,
         bidboardProjectId,
       }));
+    const approvedAt = request.approvedAt ? new Date(request.approvedAt) : voteAt;
     const { handOffServiceRfpApprovalToCore } = await import("./service-rfp-core-outbox");
     const result = await handOffServiceRfpApprovalToCore({
       sourceSystem: input.sourceSystem,

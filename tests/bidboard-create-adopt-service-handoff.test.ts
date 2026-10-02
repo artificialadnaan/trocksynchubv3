@@ -27,9 +27,10 @@ vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
   buildRfpDeclinedCallbackTargetUrl: () => "https://crm.example.com/api/internal/rfp-declined",
 }));
 // rfp-approval.ts is REAL (its normalizedDealData is the thing under test) except the CRM eligibility call.
+const eligibilityMock = vi.hoisted(() => vi.fn(async (_req: any) => ({ eligible: true }) as any));
 vi.mock("../server/rfp-approval.ts", async (importOriginal) => ({
   ...(await importOriginal<any>()),
-  checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
+  checkRfpApprovalSourceEligibility: eligibilityMock,
 }));
 vi.mock("../server/hubspot.ts", () => ({
   getHubSpotClient: vi.fn(),
@@ -202,6 +203,8 @@ beforeEach(async () => {
   process.env.SERVICE_RFP_INGRESS_SECRET_CURRENT = "s".repeat(32);
   process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
   handoffMode.throws = false;
+  eligibilityMock.mockReset();
+  eligibilityMock.mockResolvedValue({ eligible: true });
   handoffSpy.mockClear();
   coreFetchMock.mockClear();
   createBidBoardMock.mockReset();
@@ -249,16 +252,51 @@ describe("create-from-rfp ADOPT of a service deal -> TROCK Core handoff", () => 
     expect(coreFetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("REUSES the deal's latest request when it is APPROVED, instead of inserting one", async () => {
+  it("a distinct vote on a deal with an earlier APPROVED request gets its OWN request id; the old row is untouched", async () => {
     await mapDealTo(SERVICE_NUMBER);
-    await seedRequest("declined", "crm:rfp:request-1");
-    const latest = await seedRequest("approved", "crm:rfp:request-2");
+    const earlier = await seedRequest("approved", "crm:rfp:request-1");
+    const [before] = await rows("rfp_approval_requests", `id = ${earlier}`);
 
     await performCreateFromRfpVote(vote(), VOTE_AT);
 
-    expect(await rows("rfp_approval_requests")).toHaveLength(2); // nothing inserted
-    expect(handoffArg().rfpRequestId).toBe(latest);
-    expect(handoffArg().approvedAt.toISOString()).toBe(VOTE_AT); // the override's time, not the original request's
+    const all = await rows("rfp_approval_requests");
+    expect(all).toHaveLength(2);
+    const own = all.find((r) => r.source_event_id === "crm:rfp-vote:approved:round-2");
+    expect(own).toMatchObject({ status: "approved" });
+    expect(handoffArg().rfpRequestId).toBe(own.id);
+    expect(handoffArg().rfpRequestId).not.toBe(earlier);
+    expect(handoffArg().approvedAt.toISOString()).toBe(VOTE_AT); // the override's time, not the earlier approval's
+    expect(all.find((r) => r.id === earlier)).toEqual(before);
+    expect(await rows("service_rfp_core_outbox")).toHaveLength(1); // a NEW delivery, not a duplicate
+  });
+
+  it("a REQUEUED command (refreshed created_at) reuses its row AND the approval time it was recorded with", async () => {
+    await mapDealTo(SERVICE_NUMBER);
+    await performCreateFromRfpVote(vote(), VOTE_AT);
+
+    await performCreateFromRfpVote(vote(), "2026-10-02T09:00:00.000Z"); // the re-queue's refreshed receipt time
+
+    const all = await rows("rfp_approval_requests");
+    expect(all).toHaveLength(1);
+    expect(handoffArg(1).rfpRequestId).toBe(all[0].id);
+    expect(handoffArg(1).approvedAt.toISOString()).toBe(VOTE_AT);
+    expect(new Date(all[0].approved_at + "Z").toISOString()).toBe(VOTE_AT);
+  });
+
+  it("an INELIGIBLE deal (deleted / left Opportunity) still adopts with its callback, but is NOT handed to Core", async () => {
+    await mapDealTo(SERVICE_NUMBER);
+    eligibilityMock.mockResolvedValue({ eligible: false, reason: "Source CRM deal no longer exists" });
+
+    const outcome = await performCreateFromRfpVote(vote(), VOTE_AT);
+
+    expect(outcome).toBe("adopted");
+    expect(eligibilityMock).toHaveBeenCalledWith({ sourceSystem: "trock_crm", sourceDealId: DEAL_ID });
+    expect(handoffSpy).not.toHaveBeenCalled();
+    expect(await rows("rfp_approval_requests")).toHaveLength(0);
+    expect(await rows("service_rfp_core_outbox")).toHaveLength(0);
+    const callbacks = await rows("bidboard_callback_outbox");
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0].payload).toMatchObject({ status: "created", bidboardProjectId: "777", projectNumber: SERVICE_NUMBER, createdAt: VOTE_AT });
   });
 
   it("a DECLINED latest request is never the handoff id: the vote records its own approved row", async () => {
@@ -279,13 +317,15 @@ describe("create-from-rfp ADOPT of a service deal -> TROCK Core handoff", () => 
     "a deal whose latest request is still %s is NOT handed off here (its own approval will), and no row is inserted",
     async (status) => {
       await mapDealTo(SERVICE_NUMBER);
+      // An older APPROVED request sits behind it: only the LATEST request decides.
+      await seedRequest("approved", "crm:rfp:request-0");
       await seedRequest(status, "crm:rfp:request-1");
 
       const outcome = await performCreateFromRfpVote(vote(), VOTE_AT);
 
       expect(outcome).toBe("adopted");
       expect(handoffSpy).not.toHaveBeenCalled();
-      expect(await rows("rfp_approval_requests")).toHaveLength(1);
+      expect(await rows("rfp_approval_requests")).toHaveLength(2);
       expect(await rows("service_rfp_core_outbox")).toHaveLength(0);
       const [callback] = await rows("bidboard_callback_outbox");
       expect(callback.payload).toMatchObject({ status: "created", bidboardProjectId: "777" });
