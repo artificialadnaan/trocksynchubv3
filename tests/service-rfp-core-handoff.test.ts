@@ -377,6 +377,13 @@ describe("service RFP → TROCK Core handoff", () => {
       });
     });
 
+    it("an invalid edited due date is not replaced by the cached due_date (#92 CodeRabbit)", async () => {
+      const deal = { due_date: "2026-09-15T17:00:00.000Z" };
+      expect((await buildBody(deal, { bid_due_date: "2026-02-31" })).bid.dueAt).toBeNull();
+      // An EMPTY bid_due_date still falls back to due_date.
+      expect((await buildBody(deal, { bid_due_date: "" })).bid.dueAt).toBe("2026-09-15T17:00:00.000Z");
+    });
+
     it("drops a date that does not exist rather than rolling it over", async () => {
       expect((await buildBody({}, { bid_due_date: "2026-02-31" })).bid.dueAt).toBeNull();
     });

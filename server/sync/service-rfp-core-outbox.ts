@@ -392,7 +392,11 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
 
   // Compared against the CRM due date the review form pre-filled its date input from (its own chain).
   const crmDue = rfpFormDueDateSource(input.dealData);
-  const dueAt = wireDueAt(effectiveField(input, "bid_due_date"), crmDue) ?? wireDueAt(effectiveField(input, "due_date"), crmDue);
+  // A non-empty bid_due_date (the form always posts it) decides, even when it is invalid: falling back to the cached
+  // due_date would silently replace the reviewer's edit with a stale value (#92 CodeRabbit). Only an empty one
+  // falls back.
+  const bidDue = effectiveField(input, "bid_due_date");
+  const dueAt = wireString(bidDue, 64) ? wireDueAt(bidDue, crmDue) : wireDueAt(effectiveField(input, "due_date"), crmDue);
 
   const approvedAt = input.approvedAt ?? new Date();
   return {
