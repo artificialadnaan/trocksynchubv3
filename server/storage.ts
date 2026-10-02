@@ -470,6 +470,7 @@ export interface IStorage {
   getRfpApprovalRequestBySourceDealId(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestBySourceDealAndStatus(sourceSystem: SourceSystem, sourceDealId: string, status: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined>;
+  getLatestRfpApprovalRequestBySourceDeal(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
   updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
@@ -2150,6 +2151,19 @@ export class DatabaseStorage implements IStorage {
         eq(rfpApprovalRequests.sourceEventId, sourceEventId)
       ))
       .orderBy(desc(rfpApprovalRequests.createdAt));
+    return result;
+  }
+
+  // The deal's most recent request in ANY status. Ordered by the serial id, not created_at: id is insertion order
+  // and never NULL, whereas a DESC sort on the nullable created_at would rank a NULL row first.
+  async getLatestRfpApprovalRequestBySourceDeal(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.select().from(rfpApprovalRequests)
+      .where(and(
+        eq(rfpApprovalRequests.sourceSystem, sourceSystem),
+        eq(rfpApprovalRequests.sourceDealId, sourceDealId)
+      ))
+      .orderBy(desc(rfpApprovalRequests.id))
+      .limit(1);
     return result;
   }
 
