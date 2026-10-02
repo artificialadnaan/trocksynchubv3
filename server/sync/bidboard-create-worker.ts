@@ -857,8 +857,13 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
 // Core requires rfp.requestId to be a positive safe integer and orders by (approvedAt, requestId), so a synthetic or
 // hashed id is not an option.
 //   - request: the row THIS command already recorded (keyed on the CRM's sourceEventId, so a retried/reclaimed
-//     command reuses it), else the deal's LATEST request in any status, else a new 'approved' row recorded for this
-//     vote. A reused id dedupes in the Core outbox on (source_system, source_deal_id, rfp_request_id).
+//     command reuses it). Otherwise it depends on the deal's LATEST request:
+//       'pending' / 'override_approving' -> NO handoff and no row. That request's own approval hands off through
+//         processRfpApproval with the reviewer's edits; taking its id here would turn that later delivery into a
+//         duplicate in the Core outbox and the edits would never reach Core.
+//       'approved' -> reuse its id (the Core outbox dedupes on (source_system, source_deal_id, rfp_request_id)).
+//       none, or declined / any other status -> record a new 'approved' row for this vote. A declined request's id
+//         must not carry an override that effectively approves.
 //   - approvedAt: callbackAt — the command's receipt time, which this worker already treats as the vote moment (AA3)
 //     and which is stable across reclaims. It is the OVERRIDE's time, so it orders after the vote it overrides.
 //   - dealData: rebuilt from this vote's body by the approval's own normalizer, so crm_company_id / crm_property_id /
@@ -873,9 +878,15 @@ async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboa
       await buildSourceDealUrl(input.sourceSystem, input.sourceDealId),
     );
     const byEvent = await storage.getRfpApprovalRequestBySourceEventId(input.sourceSystem, input.sourceEventId);
+    const ownRequest = byEvent && byEvent.sourceDealId === input.sourceDealId ? byEvent : undefined;
+    const latest = ownRequest ? undefined : await storage.getLatestRfpApprovalRequestBySourceDeal(input.sourceSystem, input.sourceDealId);
+    if (latest && (latest.status === "pending" || latest.status === RFP_OVERRIDE_APPROVING_STATUS)) {
+      log(`[bidboard-create] Adopted service deal ${input.sourceDealId} has RFP request ${latest.id} still ${latest.status}; its approval hands off to Core, skipping here`, "sync");
+      return;
+    }
     const request =
-      (byEvent && byEvent.sourceDealId === input.sourceDealId ? byEvent : undefined)
-      ?? (await storage.getLatestRfpApprovalRequestBySourceDeal(input.sourceSystem, input.sourceDealId))
+      ownRequest
+      ?? (latest?.status === "approved" ? latest : undefined)
       ?? (await storage.createRfpApprovalRequest({
         sourceSystem: input.sourceSystem,
         sourceDealId: input.sourceDealId,

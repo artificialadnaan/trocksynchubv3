@@ -249,10 +249,10 @@ describe("create-from-rfp ADOPT of a service deal -> TROCK Core handoff", () => 
     expect(coreFetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("REUSES the deal's latest existing request (any status) instead of inserting one", async () => {
+  it("REUSES the deal's latest request when it is APPROVED, instead of inserting one", async () => {
     await mapDealTo(SERVICE_NUMBER);
-    await seedRequest("approved", "crm:rfp:request-1");
-    const latest = await seedRequest("declined", "crm:rfp:request-2");
+    await seedRequest("declined", "crm:rfp:request-1");
+    const latest = await seedRequest("approved", "crm:rfp:request-2");
 
     await performCreateFromRfpVote(vote(), VOTE_AT);
 
@@ -260,6 +260,37 @@ describe("create-from-rfp ADOPT of a service deal -> TROCK Core handoff", () => 
     expect(handoffArg().rfpRequestId).toBe(latest);
     expect(handoffArg().approvedAt.toISOString()).toBe(VOTE_AT); // the override's time, not the original request's
   });
+
+  it("a DECLINED latest request is never the handoff id: the vote records its own approved row", async () => {
+    await mapDealTo(SERVICE_NUMBER);
+    await seedRequest("approved", "crm:rfp:request-1");
+    const declined = await seedRequest("declined", "crm:rfp:request-2");
+
+    await performCreateFromRfpVote(vote(), VOTE_AT);
+
+    const inserted = await rows("rfp_approval_requests", `source_event_id = 'crm:rfp-vote:approved:round-2'`);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].status).toBe("approved");
+    expect(handoffArg().rfpRequestId).toBe(inserted[0].id);
+    expect(handoffArg().rfpRequestId).not.toBe(declined);
+  });
+
+  it.each(["pending", "override_approving"])(
+    "a deal whose latest request is still %s is NOT handed off here (its own approval will), and no row is inserted",
+    async (status) => {
+      await mapDealTo(SERVICE_NUMBER);
+      await seedRequest(status, "crm:rfp:request-1");
+
+      const outcome = await performCreateFromRfpVote(vote(), VOTE_AT);
+
+      expect(outcome).toBe("adopted");
+      expect(handoffSpy).not.toHaveBeenCalled();
+      expect(await rows("rfp_approval_requests")).toHaveLength(1);
+      expect(await rows("service_rfp_core_outbox")).toHaveLength(0);
+      const [callback] = await rows("bidboard_callback_outbox");
+      expect(callback.payload).toMatchObject({ status: "created", bidboardProjectId: "777" });
+    },
+  );
 
   it("a retried command (same sourceEventId) reuses the SAME request id and Core is told once", async () => {
     await mapDealTo(SERVICE_NUMBER);
