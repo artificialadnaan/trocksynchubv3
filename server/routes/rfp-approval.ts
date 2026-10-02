@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { asyncHandler } from "../lib/async-handler";
+import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { storage } from "../storage";
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import {
@@ -88,19 +89,9 @@ async function renderRfpReviewPage(
   source: { system: string; label: string; url?: string | null }
 ): Promise<string> {
   const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  const formatDateForInput = (val: any): string => {
-    if (val == null || val === '') return '';
-    const n = typeof val === 'string' && /^\d+$/.test(val) ? parseInt(val, 10) : val;
-    const date = new Date(n);
-    if (isNaN(date.getTime())) return '';
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  };
-
-  const proposalDueDateRaw = d.proposal_due_date || d.bid_due_date || d.due_date;
-  const proposalDueDateFormatted = formatDateForInput(proposalDueDateRaw);
+  // The SAME chain and formatter the Core handoff compares an approval's posted date against.
+  const proposalDueDateRaw = rfpFormDueDateSource(d);
+  const proposalDueDateFormatted = formatRfpFormDate(proposalDueDateRaw);
 
   const projectDescription = resolveRfpDescription(d);
 
