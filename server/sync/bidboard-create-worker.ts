@@ -2,7 +2,8 @@ import { sql } from "drizzle-orm";
 import { log } from "../index";
 import { storage } from "../storage";
 import { parseProjectTypeFromNumber } from "../constants";
-import { checkRfpApprovalSourceEligibility } from "../rfp-approval";
+import { randomUUID } from "crypto";
+import { buildSourceDealUrl, checkRfpApprovalSourceEligibility, normalizedDealData } from "../rfp-approval";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 import { buildBidBoardCreatedCallbackTargetUrl } from "./bidboard-callback-worker";
 import type { CreateFromRfpInput } from "../routes/rfp-requests";
@@ -657,6 +658,11 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
       return "failed";
     }
     await enqueueCreatedCallback(input, existingMapping.bidboardProjectId, callbackAt);
+    // A SERVICE deal adopting an existing job: the job now exists, so TROCK Core must hear about it exactly as an
+    // ordinary service approval would tell it. Only here — a service deal with NO project is still refused below.
+    if (effectiveProjectType === "4" && input.sourceSystem === "trock_crm") {
+      await handOffAdoptedServiceDealToCore(input, existingMapping.bidboardProjectId, callbackAt);
+    }
     return "adopted";
   }
 
@@ -844,6 +850,61 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
 
   await enqueueCreatedCallback(input, result.projectId, callbackAt);
   return "created";
+}
+
+// Tell TROCK Core about a service job this vote ADOPTED (the create-from-rfp path never creates a service job, so
+// adopt is the only way it reaches one). Mirrors processRfpApproval's handoff, with a REAL rfp_approval_requests id:
+// Core requires rfp.requestId to be a positive safe integer and orders by (approvedAt, requestId), so a synthetic or
+// hashed id is not an option.
+//   - request: the row THIS command already recorded (keyed on the CRM's sourceEventId, so a retried/reclaimed
+//     command reuses it), else the deal's LATEST request in any status, else a new 'approved' row recorded for this
+//     vote. A reused id dedupes in the Core outbox on (source_system, source_deal_id, rfp_request_id).
+//   - approvedAt: callbackAt — the command's receipt time, which this worker already treats as the vote moment (AA3)
+//     and which is stable across reclaims. It is the OVERRIDE's time, so it orders after the vote it overrides.
+//   - dealData: rebuilt from this vote's body by the approval's own normalizer, so crm_company_id / crm_property_id /
+//     crm_property_name reach Core (the worker's normalizedDealData above does not carry them).
+// FAIL-OPEN: never throws. The adopt outcome and its 'created' callback are already settled and must not change.
+async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboardProjectId: string, callbackAt?: string): Promise<void> {
+  try {
+    const approvedAt = callbackAt ? new Date(callbackAt) : new Date();
+    const dealData = normalizedDealData(
+      input,
+      { ownerName: input.deal.ownerName ?? "", ownerEmail: input.deal.ownerEmail ?? "" },
+      await buildSourceDealUrl(input.sourceSystem, input.sourceDealId),
+    );
+    const byEvent = await storage.getRfpApprovalRequestBySourceEventId(input.sourceSystem, input.sourceEventId);
+    const request =
+      (byEvent && byEvent.sourceDealId === input.sourceDealId ? byEvent : undefined)
+      ?? (await storage.getLatestRfpApprovalRequestBySourceDeal(input.sourceSystem, input.sourceDealId))
+      ?? (await storage.createRfpApprovalRequest({
+        sourceSystem: input.sourceSystem,
+        sourceDealId: input.sourceDealId,
+        sourceEventId: input.sourceEventId,
+        projectNumber: input.deal.projectNumber,
+        hubspotDealId: null,
+        // Never emailed: the vote already decided, so this row is the record of that decision, not a review link.
+        token: randomUUID(),
+        tokenExpiresAt: null,
+        status: "approved",
+        dealData,
+        approvedBy: "trock_crm vote (create-from-rfp)",
+        approvedAt,
+        bidboardProjectId,
+      }));
+    const { handOffServiceRfpApprovalToCore } = await import("./service-rfp-core-outbox");
+    const result = await handOffServiceRfpApprovalToCore({
+      sourceSystem: input.sourceSystem,
+      sourceDealId: input.sourceDealId,
+      rfpRequestId: request.id,
+      projectNumber: input.deal.projectNumber,
+      dealData,
+      editedFieldsOverride: { project_types: "4" },
+      approvedAt,
+    });
+    log(`[bidboard-create] Adopted service deal ${input.sourceDealId} handed to Core as RFP request ${request.id} (${result.status})`, "sync");
+  } catch (err: any) {
+    log(`[bidboard-create] Core handoff for adopted service deal ${input.sourceDealId} failed (${err?.message || err}); the adopt stands`, "sync");
+  }
 }
 
 // The sync-mapping row that createBidBoardProjectFromDeal writes internally (the write that gets caught + only

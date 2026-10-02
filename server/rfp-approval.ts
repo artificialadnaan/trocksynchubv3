@@ -980,7 +980,9 @@ function fetchAttachmentsFromProps(props: Record<string, any>): Array<{ name: st
   return list;
 }
 
-function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { ownerName?: string; ownerEmail?: string }, sourceDealUrl: string | null): Record<string, any> {
+// Exported for the create-from-rfp ADOPT handoff (bidboard-create-worker), which records an approval row and tells
+// TROCK Core about it — both must carry exactly the deal_data shape an ordinary approval stores.
+export function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { ownerName?: string; ownerEmail?: string }, sourceDealUrl: string | null): Record<string, any> {
   return {
     sourceSystem: input.sourceSystem,
     sourceDealId: input.sourceDealId,
