@@ -229,8 +229,10 @@ function officeDueAt(date: string): string | null {
 
 /**
  * One due-date field's wire value. A full timestamp passes through wireTimestamp. A date-only value is the
- * form's: when it is the CRM due date's own date — as the form rendered it, or in the office zone — the
- * reviewer left it alone, so the CRM's timestamp goes unchanged; otherwise it is 5:00 PM office time on it.
+ * form's: when it is the CRM due date's own date AS THE FORM RENDERED IT (formatRfpFormDate, the value the
+ * reviewer saw) the reviewer left it alone, so the CRM's timestamp goes unchanged; otherwise it is 5:00 PM office
+ * time on it. Only the rendered value counts: the office-zone date can differ from it (a 10 PM Chicago due date is
+ * the next day on a UTC server), and treating it as unchanged would keep the old time for a real edit (#92 R1).
  */
 function wireDueAt(value: unknown, crmDue: unknown): string | null {
   const raw = wireString(value, 64);
@@ -239,7 +241,7 @@ function wireDueAt(value: unknown, crmDue: unknown): string | null {
   // A date-only CRM value carries no time to keep: as a "timestamp" it is exactly the midnight-UTC bug.
   const crmRaw = wireString(crmDue, 64);
   const crmAt = crmRaw && !DATE_ONLY_RE.test(crmRaw) ? wireTimestamp(crmRaw) : null;
-  if (crmAt && (raw === formatRfpFormDate(crmDue) || raw === officeDate(Date.parse(crmAt)))) return crmAt;
+  if (crmAt && raw === formatRfpFormDate(crmDue)) return crmAt;
   return officeDueAt(raw);
 }
 
@@ -357,11 +359,15 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
   // bid.notes carries only a note a REVIEWER wrote. The form's Notes box is prefilled with the deal's
   // `notes`, itself a verbatim copy of the description, so an untouched box (or one holding the
   // description) would store that string twice.
+  // A reviewer who types AFTER the prefilled text sends prefill + their note: strip an unchanged prefilled prefix
+  // (the prefill itself or the description it copies) and keep only what they added (#92 R1).
   const editedNotes = wireString(input.editedFieldsOverride.notes, MAX.description);
-  const notes =
-    editedNotes && editedNotes !== wireString(input.dealData.notes, MAX.description) && editedNotes !== description
-      ? editedNotes
-      : null;
+  const prefill = wireString(input.dealData.notes, MAX.description);
+  let ownNote = editedNotes;
+  for (const prefix of [prefill, description]) {
+    if (ownNote && prefix && ownNote.startsWith(prefix)) ownNote = wireString(ownNote.slice(prefix.length), MAX.description);
+  }
+  const notes = ownNote && ownNote !== prefill && ownNote !== description ? ownNote : null;
 
   const line1 = wireString(effectiveField(input, "address"), MAX.line);
   const city = wireString(effectiveField(input, "city"), MAX.city);

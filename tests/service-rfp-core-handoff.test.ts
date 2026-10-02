@@ -356,9 +356,12 @@ describe("service RFP → TROCK Core handoff", () => {
       });
     });
 
-    it("treats the date as unchanged when it matches the CRM due date's Chicago date", async () => {
+    it("only the date the form RENDERED counts as unchanged, not the CRM time's Chicago date (#92 R1)", async () => {
       await inServerZone("UTC", async () => {
-        expect((await buildBody(LATE_EVENING, { bid_due_date: "2026-09-15" })).bid.dueAt).toBe("2026-09-16T03:00:00.000Z");
+        // 10 PM Chicago on Sep 15 renders as 2026-09-16 on a UTC server: leaving it keeps the CRM time ...
+        expect((await buildBody(LATE_EVENING, { bid_due_date: "2026-09-16" })).bid.dueAt).toBe("2026-09-16T03:00:00.000Z");
+        // ... and picking Sep 15 is a real edit: 5:00 PM Chicago on the date chosen, not the old 10 PM.
+        expect((await buildBody(LATE_EVENING, { bid_due_date: "2026-09-15" })).bid.dueAt).toBe("2026-09-15T22:00:00.000Z");
       });
     });
 
@@ -415,6 +418,11 @@ describe("service RFP → TROCK Core handoff", () => {
     it("sends null for a note that only repeats the description being sent", async () => {
       const edited = { description: "Re-scoped: north entry only", notes: "Re-scoped: north entry only" };
       expect((await buildBody({}, edited)).bid.notes).toBeNull();
+    });
+
+    it("sends only what a reviewer typed AFTER the prefilled text (#92 R1)", async () => {
+      const deal = { notes: "Prefilled line one\nline two" };
+      expect((await buildBody(deal, { notes: "Prefilled line one\r\nline two\r\nGate code 4411" })).bid.notes).toBe("Gate code 4411");
     });
 
     it("sends null for an empty note", async () => {
