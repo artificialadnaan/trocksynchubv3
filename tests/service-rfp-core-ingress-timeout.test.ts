@@ -32,7 +32,7 @@ const BODY: ServiceRfpApprovedBody = {
   office: "dallas",
   occurredAt: "2026-08-28T12:00:00.000Z",
   rfp: { requestId: 77, approvedAt: "2026-08-28T12:00:00.000Z" },
-  deal: { id: "9f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f", rfpProjectNumber: "DFW-4-12345-aa" },
+  deal: { id: "9f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f", rfpProjectNumber: "DFW-4-12345-aa", ownerEmail: null },
   company: { id: "11111111-2222-4333-8444-555555555555", name: "Acme Retail" },
   primaryContact: { name: "Dana Ruiz", email: "dana@acme.example", businessPhone: null },
   bid: { title: "Roof leak triage", estimatedValue: null, dueAt: null, description: null, notes: null },

@@ -119,7 +119,7 @@ function storedCorePayload() {
     office: "dallas",
     occurredAt: "2026-08-01T00:00:00.000Z",
     rfp: { requestId: 77, approvedAt: "2026-08-01T00:00:00.000Z" },
-    deal: { id: CRM_DEAL_ID, rfpProjectNumber: "DFW-4-12345-aa" },
+    deal: { id: CRM_DEAL_ID, rfpProjectNumber: "DFW-4-12345-aa", ownerEmail: null },
     company: { id: CRM_COMPANY_ID, name: "Acme Retail" },
     primaryContact: { name: "Dana Ruiz", email: "dana@acme.example", businessPhone: null },
     bid: { title: "Roof leak triage", estimatedValue: null, dueAt: null, description: null, notes: null },
@@ -269,7 +269,8 @@ describe("service RFP → TROCK Core handoff", () => {
       office: "dallas",
       occurredAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       rfp: { requestId: 77, approvedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) },
-      deal: { id: CRM_DEAL_ID, rfpProjectNumber: "DFW-4-12345-aa" },
+      // ownerEmail: the fixture deal has none, and the key is still PRESENT (Core checks the exact key set).
+      deal: { id: CRM_DEAL_ID, rfpProjectNumber: "DFW-4-12345-aa", ownerEmail: null },
       company: { id: CRM_COMPANY_ID, name: "Acme Retail" },
       primaryContact: { name: "Dana Ruiz", email: "Dana.Ruiz@acme.example", businessPhone: "214-555-0134" },
       bid: {
@@ -277,7 +278,7 @@ describe("service RFP → TROCK Core handoff", () => {
         estimatedValue: "18500.00",
         dueAt: "2026-09-15T17:00:00.000Z",
         description: "Emergency roof leak at the north entry",
-        // `notes` is a verbatim copy of `description` upstream; mapping it would store the string twice.
+        // No reviewer note: the deal's `notes` is a verbatim copy of `description` and is never echoed.
         notes: null,
       },
       property: {
@@ -286,6 +287,162 @@ describe("service RFP → TROCK Core handoff", () => {
         address: { line1: "1200 Main St", line2: null, city: "Dallas", state: "TX", postalCode: "75201", country: "US" },
       },
     });
+  });
+
+  /** The body built straight from one approval's inputs — the pure half, no POST. */
+  async function buildBody(dealOverrides: Record<string, any> = {}, edited: Record<string, string> = {}) {
+    const { buildServiceRfpApprovedBody } = await import("../server/sync/service-rfp-core-outbox.ts");
+    const built = buildServiceRfpApprovedBody({
+      sourceSystem: "trock_crm",
+      sourceDealId: CRM_DEAL_ID,
+      rfpRequestId: 77,
+      projectNumber: "DFW-4-12345-aa",
+      dealData: makeRequest({}, dealOverrides).dealData,
+      editedFieldsOverride: edited,
+    });
+    if (!built.ok) throw new Error(`refused: ${built.detail}`);
+    return built.body;
+  }
+
+  /** The server's local zone is what the review form renders its date input in; pin it for the test. */
+  async function inServerZone<T>(tz: string, fn: () => Promise<T>): Promise<T> {
+    const previous = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      return await fn();
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  }
+
+  describe("bid.dueAt: the form's date-only value keeps an unchanged CRM time, else 5:00 PM Chicago", () => {
+    it("keeps the CRM timestamp when the form posts the untouched date", async () => {
+      // The form always posts bid_due_date as YYYY-MM-DD; sending that verbatim was midnight UTC.
+      await runApproval({ bid_due_date: "2026-09-15" });
+      expect(corePostBody().bid.dueAt).toBe("2026-09-15T17:00:00.000Z");
+    });
+
+    it("sends a CHANGED date as 5:00 PM CDT (22:00Z)", async () => {
+      await runApproval({ bid_due_date: "2026-09-20" });
+      expect(corePostBody().bid.dueAt).toBe("2026-09-20T22:00:00.000Z");
+    });
+
+    it("sends a winter date as 5:00 PM CST (23:00Z)", async () => {
+      expect((await buildBody({}, { bid_due_date: "2026-12-10" })).bid.dueAt).toBe("2026-12-10T23:00:00.000Z");
+    });
+
+    it("lands on the right side of both 2026 DST changes", async () => {
+      const at = async (date: string) => (await buildBody({}, { bid_due_date: date })).bid.dueAt;
+      expect(await at("2026-03-07")).toBe("2026-03-07T23:00:00.000Z");
+      expect(await at("2026-03-08")).toBe("2026-03-08T22:00:00.000Z");
+      expect(await at("2026-10-31")).toBe("2026-10-31T22:00:00.000Z");
+      expect(await at("2026-11-01")).toBe("2026-11-01T23:00:00.000Z");
+    });
+
+    it("passes a full timestamp through unchanged", async () => {
+      expect((await buildBody({}, { bid_due_date: "2026-09-18T15:30:00Z" })).bid.dueAt).toBe("2026-09-18T15:30:00.000Z");
+      // …and the cached CRM timestamp, when nothing was posted at all.
+      expect((await buildBody()).bid.dueAt).toBe("2026-09-15T17:00:00.000Z");
+    });
+
+    // 10 PM CDT on Sep 15 is Sep 16 UTC: a UTC server's form rendered 09-16, the office calls it 09-15.
+    const LATE_EVENING = { bid_due_date: "2026-09-16T03:00:00.000Z" };
+
+    it("treats the date as unchanged when it matches the form's own rendering", async () => {
+      await inServerZone("UTC", async () => {
+        expect((await buildBody(LATE_EVENING, { bid_due_date: "2026-09-16" })).bid.dueAt).toBe("2026-09-16T03:00:00.000Z");
+        expect((await buildBody(LATE_EVENING, { bid_due_date: "2026-09-17" })).bid.dueAt).toBe("2026-09-17T22:00:00.000Z");
+      });
+    });
+
+    it("only the date the form RENDERED counts as unchanged, not the CRM time's Chicago date (#92 R1)", async () => {
+      await inServerZone("UTC", async () => {
+        // 10 PM Chicago on Sep 15 renders as 2026-09-16 on a UTC server: leaving it keeps the CRM time ...
+        expect((await buildBody(LATE_EVENING, { bid_due_date: "2026-09-16" })).bid.dueAt).toBe("2026-09-16T03:00:00.000Z");
+        // ... and picking Sep 15 is a real edit: 5:00 PM Chicago on the date chosen, not the old 10 PM.
+        expect((await buildBody(LATE_EVENING, { bid_due_date: "2026-09-15" })).bid.dueAt).toBe("2026-09-15T22:00:00.000Z");
+      });
+    });
+
+    it("compares against the form's own chain: proposal_due_date first", async () => {
+      const deal = { proposal_due_date: "2026-09-10T20:00:00.000Z" };
+      expect((await buildBody(deal, { bid_due_date: "2026-09-10" })).bid.dueAt).toBe("2026-09-10T20:00:00.000Z");
+    });
+
+    it("never keeps a date-only CRM value as midnight UTC", async () => {
+      await inServerZone("UTC", async () => {
+        const deal = { bid_due_date: "2026-09-15" };
+        expect((await buildBody(deal, { bid_due_date: "2026-09-15" })).bid.dueAt).toBe("2026-09-15T22:00:00.000Z");
+      });
+    });
+
+    it("an invalid edited due date is not replaced by the cached due_date (#92 CodeRabbit)", async () => {
+      const deal = { due_date: "2026-09-15T17:00:00.000Z" };
+      expect((await buildBody(deal, { bid_due_date: "2026-02-31" })).bid.dueAt).toBeNull();
+      // An EMPTY bid_due_date still falls back to due_date.
+      expect((await buildBody(deal, { bid_due_date: "" })).bid.dueAt).toBe("2026-09-15T17:00:00.000Z");
+    });
+
+    it("drops a date that does not exist rather than rolling it over", async () => {
+      expect((await buildBody({}, { bid_due_date: "2026-02-31" })).bid.dueAt).toBeNull();
+    });
+  });
+
+  describe("deal.ownerEmail", () => {
+    it("sends the deal owner trimmed and lowercased", async () => {
+      approvalRequest.current = makeRequest({}, { ownerEmail: "  Pat.Owner@TRockGC.com " });
+      await runApproval();
+      expect(corePostBody().deal).toEqual({ id: CRM_DEAL_ID, rfpProjectNumber: "DFW-4-12345-aa", ownerEmail: "pat.owner@trockgc.com" });
+    });
+
+    it("sends null for an owner that is not an email", async () => {
+      expect((await buildBody({ ownerEmail: "Pat Owner" })).deal.ownerEmail).toBeNull();
+    });
+
+    it("sends the key as null when the deal has no owner", async () => {
+      for (const ownerEmail of [undefined, "", "   "]) {
+        const deal = (await buildBody({ ownerEmail })).deal;
+        expect(Object.keys(deal)).toContain("ownerEmail");
+        expect(deal.ownerEmail).toBeNull();
+      }
+    });
+  });
+
+  describe("bid.notes carries only a note the reviewer wrote", () => {
+    it("sends a reviewer's own note", async () => {
+      await runApproval({ notes: "Gate code 4411; call the super before arriving" });
+      expect(corePostBody().bid.notes).toBe("Gate code 4411; call the super before arriving");
+    });
+
+    it("sends null for the untouched, prefilled Notes box", async () => {
+      // The prefill is the deal's own `notes`, here different from the description; a browser posts its
+      // newlines as CRLF, which the wire coercion folds exactly as it folds the stored value.
+      const deal = { notes: "Prefilled line one\nline two" };
+      expect((await buildBody(deal, { notes: "Prefilled line one\r\nline two" })).bid.notes).toBeNull();
+    });
+
+    it("sends null for a note that only repeats the description being sent", async () => {
+      const edited = { description: "Re-scoped: north entry only", notes: "Re-scoped: north entry only" };
+      expect((await buildBody({}, edited)).bid.notes).toBeNull();
+    });
+
+    it("sends only what a reviewer typed AFTER the prefilled text (#92 R1)", async () => {
+      const deal = { notes: "Prefilled line one\nline two" };
+      expect((await buildBody(deal, { notes: "Prefilled line one\r\nline two\r\nGate code 4411" })).bid.notes).toBe("Gate code 4411");
+    });
+
+    it("sends null for an empty note", async () => {
+      expect((await buildBody({}, { notes: "   " })).bid.notes).toBeNull();
+    });
+  });
+
+  it("sends a PARTIAL address as null — Core's parseAddress refuses the whole body for one", async () => {
+    // Deliberately NOT sent partially: Core requires line1, city, state and postalCode together.
+    for (const missing of ["address", "city", "state", "zip"]) {
+      const body = await buildBody({ [missing]: null });
+      expect(body.property.address).toBeNull();
+    }
   });
 
   it("names the job site with the CRM property's NAME, the street staying in the address", async () => {

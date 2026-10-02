@@ -9,6 +9,7 @@
 // no backoff at all.
 import { sql } from "drizzle-orm";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
+import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { log } from "../index";
 import { coreRfpTenant } from "../constants";
 import {
@@ -178,6 +179,72 @@ function wireTimestamp(value: unknown): string | null {
   return new Date(ms).toISOString();
 }
 
+// ── Due date ─────────────────────────────────────────────────────────────────
+//
+// The review form ALWAYS posts bid_due_date as a date-only YYYY-MM-DD (formatRfpFormDate) and that
+// overrides the CRM timestamp, so passing it straight to wireTimestamp sent midnight UTC — the previous
+// evening in Dallas — and threw away the time the CRM actually had.
+
+/** Core's office zone and default due time (web overviewForm.ts: OFFICE_TIME_ZONE, DEFAULT_DUE_TIME). */
+const OFFICE_TIME_ZONE = "America/Chicago";
+const DEFAULT_DUE_HOUR = 17;
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+const officeClock = new Intl.DateTimeFormat("en-CA", {
+  timeZone: OFFICE_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+/** The office wall clock of an instant, read back as if it were UTC (ms). Locale-independent. */
+function officeWallAsUtc(ms: number): number {
+  const parts = officeClock.formatToParts(new Date(ms));
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"));
+}
+
+/** An instant's calendar date in the office zone, YYYY-MM-DD. */
+function officeDate(ms: number): string {
+  return new Date(officeWallAsUtc(ms)).toISOString().slice(0, 10);
+}
+
+/**
+ * 5:00 PM office time on a YYYY-MM-DD date, as ISO UTC — Core's combineDueDateTime: the wall clock read
+ * as UTC, shifted by the office offset, the offset re-read at the shifted instant so a DST-change day lands
+ * on the right side of it. A date that does not exist (2026-02-31) is null, not a rolled-over neighbour.
+ */
+function officeDueAt(date: string): string | null {
+  const m = DATE_ONLY_RE.exec(date);
+  if (!m) return null;
+  const wallAsUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), DEFAULT_DUE_HOUR, 0);
+  const offsetAt = (ms: number) => officeWallAsUtc(ms) - ms;
+  const instant = wallAsUtc - offsetAt(wallAsUtc - offsetAt(wallAsUtc));
+  if (!Number.isFinite(instant) || officeDate(instant) !== date) return null;
+  return wireTimestamp(new Date(instant).toISOString());
+}
+
+/**
+ * One due-date field's wire value. A full timestamp passes through wireTimestamp. A date-only value is the
+ * form's: when it is the CRM due date's own date AS THE FORM RENDERED IT (formatRfpFormDate, the value the
+ * reviewer saw) the reviewer left it alone, so the CRM's timestamp goes unchanged; otherwise it is 5:00 PM office
+ * time on it. Only the rendered value counts: the office-zone date can differ from it (a 10 PM Chicago due date is
+ * the next day on a UTC server), and treating it as unchanged would keep the old time for a real edit (#92 R1).
+ */
+function wireDueAt(value: unknown, crmDue: unknown): string | null {
+  const raw = wireString(value, 64);
+  if (!raw) return null;
+  if (!DATE_ONLY_RE.test(raw)) return wireTimestamp(raw);
+  // A date-only CRM value carries no time to keep: as a "timestamp" it is exactly the midnight-UTC bug.
+  const crmRaw = wireString(crmDue, 64);
+  const crmAt = crmRaw && !DATE_ONLY_RE.test(crmRaw) ? wireTimestamp(crmRaw) : null;
+  if (crmAt && raw === formatRfpFormDate(crmDue)) return crmAt;
+  return officeDueAt(raw);
+}
+
 /**
  * Core requires /^[A-Z]{2}$/ and rejects the WHOLE address otherwise. Everything T-Rock bids is
  * domestic and the CRM's country field is free text that is usually blank, so an unrecognised value
@@ -267,6 +334,10 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
   // address is never silently dropped for the lack of a name.
   const contactEmail = rawContactEmail && EMAIL_RE.test(rawContactEmail) ? rawContactEmail : null;
   const rfpProjectNumber = wireString(input.projectNumber, MAX.projectNumber);
+  // The deal OWNER (the CRM resolves assigned rep -> HubSpot owner -> creator). Optional: anything that is
+  // not an email is sent as null rather than refusing the approval over it.
+  const rawOwnerEmail = wireString(input.dealData.ownerEmail, MAX.email)?.toLowerCase();
+  const ownerEmail = rawOwnerEmail && EMAIL_RE.test(rawOwnerEmail) ? rawOwnerEmail : null;
   if (!title || !companyName || (contactEmail && !contactName) || !rfpProjectNumber) {
     const missing = [
       !title && "bid title",
@@ -277,8 +348,7 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
     return { ok: false, reason: "missing_required_field", detail: `Core requires: ${missing}` };
   }
 
-  // Same fallback chain the Procore create uses, so the two descriptions are the same string. `notes`
-  // is deliberately NOT mapped to bid.notes: upstream it is a verbatim copy of `description`, and
+  // Same fallback chain the Procore create uses, so the two descriptions are the same string.
   // crm_activity_log is kept out of both systems' description fields.
   const description =
     wireString(effectiveField(input, "description"), MAX.description)
@@ -286,10 +356,25 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
     ?? wireString(input.dealData.project_description, MAX.description)
     ?? wireString(input.dealData.notes, MAX.description);
 
+  // bid.notes carries only a note a REVIEWER wrote. The form's Notes box is prefilled with the deal's
+  // `notes`, itself a verbatim copy of the description, so an untouched box (or one holding the
+  // description) would store that string twice.
+  // A reviewer who types AFTER the prefilled text sends prefill + their note: strip an unchanged prefilled prefix
+  // (the prefill itself or the description it copies) and keep only what they added (#92 R1).
+  const editedNotes = wireString(input.editedFieldsOverride.notes, MAX.description);
+  const prefill = wireString(input.dealData.notes, MAX.description);
+  let ownNote = editedNotes;
+  for (const prefix of [prefill, description]) {
+    if (ownNote && prefix && ownNote.startsWith(prefix)) ownNote = wireString(ownNote.slice(prefix.length), MAX.description);
+  }
+  const notes = ownNote && ownNote !== prefill && ownNote !== description ? ownNote : null;
+
   const line1 = wireString(effectiveField(input, "address"), MAX.line);
   const city = wireString(effectiveField(input, "city"), MAX.city);
   const state = wireString(effectiveField(input, "state"), MAX.state);
   const postalCode = wireString(effectiveField(input, "zip"), MAX.postalCode);
+  // ALL FOUR or null. Core's parseAddress requires line1, city, state and postalCode together and refuses
+  // the WHOLE body otherwise, so a partial address would turn a deliverable approval into a 400.
   const address: ServiceRfpAddress | null =
     line1 && city && state && postalCode
       ? { line1, line2: null, city, state, postalCode, country: wireCountry(effectiveField(input, "country")) }
@@ -305,6 +390,14 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
     ?? wireString(input.dealData.project_location, MAX.propertyName)
     ?? title;
 
+  // Compared against the CRM due date the review form pre-filled its date input from (its own chain).
+  const crmDue = rfpFormDueDateSource(input.dealData);
+  // A non-empty bid_due_date (the form always posts it) decides, even when it is invalid: falling back to the cached
+  // due_date would silently replace the reviewer's edit with a stale value (#92 CodeRabbit). Only an empty one
+  // falls back.
+  const bidDue = effectiveField(input, "bid_due_date");
+  const dueAt = wireString(bidDue, 64) ? wireDueAt(bidDue, crmDue) : wireDueAt(effectiveField(input, "due_date"), crmDue);
+
   const approvedAt = input.approvedAt ?? new Date();
   return {
     ok: true,
@@ -315,7 +408,8 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
       // Re-stamped on every delivery attempt; see stampOccurredAt.
       occurredAt: approvedAt.toISOString(),
       rfp: { requestId: input.rfpRequestId, approvedAt: approvedAt.toISOString() },
-      deal: { id: dealId, rfpProjectNumber },
+      // `ownerEmail` is always PRESENT, null when absent. DEPLOY ORDER: Core must accept the key first.
+      deal: { id: dealId, rfpProjectNumber, ownerEmail },
       company: { id: companyId, name: companyName },
       // NULL, NOT OMITTED, when there is no usable email: Core's parser demands the exact key set, so the
       // key is always present and an absent contact is an explicit `null` (JSON.stringify keeps it).
@@ -333,9 +427,9 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
       bid: {
         title,
         estimatedValue: wireMoney(effectiveField(input, "amount")),
-        dueAt: wireTimestamp(effectiveField(input, "bid_due_date")) ?? wireTimestamp(effectiveField(input, "due_date")),
+        dueAt,
         description,
-        notes: null,
+        notes,
       },
       property: { id: propertyId, name: propertyName, address },
     },

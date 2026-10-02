@@ -24,7 +24,7 @@ const BODY = {
   office: "dallas",
   occurredAt: new Date("2026-08-31T12:00:00.000Z").toISOString(),
   rfp: { requestId: 1, approvedAt: new Date("2026-08-31T11:59:00.000Z").toISOString() },
-  deal: { id: "11111111-1111-4111-8111-111111111111", rfpProjectNumber: "RFP-1" },
+  deal: { id: "11111111-1111-4111-8111-111111111111", rfpProjectNumber: "RFP-1", ownerEmail: null },
   company: { id: "22222222-2222-4222-8222-222222222222", name: "Acme" },
   primaryContact: { name: "Dana", email: "dana@acme.test", businessPhone: null },
   bid: { title: "Re-roof", estimatedValue: null, dueAt: null, description: null, notes: null },
