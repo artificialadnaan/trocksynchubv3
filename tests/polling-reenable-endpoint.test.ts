@@ -151,7 +151,7 @@ describe("POST /api/settings/polling/:job/enable", () => {
     expect(store.portfolio_auto_trigger).toEqual({ enabled: true });
   });
 
-  it("every other door that re-enables an auth-disabled job needs an admin too; ordinary writes do not", async () => {
+  it("every other door that writes an auth-disabled job needs an admin too; ordinary writes do not", async () => {
     const { app, store } = await setup({ procore_polling: { ...DISABLED_ROW }, hubspot_polling: { ...DISABLED_ROW } });
     const viewer = { session: { userId: "viewer-1" } };
 
@@ -164,12 +164,22 @@ describe("POST /api/settings/polling/:job/enable", () => {
     expect(store.procore_polling).toEqual(DISABLED_ROW);
     expect(store.hubspot_polling).toEqual(DISABLED_ROW);
 
-    // Turning it OFF is not a re-enable, and a job that was not auth-disabled keeps the signed-in rule.
+    // No two-step way round: an "off" write would drop disabledReason, after which a plain "on" needs no admin.
+    // So any write to an auth-disabled row needs an admin, whichever way it sets `enabled`.
     const off = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], { ...viewer, body: { enabled: false, intervalMinutes: 20 } });
-    expect(off.status).not.toHaveBeenCalledWith(403);
-    const plain = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], { ...viewer, body: { enabled: true, intervalMinutes: 20 } });
-    expect(plain.status).not.toHaveBeenCalledWith(403);
+    expect(off.status).toHaveBeenCalledWith(403);
+    const putOff = await invokeRoute(app.routes["PUT /api/automation-config"], { ...viewer, body: { key: "procore_polling", value: { enabled: false } } });
+    expect(putOff.status).toHaveBeenCalledWith(403);
+    expect(store.procore_polling).toEqual(DISABLED_ROW);
+
+    // A job that was not auth-disabled keeps the signed-in rule, on and off.
+    store.procore_polling = { enabled: false, intervalMinutes: 20 };
+    const plainOn = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], { ...viewer, body: { enabled: true, intervalMinutes: 20 } });
+    expect(plainOn.status).not.toHaveBeenCalledWith(403);
     expect(store.procore_polling).toMatchObject({ enabled: true });
+    const plainOff = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], { ...viewer, body: { enabled: false, intervalMinutes: 20 } });
+    expect(plainOff.status).not.toHaveBeenCalledWith(403);
+    expect(store.procore_polling).toMatchObject({ enabled: false });
 
     const admin = await invokeRoute(app.routes["POST /api/automation/polling/config"], { session: { userId: "admin-1" }, body: { enabled: true } });
     expect(admin.status).not.toHaveBeenCalledWith(403);

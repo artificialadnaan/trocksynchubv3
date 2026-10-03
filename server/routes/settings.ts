@@ -752,13 +752,16 @@ export async function requireAdmin(req: any, res: any, next: any) {
 /**
  * Clearing an auth_expired disable restarts polling against credentials that were rejected, so it takes an admin
  * through every door that can do it: the Settings toggle routes and the generic config PUT, as well as the audited
- * POST /api/settings/polling/:job/enable. Any write that does not re-enable an auth-disabled job keeps the signed-in rule.
+ * POST /api/settings/polling/:job/enable. Those doors rewrite the whole row, so ANY write to an auth-disabled row
+ * clears the reason, including one that keeps it off: a signed-in "off" followed by a plain "on" would otherwise walk
+ * round the gate in two steps. So every write to an auth_expired row needs an admin; rows that are not auth-disabled
+ * keep the signed-in rule.
  */
-export function requireAdminToClearAuthDisable(keyOf: (req: any) => string | null, enabling: (req: any) => boolean) {
+export function requireAdminWhileAuthDisabled(keyOf: (req: any) => string | null) {
   return async (req: any, res: any, next: any) => {
     try {
       const key = keyOf(req);
-      if (!key || !enabling(req)) return next();
+      if (!key) return next();
       const row: any = (await storage.getAutomationConfig(key))?.value;
       if (row?.disabledReason !== "auth_expired") return next();
       return requireAdmin(req, res, next);
@@ -867,7 +870,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     "/api/automation-config",
     requireAuth,
     requireAdminForRetention,
-    requireAdminToClearAuthDisable(pollingKey, (req) => Boolean(req.body?.value?.enabled)),
+    requireAdminWhileAuthDisabled(pollingKey),
     async (req, res) => {
       try {
         const config = await storage.upsertAutomationConfig(req.body);
@@ -915,7 +918,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     }
   });
 
-  app.post("/api/automation/polling/config", requireAuth, requireAdminToClearAuthDisable(() => "hubspot_polling", (req) => Boolean(req.body?.enabled)), async (req, res) => {
+  app.post("/api/automation/polling/config", requireAuth, requireAdminWhileAuthDisabled(() => "hubspot_polling"), async (req, res) => {
     try {
       const { enabled, intervalMinutes } = req.body;
       const interval = intervalMinutes || 10;
@@ -967,7 +970,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     }
   });
 
-  app.post("/api/automation/procore-polling/config", requireAuth, requireAdminToClearAuthDisable(() => "procore_polling", (req) => Boolean(req.body?.enabled)), async (req, res) => {
+  app.post("/api/automation/procore-polling/config", requireAuth, requireAdminWhileAuthDisabled(() => "procore_polling"), async (req, res) => {
     try {
       const { enabled, intervalMinutes } = req.body;
       const interval = intervalMinutes || 15;
@@ -1421,17 +1424,29 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         results[key] = "enabled";
       }
 
-      // HubSpot polling — 15 min
+      // HubSpot and Procore polling — 15 min
       // The SAME cycles the Settings toggle and boot start, so an expired credential disables the job and alerts
       // (recordPollingAuthExpiry) instead of being logged and retried forever by a private copy of the loop.
-      await storage.upsertAutomationConfig({ key: "hubspot_polling", value: { enabled: true, intervalMinutes: 15 }, description: "HubSpot polling (auto-enabled)" });
-      if (!pollingTimer) startPolling(15);
-      results["hubspot_polling"] = "enabled (15 min)";
-
-      // Procore polling — 15 min
-      await storage.upsertAutomationConfig({ key: "procore_polling", value: { enabled: true, intervalMinutes: 15 }, description: "Procore polling (auto-enabled)" });
-      if (!procorePollingTimer) startProcorePolling(15);
-      results["procore_polling"] = "enabled (15 min)";
+      // A job auto-disabled for auth_expired is LEFT OFF: this route has a shared secret, not an admin session, and
+      // clearing that disable is an admin action (POST /api/settings/polling/:job/enable).
+      for (const job of [POLLING_JOBS.hubspot, POLLING_JOBS.procore]) {
+        const current: any = (await storage.getAutomationConfig(job.key))?.value;
+        if (current?.disabledReason === "auth_expired") {
+          results[job.key] = `skipped: auth_expired — an admin re-enables it via POST /api/settings/polling/${job.slug}/enable`;
+          continue;
+        }
+        await storage.upsertAutomationConfig({
+          key: job.key,
+          value: { enabled: true, intervalMinutes: 15 },
+          description: job.key === "hubspot_polling" ? "HubSpot polling (auto-enabled)" : "Procore polling (auto-enabled)",
+        });
+        if (job.key === "hubspot_polling") {
+          if (!pollingTimer) startPolling(15);
+        } else if (!procorePollingTimer) {
+          startProcorePolling(15);
+        }
+        results[job.key] = "enabled (15 min)";
+      }
 
       // Role assignment polling — 30 min
       // MERGE, don't rebuild. The cursor is safe in its own row now, but rebuilding still discarded batchSize
