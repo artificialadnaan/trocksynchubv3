@@ -36,9 +36,18 @@ export interface ServiceRfpApprovedBody {
   office: string;
   occurredAt: string;
   rfp: { requestId: number; approvedAt: string };
-  deal: { id: string; rfpProjectNumber: string };
+  /**
+   * `ownerEmail`: the deal owner (CRM: assigned rep -> HubSpot owner -> creator), trimmed + lowercased, or
+   * null when absent or not an email. Always PRESENT. Requires a Core that accepts the key: an older one
+   * refuses the extra deal key with a 400.
+   */
+  deal: { id: string; rfpProjectNumber: string; ownerEmail: string | null };
   company: { id: string; name: string };
-  primaryContact: { name: string; email: string; businessPhone: string | null };
+  /**
+   * Null when the CRM deal has no usable contact email. Always PRESENT (Core checks the exact key set),
+   * never omitted. Requires a Core that accepts the null: an older one answers 400.
+   */
+  primaryContact: { name: string; email: string; businessPhone: string | null } | null;
   bid: {
     title: string;
     estimatedValue: string | null;

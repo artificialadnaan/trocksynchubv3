@@ -168,6 +168,43 @@ describe("re-driving a service RFP to Core", () => {
     expect(replayMock).not.toHaveBeenCalled();
   });
 
+  it("re-drives a former 'contact email' refusal into a body with primaryContact: null", async () => {
+    // One of the approvals refused before any POST for "Core requires: contact email". Its row stores the
+    // refusal, not a body, so a re-drive REBUILDS — with the REAL builder here, so the assertion is on
+    // the bytes Core would receive rather than on a stub's answer.
+    const actual = await vi.importActual<typeof import("../server/sync/service-rfp-core-outbox.ts")>(
+      "../server/sync/service-rfp-core-outbox.ts",
+    );
+    buildMock.mockImplementation(actual.buildServiceRfpApprovedBody as any);
+    priorRow.payload = {
+      refused: "missing_required_field",
+      detail: "Core requires: contact email",
+      projectNumber: "ATL-4-24326-ae",
+    };
+    requestRow.current = approvedService({
+      dealData: {
+        project_number: "ATL-4-24326-ae",
+        project_types: "4",
+        dealname: "Roof leak triage",
+        company_name: "RPM Investments",
+        contact_name: "Dana Ruiz",
+        client_email: "",
+        crm_company_id: "11111111-2222-4333-8444-555555555555",
+        crm_property_id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      },
+    });
+
+    const out = await redriveServiceRfpToCore(781);
+
+    expect(out).toEqual({ ok: true, status: "sent" });
+    expect(replayMock).not.toHaveBeenCalled();
+    expect(handoffMock).toHaveBeenCalledTimes(1);
+    const rebuilt = actual.buildServiceRfpApprovedBody(handoffMock.mock.calls[0]![0] as any);
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.ok && rebuilt.body).toHaveProperty("primaryContact", null);
+    expect(JSON.stringify(rebuilt.ok && rebuilt.body)).toContain('"primaryContact":null');
+  });
+
   it("ABORTS when the prior payload cannot be read — inconclusive is not 'no prior delivery' [Codex #83]", async () => {
     // The asymmetry that decides this: if the read fails transiently and the upsert then succeeds, a
     // `dead` row from an ambiguous delivery is rebuilt with the request row's LATER approvedAt, Core

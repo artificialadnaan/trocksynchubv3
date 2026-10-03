@@ -61,9 +61,12 @@ describe("isAuthorizedRfpApprover", () => {
 
   it("ALLOWS a service approver on a service ('4') RFP (safety-net routing)", async () => {
     const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
-    // Safety net for type 4 = James + Colby.
-    await expect(isAuthorizedRfpApprover("cburling@trockgc.com", "4", "hubspot")).resolves.toBe(true);
-    await expect(isAuthorizedRfpApprover("jhelms@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+    // Safety net for type 4 = Kason + Andrew (migration 0026, 2026-10-01).
+    await expect(isAuthorizedRfpApprover("kreeder@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+    await expect(isAuthorizedRfpApprover("agreen@trockgc.com", "4", "hubspot")).resolves.toBe(true);
+    // The former service approvers are not on it any more.
+    await expect(isAuthorizedRfpApprover("cburling@trockgc.com", "4", "hubspot")).resolves.toBe(false);
+    await expect(isAuthorizedRfpApprover("jhelms@trockgc.com", "4", "hubspot")).resolves.toBe(false);
   });
 
   it("REJECTS a non-service approver (sgibson) on a service ('4') RFP", async () => {
@@ -85,7 +88,7 @@ describe("isAuthorizedRfpApprover", () => {
 
   it("compares case-insensitively and trims surrounding whitespace", async () => {
     const { isAuthorizedRfpApprover } = await import("../server/rfp-approval.ts");
-    await expect(isAuthorizedRfpApprover("  CBurling@TrockGC.com  ", "4", "hubspot")).resolves.toBe(true);
+    await expect(isAuthorizedRfpApprover("  KReeder@TrockGC.com  ", "4", "hubspot")).resolves.toBe(true);
   });
 
   it("rejects an empty/missing email", async () => {

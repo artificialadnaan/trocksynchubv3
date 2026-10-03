@@ -54,6 +54,8 @@ export interface NormalizedRfpRequestInput {
      */
     companyId?: string | null;
     propertyId?: string | null;
+    /** The CRM property's name: what TROCK Core names the job site (absent on bodies predating the CRM field). */
+    propertyName?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -592,8 +594,9 @@ const rfpApproverCache = new Map<string, { timestamp: number; recipients: string
  */
 function hardcodedRfpSafetyNetRecipients(type: string): string[] {
   if (type === '4') {
-    // Project type 4: James + Colby
-    return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+    // Project type 4 (service): Kason + Andrew, the owner's service approvers (2026-10-01; migration 0026). Kept equal
+    // to the configured row so a config-read failure never emails people the live check would then refuse.
+    return ['kreeder@trockgc.com', 'agreen@trockgc.com'];
   }
   // All other project types: Sidney + James + Tim (non-service routing — kept in sync with main's #45 change)
   return ['sgibson@trockgc.com', 'jhelms@trockgc.com', 'tmitchell@trockgc.com'];
@@ -977,7 +980,9 @@ function fetchAttachmentsFromProps(props: Record<string, any>): Array<{ name: st
   return list;
 }
 
-function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { ownerName?: string; ownerEmail?: string }, sourceDealUrl: string | null): Record<string, any> {
+// Exported for the create-from-rfp ADOPT handoff (bidboard-create-worker), which records an approval row and tells
+// TROCK Core about it — both must carry exactly the deal_data shape an ordinary approval stores.
+export function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { ownerName?: string; ownerEmail?: string }, sourceDealUrl: string | null): Record<string, any> {
   return {
     sourceSystem: input.sourceSystem,
     sourceDealId: input.sourceDealId,
@@ -1007,6 +1012,8 @@ function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { owner
     // these must read as "not supplied" and take the terminal-skip path.
     crm_company_id: input.deal.companyId || null,
     crm_property_id: input.deal.propertyId || null,
+    // The job site's NAME for the Core handoff (null when the CRM sent none: the handoff falls back to the street).
+    crm_property_name: input.deal.propertyName || null,
     bid_due_date: input.deal.dueDate || '',
     due_date: input.deal.dueDate || '',
     workflowRoute: input.deal.workflowRoute || '',
