@@ -354,48 +354,56 @@ async function recordOnce(
     }
 
     const dedupeKey = `${persisted ? "polling_auto_disabled" : "polling_auto_disable_not_saved"}:${job.key}:${disabledAt}`;
-    if (inFlight.has(dedupeKey) || delivered.has(dedupeKey) || (await storage.checkEmailDedupeKey(dedupeKey))) {
+    // Claim the event SYNCHRONOUSLY, before any await: two callers for the same event (a scheduled retry racing a
+    // manual trigger) could otherwise both pass the check while the dedupe lookup is pending and both send. The claim
+    // is held through the lookup, the send and the banking, and released on every exit by the finally.
+    if (inFlight.has(dedupeKey) || delivered.has(dedupeKey)) {
       return { newEvent, disabledAt, persisted, alert: "already_sent" };
     }
-
-    const { subject, htmlBody } = renderPollingDisabledEmail({ job, disabledAt, error: args.error, persisted });
-    const send: SendEmail = deps.send ?? (await import("./email-service")).sendEmail;
-    let sent = false;
     inFlight.add(dedupeKey);
     try {
-      // Ops alert → only the configured recipient; skip the customer-facing GLOBAL_CC.
-      const res = await send({ to: recipient, subject, htmlBody, bypassGlobalCc: true, fromName: "T-Rock Sync Hub Alerts" });
-      sent = Boolean(res?.success);
-    } catch (err) {
-      console.error(`[PollingAlert] ${job.key} alert email send FAILED:`, err instanceof Error ? err.message : err);
+      if (await storage.checkEmailDedupeKey(dedupeKey)) {
+        return { newEvent, disabledAt, persisted, alert: "already_sent" };
+      }
+
+      const { subject, htmlBody } = renderPollingDisabledEmail({ job, disabledAt, error: args.error, persisted });
+      const send: SendEmail = deps.send ?? (await import("./email-service")).sendEmail;
+      let sent = false;
+      try {
+        // Ops alert → only the configured recipient; skip the customer-facing GLOBAL_CC.
+        const res = await send({ to: recipient, subject, htmlBody, bypassGlobalCc: true, fromName: "T-Rock Sync Hub Alerts" });
+        sent = Boolean(res?.success);
+      } catch (err) {
+        console.error(`[PollingAlert] ${job.key} alert email send FAILED:`, err instanceof Error ? err.message : err);
+      }
+      if (!sent) return { newEvent, disabledAt, persisted, alert: "send_failed" };
+      delivered.add(dedupeKey);
+
+      // DELIVERED from here on. A failure to bank the dedupe row is not a failed send: retrying would email the
+      // recipient again. It is logged instead; this process remembers the delivery, so only a restart's boot check
+      // could send one more copy.
+      let banked = false;
+      for (let i = 0; i < PERSIST_ATTEMPTS && !banked; i++) {
+        try {
+          await storage.createEmailSendLog({
+            templateKey: "polling_auto_disabled_alert",
+            recipientEmail: recipient,
+            subject,
+            dedupeKey,
+            status: "sent",
+            metadata: { job: job.key, disabledAt, persisted },
+          });
+          banked = true;
+        } catch (err) {
+          console.warn(`[PollingAlert] ${job.key} alert delivered but its send log failed (attempt ${i + 1}):`, err instanceof Error ? err.message : err);
+        }
+      }
+      if (!banked) console.error(`[PollingAlert] ${job.key} alert delivered but never logged; a restart may send it once more`);
+      console.log(`[PollingAlert] ${job.key} auto-disable alert email sent (disabledAt=${disabledAt}, persisted=${persisted})`);
+      return { newEvent, disabledAt, persisted, alert: "sent" };
     } finally {
-      if (sent) delivered.add(dedupeKey);
       inFlight.delete(dedupeKey);
     }
-    if (!sent) return { newEvent, disabledAt, persisted, alert: "send_failed" };
-
-    // DELIVERED from here on. A failure to bank the dedupe row is not a failed send: retrying would email the recipient
-    // again. It is logged instead; this process remembers the delivery, so only a restart's boot check could send one
-    // more copy.
-    let banked = false;
-    for (let i = 0; i < PERSIST_ATTEMPTS && !banked; i++) {
-      try {
-        await storage.createEmailSendLog({
-          templateKey: "polling_auto_disabled_alert",
-          recipientEmail: recipient,
-          subject,
-          dedupeKey,
-          status: "sent",
-          metadata: { job: job.key, disabledAt, persisted },
-        });
-        banked = true;
-      } catch (err) {
-        console.warn(`[PollingAlert] ${job.key} alert delivered but its send log failed (attempt ${i + 1}):`, err instanceof Error ? err.message : err);
-      }
-    }
-    if (!banked) console.error(`[PollingAlert] ${job.key} alert delivered but never logged; a restart may send it once more`);
-    console.log(`[PollingAlert] ${job.key} auto-disable alert email sent (disabledAt=${disabledAt}, persisted=${persisted})`);
-    return { newEvent, disabledAt, persisted, alert: "sent" };
   } catch (err) {
     try {
       console.error(`[PollingAlert] auth-expiry handling failed for ${job.key}:`, err instanceof Error ? err.message : err);

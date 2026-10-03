@@ -453,6 +453,44 @@ describe("recordPollingAuthExpiry", () => {
     expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
   });
 
+  it("two calls racing on the dedupe LOOKUP deliver one email: the event is claimed before the await", async () => {
+    backedStore({
+      procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" },
+    });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    // Every lookup is held open, so if both callers reached it they would both be suspended on it at once.
+    const pending: ((v: boolean) => void)[] = [];
+    mocks.storage.checkEmailDedupeKey.mockImplementation(() => new Promise<boolean>((r) => pending.push(r)));
+    const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z") };
+
+    const a = recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { ...deps, retry: { attempt: 1, disabledAt: "2026-06-10T08:00:00.000Z", persisted: true } });
+    const b = recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
+    await vi.waitFor(() => expect(pending.length).toBeGreaterThanOrEqual(1));
+    await new Promise((r) => setTimeout(r, 20));
+    const lookups = pending.length;
+    pending.forEach((r) => r(false));
+    const results = [(await a).alert, (await b).alert].sort();
+
+    expect(lookups).toBe(1);
+    expect(results).toEqual(["already_sent", "sent"]);
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("the claim is released on every exit: a lookup that throws, or a failed send, leaves the event sendable", async () => {
+    backedStore({
+      procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" },
+    });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    mocks.storage.checkEmailDedupeKey.mockRejectedValueOnce(new Error("db blip"));
+    const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z"), scheduleRetry: () => {} };
+
+    expect((await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps)).alert).toBe("send_failed");
+    mocks.sendEmail.mockResolvedValueOnce({ success: false });
+    expect((await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps)).alert).toBe("send_failed");
+    expect((await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps)).alert).toBe("sent");
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(2);
+  });
+
   it("never throws, even when storage is down", async () => {
     mocks.storage.getAutomationConfig.mockRejectedValue(new Error("db down"));
     mocks.storage.upsertAutomationConfig.mockRejectedValue(new Error("db down"));
