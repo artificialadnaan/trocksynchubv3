@@ -52,11 +52,37 @@ function displayOffice(officeSlug: string): string {
  *  - `unconfirmed`: an outcome this producer could not classify either way.
  *  - `recovered`: deliveries are working again.
  */
-export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subject: string; htmlBody: string } {
+/** Which approval the outcome was for, so the email names the RFP an operator has to re-drive. */
+export interface ServiceRfpAlertSubject {
+  requestId: number;
+  sourceDealId: string;
+  projectNumber?: string | null;
+  companyName?: string | null;
+}
+
+export function renderServiceRfpCoreAlertEmail(
+  e: PushAlertEmailInput,
+  rfp?: ServiceRfpAlertSubject,
+): { subject: string; htmlBody: string } {
   const office = displayOffice(e.office);
   const safeOffice = escapeHtml(office);
+  // The subject names the RFP by the number people use (the project number), else its request id.
+  const label = rfp ? ` — ${rfp.projectNumber?.trim() || `RFP request ${rfp.requestId}`}` : "";
+  const rfpLines = rfp
+    ? `
+      <p><strong>RFP request:</strong> ${escapeHtml(String(rfp.requestId))}</p>
+      <p><strong>Project number:</strong> ${escapeHtml(rfp.projectNumber?.trim() || "—")}</p>
+      <p><strong>Company:</strong> ${escapeHtml(rfp.companyName?.trim() || "—")}</p>
+      <p><strong>CRM deal:</strong> ${escapeHtml(rfp.sourceDealId)}</p>`
+    : "";
+  // Only the FIRST failure of a reason is emailed inside the re-alert window (a different reason always is), so
+  // the email says where the rest are.
+  const others = `
+      <p>Other approvals that failed for the same reason inside the alert window are not emailed one by one: list
+      them with <code>select rfp_request_id, source_deal_id, status, last_error from service_rfp_core_outbox where
+      status in ('failed','dead') order by updated_at desc</code>.</p>`;
 
-  const details = `
+  const details = `${rfpLines}
       <p><strong>Office:</strong> ${safeOffice}</p>
       <p><strong>When:</strong> ${e.now.toISOString()}</p>
       <p><strong>Delivery attempts:</strong> ${e.attempts ?? "—"}</p>
@@ -78,21 +104,21 @@ export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subjec
 
   if (e.kind === "request_rejected") {
     return {
-      subject: `⚠️ TROCK Core REJECTED an approved service RFP — office ${office}`,
+      subject: `⚠️ TROCK Core REJECTED an approved service RFP — office ${office}${label}`,
       htmlBody: `
       <h2>TROCK Core refused an approved service RFP</h2>${details}
       <p>Core returned a deterministic refusal (a 409 conflict, a bad request, or a rejected signature),
       or the approval could not be expressed on the v1 contract at all — a non-CRM source deal, an office
       with no Core tenant, or a missing CRM company/property uuid. Either way it will <strong>not</strong>
       be accepted as-is, so the row is recorded 'failed' in service_rfp_core_outbox and is never retried;
-      the Error above is the reason. Fix the cause and re-drive the row.</p>${unaffected}
+      the Error above is the reason. Fix the cause and re-drive the row.</p>${unaffected}${others}
     `,
     };
   }
 
   if (e.kind === "terminal_failure") {
     return {
-      subject: `⚠️ TROCK Core service-RFP delivery DEAD-LETTERED — office ${office}`,
+      subject: `⚠️ TROCK Core service-RFP delivery DEAD-LETTERED — office ${office}${label}`,
       htmlBody: `
       <h2>TROCK Core service-RFP delivery exhausted its retries</h2>${details}
       <p>The row reached its attempt ceiling and is now 'dead' in service_rfp_core_outbox. It will not be
@@ -100,20 +126,20 @@ export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subjec
       CORE_INGRESS_BASE_URL wrong or unreachable, Core still serving the ingress dark (404) or holding no
       secret of its own (503), or SERVICE_RFP_INGRESS_SECRET_CURRENT missing on this side / shorter than
       Core's 32-byte floor. Fix the cause, then re-drive the row. Further alerts are throttled to roughly
-      hourly until deliveries recover.</p>${unaffected}
+      hourly until deliveries recover.</p>${unaffected}${others}
     `,
     };
   }
 
   if (e.kind === "unconfirmed") {
     return {
-      subject: `⚠️ TROCK Core service-RFP delivery UNCONFIRMED — office ${office}`,
+      subject: `⚠️ TROCK Core service-RFP delivery UNCONFIRMED — office ${office}${label}`,
       htmlBody: `
       <h2>TROCK Core service-RFP delivery could not be confirmed</h2>${details}
       <p>The POST ended in a state this producer could not classify as accepted or refused. That is
       <strong>not</strong> proof Core dropped it — check whether a bid already exists for this deal in
       Core before re-driving the service_rfp_core_outbox row, so a retry cannot become a second
-      bid.</p>${unaffected}
+      bid.</p>${unaffected}${others}
     `,
     };
   }
@@ -124,7 +150,10 @@ export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subjec
     <h2>TROCK Core service-RFP delivery has recovered</h2>
     <p><strong>Office:</strong> ${safeOffice}</p>
     <p><strong>When:</strong> ${e.now.toISOString()}</p>
-    <p>An approved service RFP has reached Core again; the prior failure has cleared.</p>
+    ${rfpLines}
+    <p>An approved service RFP has reached Core again, so deliveries are working. This does <strong>not</strong>
+    re-send approvals that already failed or dead-lettered: those rows stay in service_rfp_core_outbox until
+    re-driven.</p>
   `,
   };
 }
@@ -139,6 +168,8 @@ export interface ServiceRfpCoreDeliveryOutcome {
   error?: string;
   /** A refusal that can never be accepted as-is, as opposed to a dead-lettered retry. Ignored when ok. */
   terminal?: boolean;
+  /** The approval this outcome is for; named in the email. */
+  rfp?: ServiceRfpAlertSubject;
 }
 
 /**
@@ -211,8 +242,10 @@ export async function recordServiceRfpCoreDelivery(
           terminalFailure: !outcome.ok && outcome.terminal !== true,
         },
         officeSlug,
+        // Errors here name a reason, never a row: a different reason is a new incident, the same one is throttled.
+        alertOnNewError: true,
       },
-      { render: renderServiceRfpCoreAlertEmail },
+      { render: (input) => renderServiceRfpCoreAlertEmail(input, outcome.rfp) },
     ),
   );
 }

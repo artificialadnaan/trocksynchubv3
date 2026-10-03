@@ -12,6 +12,8 @@ import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { log } from "../index";
 import { coreRfpTenant } from "../constants";
+// Type-only: the alert module is imported dynamically at runtime (see reportDelivery).
+import type { ServiceRfpAlertSubject } from "./service-rfp-core-alert";
 import {
   SERVICE_RFP_CONTRACT_VERSION,
   buildServiceRfpIngressTargetUrl,
@@ -79,6 +81,12 @@ const ALERT_DISPATCH_WAIT_MS = 2_000;
  * The copy is this stream's own (see ./service-rfp-core-alert); only the debounce, the state table and
  * the send path are shared with the Bid Board → CRM push.
  */
+/** The approval a delivered row is for, from the v1 body it carries. */
+function rowSubject(row: { body: ServiceRfpApprovedBody }): ServiceRfpAlertSubject {
+  return { requestId: row.body.rfp.requestId, sourceDealId: row.body.deal.id,
+    projectNumber: row.body.deal.rfpProjectNumber ?? null, companyName: row.body.company.name ?? null };
+}
+
 async function reportDelivery(outcome: {
   office: string | null;
   ok: boolean;
@@ -86,6 +94,7 @@ async function reportDelivery(outcome: {
   status?: number;
   error?: string;
   terminal?: boolean;
+  rfp?: ServiceRfpAlertSubject;
 }): Promise<void> {
   const dispatch = (async () => {
     const { recordServiceRfpCoreDelivery } = await import("./service-rfp-core-alert");
@@ -610,7 +619,7 @@ async function deliver(
     const error = "SERVICE_RFP_INGRESS_SECRET_CURRENT is missing or shorter than 32 bytes";
     const { dead } = await markRetryable(row, error);
     if (dead) {
-      await reportDelivery({ office: row.office, ok: false, attempts: row.attemptCount, error, terminal: false });
+      await reportDelivery({ office: row.office, rfp: rowSubject(row), ok: false, attempts: row.attemptCount, error, terminal: false });
     }
     log(
       `[service-rfp-core] Row ${row.id} has no usable ingress secret; ${dead ? "dead-lettered" : "queued for retry"}`,
@@ -630,7 +639,7 @@ async function deliver(
     // 'failing' until an ok outcome flips it, so without this no recovery email is ever sent — and the
     // failure debounce keeps suppressing the NEXT incident as a repeat of one that already cleared,
     // however many successful deliveries happened in between.
-    await reportDelivery({ office: row.office, ok: true, attempts: row.attemptCount, status: outcome.status });
+    await reportDelivery({ office: row.office, rfp: rowSubject(row), ok: true, attempts: row.attemptCount, status: outcome.status });
     log(`[service-rfp-core] Row ${row.id} delivered to Core (bid ${outcome.bidId ?? "unknown"})`, "sync");
     return "sent";
   }
@@ -639,6 +648,7 @@ async function deliver(
     await markTerminal(row.id, outcome.error, outcome.status);
     await reportDelivery({
       office: row.office,
+      rfp: rowSubject(row),
       ok: false,
       attempts: row.attemptCount,
       status: outcome.status,
@@ -653,6 +663,7 @@ async function deliver(
   if (dead) {
     await reportDelivery({
       office: row.office,
+      rfp: rowSubject(row),
       ok: false,
       attempts: row.attemptCount,
       status: outcome.status,
@@ -747,7 +758,8 @@ export async function handOffServiceRfpApprovalToCore(
         lastError: error,
       });
       if (!inserted) return { status: "duplicate" };
-      await reportDelivery({ office, ok: false, attempts: 0, error, terminal: true });
+      await reportDelivery({ office, ok: false, attempts: 0, error, terminal: true,
+        rfp: { requestId: input.rfpRequestId, sourceDealId: input.sourceDealId, projectNumber: input.projectNumber } });
       log(`[service-rfp-core] Service RFP ${input.rfpRequestId} cannot reach Core — ${error}`, "sync");
       return { status: "failed" };
     }
