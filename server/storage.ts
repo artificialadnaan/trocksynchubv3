@@ -267,7 +267,7 @@ export interface IStorage {
   /** Get user by username for authentication */
   getUserByUsername(username: string): Promise<User | undefined>;
   /** Create a new user with hashed password */
-  createUser(user: InsertUser): Promise<User>;
+  createUser(user: InsertUser & { role?: string }): Promise<User>;
 
   // ==================== SYNC MAPPINGS ====================
   // Sync mappings are the core data structure linking entities across systems
@@ -509,7 +509,7 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  async createUser(insertUser: InsertUser): Promise<User> {
+  async createUser(insertUser: InsertUser & { role?: string }): Promise<User> {
     const hashedPassword = await bcrypt.hash(insertUser.password, 10);
     const [user] = await db.insert(users).values({ ...insertUser, password: hashedPassword }).returning();
     return user;

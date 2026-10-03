@@ -18,6 +18,9 @@ const loginLimiter = rateLimit({
   message: { error: "Too many login attempts, please try again later" },
 });
 
+/** Role given to every account created through /api/auth/register. Never "admin". */
+export const LEAST_PRIVILEGED_ROLE = "user";
+
 export function registerAuthRoutes(app: Express, requireAuth: RequestHandler) {
   app.post("/api/auth/login", loginLimiter, asyncHandler(async (req, res) => {
     const { username, password } = req.body;
@@ -29,14 +32,21 @@ export function registerAuthRoutes(app: Express, requireAuth: RequestHandler) {
     res.json({ id: user.id, username: user.username, role: user.role });
   }));
 
+  // Account creation is admin-only. The caller must be an existing user whose role is "admin";
+  // the new account is always created with the least-privileged role (the users.role column
+  // defaults to "admin", so the role is passed explicitly), and the caller's session is left
+  // untouched -- the admin stays logged in as themselves.
   app.post("/api/auth/register", requireAuth, asyncHandler(async (req, res) => {
+    const caller = await storage.getUser(req.session.userId!);
+    if (!caller || caller.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden" });
+    }
     const { username, password } = req.body;
     const existing = await storage.getUserByUsername(username);
     if (existing) {
       return res.status(400).json({ message: "Username already exists" });
     }
-    const user = await storage.createUser({ username, password });
-    req.session.userId = user.id;
+    const user = await storage.createUser({ username, password, role: LEAST_PRIVILEGED_ROLE });
     res.json({ id: user.id, username: user.username, role: user.role });
   }));
 
