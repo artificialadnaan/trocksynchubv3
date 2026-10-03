@@ -638,6 +638,19 @@ export async function resolveNotesSectionByAnchor(
       if (verdict === "foreign-card" && !best && !contaminatedSelector) {
         contaminatedSelector = describeClimb(depth, "foreign-card");
       }
+      // A boundary stop ABOVE a good ancestor: was what stopped us a neighbouring card, or Notes content the
+      // boundary selector could not recognise as such? If the stop container holds note rows or the CRM marker
+      // that `best` does not, `best` is the HEADER — returning it blinds the idempotency read and the post-save
+      // verify, and every run posts another duplicate (CodeRabbit on 6e05da3). Decline instead.
+      if (verdict === "foreign-card" && best) {
+        const outside = await notesContentOutside(node, best.locator);
+        if (outside === null) {
+          climbUnreadable = true;
+        } else if (outside) {
+          if (!contaminatedSelector) contaminatedSelector = describeClimb(best.depth, "header-only");
+          best = null;
+        }
+      }
       break;
     }
     // FAIL CLOSED on an unknown above a good ancestor. `best` may be the card's HEADER (the label's row, which holds
@@ -662,11 +675,33 @@ export async function resolveNotesSectionByAnchor(
 }
 
 /**
+ * After a card-boundary stop: does the stop container hold Notes content — note rows, or the CRM marker — that
+ * the resolved container does not? `null` when a read failed (the caller fails closed on it).
+ *
+ * The marker half covers rows whose markup `sectionRow` does not recognise; its cost is that a neighbouring card
+ * quoting the marker also declines, which is a refusal reported as an error, never a skip and never a write.
+ */
+async function notesContentOutside(stop: Locator, best: Locator): Promise<boolean | null> {
+  const rowSelector = PROCORE_SELECTORS.bidboard.newUi.notes.sectionRow;
+  const rowsInStop = await countWithin(stop, rowSelector);
+  const rowsInBest = await countWithin(best, rowSelector);
+  if (rowsInStop === null || rowsInBest === null) return null;
+  if (rowsInStop > rowsInBest) return true;
+  const stopText = await stop.innerText({ timeout: NOTE_TEXT_READ_TIMEOUT_MS }).catch(() => null);
+  const bestText = await best.innerText({ timeout: NOTE_TEXT_READ_TIMEOUT_MS }).catch(() => null);
+  if (stopText === null || bestText === null) return null;
+  return hasMarkerNote([stopText]) && !hasMarkerNote([bestText]);
+}
+
+/**
  * The human-readable description of a climb outcome. Reported in `matched.section`, logged, and shown by
  * the prober — an operator reading "⇑2" knows the card was two levels above its label, which is the one
  * fact that says whether the resolved container is the card or something wider.
  */
-function describeClimb(depth: number, outcome: "ok" | "contaminated" | "page-level" | "foreign-card"): string {
+function describeClimb(
+  depth: number,
+  outcome: "ok" | "contaminated" | "page-level" | "foreign-card" | "header-only",
+): string {
   const anchor = PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor;
   const suffix =
     outcome === "ok"
@@ -675,7 +710,9 @@ function describeClimb(depth: number, outcome: "ok" | "contaminated" | "page-lev
         ? `rejected: holds the Project Description or a Create New Project button`
         : outcome === "foreign-card"
           ? `rejected: also holds another card's title or text field`
-          : `rejected: page-level container (a landmark, or <body>/<main> itself)`;
+          : outcome === "header-only"
+            ? `rejected: note rows or the CRM marker sit outside it, so it is the card's header, not the card`
+            : `rejected: page-level container (a landmark, or <body>/<main> itself)`;
   return `Notes label ⇑${depth} — ${suffix}`;
 }
 

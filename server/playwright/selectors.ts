@@ -72,6 +72,14 @@ const BIDBOARD_NOTES_INPUT_CONFIRMED = 'textarea[name="value"][placeholder="Ente
  * `notes.sectionLabel` matches; two literals would drift. See `sectionLabel` for the pattern's semantics.
  */
 const BIDBOARD_NOTES_LABEL = ':text-matches("^ *Notes *([(]?[0-9]+[)]?)? *$")';
+/**
+ * A rendered note ROW, by note-specific hooks only — `notes.item` minus its generic bare `li`. Shared by the row
+ * read, the card-boundary exclusion (a heading or field INSIDE a note row is note content, not another card), and
+ * the header-only check after a boundary stop. `li` is left out of the last two on purpose: a column that renders
+ * its cards as list items would otherwise hide every neighbour's title from the boundary.
+ */
+const BIDBOARD_NOTES_ROW_HOOKS = ['div.aid-note', '[class*="aid-note-item"]', '[data-qa="note-item"]', '[data-testid="note-item"]'];
+const NOT_IN_NOTE_ROW = `:not(:is(${BIDBOARD_NOTES_ROW_HOOKS.join(", ")}) *)`;
 
 export const PROCORE_SELECTORS = {
   // Login page - Procore uses a two-step login flow
@@ -275,8 +283,16 @@ export const PROCORE_SELECTORS = {
          *      would let the climb widen over a neighbour whose field the input lookup could then type into. The
          *      MUI aria-hidden shadow textarea is not a field. (An always-open Notes composer only narrows the
          *      result, and the editor lookup then declines inside it; it can never widen it.)
+         * Neither counts INSIDE a note row (`BIDBOARD_NOTES_ROW_HOOKS`): an author `<h6>` in a row is Notes content, and
+         * counting it stopped the climb at the header, which does not hold the rows (CodeRabbit on 6e05da3). Rows
+         * this cannot recognise are caught after the stop instead — see `sectionRow` and the climb.
          */
-        sectionForeignCard: `:is(h1, h2, h3, h4, h5, h6, [role="heading"]):not(${BIDBOARD_NOTES_LABEL}):not(:has(${BIDBOARD_NOTES_LABEL})), textarea:not([aria-hidden="true"]), [contenteditable="true"]`,
+        sectionForeignCard: `:is(h1, h2, h3, h4, h5, h6, [role="heading"]):not(${BIDBOARD_NOTES_LABEL}):not(:has(${BIDBOARD_NOTES_LABEL}))${NOT_IN_NOTE_ROW}, textarea:not([aria-hidden="true"])${NOT_IN_NOTE_ROW}, [contenteditable="true"]${NOT_IN_NOTE_ROW}`,
+        /**
+         * Note rows by note-specific hooks, for the check after a card-boundary stop: rows in the stop container
+         * that the resolved one lacks mean the resolved one is the header, so the climb declines.
+         */
+        sectionRow: BIDBOARD_NOTES_ROW_HOOKS.join(", "),
         /**
          * Anything inside a resolved "Notes section" that proves it is NOT the Notes card but a wrapper
          * that swallowed the rest of the page. A container matching this is refused outright.
@@ -382,13 +398,7 @@ export const PROCORE_SELECTORS = {
          * instead of trusting the first hit, so a wrong match here can only add noise, never hide an
          * existing note (which would post a duplicate).
          */
-        item: [
-          'div.aid-note',
-          '[class*="aid-note-item"]',
-          '[data-qa="note-item"]',
-          '[data-testid="note-item"]',
-          'li',
-        ],
+        item: [...BIDBOARD_NOTES_ROW_HOOKS, 'li'],
       },
     },
   },

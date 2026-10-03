@@ -799,7 +799,10 @@ describe("the structural climb stops at the Notes card's boundary, against real 
     expect(await page.locator("#notesCard .aid-note").innerText()).toContain("Owner confirmed scope");
   });
 
-  it("THE round-3 P2 (marker read): a neighbour card quoting the marker does not make the Notes card skip", async () => {
+  it("THE round-3 P2 (marker read): a neighbour card quoting the marker never makes the Notes card SKIP", async () => {
+    // Since the header-only check (CodeRabbit on 6e05da3) this declines rather than posts: a marker outside the
+    // resolved card is indistinguishable from a note row the boundary could not recognise. What Codex flagged — a
+    // silent `skipped: true` with no note in Notes — must still never happen, and nothing may be written.
     await page.setContent(`
       <div id="col">
         <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
@@ -816,9 +819,11 @@ describe("the structural climb stops at the Notes card's boundary, against real 
       stepTimeoutMs: 2000,
     });
 
-    expect(result.error).toBeUndefined();
-    expect(result).toMatchObject({ posted: true, skipped: false });
-    expect(await page.locator("#notesCard .aid-note").count()).toBe(1);
+    expect(result).toMatchObject({ posted: false, skipped: false });
+    expect(result.error).toMatch(/not a usable Notes card/);
+    expect(result.error).toMatch(/header/);
+    expect(await page.locator(".aid-note").count()).toBe(0);
+    expect(await page.locator("textarea[name=value]").count()).toBe(0);
   });
 
   it("THE round-3 P2 (hidden duplicate '+'): a hidden template copy inside the card does not split it", async () => {
@@ -853,6 +858,94 @@ describe("the structural climb stops at the Notes card's boundary, against real 
       <div id="col">
         <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
         <div id="internalNotesCard"><h3>Internal Notes</h3><span style="visibility:hidden">${PLUS("internalPlus")}</span></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result.ok).toBe(true);
+    expect(await resolvedIdentity(result)).toBe("DIV#notesCard");
+  });
+});
+
+/**
+ * CodeRabbit on 6e05da3 (Major): `sectionForeignCard` counted headings and fields INSIDE note rows, so an author
+ * `<h6>` in a row stopped the climb at the header — which does not hold the rows — and the header came back `ok`.
+ * The idempotency read and the post-save verify were then blind to the card's notes: a duplicate on every run.
+ */
+describe("the card boundary never leaves the header as the Notes card, against real Chromium", () => {
+  const NOTE_TEXT = [`${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab (as of Oct 2, 2026)`, "", "Owner confirmed scope."].join("\n");
+
+  it("a heading and a field inside a recognised note row are Notes content: resolves the CARD and skips", async () => {
+    await page.setContent(`
+      <div id="card">
+        <div id="header"><h3>Notes</h3>${PLUS("plus")}</div>
+        <div id="cardBody">
+          <div class="aid-note"><h6>Colby Burling</h6><span>Aug 17, 2026</span>
+            <p>${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab</p><textarea aria-label="Edit note"></textarea></div>
+        </div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result.ok).toBe(true);
+    expect(await resolvedIdentity(result)).toBe("DIV#card");
+
+    navigateToProjectMock.mockResolvedValue(true);
+    const posted = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 1000,
+      overallTimeoutMs: 15000,
+      stepTimeoutMs: 500,
+    });
+    expect(posted).toMatchObject({ posted: false, skipped: true });
+    expect(await page.locator(".aid-note").count()).toBe(1);
+  });
+
+  it("rows the boundary cannot recognise, holding the marker, make it DECLINE rather than return the header", async () => {
+    // No note-row hook at all: the `<h6>` stops the climb at the header. The marker in the stop container, absent
+    // from the header, is what proves the header is not the card.
+    await page.setContent(`
+      <div id="card">
+        <div id="header"><h3>Notes</h3>${PLUS("plus")}</div>
+        <div id="cardBody"><article class="row"><h6>Colby Burling</h6><p>${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab</p></article></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+    if (result.ok || result.reason !== "contaminated") throw new Error("unreachable");
+    expect(result.selector).toContain("header");
+
+    navigateToProjectMock.mockResolvedValue(true);
+    const posted = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 500,
+      overallTimeoutMs: 10000,
+      stepTimeoutMs: 300,
+    });
+    expect(posted).toMatchObject({ posted: false, skipped: false });
+    expect(await page.locator("article.row").count()).toBe(1);
+  });
+
+  it("recognised rows outside the stop make it DECLINE even before any CRM note exists", async () => {
+    // A field in the body (an always-open composer the boundary counts) stops the climb at the header; the rows
+    // beside it are recognised, so the header is refused before the first post rather than after a duplicate.
+    await page.setContent(`
+      <div id="card">
+        <div id="header"><h3>Notes</h3>${PLUS("plus")}</div>
+        <div id="cardBody"><div contenteditable="true"></div><div class="aid-note">Colby Burling · a rep's own note</div></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+  });
+
+  it("a neighbouring card still bounds the Notes card when the card has rows of its own", async () => {
+    // The header-only check must not undo the round-3 P1: rows INSIDE the resolved card are not "outside" it.
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div>
+          <div class="rows"><div class="aid-note"><h6>Colby Burling</h6>${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab</div></div></div>
+        <div id="tasksCard"><h3>Tasks</h3><div contenteditable="true"></div></div>
       </div>
       ${DESCRIPTION_FIELD}
     `);
