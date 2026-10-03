@@ -1,4 +1,7 @@
-// Data retention: prune rows that nothing reads any more, in small batches, from a FIXED allowlist.
+// Data retention: prune OLD rows in small batches, from a FIXED allowlist. Old does not always mean unread:
+// idempotency keys are kept for a grace window past expiry because checkIdempotencyKey still reads them,
+// and bidboard_stage_sync_runs always keeps its newest "success"/"initialized" row, which
+// storage.hasSuccessfulBidboardStageSyncRun reads as the Bid Board stage-sync baseline (see the target).
 //
 // Why this exists: the SyncHub Postgres volume sat at 406/500 MB with ~50k EXPIRED idempotency_keys
 // that were never deleted, and bidboard_automation_logs / bidboard_stage_sync_runs growing ~280
@@ -79,12 +82,19 @@ export const RETENTION_TARGETS = Object.freeze([
       "DELETE FROM bidboard_automation_logs WHERE id IN " +
       "(SELECT id FROM bidboard_automation_logs WHERE created_at < $1 ORDER BY id LIMIT $2)",
   }),
+  // Never the newest "success"/"initialized" run, however old. storage.hasSuccessfulBidboardStageSyncRun reads
+  // these as the stage-sync baseline; with none left, runBidBoardStageSync re-seeds the baseline
+  // (diffBidBoardStages initializeOnly) and silently drops every pending stage change. A long auth outage where
+  // every run is "failed" would otherwise age the last success row out. id is a serial, so max(id) is the newest;
+  // IS DISTINCT FROM (not <>) so that, when no such row exists, the NULL from max() excludes nothing.
   Object.freeze({
     table: "bidboard_stage_sync_runs" as const,
     rule: "older_than_window" as const,
     sql:
       "DELETE FROM bidboard_stage_sync_runs WHERE id IN " +
-      "(SELECT id FROM bidboard_stage_sync_runs WHERE started_at < $1 ORDER BY id LIMIT $2)",
+      "(SELECT id FROM bidboard_stage_sync_runs WHERE started_at < $1 " +
+      "AND id IS DISTINCT FROM (SELECT max(id) FROM bidboard_stage_sync_runs WHERE status IN ('success', 'initialized')) " +
+      "ORDER BY id LIMIT $2)",
   }),
 ]);
 

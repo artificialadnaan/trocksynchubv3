@@ -108,8 +108,13 @@ describe("data retention — the run", () => {
 
     const tables = new Set(q.calls.map((c) => /^DELETE FROM (\w+) /.exec(c.text)?.[1]));
     expect([...tables].sort()).toEqual(["bidboard_automation_logs", "bidboard_stage_sync_runs", "idempotency_keys"]);
+    // bidboard_stage_sync_runs alone carries the clause that keeps its newest success/initialized (baseline) row.
+    const KEEP_BASELINE =
+      " AND id IS DISTINCT FROM (SELECT max(id) FROM bidboard_stage_sync_runs WHERE status IN ('success', 'initialized'))";
     for (const c of q.calls) {
-      expect(c.text).toMatch(/^DELETE FROM (\w+) WHERE id IN \(SELECT id FROM \1 WHERE (expires_at|created_at|started_at) < \$1 ORDER BY id LIMIT \$2\)$/);
+      const isStageSync = c.text.startsWith("DELETE FROM bidboard_stage_sync_runs ");
+      expect(c.text.includes(KEEP_BASELINE)).toBe(isStageSync);
+      expect(c.text.replace(KEEP_BASELINE, "")).toMatch(/^DELETE FROM (\w+) WHERE id IN \(SELECT id FROM \1 WHERE (expires_at|created_at|started_at) < \$1 ORDER BY id LIMIT \$2\)$/);
       expect(c.params[1]).toBe(100);
     }
     expect(RETENTION_TARGETS.map((t) => t.table)).toEqual(["idempotency_keys", "bidboard_automation_logs", "bidboard_stage_sync_runs"]);
@@ -243,7 +248,7 @@ describe("data retention — shipped SQL against real Postgres (PGlite)", () => 
       DROP TABLE IF EXISTS idempotency_keys, bidboard_automation_logs, bidboard_stage_sync_runs, webhook_logs;
       CREATE TABLE idempotency_keys (id SERIAL PRIMARY KEY, key TEXT NOT NULL UNIQUE, expires_at TIMESTAMP);
       CREATE TABLE bidboard_automation_logs (id SERIAL PRIMARY KEY, action TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW());
-      CREATE TABLE bidboard_stage_sync_runs (id SERIAL PRIMARY KEY, started_at TIMESTAMP NOT NULL DEFAULT NOW());
+      CREATE TABLE bidboard_stage_sync_runs (id SERIAL PRIMARY KEY, started_at TIMESTAMP NOT NULL DEFAULT NOW(), status TEXT NOT NULL DEFAULT 'running');
       CREATE TABLE webhook_logs (id SERIAL PRIMARY KEY, created_at TIMESTAMP);
     `);
   });
@@ -277,6 +282,32 @@ describe("data retention — shipped SQL against real Postgres (PGlite)", () => 
     expect((await pg.query(`SELECT action FROM bidboard_automation_logs ORDER BY action`)).rows.map((r: any) => r.action)).toEqual(["recent", "undated"]);
     expect((await pg.query(`SELECT count(*)::int AS n FROM bidboard_stage_sync_runs`)).rows[0]).toEqual({ n: 1 });
     expect((await pg.query(`SELECT count(*)::int AS n FROM webhook_logs`)).rows[0]).toEqual({ n: 1 });
+  });
+
+  it("keeps the newest success/initialized stage-sync run however old: it is the stage-sync baseline", async () => {
+    const at = (ms: number) => new Date(NOW.getTime() + ms).toISOString();
+    // A >90-day outage: one old success, then only failed runs, all older than the window.
+    await pg.query(
+      `INSERT INTO bidboard_stage_sync_runs (started_at, status) VALUES
+         ($1, 'initialized'), ($2, 'success'), ($3, 'failed'), ($4, 'failed'), ($5, 'partial'), ($6, 'failed')`,
+      [at(-200 * DAY), at(-150 * DAY), at(-140 * DAY), at(-120 * DAY), at(-110 * DAY), at(-10 * DAY)],
+    );
+    // batchSize 2 so the kept row is skipped across several batches, not just one.
+    const out = await runDataRetention({ ...ENABLED, batchSize: 2, maxBatchesPerRun: 100 }, { db, sleep: noSleep, now: () => NOW });
+
+    expect(out!.deleted.bidboard_stage_sync_runs).toBe(4);
+    expect((await pg.query(`SELECT id, status FROM bidboard_stage_sync_runs ORDER BY id`)).rows).toEqual([
+      { id: 2, status: "success" },
+      { id: 6, status: "failed" },
+    ]);
+    // What storage.hasSuccessfulBidboardStageSyncRun asks: still true, so no silent re-seed.
+    expect((await pg.query(`SELECT count(*)::int AS n FROM bidboard_stage_sync_runs WHERE status IN ('success', 'initialized')`)).rows[0]).toEqual({ n: 1 });
+
+    // With no success/initialized row at all, old rows are pruned normally (max() is NULL and excludes nothing).
+    await pg.exec(`DELETE FROM bidboard_stage_sync_runs`);
+    await pg.query(`INSERT INTO bidboard_stage_sync_runs (started_at, status) VALUES ($1, 'failed'), ($2, 'failed')`, [at(-120 * DAY), at(-100 * DAY)]);
+    const none = await runDataRetention({ ...ENABLED, batchSize: 10, maxBatchesPerRun: 100 }, { db, sleep: noSleep, now: () => NOW });
+    expect(none!.deleted.bidboard_stage_sync_runs).toBe(2);
   });
 
   it("each statement deletes at most batchSize rows, lowest ids first", async () => {
