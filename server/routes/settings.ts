@@ -771,6 +771,23 @@ export function requireAdminWhileAuthDisabled(keyOf: (req: any) => string | null
   };
 }
 
+/**
+ * The write behind requireAdminWhileAuthDisabled. The gate's read and the handler's write are separate statements,
+ * so a polling cycle's auth-expiry disable can land between them; an unconditional upsert would then clear it (and a
+ * toggle would restart the timer) without an admin. So the write is conditional on the stored row STILL not being
+ * auth_expired, evaluated by the database at write time. If it is, only an admin's write goes through; anyone else
+ * gets the gate's 403 and nothing is written. Returns null once it has answered the request.
+ */
+async function writePollingRowUnlessAuthDisabled(req: any, res: any, data: { key: string; value: unknown; description?: string }) {
+  const written = await storage.upsertAutomationConfigUnlessAuthDisabled(data as any);
+  if (written) return written;
+  const userId = req.session?.userId;
+  const user = userId ? await storage.getUser(userId) : undefined;
+  if (user?.role === "admin") return await storage.upsertAutomationConfig(data as any);
+  res.status(userId ? 403 : 401).json({ message: userId ? "Admin only" : "Unauthorized" });
+  return null;
+}
+
 // ─── Route registration ───────────────────────────────────────────────────────
 export function registerSettingsRoutes(app: Express, requireAuth: any) {
   app.get("/api/health", (_req, res) => {
@@ -873,7 +890,10 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     requireAdminWhileAuthDisabled(pollingKey),
     async (req, res) => {
       try {
-        const config = await storage.upsertAutomationConfig(req.body);
+        const config = pollingKey(req)
+          ? await writePollingRowUnlessAuthDisabled(req, res, req.body)
+          : await storage.upsertAutomationConfig(req.body);
+        if (!config) return;
         res.json(config);
       } catch (e: any) {
         res.status(400).json({ message: e.message });
@@ -922,11 +942,12 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     try {
       const { enabled, intervalMinutes } = req.body;
       const interval = intervalMinutes || 10;
-      await storage.upsertAutomationConfig({
+      const written = await writePollingRowUnlessAuthDisabled(req, res, {
         key: "hubspot_polling",
         value: { enabled, intervalMinutes: interval },
         description: "Automatic HubSpot polling sync configuration",
       });
+      if (!written) return;
 
       if (enabled) {
         startPolling(interval);
@@ -974,11 +995,12 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     try {
       const { enabled, intervalMinutes } = req.body;
       const interval = intervalMinutes || 15;
-      await storage.upsertAutomationConfig({
+      const written = await writePollingRowUnlessAuthDisabled(req, res, {
         key: "procore_polling",
         value: { enabled, intervalMinutes: interval },
         description: "Automatic Procore data polling sync configuration",
       });
+      if (!written) return;
       if (enabled) {
         startProcorePolling(interval);
       } else {

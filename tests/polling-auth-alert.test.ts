@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     getAutomationConfig: vi.fn(),
     getAutomationConfigs: vi.fn(),
     upsertAutomationConfig: vi.fn(),
+    upsertAutomationConfigUnlessAuthDisabled: vi.fn(),
     patchAutomationConfig: vi.fn(),
     createAuditLog: vi.fn(),
     checkEmailDedupeKey: vi.fn(),
@@ -61,6 +62,12 @@ function backedStore(initial: Record<string, any> = {}) {
   mocks.storage.getAutomationConfig.mockImplementation(async (key: string) => (key in rows ? { key, value: rows[key] } : undefined));
   mocks.storage.getAutomationConfigs.mockImplementation(async () => Object.entries(rows).map(([key, value]) => ({ key, value })));
   mocks.storage.upsertAutomationConfig.mockImplementation(async (data: any) => {
+    rows[data.key] = data.value;
+    return data;
+  });
+  mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockImplementation(async (data: any) => {
+    // Stands in for the conditional ON CONFLICT DO UPDATE (its real SQL is pinned by the PGlite test).
+    if (rows[data.key]?.disabledReason === "auth_expired") return null;
     rows[data.key] = data.value;
     return data;
   });

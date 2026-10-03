@@ -320,6 +320,7 @@ export interface IStorage {
   getAutomationConfigs(): Promise<AutomationConfig[]>;
   getAutomationConfig(key: string): Promise<AutomationConfig | undefined>;
   upsertAutomationConfig(data: InsertAutomationConfig): Promise<AutomationConfig>;
+  upsertAutomationConfigUnlessAuthDisabled(data: InsertAutomationConfig): Promise<AutomationConfig | null>;
   /** Merge `patch` into an automation config's jsonb value ATOMICALLY, leaving untouched keys alone. */
   patchAutomationConfig(
     key: string,
@@ -838,6 +839,22 @@ export class DatabaseStorage implements IStorage {
         set: { ...data, updatedAt: new Date() },
       }).returning();
     return result;
+  }
+
+  /**
+   * The same upsert, except that a stored row whose value has `disabledReason: "auth_expired"` is left untouched
+   * and null is returned. The condition is evaluated by the ON CONFLICT DO UPDATE itself, which holds the row lock,
+   * so a polling auth-expiry disable that lands after a caller's own read cannot be overwritten by this write.
+   * (`->>` on a non-object jsonb value yields NULL, which IS DISTINCT FROM 'auth_expired', so such rows update.)
+   */
+  async upsertAutomationConfigUnlessAuthDisabled(data: InsertAutomationConfig): Promise<AutomationConfig | null> {
+    const [result] = await db.insert(automationConfig).values(data)
+      .onConflictDoUpdate({
+        target: automationConfig.key,
+        set: { ...data, updatedAt: new Date() },
+        setWhere: sql`(${automationConfig.value} ->> 'disabledReason') IS DISTINCT FROM 'auth_expired'`,
+      }).returning();
+    return result ?? null;
   }
 
   /**

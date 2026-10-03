@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     getAutomationConfig: vi.fn(),
     getAutomationConfigs: vi.fn(),
     upsertAutomationConfig: vi.fn(),
+    upsertAutomationConfigUnlessAuthDisabled: vi.fn(),
     patchAutomationConfig: vi.fn(),
     createAuditLog: vi.fn(),
     getUser: vi.fn(),
@@ -80,6 +81,12 @@ function backedStore(initial: Record<string, any>) {
   mocks.storage.getAutomationConfig.mockImplementation(async (key: string) => (key in rows ? { key, value: rows[key] } : undefined));
   mocks.storage.getAutomationConfigs.mockImplementation(async () => Object.entries(rows).map(([key, value]) => ({ key, value })));
   mocks.storage.upsertAutomationConfig.mockImplementation(async (data: any) => {
+    rows[data.key] = data.value;
+    return data;
+  });
+  mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockImplementation(async (data: any) => {
+    // Stands in for the conditional ON CONFLICT DO UPDATE (its real SQL is pinned by the PGlite test).
+    if (rows[data.key]?.disabledReason === "auth_expired") return null;
     rows[data.key] = data.value;
     return data;
   });
@@ -184,6 +191,42 @@ describe("POST /api/settings/polling/:job/enable", () => {
     const admin = await invokeRoute(app.routes["POST /api/automation/polling/config"], { session: { userId: "admin-1" }, body: { enabled: true } });
     expect(admin.status).not.toHaveBeenCalledWith(403);
     expect(store.hubspot_polling).toMatchObject({ enabled: true });
+  });
+
+  it.each([
+    ["POST /api/automation/procore-polling/config", "procore_polling", { enabled: true, intervalMinutes: 20 }],
+    ["POST /api/automation/polling/config", "hubspot_polling", { enabled: true }],
+    ["PUT /api/automation-config", "procore_polling", { key: "procore_polling", value: { enabled: true, intervalMinutes: 20 } }],
+  ] as const)("%s: a disable landing between the gate's read and the write is not overwritten by a non-admin", async (route, key, body) => {
+    const { app, store, status } = await setup({ [key]: { enabled: true, intervalMinutes: 20 } });
+    // The gate reads the row while it is still enabled; the polling cycle's auth-expiry disable commits right after.
+    mocks.storage.getAutomationConfig.mockImplementationOnce(async (k: string) => {
+      const before = store[k];
+      store[k] = { ...DISABLED_ROW };
+      return { key: k, value: before };
+    });
+
+    const res = await invokeRoute(app.routes[route], { session: { userId: "viewer-1" }, body });
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({ message: "Admin only" });
+    expect(store[key]).toEqual(DISABLED_ROW);
+    expect(mocks.storage.upsertAutomationConfig).not.toHaveBeenCalled();
+    expect((await status())[key].active).toBe(false);
+  });
+
+  it("the same race for an admin: the admin's write still goes through", async () => {
+    const { app, store } = await setup({ procore_polling: { enabled: true, intervalMinutes: 20 } });
+    mocks.storage.getAutomationConfig.mockImplementationOnce(async (k: string) => {
+      const before = store[k];
+      store[k] = { ...DISABLED_ROW };
+      return { key: k, value: before };
+    });
+    const res = await invokeRoute(app.routes["POST /api/automation/procore-polling/config"], {
+      session: { userId: "admin-1" },
+      body: { enabled: true, intervalMinutes: 20 },
+    });
+    expect(res.status).not.toHaveBeenCalled();
+    expect(store.procore_polling).toEqual({ enabled: true, intervalMinutes: 20 });
   });
 
   it("for an admin: clears disabledReason, keeps the interval, restarts the timer and audits", async () => {
