@@ -1451,17 +1451,18 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       // (recordPollingAuthExpiry) instead of being logged and retried forever by a private copy of the loop.
       // A job auto-disabled for auth_expired is LEFT OFF: this route has a shared secret, not an admin session, and
       // clearing that disable is an admin action (POST /api/settings/polling/:job/enable).
+      // The check is the write itself: conditional on the row not being auth_expired when the database applies it,
+      // so a disable that lands mid-request is never overwritten (a separate read first would race it).
       for (const job of [POLLING_JOBS.hubspot, POLLING_JOBS.procore]) {
-        const current: any = (await storage.getAutomationConfig(job.key))?.value;
-        if (current?.disabledReason === "auth_expired") {
-          results[job.key] = `skipped: auth_expired — an admin re-enables it via POST /api/settings/polling/${job.slug}/enable`;
-          continue;
-        }
-        await storage.upsertAutomationConfig({
+        const written = await storage.upsertAutomationConfigUnlessAuthDisabled({
           key: job.key,
           value: { enabled: true, intervalMinutes: 15 },
           description: job.key === "hubspot_polling" ? "HubSpot polling (auto-enabled)" : "Procore polling (auto-enabled)",
         });
+        if (!written) {
+          results[job.key] = `skipped: auth_expired — an admin re-enables it via POST /api/settings/polling/${job.slug}/enable`;
+          continue;
+        }
         if (job.key === "hubspot_polling") {
           if (!pollingTimer) startPolling(15);
         } else if (!procorePollingTimer) {

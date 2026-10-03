@@ -544,6 +544,44 @@ describe("enable-all-automations → alert", () => {
       vi.useRealTimers();
     }
   });
+
+  it("a disable that lands mid-request is not overwritten: the enable is conditional at write time", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("INTERNAL_API_SECRET", "test-internal-secret");
+      const disabled = { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" };
+      const { rows } = backedStore({ procore_polling: { enabled: true, intervalMinutes: 17 } });
+      // Any read of procore_polling during the request sees the old, enabled row, and the polling cycle's
+      // auth-expiry disable commits right after that read (before enable-all's write).
+      const realGet = mocks.storage.getAutomationConfig.getMockImplementation()!;
+      mocks.storage.getAutomationConfig.mockImplementation(async (key: string) => {
+        const out = await realGet(key);
+        if (key === "procore_polling") rows.procore_polling = { ...disabled };
+        return out;
+      });
+      // And with no read at all, it commits once the request is under way.
+      const realUpsert = mocks.storage.upsertAutomationConfig.getMockImplementation()!;
+      mocks.storage.upsertAutomationConfig.mockImplementation(async (data: any) => {
+        if (data.key === "hubspot_webhook_processing") rows.procore_polling = { ...disabled };
+        return realUpsert(data);
+      });
+      mocks.runFullHubSpotSync.mockResolvedValue({});
+      const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+      const app = createFakeApp();
+      registerSettingsRoutes(app as any, passAuth);
+
+      const res = await invokeRoute(app.routes["POST /api/internal/enable-all-automations"], {
+        body: {},
+        headers: { "x-internal-secret": "test-internal-secret" },
+      });
+      await vi.advanceTimersByTimeAsync(91_000);
+      expect(res.json.mock.calls[0][0].automations.procore_polling).toMatch(/^skipped: auth_expired/);
+      expect(rows.procore_polling).toEqual(disabled);
+      expect(mocks.runFullProcoreSync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("polling cycles → alert", () => {
