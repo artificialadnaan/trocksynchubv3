@@ -486,8 +486,10 @@ describe("postBidBoardProjectNote end to end, against real Chromium", () => {
 
   /**
    * Codex round 1 on #73 (P1): the climb keeps the OUTERMOST ancestor with exactly one "+", so a column that holds
-   * the Notes card AND a card with no "+" of its own resolves to the whole column. The generic editor/Create tiers
+   * the Notes card AND a card with no "+" of its own resolved to the whole column. The generic editor/Create tiers
    * could then reach the neighbouring card. The Tasks card here has both a contenteditable and a Create submit.
+   * Since round 3 the climb also stops at the card boundary (`sectionForeignCard`), so this resolves to #notesCard;
+   * these tests keep the confirmed-hooks-only write path covered as the second line of defence.
    */
   const columnWithTasksCard = (composer: "confirmed" | "none") => `
     <div id="col">
@@ -689,5 +691,171 @@ describe("resolveNotesSection polling, against real Chromium", () => {
     `);
     const result = await resolveNotesSection(page, { timeoutMs: 5000 });
     expect(result).toMatchObject({ ok: true, structural: true });
+  });
+});
+
+/**
+ * Codex round 3 on #73 (a3d6245). The climb kept the OUTERMOST ancestor with exactly one "+", so a neighbouring
+ * card WITHOUT a "+" of its own was swallowed: the resolver returned the shared column, and every read and lookup
+ * after it ran over the neighbour too. `sectionForeignCard` is the card boundary that stops it.
+ */
+describe("the structural climb stops at the Notes card's boundary, against real Chromium", () => {
+  const NOTE_TEXT = [`${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab (as of Oct 2, 2026)`, "", "Owner confirmed scope."].join("\n");
+  /** "+" opens a composer with the CONFIRMED note field inside #notesCard; Create commits a row there. */
+  const notesComposerScript = `
+    document.getElementById('notesPlus').addEventListener('click', () => {
+      const card = document.getElementById('notesCard');
+      if (card.querySelector('.composer')) return;
+      const composer = document.createElement('div');
+      composer.className = 'composer';
+      const field = document.createElement('textarea');
+      field.name = 'value';
+      field.placeholder = 'Enter note';
+      const create = document.createElement('button');
+      create.textContent = 'Create';
+      composer.append(field, create);
+      card.appendChild(composer);
+      create.addEventListener('click', () => {
+        const row = document.createElement('div');
+        row.className = 'aid-note';
+        row.textContent = field.value;
+        card.querySelector('.rows').appendChild(row);
+        composer.remove();
+      });
+    });`;
+
+  it("THE round-3 P1: a titled neighbour with no '+' stops the climb at the card, not the shared column", async () => {
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+        <div id="tasksCard"><h3>Tasks</h3><button>Create</button></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result.ok).toBe(true);
+    expect(await resolvedIdentity(result)).toBe("DIV#notesCard");
+  });
+
+  it("THE round-3 P1: an UNTITLED neighbour is still a boundary when it holds a text field", async () => {
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+        <div id="otherCard"><span>Follow-ups</span><div contenteditable="true"></div></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result.ok).toBe(true);
+    expect(await resolvedIdentity(result)).toBe("DIV#notesCard");
+  });
+
+  it("THE round-3 P1: fails CLOSED when the label's own row already shares a container with another card", async () => {
+    // No container holds the Notes label and its "+" without the Tasks title too — there is no Notes-only scope.
+    await page.setContent(`
+      <div id="row"><h3>Notes</h3><h3>Tasks</h3>${PLUS("plus")}</div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+    if (result.ok || result.reason !== "contaminated") throw new Error("unreachable");
+    expect(result.selector).toContain("another card");
+  });
+
+  it("THE round-3 P1, end to end: never types into a neighbour's note-shaped field that comes FIRST in the column", async () => {
+    // The neighbour carries a field identical to the confirmed note input, and its own Create. With the column
+    // resolved, the confirmed-input lookup took the first visible match (the neighbour's) and the Create climb from
+    // it pressed the neighbour's Create — a write into another card.
+    await page.setContent(`
+      <div id="col">
+        <div id="followUpCard">
+          <textarea id="followUpField" name="value" placeholder="Enter note"></textarea>
+          <button id="followUpCreate">Create</button>
+        </div>
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+      <script>
+        document.getElementById('followUpCreate').addEventListener('click', () => {
+          document.getElementById('followUpCreate').dataset.clicked = 'yes';
+        });
+        ${notesComposerScript}
+      </script>
+    `);
+    navigateToProjectMock.mockResolvedValue(true);
+
+    const result = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 4000,
+      overallTimeoutMs: 20000,
+      stepTimeoutMs: 2000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    expect(await page.locator("#followUpField").inputValue()).toBe("");
+    expect(await page.locator("#followUpCreate").getAttribute("data-clicked")).toBeNull();
+    expect(await page.locator("#notesCard .aid-note").innerText()).toContain("Owner confirmed scope");
+  });
+
+  it("THE round-3 P2 (marker read): a neighbour card quoting the marker does not make the Notes card skip", async () => {
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+        <div id="activityCard"><h3>Activity</h3><p>${CRM_ACTIVITY_NOTE_MARKER} copied into another card</p></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+      <script>${notesComposerScript}</script>
+    `);
+    navigateToProjectMock.mockResolvedValue(true);
+
+    const result = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 4000,
+      overallTimeoutMs: 20000,
+      stepTimeoutMs: 2000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result).toMatchObject({ posted: true, skipped: false });
+    expect(await page.locator("#notesCard .aid-note").count()).toBe(1);
+  });
+
+  it("THE round-3 P2 (hidden duplicate '+'): a hidden template copy inside the card does not split it", async () => {
+    // Raw-counted, the hidden copy made the card read as two cards: the climb stopped at the header, which does not
+    // hold the rows, so the idempotency read was blind to the existing CRM note.
+    await page.setContent(`
+      <div id="card">
+        <div id="header"><h3>Notes</h3>${PLUS("plus")}</div>
+        <div id="cardBody">
+          <div style="display:none">${PLUS("hiddenTemplatePlus")}</div>
+          <div class="aid-note">Colby Burling · Aug 17, 2026 ${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab</div>
+        </div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result.ok).toBe(true);
+    expect(await resolvedIdentity(result)).toBe("DIV#card");
+
+    navigateToProjectMock.mockResolvedValue(true);
+    const posted = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", {
+      verifyTimeoutMs: 1000,
+      overallTimeoutMs: 15000,
+      stepTimeoutMs: 500,
+    });
+    expect(posted).toMatchObject({ posted: false, skipped: true });
+  });
+
+  it("THE round-3 P2 (hidden duplicate '+'): a neighbour whose '+' is hidden is still outside the card", async () => {
+    // Counting only visible "+" must not let the climb widen over a neighbour with a hidden one; its title stops it.
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+        <div id="internalNotesCard"><h3>Internal Notes</h3><span style="visibility:hidden">${PLUS("internalPlus")}</span></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result.ok).toBe(true);
+    expect(await resolvedIdentity(result)).toBe("DIV#notesCard");
   });
 });

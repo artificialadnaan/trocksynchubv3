@@ -67,6 +67,11 @@ const BIDBOARD_NOTES_ADD_BUTTON_ANCHOR = 'button:has(svg[data-qa="ci-Plus"])';
  * literal. Declared once so the structural path (which acts ONLY on confirmed hooks) and the tiered list cannot drift.
  */
 const BIDBOARD_NOTES_INPUT_CONFIRMED = 'textarea[name="value"][placeholder="Enter note"]:not([aria-hidden="true"])';
+/**
+ * The Notes card's own label. Declared once because `notes.sectionForeignCard` has to EXCLUDE exactly what
+ * `notes.sectionLabel` matches; two literals would drift. See `sectionLabel` for the pattern's semantics.
+ */
+const BIDBOARD_NOTES_LABEL = ':text-matches("^ *Notes *([(]?[0-9]+[)]?)? *$")';
 
 export const PROCORE_SELECTORS = {
   // Login page - Procore uses a two-step login flow
@@ -254,7 +259,24 @@ export const PROCORE_SELECTORS = {
          * A count BADGE (`<h3>Notes<span>3</span></h3>`) matches too — Playwright's text engines match
          * an element's own immediate text node, which is "Notes". Also verified, not assumed.
          */
-        sectionLabel: ':text-matches("^ *Notes *([(]?[0-9]+[)]?)? *$")',
+        sectionLabel: BIDBOARD_NOTES_LABEL,
+        /**
+         * Proof that a container holds ANOTHER card — the card BOUNDARY the structural climb stops at.
+         *
+         * Exactly-one-"+" only stops the climb below a neighbour that has its own "+". A neighbour without one (a
+         * Tasks card, a details card) let the climb widen to the shared column, and the card the automation then
+         * read and acted in was the column (Codex P1 on #73). Two signals, both MONOTONE as the container widens,
+         * so they are hard stops like the others:
+         *   1. a heading that is not the Notes label and does not contain it — another card's title. Verified in
+         *      real Chromium: `<h3>Notes</h3>`, `<h3><span>Notes</span></h3>`, `<h3>Notes<span>3</span></h3>` are
+         *      excluded; `<h3>Tasks</h3>` and an `Internal Notes` heading are counted.
+         *   2. a text-entry field. Read BEFORE the "+" is clicked, when the Notes composer is not open, so any field
+         *      is someone else's — and that includes a field shaped like the confirmed note input: excluding it
+         *      would let the climb widen over a neighbour whose field the input lookup could then type into. The
+         *      MUI aria-hidden shadow textarea is not a field. (An always-open Notes composer only narrows the
+         *      result, and the editor lookup then declines inside it; it can never widen it.)
+         */
+        sectionForeignCard: `:is(h1, h2, h3, h4, h5, h6, [role="heading"]):not(${BIDBOARD_NOTES_LABEL}):not(:has(${BIDBOARD_NOTES_LABEL})), textarea:not([aria-hidden="true"]), [contenteditable="true"]`,
         /**
          * Anything inside a resolved "Notes section" that proves it is NOT the Notes card but a wrapper
          * that swallowed the rest of the page. A container matching this is refused outright.

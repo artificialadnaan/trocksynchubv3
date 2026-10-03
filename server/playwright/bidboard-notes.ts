@@ -485,7 +485,7 @@ export type NotesAnchorResolution =
  * once it holds a page landmark it keeps holding that. Continuing past any of them could only produce a
  * worse match than the one just rejected.
  */
-type ClimbRejection = "too-narrow" | "too-many-anchors" | "contaminated" | "page-level" | "unreadable";
+type ClimbRejection = "too-narrow" | "too-many-anchors" | "contaminated" | "page-level" | "foreign-card" | "unreadable";
 
 /**
  * Is this container acceptable as THE Notes card? Every check fails CLOSED, and "could not tell" is kept
@@ -497,7 +497,18 @@ async function classifyNotesCandidate(container: Locator): Promise<ClimbRejectio
   // CARDS, and clicking "the first visible +" inside it is how the note ended up in Procore's Internal
   // Notes card in the reviewer's real-Chromium run. Exactly-one also makes the later addButton lookup
   // unambiguous by construction rather than by luck.
-  const anchors = await countWithin(container, selectors.sectionAnchor);
+  //
+  // VISIBLE ones only (Codex P2 on #73). Procore's SPA renders hidden responsive/template copies of controls —
+  // see MAX_NODES_PER_SELECTOR — and a raw count read a card holding one visible "+" and its hidden twin as two
+  // cards, so the climb stopped at the header (or nothing) and the step declined, or read the header alone. The
+  // add-button lookup already takes the first VISIBLE "+", so one visible "+" keeps that click unambiguous. The
+  // two-card wrapper stays stopped: a neighbour's visible "+" still counts, and a neighbour whose "+" is hidden
+  // is caught by `sectionForeignCard` (its title or its field) instead.
+  const anchors = await container
+    .locator(selectors.sectionAnchor)
+    .filter({ visible: true })
+    .count()
+    .catch(() => null);
   if (anchors === null) return "unreadable";
   if (anchors === 0) return "too-narrow";
   if (anchors > 1) return "too-many-anchors";
@@ -517,7 +528,14 @@ async function classifyNotesCandidate(container: Locator): Promise<ClimbRejectio
 
   const clean = await isPlausibleNotesSectionDetailed(container);
   if (clean === null) return "unreadable";
-  return clean ? "ok" : "contaminated";
+  if (!clean) return "contaminated";
+
+  // The CARD BOUNDARY (Codex P1 on #73). Exactly-one-"+" cannot see a neighbouring card that has no "+", so
+  // without this the climb widened to the shared column and every later read and lookup ran over the
+  // neighbour too. Another card's title or text field in scope means this container is wider than the card.
+  const foreign = await countWithin(container, selectors.sectionForeignCard);
+  if (foreign === null) return "unreadable";
+  return foreign > 0 ? "foreign-card" : "ok";
 }
 
 /**
@@ -529,9 +547,10 @@ async function classifyNotesCandidate(container: Locator): Promise<ClimbRejectio
  * hashes) are exactly the things Procore churns.
  *
  * THE RULE: start at the "Notes" label; climb; keep the OUTERMOST ancestor that still contains EXACTLY
- * ONE add-button anchor, is not itself a page root, contains no page-level landmark, and passes the
- * contamination check. Stop at the first ancestor that fails any of those and return the last one that
- * passed.
+ * ONE visible add-button anchor, is not itself a page root, contains no page-level landmark, passes the
+ * contamination check, and holds no other card's title or text field (`sectionForeignCard`, the card
+ * boundary). Stop at the first ancestor that fails any of those and return the last one that passed; if
+ * the very first container holding the "+" already fails, decline.
  *
  * Both halves are load-bearing, and both replace a rule that was observed failing in real Chromium:
  *
@@ -614,6 +633,11 @@ export async function resolveNotesSectionByAnchor(
       if (verdict === "page-level" && !best && !contaminatedSelector) {
         contaminatedSelector = describeClimb(depth, "page-level");
       }
+      // The label's own row already shares a container with another card: there is no Notes-only container to
+      // act in, so this label yields nothing (fail closed) rather than the shared one.
+      if (verdict === "foreign-card" && !best && !contaminatedSelector) {
+        contaminatedSelector = describeClimb(depth, "foreign-card");
+      }
       break;
     }
     // FAIL CLOSED on an unknown above a good ancestor. `best` may be the card's HEADER (the label's row, which holds
@@ -642,14 +666,16 @@ export async function resolveNotesSectionByAnchor(
  * the prober — an operator reading "⇑2" knows the card was two levels above its label, which is the one
  * fact that says whether the resolved container is the card or something wider.
  */
-function describeClimb(depth: number, outcome: "ok" | "contaminated" | "page-level"): string {
+function describeClimb(depth: number, outcome: "ok" | "contaminated" | "page-level" | "foreign-card"): string {
   const anchor = PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor;
   const suffix =
     outcome === "ok"
-      ? `outermost with exactly one ${anchor}`
+      ? `outermost with exactly one visible ${anchor} and no other card in it`
       : outcome === "contaminated"
         ? `rejected: holds the Project Description or a Create New Project button`
-        : `rejected: page-level container (a landmark, or <body>/<main> itself)`;
+        : outcome === "foreign-card"
+          ? `rejected: also holds another card's title or text field`
+          : `rejected: page-level container (a landmark, or <body>/<main> itself)`;
   return `Notes label ⇑${depth} — ${suffix}`;
 }
 
