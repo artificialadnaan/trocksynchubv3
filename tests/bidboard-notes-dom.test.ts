@@ -85,6 +85,8 @@ function installedChromiumPath(): string | undefined {
     "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
     "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
     "chrome-linux/chrome",
+    // Playwright 1.58's linux-x64 full-Chromium layout; `chrome-linux/chrome` is the arm64 one.
+    "chrome-linux64/chrome",
   ];
   for (const root of roots) {
     const builds = fs
