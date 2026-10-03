@@ -290,7 +290,13 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
   // and then report that unrelated widget's textbox and Create button as successful validation. Wrong
   // validation is worse than none, because it is acted on.
   candidates.addButtonInSection = sectionLocator ? await probe(NOTES.addButton, sectionLocator) : [];
-  const matchedAddButton = candidates.addButtonInSection.find((row) => row.visible === true && row.actable)?.selector ?? null;
+  // A structurally-found card: production acts ONLY on the confirmed "+" there, so the verdict does too. The rows
+  // above still list every candidate, as evidence.
+  const structural = sectionResolution.ok && sectionResolution.structural;
+  const matchedAddButton =
+    candidates.addButtonInSection.find(
+      (row) => row.visible === true && row.actable && (!structural || row.selector === NOTES.confirmed.addButton),
+    )?.selector ?? null;
 
   let editorScopeLabels: string[] = [];
   let inputWouldBeRefused: boolean | null = null;
@@ -331,7 +337,9 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
     // single immediate probe after a fixed delay would report a slow-rendering editor as absent, and
     // an operator would then replace working selectors), and the SCOPE FIXING. Running it first also
     // means the per-candidate diagnostic rows below are taken after the editor has actually rendered.
-    const editor = await resolveNoteEditorInput(page as any, sectionLocator as any, editorTimeoutMs);
+    const editor = await resolveNoteEditorInput(page as any, sectionLocator as any, editorTimeoutMs, {
+      confirmedOnly: structural,
+    });
     editorScopeLabels = editor.scopes.map((scope) => scope.label);
     editorOpened = editor.input !== null;
     resolvedInputSelector = editor.input?.selector ?? null;
@@ -363,7 +371,13 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
       ].map((row) => ({ ...row, scope: label }));
       candidates.createButtonAfterAdd.push(...rows);
       // …and the verdict for Create likewise comes from the shared helper, in that fixed scope.
-      const create = await resolveNoteCreateControl(editor.editorScope as any, editorTimeoutMs);
+      const create = await resolveNoteCreateControl(
+        editor.editorScope as any,
+        editorTimeoutMs,
+        structural && editor.input
+          ? { nearInput: editor.input.locator as any, within: editor.editorScope as any, notesSection: sectionLocator as any }
+          : undefined,
+      );
       resolvedCreateSelector = create?.selector ?? null;
     }
 

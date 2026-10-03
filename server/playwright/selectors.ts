@@ -56,6 +56,31 @@ function stageTabSelectorFor(labels: readonly string[]): string {
     .join(", ");
 }
 
+/**
+ * The Bid Board Notes card's add-a-note control. Confirmed against a live project (2026-08-18) — see
+ * `notes.sectionAnchor`'s docblock for the full story and why this must be declared once, as a shared
+ * constant, rather than as two independently-editable literal strings.
+ */
+const BIDBOARD_NOTES_ADD_BUTTON_ANCHOR = 'button:has(svg[data-qa="ci-Plus"])';
+/**
+ * The note body field, CONFIRMED against a live project (2026-08-18) — see `input.precise[0]`, which is this same
+ * literal. Declared once so the structural path (which acts ONLY on confirmed hooks) and the tiered list cannot drift.
+ */
+const BIDBOARD_NOTES_INPUT_CONFIRMED = 'textarea[name="value"][placeholder="Enter note"]:not([aria-hidden="true"])';
+/**
+ * The Notes card's own label. Declared once because `notes.sectionForeignCard` has to EXCLUDE exactly what
+ * `notes.sectionLabel` matches; two literals would drift. See `sectionLabel` for the pattern's semantics.
+ */
+const BIDBOARD_NOTES_LABEL = ':text-matches("^ *Notes *([(]?[0-9]+[)]?)? *$")';
+/**
+ * A rendered note ROW, by note-specific hooks only — `notes.item` minus its generic bare `li`. Shared by the row
+ * read, the card-boundary exclusion (a heading or field INSIDE a note row is note content, not another card), and
+ * the header-only check after a boundary stop. `li` is left out of the last two on purpose: a column that renders
+ * its cards as list items would otherwise hide every neighbour's title from the boundary.
+ */
+const BIDBOARD_NOTES_ROW_HOOKS = ['div.aid-note', '[class*="aid-note-item"]', '[data-qa="note-item"]', '[data-testid="note-item"]'];
+const NOT_IN_NOTE_ROW = `:not(:is(${BIDBOARD_NOTES_ROW_HOOKS.join(", ")}) *)`;
+
 export const PROCORE_SELECTORS = {
   // Login page - Procore uses a two-step login flow
   login: {
@@ -174,13 +199,136 @@ export const PROCORE_SELECTORS = {
           ],
         },
         /**
+         * STRUCTURAL ANCHOR for the Notes card, used when none of `section.precise` matches — AND the
+         * real add-a-note control, registered again below as `addButton.precise[0]`.
+         *
+         * Confirmed against a live Bid Board project (2026-08-18): none of the `aid-notes` /
+         * `data-qa="notes-section"` guesses above exist on the page, so the automation fell through to
+         * `loose` and correctly refused. The add-a-note control is an icon button whose SVG carries
+         * Procore's own QA hook:
+         *
+         *   <button><span class="StyledContent-core-12_53_0__sc-…"><svg data-qa="ci-Plus" name="Plus">
+         *
+         * `data-qa` is the only durable part. The styled-components class has the component-library
+         * VERSION baked into it (`core-12_53_0`) and `fYTJkl` / `f45h` are generated hashes — all three
+         * churn on every Procore release, so none of them may be used as a hook.
+         *
+         * On its own this selector is NOT specific enough to act on directly against the page — other
+         * cards may render the same "+" icon — which is why it is used two different ways rather than
+         * one:
+         *   1. as the UNIQUENESS CONSTRAINT on the climb (resolveNotesSectionByAnchor climbs from
+         *      `sectionLabel` and keeps the OUTERMOST ancestor still containing EXACTLY ONE of these).
+         *      Exactly-one is what makes the resolved container a single card: the moment the climb
+         *      reaches a wrapper holding a neighbouring card, that wrapper holds two "+" and the climb
+         *      stops below it. It used to be the thing climbed FROM, which is how a decoy "+" in
+         *      another card walked the automation into that card — see `sectionLabel`.
+         *   2. as the `addButton.precise` candidate searched for AFTER the section above resolves,
+         *      because once scoped inside a validated container the "other cards" ambiguity is gone —
+         *      and after (1) that container provably holds exactly one, so the click cannot be
+         *      ambiguous either. Both roles are declared here, once, as the same literal string, so a
+         *      Procore change to this button updates both at once rather than drifting.
+         */
+        sectionAnchor: BIDBOARD_NOTES_ADD_BUTTON_ANCHOR,
+        /**
+         * The ONLY hooks the automation acts on when the Notes card was found by the structural climb rather than
+         * by a precise card hook. That climb proves the card holds exactly one "+", not that it holds nothing else,
+         * so the generic tiers (a bare contenteditable, a "+"-text button) could reach a neighbouring card inside
+         * the same container. Only hooks confirmed on the live page are specific enough to act on there; the Create
+         * control, never confirmed, is found by climbing from the confirmed input instead (resolveNoteCreateControl).
+         */
+        confirmed: {
+          addButton: BIDBOARD_NOTES_ADD_BUTTON_ANCHOR,
+          input: BIDBOARD_NOTES_INPUT_CONFIRMED,
+        },
+        /**
+         * The Notes card's own label — where the climb STARTS.
+         *
+         * Anchoring the climb here rather than on the "+" is what keeps the resolved card the RIGHT
+         * card. Climbing from "+" meant any decoy "+" earlier in DOM order (Procore's separate
+         * "Internal Notes" feature ships one) could climb to a wrapper holding BOTH cards, whose
+         * "Notes" label belongs to the other one — observed in real Chromium putting the note in the
+         * wrong card and reporting success. From the label there is no such degree of freedom.
+         *
+         * Anchored `^…$`, so it cannot match "Internal Notes" — a different Procore feature whose card
+         * would otherwise be indistinguishable. The optional trailing group tolerates a COUNT SUFFIX:
+         * Procore appends counts to labels elsewhere in this codebase (the Bid Board tab's " (N)"
+         * suffix needed the same treatment), and a plain `:text-is("Notes")` is exact, so "Notes (3)"
+         * would make the whole mechanism inert.
+         *
+         * Verified against real Chromium (not assumed) — `tests/bidboard-notes-dom.test.ts` asserts
+         * every line of this against `page.setContent`:
+         *   "Notes" ✓   "Notes (3)" ✓   "Notes 3" ✓   "Notes3" ✓   "  Notes  " ✓
+         *   "Internal Notes" ✗   "Notes to self" ✗
+         * Deliberately written with `[(]`/`[)]`/`[0-9]` character classes and ` *` instead of `\(`,
+         * `\d` and `\s`: Playwright unescapes the quoted argument itself, so a backslash in the pattern
+         * has to survive BOTH the JS string literal and Playwright's parser (`\s` has to be written
+         * `\\\\s` here). Character classes need no backslash at all, so there is nothing to get wrong.
+         *
+         * A count BADGE (`<h3>Notes<span>3</span></h3>`) matches too — Playwright's text engines match
+         * an element's own immediate text node, which is "Notes". Also verified, not assumed.
+         */
+        sectionLabel: BIDBOARD_NOTES_LABEL,
+        /**
+         * Proof that a container holds ANOTHER card — the card BOUNDARY the structural climb stops at.
+         *
+         * Exactly-one-"+" only stops the climb below a neighbour that has its own "+". A neighbour without one (a
+         * Tasks card, a details card) let the climb widen to the shared column, and the card the automation then
+         * read and acted in was the column (Codex P1 on #73). Two signals, both MONOTONE as the container widens,
+         * so they are hard stops like the others:
+         *   1. a heading that is not the Notes label and does not contain it — another card's title. Verified in
+         *      real Chromium: `<h3>Notes</h3>`, `<h3><span>Notes</span></h3>`, `<h3>Notes<span>3</span></h3>` are
+         *      excluded; `<h3>Tasks</h3>` and an `Internal Notes` heading are counted.
+         *   2. a text-entry field. Read BEFORE the "+" is clicked, when the Notes composer is not open, so any field
+         *      is someone else's — and that includes a field shaped like the confirmed note input: excluding it
+         *      would let the climb widen over a neighbour whose field the input lookup could then type into. The
+         *      MUI aria-hidden shadow textarea is not a field. (An always-open Notes composer only narrows the
+         *      result, and the editor lookup then declines inside it; it can never widen it.)
+         * Neither counts INSIDE a note row (`BIDBOARD_NOTES_ROW_HOOKS`): an author `<h6>` in a row is Notes content, and
+         * counting it stopped the climb at the header, which does not hold the rows (CodeRabbit on 6e05da3). Rows
+         * this cannot recognise are caught after the stop instead — see `sectionRow` and the climb.
+         */
+        sectionForeignCard: `:is(h1, h2, h3, h4, h5, h6, [role="heading"]):not(${BIDBOARD_NOTES_LABEL}):not(:has(${BIDBOARD_NOTES_LABEL}))${NOT_IN_NOTE_ROW}, textarea:not([aria-hidden="true"])${NOT_IN_NOTE_ROW}, [contenteditable="true"]${NOT_IN_NOTE_ROW}`,
+        /**
+         * Note rows by note-specific hooks, for the check after a card-boundary stop: rows in the stop container
+         * that the resolved one lacks mean the resolved one is the header, so the climb declines.
+         */
+        sectionRow: BIDBOARD_NOTES_ROW_HOOKS.join(", "),
+        /**
          * Anything inside a resolved "Notes section" that proves it is NOT the Notes card but a wrapper
          * that swallowed the rest of the page. A container matching this is refused outright.
          */
         sectionContamination: 'textarea[name="description"], [name*="description" i], button.aid-addNewProject, button:has-text("Create New Project")',
+        /**
+         * PAGE-LEVEL LANDMARKS — a second, independent reason to refuse a container for being too wide.
+         *
+         * `sectionContamination` can only fire while Procore is rendering the description as a real
+         * `textarea[name=…]`, and Procore renders that field READ-ONLY until Edit is clicked. With the
+         * textarea absent, contamination is silent and an unbounded climb resolves to `<body>` —
+         * observed, in real Chromium, as `{"ok":true,"id":"BODY"}`. These landmarks do not depend on
+         * the description being editable: a container that has swallowed the app's navigation, its
+         * tab bar or its `<main>` region is page-level whatever else is on screen.
+         *
+         * Deliberately NOT including `header`: a Notes CARD may legitimately use `<header>` for its own
+         * title row, and rejecting that would leave the automation permanently refusing.
+         */
+        sectionPageLevelLandmark: 'main, [role="main"], nav, [role="navigation"], [role="banner"], [role="tablist"]',
+        /**
+         * The container ITSELF being a page root. A CSS `.locator()` only ever searches DESCENDANTS, so
+         * the landmark selector above cannot see that the container it is being run on IS `<body>`;
+         * this xpath matches the node itself and nothing else. Counting it costs ~1ms — deliberately
+         * not `evaluate(el => el.tagName)`, which on a locator that resolves to NOTHING (one climb past
+         * `<html>` does exactly that) blocks for the full 30s default timeout.
+         */
+        sectionSelfPageLevel: 'xpath=self::html|self::body|self::main',
         /** The "+" add-a-note control inside the Notes section. */
         addButton: {
           precise: [
+            // CONFIRMED (2026-08-18) — the same real control `sectionAnchor` climbs from, searched for
+            // again here because this list is consulted separately, scoped inside the already-resolved
+            // section. Listed first: it is the one hook known to exist on the live page; the four
+            // guesses below have not been seen on it and stay only in case an older Bid Board layout
+            // still uses them.
+            BIDBOARD_NOTES_ADD_BUTTON_ANCHOR,
             'button.aid-add-note',
             '[class*="aid-add-note"]',
             'button[data-qa="qa-add-note-button"]',
@@ -203,10 +351,19 @@ export const PROCORE_SELECTORS = {
          */
         input: {
           precise: [
+            // CONFIRMED against a live project (2026-08-18). MUI renders a multiline TextField as TWO
+            // textareas — the real one, and an aria-hidden readonly shadow copy it uses to measure
+            // height. The shadow has no placeholder and no name, so it cannot match this selector; the
+            // `:not([aria-hidden="true"])` is belt-and-braces, because filling the shadow would be
+            // SILENT (it is readonly) and would surface only as an empty note at verify time.
+            //
+            // Deliberately NOT `textarea[name="value"]` on its own: `value` is a generic MUI field name
+            // that says nothing about this being the note body.
+            BIDBOARD_NOTES_INPUT_CONFIRMED,
             'textarea[name="note"]',
             'textarea[name="body"]',
             'textarea[name="content"]',
-            'textarea[placeholder*="note" i]',
+            'textarea[placeholder*="note" i]:not([aria-hidden="true"])',
             '[role="textbox"][contenteditable="true"]',
           ],
           scopedOnly: ['div[contenteditable="true"]'],
@@ -241,13 +398,7 @@ export const PROCORE_SELECTORS = {
          * instead of trusting the first hit, so a wrong match here can only add noise, never hide an
          * existing note (which would post a duplicate).
          */
-        item: [
-          'div.aid-note',
-          '[class*="aid-note-item"]',
-          '[data-qa="note-item"]',
-          '[data-testid="note-item"]',
-          'li',
-        ],
+        item: [...BIDBOARD_NOTES_ROW_HOOKS, 'li'],
       },
     },
   },

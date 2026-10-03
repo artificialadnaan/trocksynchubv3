@@ -29,8 +29,10 @@
  *    read first and the step skips when the marker is already present in this project's Notes.
  *    Without it a retry, an ADOPTED pre-existing project, or a duplicate create command stacks copies
  *    of the same ~8 KB note.
- * 3. LEAVES THE PAGE CLEAN. Once anything has been typed, every exit path cancels the editor. The
- *    page is shared: the document sync runs on it next, under the same browser lock.
+ * 3. LEAVES THE PAGE CLEAN. Once the add control has been CLICKED, every exit path dismisses whatever
+ *    it opened — not only once something has been typed, because a click that opened the wrong thing
+ *    leaves that thing open just the same. The page is shared: the document sync runs on it next,
+ *    under the same browser lock.
  * 4. NEVER THROWS. Every exit is a result object. Posting a note is strictly less important than
  *    creating the project (see the fail-open wrapper in createBidBoardProjectFromDeal).
  *
@@ -65,6 +67,20 @@ const SECTION_TIMEOUT_MS = 15000;
 const CONTROL_TIMEOUT_MS = 10000;
 const VERIFY_TIMEOUT_MS = 10000;
 const OVERALL_TIMEOUT_MS = 90000;
+/**
+ * Bound on the ONE auto-waiting call in readNoteTextsDetailed. See the comment there: `innerText()` on
+ * a locator that resolves to nothing costs 30s (measured), which is three times the entire verify
+ * window it runs inside.
+ */
+const NOTE_TEXT_READ_TIMEOUT_MS = 5000;
+/**
+ * Bound on the structural climb. Every query in it is a `count()` (~1ms), so this is not a wait — it is
+ * the cap on how many LABEL CANDIDATES get walked on a pathological page, and it is clamped by the
+ * caller's remaining budget so the climb cannot outlive the step that owns the browser lock.
+ */
+const ANCHOR_RESOLVE_TIMEOUT_MS = 5000;
+/** Between passes of the combined precise + structural section poll in resolveNotesSection. */
+const SECTION_POLL_INTERVAL_MS = 250;
 
 /**
  * Defensive cap applied immediately before typing. The CRM already caps the note (MAX_NOTE_CHARS), but
@@ -340,7 +356,10 @@ async function firstVisible(
  * hiding an existing note and posting a duplicate. Union means a wrong `item` match can only add
  * noise, and the marker is still found through the container's text.
  */
-export async function readNoteTextsDetailed(section: Locator): Promise<{ texts: string[]; failed: boolean }> {
+export async function readNoteTextsDetailed(
+  section: Locator,
+  options?: { timeoutMs?: number },
+): Promise<{ texts: string[]; failed: boolean }> {
   const texts: string[] = [];
   let failed = false;
   for (const selector of PROCORE_SELECTORS.bidboard.newUi.notes.item) {
@@ -356,7 +375,15 @@ export async function readNoteTextsDetailed(section: Locator): Promise<{ texts: 
       else texts.push(...got);
     }
   }
-  const sectionText = await section.innerText().catch(() => null);
+  // EXPLICITLY BOUNDED. `innerText()` is the one call in here that AUTO-WAITS: measured against real
+  // Chromium, on a locator resolving to zero elements `count()` and `isVisible()` return in ~1ms while
+  // `innerText()` blocks for the full 30s default before throwing. This runs inside the verify loop,
+  // whose whole window is 10s, and it holds the GLOBAL browser lock while it does — so one detached
+  // section would blow a 10s budget out to 30s per iteration. The timeout only bounds the wait; a
+  // section that IS there still answers immediately.
+  const sectionText = await section
+    .innerText({ timeout: Math.max(1, options?.timeoutMs ?? NOTE_TEXT_READ_TIMEOUT_MS) })
+    .catch(() => null);
   if (sectionText === null) failed = true;
   else if (sectionText) texts.push(sectionText);
   // `failed` exists so a caller can tell "this project has no CRM note" from "we could not read the
@@ -378,11 +405,29 @@ async function isPlausibleNotesSection(section: Locator): Promise<boolean> {
   // FAIL CLOSED. `.catch(() => 0)` here used to mean "the contamination query blew up, therefore the
   // container is clean" — an unknown converted into the favourable answer, on the check that decides
   // whether it is safe to act inside this element at all. An unreadable container is not a safe one.
-  const contaminated = await section
-    .locator(PROCORE_SELECTORS.bidboard.newUi.notes.sectionContamination)
+  return (await isPlausibleNotesSectionDetailed(section)) === true;
+}
+
+/**
+ * The same contamination verdict, with "could not tell" kept as `null` instead of folded into `false`.
+ *
+ * The boolean wrapper above is right for its callers (production declines on either, and a bare boolean
+ * keeps the precise-tier and dialog checks simple), but the structural climb has to tell the two apart:
+ * "this container holds the description field" is a diagnosis about the PAGE, while "the query threw" is
+ * a diagnosis about the RUN, and an operator reading the prober acts on them differently. This module
+ * already carries `VisibleMatch.probeFailed` for exactly this distinction.
+ */
+async function isPlausibleNotesSectionDetailed(section: Locator): Promise<boolean | null> {
+  const contaminated = await countWithin(section, PROCORE_SELECTORS.bidboard.newUi.notes.sectionContamination);
+  return contaminated === null ? null : contaminated === 0;
+}
+
+/** `count()` inside a container, with a failed query kept as `null` rather than collapsed into 0. */
+async function countWithin(container: Locator, selector: string): Promise<number | null> {
+  return container
+    .locator(selector)
     .count()
-    .catch(() => -1);
-  return contaminated === 0;
+    .catch(() => null);
 }
 
 /**
@@ -395,17 +440,383 @@ async function isPlausibleNotesSection(section: Locator): Promise<boolean> {
  * verdict.
  */
 export type NotesSectionResolution =
+  /**
+   * `structural`: found by the label climb rather than a precise card hook. The climb proves the container holds
+   * exactly one "+", not that it holds nothing else, so every later step acts ONLY on confirmed hooks.
+   */
+  | { ok: true; locator: Locator; selector: string; structural: boolean }
+  | {
+      ok: false;
+      reason: "not-found" | "loose-only" | "contaminated" | "unreadable";
+      selector: string | null;
+      message: string;
+    };
+
+/**
+ * How many levels above the "Notes" label the card may sit. Bounded on purpose: an unbounded climb ends
+ * at <body>, which is precisely the page-sized wrapper this whole mechanism exists to avoid. Eight
+ * covers the observed nesting (h3 > header > card > …) with slack for a layout change, and is the LAST
+ * line of defence rather than the first — the constraints below normally stop the climb long before it.
+ */
+const ANCHOR_CLIMB_LIMIT = 8;
+/** Bound on how many "Notes" labels are considered, so a page full of them cannot spin. */
+const LABEL_CANDIDATE_LIMIT = 12;
+
+/**
+ * Mirrors `NotesSectionResolution`'s ok/reason shape rather than a bare `{locator,selector} | null`,
+ * because a bare null erases the difference between "never found a usable container at all", "found one,
+ * and it's too wide" and "the queries themselves are failing" — the middle one is an actionable
+ * diagnosis (a page-level wrapper problem) and the last one means RE-RUN, not "go find a new selector".
+ * A plain not-found/loose-only report would hide both from the prober and from whoever reads its output
+ * to pick real Procore hooks.
+ */
+export type NotesAnchorResolution =
   | { ok: true; locator: Locator; selector: string }
-  | { ok: false; reason: "not-found" | "loose-only" | "contaminated"; selector: string | null; message: string };
+  | { ok: false; reason: "contaminated"; selector: string }
+  | { ok: false; reason: "unreadable"; selector: string | null }
+  | { ok: false; reason: "not-found" };
+
+/**
+ * Why a candidate container was rejected. `too-narrow` is the ONLY soft one — it means "keep climbing".
+ *
+ * The other three are HARD stops, and that is a property of the page, not a convention: every one of
+ * them is MONOTONE as the container widens. A wider container contains a superset of elements, so once
+ * it holds two "+" it cannot go back to one; once it holds the description field it keeps holding it;
+ * once it holds a page landmark it keeps holding that. Continuing past any of them could only produce a
+ * worse match than the one just rejected.
+ */
+type ClimbRejection = "too-narrow" | "too-many-anchors" | "contaminated" | "page-level" | "foreign-card" | "unreadable";
+
+/**
+ * Is this container acceptable as THE Notes card? Every check fails CLOSED, and "could not tell" is kept
+ * separate from "no" so the caller can report it as such.
+ */
+async function classifyNotesCandidate(container: Locator): Promise<ClimbRejection | "ok"> {
+  const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
+  // EXACTLY ONE add control. Not "at least one": a container holding two is a container holding two
+  // CARDS, and clicking "the first visible +" inside it is how the note ended up in Procore's Internal
+  // Notes card in the reviewer's real-Chromium run. Exactly-one also makes the later addButton lookup
+  // unambiguous by construction rather than by luck.
+  //
+  // VISIBLE ones only (Codex P2 on #73). Procore's SPA renders hidden responsive/template copies of controls —
+  // see MAX_NODES_PER_SELECTOR — and a raw count read a card holding one visible "+" and its hidden twin as two
+  // cards, so the climb stopped at the header (or nothing) and the step declined, or read the header alone. The
+  // add-button lookup already takes the first VISIBLE "+", so one visible "+" keeps that click unambiguous. The
+  // two-card wrapper stays stopped: a neighbour's visible "+" still counts, and a neighbour whose "+" is hidden
+  // is caught by `sectionForeignCard` (its title or its field) instead.
+  const anchors = await container
+    .locator(selectors.sectionAnchor)
+    .filter({ visible: true })
+    .count()
+    .catch(() => null);
+  if (anchors === null) return "unreadable";
+  if (anchors === 0) return "too-narrow";
+  if (anchors > 1) return "too-many-anchors";
+
+  // SELF check first, and by tagName rather than by contamination. Relying on contamination to keep the
+  // climb off <body> only works while Procore renders the description as a real textarea — it renders it
+  // read-only until Edit is clicked, and with the textarea absent the climb resolved to `<body>` in real
+  // Chromium. A `.locator()` only ever searches descendants, so this is the only way to ask about the
+  // container itself.
+  const selfPageLevel = await countWithin(container, selectors.sectionSelfPageLevel);
+  if (selfPageLevel === null) return "unreadable";
+  if (selfPageLevel > 0) return "page-level";
+
+  const landmarks = await countWithin(container, selectors.sectionPageLevelLandmark);
+  if (landmarks === null) return "unreadable";
+  if (landmarks > 0) return "page-level";
+
+  const clean = await isPlausibleNotesSectionDetailed(container);
+  if (clean === null) return "unreadable";
+  if (!clean) return "contaminated";
+
+  // The CARD BOUNDARY (Codex P1 on #73). Exactly-one-"+" cannot see a neighbouring card that has no "+", so
+  // without this the climb widened to the shared column and every later read and lookup ran over the
+  // neighbour too. Another card's title or text field in scope means this container is wider than the card.
+  const foreign = await countWithin(container, selectors.sectionForeignCard);
+  if (foreign === null) return "unreadable";
+  return foreign > 0 ? "foreign-card" : "ok";
+}
+
+/**
+ * Resolve the Notes card structurally, by climbing from its LABEL, when no `section.precise` hook exists.
+ *
+ * Why this exists: every `section.precise` candidate was an educated guess at Procore's markup, and a
+ * live project (2026-08-18) has none of them — so production fell through to `loose` and refused. More
+ * guesses would only move the next failure, because the guessed hooks (`aid-notes`, styled-components
+ * hashes) are exactly the things Procore churns.
+ *
+ * THE RULE: start at the "Notes" label; climb; keep the OUTERMOST ancestor that still contains EXACTLY
+ * ONE visible add-button anchor, is not itself a page root, contains no page-level landmark, passes the
+ * contamination check, and holds no other card's title or text field (`sectionForeignCard`, the card
+ * boundary). Stop at the first ancestor that fails any of those and return the last one that passed; if
+ * the very first container holding the "+" already fails, decline.
+ *
+ * Both halves are load-bearing, and both replace a rule that was observed failing in real Chromium:
+ *
+ *   • FROM THE LABEL, not from the "+". Climbing from any "+" let a decoy in a neighbouring card (Procore
+ *     ships a separate "Internal Notes" feature with its own "+") walk up to a wrapper holding BOTH
+ *     cards, whose "Notes" label belongs to the OTHER one. The note was posted into Internal Notes and
+ *     reported `posted: true`, and the idempotency read then covered the same wrong container, so the
+ *     project would be skipped forever. Starting at the real label removes that degree of freedom
+ *     entirely — a "+" in another card is no longer reachable.
+ *   • OUTERMOST, not innermost. Innermost-labelled meant that for the very ordinary
+ *     `<div card><div header><h3>Notes</h3><button>+</button></div><div body>…notes…</div></div>` the
+ *     answer was the HEADER: the note rows sit outside it, so the idempotency guard was blind (duplicate
+ *     ~8 KB notes on every run) and the post-save verify could not see the note it had just posted
+ *     (every duplicate reported as a failure, so every retry added another). Widening past the header
+ *     reaches the card, which holds the label AND the rows.
+ *
+ * And exactly-one-"+" is what keeps OUTERMOST safe: the wrapper holding two cards holds two "+", so the
+ * climb stops below it. That is the same fact that kills the wrong-card case a second time over.
+ *
+ * A Notes card with NO notes yet is unaffected: the "+" is how the first note gets added, so it is
+ * present either way. A page whose ONLY "+" is this one climbs on the landmark/self checks and the depth
+ * bound instead — see `sectionPageLevelLandmark`.
+ */
+export async function resolveNotesSectionByAnchor(
+  page: Scope,
+  options?: { timeoutMs?: number },
+): Promise<NotesAnchorResolution> {
+  const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
+  // Every query below is a `count()` — measured at ~1ms against real Chromium — so this deadline is not
+  // a wait, it is a cap on how many CANDIDATES get walked. Checked between candidates only, so the first
+  // one always gets a complete attempt: a budget that expired before any work was done would report
+  // "not-found" for a page nobody looked at.
+  const deadline = Date.now() + Math.max(0, options?.timeoutMs ?? ANCHOR_RESOLVE_TIMEOUT_MS);
+  const labels = page.locator(selectors.sectionLabel);
+  const total = await labels.count().catch(() => null);
+  if (total === null) return { ok: false, reason: "unreadable", selector: selectors.sectionLabel };
+
+  let contaminatedSelector: string | null = null;
+  let sawUnreadable = false;
+  // EVERY label is walked, not just up to the first card: a second, distinct "Notes" card is an ambiguity this
+  // resolver cannot settle, and returning whichever came first in DOM order is a coin toss over which card gets
+  // the note — and which card the idempotency read covers (adversarial review of #73, finding 2).
+  const found: Array<{ locator: Locator; depth: number }> = [];
+  // Labels that were never examined (the budget ran out, or past LABEL_CANDIDATE_LIMIT) could each be that second
+  // card, so with a card in hand they are an unknown, not an absence.
+  let unexamined = total > LABEL_CANDIDATE_LIMIT;
+  for (let i = 0; i < Math.min(total, LABEL_CANDIDATE_LIMIT); i += 1) {
+    if (i > 0 && Date.now() >= deadline) {
+      unexamined = true;
+      break;
+    }
+    const label = labels.nth(i);
+    const labelVisible = await label.isVisible().catch(() => null);
+    if (labelVisible === null) {
+      sawUnreadable = true;
+      continue;
+    }
+    if (!labelVisible) continue;
+
+    let node: Locator = label;
+    let best: { locator: Locator; depth: number } | null = null;
+    let climbUnreadable = false;
+    for (let depth = 1; depth <= ANCHOR_CLIMB_LIMIT; depth += 1) {
+      node = node.locator("xpath=..");
+      // One climb past <html> resolves to the document node, which is not an element — Playwright
+      // reports it as zero matches. Checked explicitly, because every check below would then be
+      // answering about nothing at all.
+      const exists = await node.count().catch(() => null);
+      if (exists === null) {
+        climbUnreadable = true;
+        break;
+      }
+      // Zero is not "the top of the page" here: <html> is a page root and hard-stops the climb before it could be
+      // passed. An ancestor that VANISHES between two counts is an SPA re-render, and stopping on it would hand back
+      // `best` — the header row, if the card was the level that vanished — blinding the idempotency read (adversarial
+      // review of #73). Above a good ancestor that is an unknown, and an unknown fails closed.
+      if (exists === 0) {
+        if (best) climbUnreadable = true;
+        break;
+      }
+
+      const verdict = await classifyNotesCandidate(node);
+      if (verdict === "ok") {
+        // Widen, keeping this as the best so far. The FIRST ok establishes the floor, so a hard stop
+        // higher up returns a real card rather than nothing.
+        best = { locator: node, depth };
+        continue;
+      }
+      // "too-narrow" (no "+" in scope yet) is the only verdict that means keep going: the label may sit
+      // in a title row whose sibling holds the button. It is monotone in the same way — once a container
+      // contains the "+", no wider one stops containing it — so this cannot loop back on itself.
+      if (verdict === "too-narrow" && !best) continue;
+      if (verdict === "unreadable") climbUnreadable = true;
+      if (verdict === "contaminated" && !best && !contaminatedSelector) {
+        contaminatedSelector = describeClimb(depth, "contaminated");
+      }
+      if (verdict === "page-level" && !best && !contaminatedSelector) {
+        contaminatedSelector = describeClimb(depth, "page-level");
+      }
+      // The label's own row already shares a container with another card: there is no Notes-only container to
+      // act in, so this label yields nothing (fail closed) rather than the shared one.
+      if (verdict === "foreign-card" && !best && !contaminatedSelector) {
+        contaminatedSelector = describeClimb(depth, "foreign-card");
+      }
+      // A boundary stop ABOVE a good ancestor: was what stopped us a neighbouring card, or Notes content the
+      // boundary selector could not recognise as such? If the stop container holds note rows or the CRM marker
+      // that `best` does not, `best` is the HEADER — returning it blinds the idempotency read and the post-save
+      // verify, and every run posts another duplicate (CodeRabbit on 6e05da3). Decline instead.
+      if (verdict === "foreign-card" && best) {
+        const outside = await notesContentOutside(node, best.locator);
+        if (outside === null) {
+          climbUnreadable = true;
+        } else if (outside) {
+          // The WHOLE resolution declines, not just this label. This label found the real Notes card and could
+          // not scope it safely; moving on to the next "Notes" label would post into some other card while the
+          // real one — which may already hold the CRM note — is ignored (adversarial review of #73, finding 2).
+          return { ok: false, reason: "contaminated", selector: describeClimb(best.depth, "header-only") };
+        }
+      }
+      break;
+    }
+    // FAIL CLOSED on an unknown above a good ancestor. `best` may be the card's HEADER (the label's row, which holds
+    // the "+" but not the note rows); the query that failed was the one that would have widened it to the card. An
+    // unknown there is not "stop here": returning the header would blind the idempotency read and post a duplicate.
+    if (climbUnreadable) {
+      if (best) return { ok: false, reason: "unreadable", selector: describeClimb(best.depth, "ok") };
+      sawUnreadable = true;
+      continue;
+    }
+    if (best) {
+      // Two labels inside ONE card (a count badge, a label repeated in the card) climb to the same element; that
+      // is one card, not two.
+      let duplicate = false;
+      for (const card of found) {
+        const same = await card.locator
+          .and(best.locator)
+          .count()
+          .catch(() => null);
+        if (same === null) return { ok: false, reason: "unreadable", selector: describeClimb(best.depth, "ok") };
+        if (same > 0) duplicate = true;
+      }
+      if (!duplicate) found.push(best);
+    }
+  }
+  // Unknown BEFORE contaminated: a failed query may have hidden the real card while a decoy label produced the
+  // contaminated verdict, and the operator's next step differs (re-run, versus fix a wrapper). Both decline. It
+  // also outranks a card in hand: the label that could not be read may be a second one.
+  if (sawUnreadable || (found.length > 0 && unexamined)) {
+    return { ok: false, reason: "unreadable", selector: null };
+  }
+  if (found.length > 1) {
+    return { ok: false, reason: "contaminated", selector: `${found.length} "Notes" labels resolve to separate cards — ambiguous` };
+  }
+  if (found.length === 1) {
+    return { ok: true, locator: found[0].locator, selector: describeClimb(found[0].depth, "ok") };
+  }
+  if (contaminatedSelector) {
+    return { ok: false, reason: "contaminated", selector: contaminatedSelector };
+  }
+  return { ok: false, reason: "not-found" };
+}
+
+/**
+ * After a card-boundary stop: does the stop container hold Notes content — note rows, or the CRM marker — that
+ * the resolved container does not? `null` when a read failed (the caller fails closed on it).
+ *
+ * The marker half covers rows whose markup `sectionRow` does not recognise; its cost is that a neighbouring card
+ * quoting the marker also declines, which is a refusal reported as an error, never a skip and never a write.
+ */
+async function notesContentOutside(stop: Locator, best: Locator): Promise<boolean | null> {
+  const rowSelector = PROCORE_SELECTORS.bidboard.newUi.notes.sectionRow;
+  const rowsInStop = await countWithin(stop, rowSelector);
+  const rowsInBest = await countWithin(best, rowSelector);
+  if (rowsInStop === null || rowsInBest === null) return null;
+  if (rowsInStop > rowsInBest) return true;
+  const stopText = await stop.innerText({ timeout: NOTE_TEXT_READ_TIMEOUT_MS }).catch(() => null);
+  const bestText = await best.innerText({ timeout: NOTE_TEXT_READ_TIMEOUT_MS }).catch(() => null);
+  if (stopText === null || bestText === null) return null;
+  return hasMarkerNote([stopText]) && !hasMarkerNote([bestText]);
+}
+
+/**
+ * The human-readable description of a climb outcome. Reported in `matched.section`, logged, and shown by
+ * the prober — an operator reading "⇑2" knows the card was two levels above its label, which is the one
+ * fact that says whether the resolved container is the card or something wider.
+ */
+function describeClimb(
+  depth: number,
+  outcome: "ok" | "contaminated" | "page-level" | "foreign-card" | "header-only",
+): string {
+  const anchor = PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor;
+  const suffix =
+    outcome === "ok"
+      ? `outermost with exactly one visible ${anchor} and no other card in it`
+      : outcome === "contaminated"
+        ? `rejected: holds the Project Description or a Create New Project button`
+        : outcome === "foreign-card"
+          ? `rejected: also holds another card's title or text field`
+          : outcome === "header-only"
+            ? `rejected: note rows or the CRM marker sit outside it, so it is the card's header, not the card`
+            : `rejected: page-level container (a landmark, or <body>/<main> itself)`;
+  return `Notes label ⇑${depth} — ${suffix}`;
+}
 
 export async function resolveNotesSection(
   page: Scope,
-  options?: { timeoutMs?: number; projectLabel?: string },
+  options?: { timeoutMs?: number; deadlineAt?: number; projectLabel?: string },
 ): Promise<NotesSectionResolution> {
   const selectors = PROCORE_SELECTORS.bidboard.newUi.notes;
   const where = options?.projectLabel ? ` on project ${options.projectLabel}` : "";
-  const precise = await firstVisible(page, selectors.section.precise, options?.timeoutMs ?? SECTION_TIMEOUT_MS);
+  // The precise tier and the structural climb are tried TOGETHER on each pass, until the timeout. The precise
+  // hooks are guesses that the live page (2026-08-18) does not carry; polling them alone for the whole timeout
+  // before the climb added a guaranteed SECTION_TIMEOUT_MS to every post, holding the global browser lock. The
+  // poll is still a wait: a page that has not rendered its Notes card yet is looked at again, by both strategies.
+  const pollUntil = Date.now() + (options?.timeoutMs ?? SECTION_TIMEOUT_MS);
+  let precise: { locator: Locator; selector: string } | null = null;
+  let anchored: NotesAnchorResolution = { ok: false, reason: "not-found" };
+  for (;;) {
+    precise = await firstVisible(page, selectors.section.precise, 0);
+    if (precise) break;
+    anchored = await resolveNotesSectionByAnchor(page, {
+      timeoutMs:
+        options?.deadlineAt === undefined
+          ? ANCHOR_RESOLVE_TIMEOUT_MS
+          : Math.min(ANCHOR_RESOLVE_TIMEOUT_MS, Math.max(0, options.deadlineAt - Date.now())),
+    });
+    if (anchored.ok) {
+      return { ok: true, locator: anchored.locator, selector: anchored.selector, structural: true };
+    }
+    const now = Date.now();
+    if (now >= pollUntil || (options?.deadlineAt !== undefined && now >= options.deadlineAt)) break;
+    await new Promise((resolve) => setTimeout(resolve, SECTION_POLL_INTERVAL_MS));
+  }
   if (!precise) {
+    // Before reporting a refusal, try the structural anchor. It is attempted only AFTER the precise
+    // tier so a real hook (if Procore ever ships one) still wins on speed, and it is validated by the
+    // same contamination check as everything else — it is a different way to FIND the card, not a
+    // weaker standard for accepting one.
+    //
+    // `deadlineAt` is the caller's OVERALL step deadline, so the climb is clamped by what is left after
+    // the precise poll rather than getting a fresh budget of its own. Without it this ran unbounded and
+    // in full even when the step had ~0ms left, on a page held by the global browser lock.
+    // A structurally-located-but-too-wide card is a different, more actionable diagnosis than "nothing
+    // matched" — collapsing it into not-found/loose-only would send an operator hunting for a missing
+    // selector when the real problem is a page-level wrapper. Reported the same way the precise-tier
+    // contamination case is, below.
+    if (anchored.reason === "contaminated") {
+      return {
+        ok: false,
+        reason: "contaminated",
+        selector: anchored.selector,
+        // The selector is describeClimb's text, which names the actual rejection (the description / Create New
+        // Project, or a page-level container), so the message does not assume which one it was.
+        message: `Resolved "Notes section"${where} (${anchored.selector}) is not a usable Notes card — refusing to act inside it`,
+      };
+    }
+    // "We could not tell" is NOT "it is not there". Production declines on both (its safe direction),
+    // but they send an operator in opposite directions: re-run, versus go and find a new selector.
+    if (anchored.reason === "unreadable") {
+      return {
+        ok: false,
+        reason: "unreadable",
+        selector: anchored.selector,
+        message: `Could not determine whether a Notes section exists${where} — a DOM query failed mid-climb (the page may have re-rendered under us); refusing to act on an unknown, re-run the prober`,
+      };
+    }
     // Distinguish "nothing matched" from "only the loose text-shaped guesses matched". Production
     // refuses either way, but the operator needs to know which — the second means the docs-shaped
     // guess is on the page and a real structural hook has to be found to replace it.
@@ -433,7 +844,7 @@ export async function resolveNotesSection(
       message: `Resolved "Notes section"${where} (${precise.selector}) also contains the Project Description or a Create New Project button — refusing to act inside a page-level wrapper`,
     };
   }
-  return { ok: true, locator: precise.locator, selector: precise.selector };
+  return { ok: true, locator: precise.locator, selector: precise.selector, structural: false };
 }
 
 /**
@@ -485,10 +896,15 @@ export async function resolveNoteEditorInput(
   page: Scope,
   section: Locator,
   timeoutMs: number,
+  options?: { confirmedOnly?: boolean },
 ): Promise<NoteEditorResolution> {
   const scopes = await resolveEditorScopes(page, section);
+  const notes = PROCORE_SELECTORS.bidboard.newUi.notes;
+  // A structurally-found card may share its container with other cards, so only the CONFIRMED note field is
+  // specific enough to type into there — never a bare contenteditable that another card could also render.
+  const candidates = options?.confirmedOnly ? [notes.confirmed.input] : actableCandidates(notes.input);
   const input = await firstVisibleAcross(
-    scopes.map(({ scope }) => ({ scope, candidates: actableCandidates(PROCORE_SELECTORS.bidboard.newUi.notes.input) })),
+    scopes.map(({ scope }) => ({ scope, candidates })),
     timeoutMs,
   );
   if (!input) return { scopes, input: null, editorScope: null, editorScopeLabel: null };
@@ -501,11 +917,95 @@ export async function resolveNoteEditorInput(
   };
 }
 
-/** Resolve the Create control INSIDE the already-fixed editor scope. Polled, like every other lookup. */
+/** How far above the note field the Create control may sit (field → form → composer → …). */
+const CREATE_CLIMB_LIMIT = 6;
+/** A text-entry field. A second one inside an ancestor means the climb has left the note composer. */
+const EDITABLE_FIELD = 'textarea:not([aria-hidden="true"]), [contenteditable="true"]';
+
+/**
+ * Where the Create climb may look, for a note typed into a STRUCTURALLY-found card.
+ *
+ * `within` is the container the note field was found in (the resolved Notes card, or a validated dialog): the climb
+ * never examines an ancestor outside it. `notesSection` is the resolved Notes card, whose "+" marks the composer's
+ * upper edge. Both are required — the composer edge alone let the climb leave the card whenever the "+" was gone.
+ */
+export type CreateClimbBounds = { nearInput: Locator; within: Locator; notesSection: Locator };
+
+/**
+ * The Create control for a note typed into a STRUCTURALLY-found card: the innermost ancestor of the note field that
+ * holds a visible Create candidate, provided that ancestor is still INSIDE the composer — it holds neither the
+ * card's "+" nor a second text field — and INSIDE `within`, and holds exactly ONE visible Create candidate. Two
+ * Creates are ambiguous. Either way it declines — Create was never confirmed on the live page, and the card's
+ * container may hold other cards, so "the first Create in the card" is not specific enough to click.
+ *
+ * Two hard edges, both from the adversarial review of #73 (finding 1). The "+" edge only exists while the "+" does:
+ * Procore-style UIs unmount the add control while composing, and with it gone the climb rose out of the card and
+ * pressed a neighbouring card's Create whenever the composer's own Create was late or was labelled "Post". So a
+ * vanished "+" is a stop (the composer cannot be bounded), and no ancestor outside `within` is ever examined.
+ */
+async function resolveCreateNearInput(
+  bounds: CreateClimbBounds,
+): Promise<{ locator: Locator; selector: string } | null | "unreadable"> {
+  const notes = PROCORE_SELECTORS.bidboard.newUi.notes;
+  const candidates = actableCandidates(notes.createButton).join(", ");
+  const cardAnchors = await bounds.notesSection.locator(notes.sectionAnchor).count().catch(() => null);
+  if (cardAnchors === null) return "unreadable";
+  if (cardAnchors === 0) return null;
+  let node = bounds.nearInput;
+  for (let depth = 1; depth <= CREATE_CLIMB_LIMIT; depth += 1) {
+    node = node.locator("xpath=..");
+    const exists = await node.count().catch(() => null);
+    if (exists === null) return "unreadable";
+    if (exists === 0) return null;
+    // INSIDE `within` (one of its descendants) or `within` itself — never above it.
+    const isWithin = await node.and(bounds.within).count().catch(() => null);
+    const insideWithin = await bounds.within.locator("*").and(node).count().catch(() => null);
+    if (isWithin === null || insideWithin === null) return "unreadable";
+    if (isWithin === 0 && insideWithin === 0) return null;
+    // The COMPOSER boundary: an ancestor holding the Notes "+" is the card (or wider), where a neighbouring card's
+    // Create is reachable even without a text field of its own. Create must be found strictly inside the composer.
+    const anchors = await node.locator(notes.sectionAnchor).count().catch(() => null);
+    if (anchors === null) return "unreadable";
+    if (anchors > 0) return null;
+    const fields = await node.locator(EDITABLE_FIELD).count().catch(() => null);
+    if (fields === null) return "unreadable";
+    if (fields > 1) return null;
+    const css = node.locator(candidates).filter({ visible: true });
+    const cssCount = await css.count().catch(() => null);
+    if (cssCount === null) return "unreadable";
+    if (cssCount > 1) return null;
+    if (cssCount === 1) return { locator: css.first(), selector: `note field ⇑${depth} — ${candidates}` };
+    const role = node.getByRole(CREATE_BUTTON_ROLE.role, { name: CREATE_BUTTON_ROLE.name }).filter({ visible: true });
+    const roleCount = await role.count().catch(() => null);
+    if (roleCount === null) return "unreadable";
+    if (roleCount > 1) return null;
+    if (roleCount === 1) return { locator: role.first(), selector: `note field ⇑${depth} — ${ROLE_MATCH_LABEL}` };
+    // `within` itself was just examined: there is nothing above it this climb may look at.
+    if (isWithin > 0) return null;
+  }
+  return null;
+}
+
+/**
+ * Resolve the Create control INSIDE the already-fixed editor scope. Polled, like every other lookup. With `nearInput`
+ * (a structurally-found card), it is found by climbing from the confirmed note field instead — see
+ * resolveCreateNearInput — and an unreadable step declines at once.
+ */
 export async function resolveNoteCreateControl(
   editorScope: Scope,
   timeoutMs: number,
+  options?: CreateClimbBounds,
 ): Promise<{ locator: Locator; selector: string } | null> {
+  if (options) {
+    const until = Date.now() + timeoutMs;
+    for (;;) {
+      const hit = await resolveCreateNearInput(options);
+      if (hit === "unreadable") return null;
+      if (hit) return hit;
+      if (Date.now() >= until) return null;
+      await new Promise((resolve) => setTimeout(resolve, SECTION_POLL_INTERVAL_MS));
+    }
+  }
   const hit = await firstVisibleAcross(
     [
       {
@@ -579,7 +1079,10 @@ export async function cancelEditor(page: Page, editor?: Locator): Promise<Cancel
   /** The most recent visibility reading: true = still open, false = gone, null = could not tell. */
   let lastReading: boolean | null = null;
 
-  for (let attempt = 1; attempt <= CANCEL_MAX_ATTEMPTS; attempt++) {
+  // Without an editor locator nothing can be verified, so extra presses are blind: they only add delay under the
+  // browser lock and can dismiss UI another job left open on the shared page. One Escape, then report unknown.
+  const maxAttempts = editor ? CANCEL_MAX_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     attempts = attempt;
     try {
       await page.keyboard.press("Escape");
@@ -661,12 +1164,27 @@ export async function postBidBoardProjectNote(
    */
   const actBudget = () => Math.max(1, Math.min(CONTROL_TIMEOUT_MS, remainingMs()));
   let hasTyped = false;
+  /**
+   * Whether the add control has been CLICKED. Cleanup used to be gated on `hasTyped` alone, which
+   * assumed the only thing a failure could leave behind was a draft. It is not: the click itself opens
+   * something, and if the editor is then not where we expect (the failure path immediately below it),
+   * whatever it opened is still open when the page is handed to the document sync under the same
+   * browser lock. Nothing was typed, so there is no draft to warn about — but the page still has to be
+   * put back.
+   */
+  let hasClickedAdd = false;
 
   /** Single exit for every failure: cancels a half-typed editor, then reports. Never throws. */
   const fail = async (message: string, screenshotName?: string): Promise<PostBidBoardNoteResult> => {
     if (screenshotName) {
       const path = await takeScreenshot(page, screenshotName).catch(() => "");
       if (path) message = `${message}; screenshot: ${path}`;
+    }
+    if (!hasTyped && hasClickedAdd) {
+      // Best-effort dismissal, and deliberately NOT reported: with nothing typed there is no locator to
+      // verify against, so cancelEditor can only answer "unknown" — and appending an unknown to every
+      // add-click failure would be noise that trains an operator to ignore the warning that matters.
+      await cancelEditor(page).catch(() => undefined);
     }
     if (hasTyped) {
       const cancel = await cancelEditor(page, typedEditor);
@@ -721,6 +1239,8 @@ export async function postBidBoardProjectNote(
     // the prober reaches the identical verdict by calling the same function.
     const section = await resolveNotesSection(page, {
       timeoutMs: stepBudget(SECTION_TIMEOUT_MS),
+      // The structural climb inside is clamped by the OVERALL step deadline, not by a fresh budget.
+      deadlineAt,
       projectLabel: projectId,
     });
     if (!section.ok) {
@@ -734,7 +1254,7 @@ export async function postBidBoardProjectNote(
     // FAIL CLOSED. An unreadable notes list is NOT an empty one: reading [] as "no marker present"
     // means "safe to post", and the cost of being wrong is another ~8 KB duplicate on the project,
     // repeated on every retry and on every adopt.
-    const existingNotes = await readNoteTextsDetailed(section.locator);
+    const existingNotes = await readNoteTextsDetailed(section.locator, { timeoutMs: stepBudget(NOTE_TEXT_READ_TIMEOUT_MS) });
     if (existingNotes.failed) {
       return await fail(
         `Could not read the existing notes on project ${projectId} — refusing to post in case a CRM activity note is already there`,
@@ -748,7 +1268,12 @@ export async function postBidBoardProjectNote(
 
     if (outOfTime()) return await fail(`Timed out before opening the note editor on project ${projectId}`);
 
-    const addButton = await find(section.locator, actableCandidates(selectors.addButton), CONTROL_TIMEOUT_MS);
+    // A structurally-found card: only the confirmed "+" (which the climb proved is the card's only one).
+    const addButton = await find(
+      section.locator,
+      section.structural ? [selectors.confirmed.addButton] : actableCandidates(selectors.addButton),
+      CONTROL_TIMEOUT_MS,
+    );
     if (!addButton) {
       return await fail(
         `Add-note control not found on project ${projectId} (selectors may need updating)`,
@@ -758,6 +1283,9 @@ export async function postBidBoardProjectNote(
     matched.addButton = addButton.selector;
 
     if (outOfTime()) return await fail(`Timed out before opening the note editor on project ${projectId}`);
+    // Set BEFORE the click, not after: a click that throws mid-flight (a detached node, a timeout) may
+    // still have landed and opened something, and the failure path has to put the shared page back.
+    hasClickedAdd = true;
     await addButton.locator.click({ timeout: actBudget() });
     await randomDelay(800, 1500);
 
@@ -779,7 +1307,9 @@ export async function postBidBoardProjectNote(
     // loose-only sections, contaminated containers, cross-deal mappings and deadline exhaustion — and
     // a note that doesn't post is a non-event, while filling the wrong field on a live Procore project
     // is not.
-    const editor = await resolveNoteEditorInput(page, section.locator, stepBudget(CONTROL_TIMEOUT_MS));
+    const editor = await resolveNoteEditorInput(page, section.locator, stepBudget(CONTROL_TIMEOUT_MS), {
+      confirmedOnly: section.structural,
+    });
     const input = editor.input;
     if (!input) {
       return await fail(
@@ -817,7 +1347,14 @@ export async function postBidBoardProjectNote(
     // Resolved only NOW, after the body is typed — a Procore editor may not render or enable Create
     // until the note is non-empty. Same shared helper the prober calls, so the scope fixing and the
     // polling cannot drift apart.
-    const createButton = await resolveNoteCreateControl(editorScope, stepBudget(CONTROL_TIMEOUT_MS));
+    const createButton = await resolveNoteCreateControl(
+      editorScope,
+      stepBudget(CONTROL_TIMEOUT_MS),
+      // Bounded by the container the field was found in AND by the resolved card's "+" — see resolveCreateNearInput.
+      section.structural
+        ? { nearInput: input.locator, within: editorScope as Locator, notesSection: section.locator }
+        : undefined,
+    );
     if (!createButton) {
       return await fail(
         `Note Create button not found on project ${projectId} (selectors may need updating)`,
@@ -852,7 +1389,13 @@ export async function postBidBoardProjectNote(
       // counts as STILL OPEN.
       const editorVisible = await input.locator.isVisible().catch(() => null);
       editorStillOpen = editorVisible !== false;
-      const rendered = editorStillOpen ? null : await readNoteTextsDetailed(section.locator);
+      // Bounded by what is left of the VERIFY window, not by its own default: this is the loop the
+      // measured 30s `innerText()` stall sits in, and it holds the global browser lock while it runs.
+      const rendered = editorStillOpen
+        ? null
+        : await readNoteTextsDetailed(section.locator, {
+            timeoutMs: Math.min(NOTE_TEXT_READ_TIMEOUT_MS, Math.max(1, verifyDeadline - Date.now())),
+          });
       // A failed verify read is not "not there yet" and not "there" — keep polling, and if the window
       // expires the step reports unverified, which is the pessimistic answer.
       if (rendered && !rendered.failed) {
