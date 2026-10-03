@@ -1135,6 +1135,57 @@ export const insertBidboardCreateOutboxSchema = createInsertSchema(bidboardCreat
 export type InsertBidboardCreateOutbox = z.infer<typeof insertBidboardCreateOutboxSchema>;
 export type BidboardCreateOutbox = typeof bidboardCreateOutbox.$inferSelect;
 
+// Durable outbound outbox for the approved-service-RFP handoff to TROCK Core, shaped like
+// bidboard_callback_outbox (per-row target_url, backoff, dead-lettering) — NOT like
+// bidboard_create_outbox.
+//
+// It is deliberately its OWN table rather than a row in bidboard_create_outbox. That table has no
+// command-kind column and its claim query has no type filter, so the Playwright worker would claim a
+// Core-shaped row and cast it to CreateFromRfpInput — creating a SECOND Procore project for a deal it
+// had already created. Its unique index on source_event_id is global too, so the two commands would
+// overwrite each other's payload and reset the real in-flight create to 'pending'.
+//
+// status: pending | sent | failed | dead.
+//   - 'failed' is TERMINAL and is also the state of a REFUSAL recorded before any POST (a
+//     HubSpot-sourced service RFP, or an office with no Core tenant — see officeTenantForPrefix).
+//     Such a row carries a NULL target_url because there is no destination for it at all; storing a
+//     fabricated URL would make a permanently-undeliverable row look drainable.
+//   - 'dead' is the attempt-ceiling dead-letter, matching the callback outbox.
+// A failed/dead row keeps its payload so it can be replayed by hand once the cause is fixed.
+export const serviceRfpCoreOutbox = pgTable("service_rfp_core_outbox", {
+  id: serial("id").primaryKey(),
+  sourceSystem: text("source_system").notNull(),
+  sourceDealId: text("source_deal_id").notNull(),
+  // No FK to rfp_approval_requests: this row is the durable record of what Core was (or was not) told,
+  // and a terminal refusal must outlive any cleanup of the request that produced it. Identity is the
+  // by-value triple in the unique index below.
+  rfpRequestId: integer("rfp_request_id").notNull(),
+  payload: jsonb("payload").notNull(),
+  targetUrl: text("target_url"),
+  status: text("status").notNull().default("pending"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  /** One more than the backoff-interval count, so the last declared retry can actually run; the DB
+   *  value wins at runtime. Kept in step with SERVICE_RFP_CORE_MAX_ATTEMPTS and migration 0025. */
+  maxAttempts: integer("max_attempts").notNull().default(6),
+  lastError: text("last_error"),
+  lastStatusCode: integer("last_status_code"),
+  /** Core's bid id from a 2xx, so a delivered row names the record it created. */
+  coreBidId: text("core_bid_id"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  sentAt: timestamp("sent_at"),
+}, (table) => [
+  // processRfpApproval is not idempotent and both entry points are fire-and-forget behind a 202, so a
+  // concurrent re-entry for one approval is possible. This unique triple is what makes that safe: the
+  // second insert conflicts, returns no row, and the caller skips the POST.
+  uniqueIndex("idx_service_rfp_core_outbox_request").on(table.sourceSystem, table.sourceDealId, table.rfpRequestId),
+  index("idx_service_rfp_core_outbox_pending").on(table.status, table.nextAttemptAt).where(sql`status = 'pending'`),
+]);
+export const insertServiceRfpCoreOutboxSchema = createInsertSchema(serviceRfpCoreOutbox).omit({ id: true, createdAt: true, sentAt: true });
+export type InsertServiceRfpCoreOutbox = z.infer<typeof insertServiceRfpCoreOutboxSchema>;
+export type ServiceRfpCoreOutbox = typeof serviceRfpCoreOutbox.$inferSelect;
+
 // RFP Reporting & Scheduled Email
 export const rfpChangeLog = pgTable("rfp_change_log", {
   id: uuid("id").defaultRandom().primaryKey(),

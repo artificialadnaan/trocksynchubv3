@@ -22,6 +22,7 @@ import {
   type BidBoardCreatedCallbackPayload,
   type RfpDeclinedCallbackPayload,
 } from './sync/bidboard-callback-worker';
+import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox';
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
 
 const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
@@ -41,6 +42,20 @@ export interface NormalizedRfpRequestInput {
     /** Deal owner / rep — the "Requested by" person (CRM-sourced; HubSpot resolves its own). */
     ownerName?: string | null;
     ownerEmail?: string | null;
+    /**
+     * `deals.company_id` / `deals.property_id` in the CRM — the customer and the job site as uuids.
+     * They are what lets TROCK Core resolve both BY ID; matching them by name is unsafe in the other
+     * direction, because `street` falls back to `project_location`, which holds the office designator,
+     * so an address-less deal would create a property literally named "DFW".
+     *
+     * Optional + nullable: absent on any body predating the CRM change, and null on a deal with no
+     * company or property. Their absence is a terminal, ALERTING skip of the Core handoff — never a
+     * crash, and never a guess.
+     */
+    companyId?: string | null;
+    propertyId?: string | null;
+    /** The CRM property's name: what TROCK Core names the job site (absent on bodies predating the CRM field). */
+    propertyName?: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -579,8 +594,9 @@ const rfpApproverCache = new Map<string, { timestamp: number; recipients: string
  */
 function hardcodedRfpSafetyNetRecipients(type: string): string[] {
   if (type === '4') {
-    // Project type 4: James + Colby
-    return ['jhelms@trockgc.com', 'cburling@trockgc.com'];
+    // Project type 4 (service): Kason + Andrew, the owner's service approvers (2026-10-01; migration 0026). Kept equal
+    // to the configured row so a config-read failure never emails people the live check would then refuse.
+    return ['kreeder@trockgc.com', 'agreen@trockgc.com'];
   }
   // All other project types: Sidney + James + Tim (non-service routing — kept in sync with main's #45 change)
   return ['sgibson@trockgc.com', 'jhelms@trockgc.com', 'tmitchell@trockgc.com'];
@@ -964,7 +980,9 @@ function fetchAttachmentsFromProps(props: Record<string, any>): Array<{ name: st
   return list;
 }
 
-function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { ownerName?: string; ownerEmail?: string }, sourceDealUrl: string | null): Record<string, any> {
+// Exported for the create-from-rfp ADOPT handoff (bidboard-create-worker), which records an approval row and tells
+// TROCK Core about it — both must carry exactly the deal_data shape an ordinary approval stores.
+export function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { ownerName?: string; ownerEmail?: string }, sourceDealUrl: string | null): Record<string, any> {
   return {
     sourceSystem: input.sourceSystem,
     sourceDealId: input.sourceDealId,
@@ -989,6 +1007,13 @@ function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: { owner
     // 'description'" fallback — 'crm_activity_log' deliberately doesn't match it, so the review email's
     // Description row can never pick this up.
     crm_activity_log: input.deal.crmActivityLog || '',
+    // The CRM's customer/job-site uuids, persisted so the Core handoff at approval time can resolve
+    // both by id. Null (not '') when absent: '' would read as "known to be empty" downstream, where
+    // these must read as "not supplied" and take the terminal-skip path.
+    crm_company_id: input.deal.companyId || null,
+    crm_property_id: input.deal.propertyId || null,
+    // The job site's NAME for the Core handoff (null when the CRM sent none: the handoff falls back to the street).
+    crm_property_name: input.deal.propertyName || null,
     bid_due_date: input.deal.dueDate || '',
     due_date: input.deal.dueDate || '',
     workflowRoute: input.deal.workflowRoute || '',
@@ -1558,6 +1583,48 @@ export async function processRfpApproval(
       }
     }
 
+    // HOISTED out of the createBidBoardProjectFromDeal call arguments below. It is the one resolved
+    // view of this approval's field values, and BOTH the TROCK Core payload and the Procore Playwright
+    // create are built from it — built inline, the two systems could be told different things about a
+    // single approval and nothing would notice.
+    const editedFieldsOverride: Record<string, string> = {
+      // The CRM activity log travels here rather than via normalizedDealData, which is passed
+      // ONLY for trock_crm — a hubspot-sourced request that carried crmActivityLog would
+      // otherwise be persisted in deal_data and then silently dropped before the create, so the
+      // field would be "accepted but unused" on that path. editedFieldsOverride is passed for
+      // BOTH source systems, so routing it through here keeps accepted == used everywhere.
+      // (In practice only the CRM sends the field today; this removes the divergence rather than
+      // documenting it.)
+      ...(dealData.crm_activity_log ? { crm_activity_log: String(dealData.crm_activity_log) } : {}),
+      // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
+      ...(dealData.description ? { description: String(dealData.description) } : {}),
+      ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
+      ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
+      ...(dealData.address ? { address: String(dealData.address) } : {}),
+      ...(dealData.city ? { city: String(dealData.city) } : {}),
+      ...(dealData.state ? { state: String(dealData.state) } : {}),
+      ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
+      // User-edited fields override the enriched fallbacks
+      ...editedFields,
+      project_types: finalProjectTypeDigit,
+    };
+
+    // Tell TROCK Core about the service job BEFORE the multi-minute Procore automation, so the card is
+    // in the service estimating lane immediately. FAIL-OPEN by construction: this never throws and its
+    // result is deliberately not branched on — a Core outage leaves a queued outbox row and the
+    // Procore create proceeds exactly as it did before.
+    if (isService) {
+      await handOffServiceRfpApprovalToCore({
+        sourceSystem: identity.sourceSystem,
+        sourceDealId,
+        rfpRequestId: request.id,
+        // The POST-rewrite number, so a type change made at approval time is the number Core records.
+        projectNumber: finalProjectNumber,
+        dealData,
+        editedFieldsOverride,
+      });
+    }
+
     const TEMP_DIR = process.env.TEMP_DIR || '.playwright-temp';
     const tempPaths: string[] = [];
     let attachmentsToSync: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }> | undefined;
@@ -1595,27 +1662,7 @@ export async function processRfpApproval(
           syncDocuments: true,
           attachmentsOverride: attachmentsToSync,
           projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
-          editedFieldsOverride: {
-            // The CRM activity log travels here rather than via normalizedDealData, which is passed
-            // ONLY for trock_crm — a hubspot-sourced request that carried crmActivityLog would
-            // otherwise be persisted in deal_data and then silently dropped before the create, so the
-            // field would be "accepted but unused" on that path. editedFieldsOverride is passed for
-            // BOTH source systems, so routing it through here keeps accepted == used everywhere.
-            // (In practice only the CRM sends the field today; this removes the divergence rather than
-            // documenting it.)
-            ...(dealData.crm_activity_log ? { crm_activity_log: String(dealData.crm_activity_log) } : {}),
-            // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
-            ...(dealData.description ? { description: String(dealData.description) } : {}),
-            ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
-            ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
-            ...(dealData.address ? { address: String(dealData.address) } : {}),
-            ...(dealData.city ? { city: String(dealData.city) } : {}),
-            ...(dealData.state ? { state: String(dealData.state) } : {}),
-            ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
-            // User-edited fields override the enriched fallbacks
-            ...editedFields,
-            project_types: finalProjectTypeDigit,
-          },
+          editedFieldsOverride,
           proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
         },
       });

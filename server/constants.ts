@@ -33,6 +33,48 @@ export function replaceProjectTypeInNumber(projectNumber: string, newTypeDigit: 
   return projectNumber.replace(/^([A-Za-z]{2,4}-)\d+(-)/, `$1${newTypeDigit}$2`);
 }
 
+// Same shape as PROJECT_NUMBER_PREFIX_RE but capturing the OFFICE rather than the type digit, so the
+// two readings of a project number stay in one file and cannot drift apart.
+// parseOfficePrefixFromNumber USED TO LIVE HERE and is deliberately gone.
+//
+// It read the leading letters of a project number as the OFFICE that runs the job, and its only caller
+// used that to pick a Core tenant — which refused every Atlanta-prefixed service RFP and lost two real
+// approvals. The prefix records the MARKET the work is in; Atlanta jobs are run out of DFW.
+//
+// Deleting it rather than leaving it unused is the point. An exported helper called
+// "parseOfficePrefixFromNumber" is a standing invitation to answer an office question with it, and the
+// next reader has no way to know the name is wrong. `parseProjectTypeFromNumber` below still reads the
+// TYPE digit from the same string, which the number genuinely does encode.
+
+/**
+ * The TROCK Core tenant that RFP approvals belong to.
+ *
+ * A SINGLE VALUE, and that is the correction. This used to be a prefix → tenant MAP, on the reading
+ * that a project number's prefix names the OFFICE that runs the job — so `ATL-…` was mapped to null
+ * and every Atlanta-prefixed service RFP was refused as "no Core tenant".
+ *
+ * The prefix does not mean that. It records the MARKET the work is in; Atlanta jobs are run out of the
+ * DFW office like everything else. So the refusal was answering a question nobody asked: those
+ * approvals had an office all along, and two real ones were rejected for it.
+ *
+ * Deriving a tenant from the prefix is therefore not a mapping that needs another entry — it is the
+ * wrong input. One operating office, one tenant, stated once. If a second office ever runs its own
+ * jobs, that is a deliberate change here with a real second tenant behind it, not a row added to a
+ * table that was already asking the wrong thing.
+ */
+const CORE_RFP_TENANT = "dallas";
+
+/**
+ * The Core tenant an approved RFP is delivered to.
+ *
+ * Takes no argument BY DESIGN. The previous signature accepted the project-number prefix, which is
+ * what made "which office runs this?" look like a lookup on the wrong column; removing the parameter
+ * means a caller cannot reintroduce that reading without changing this function.
+ */
+export function coreRfpTenant(): string {
+  return CORE_RFP_TENANT;
+}
+
 /**
  * The CANONICAL project-type digit an RFP approval will actually CREATE — the single source of truth
  * shared by processRfpApproval (which selects the service vs non-service BidBoard stage from it), the

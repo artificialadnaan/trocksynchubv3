@@ -134,6 +134,7 @@ describe("role polling — the enabled-key clobber", () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     mocks.storage.getAutomationConfig.mockResolvedValue(undefined);
     mocks.storage.upsertAutomationConfig.mockResolvedValue({});
     mocks.storage.patchAutomationConfig.mockImplementation(async (key: string, patch: any) => ({ key, value: patch }));
@@ -435,11 +436,14 @@ describe("role polling — the enabled-key clobber", () => {
 
     const enableAll = app.routes["POST /api/internal/enable-all-automations"];
     expect(enableAll, "enable-all route must exist").toBeTruthy();
-    // The route is secret-gated; the default is the same literal the handler falls back to.
-    await invokeRoute(enableAll, {
-      body: { secret: process.env.INTERNAL_API_SECRET || "synchub-test-2026" },
-      headers: {},
+    // The route is secret-gated and fails closed when INTERNAL_API_SECRET is unset, so the test sets it.
+    vi.stubEnv("INTERNAL_API_SECRET", "test-internal-secret");
+    const res = await invokeRoute(enableAll, {
+      body: {},
+      headers: { "x-internal-secret": "test-internal-secret" },
     });
+    expect(res.status).not.toHaveBeenCalledWith(401);
+    expect(res.status).not.toHaveBeenCalledWith(503);
     await vi.advanceTimersByTimeAsync(150_000);
 
     // 175 from the database, not the 50 default this process booted with.

@@ -50,6 +50,7 @@ import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
 import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
 import { startBidboardCreateWorker } from "../sync/bidboard-create-worker";
+import { startServiceRfpCoreOutboxWorker } from "../sync/service-rfp-core-outbox";
 import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
 import { startPendingRfpDigestScheduler } from "../cron/pendingRfpDigestScheduler";
 
@@ -123,6 +124,9 @@ export async function registerRoutes(
   startAlertScheduler();
   startBidBoardCallbackWorker();
   startBidboardCreateWorker();
+  // Drains service-RFP rows Core could not accept inline. A tick with an empty queue is one indexed
+  // read, so this stays harmless while the ingress is unprovisioned.
+  startServiceRfpCoreOutboxWorker();
   startTrockCrmRelayScheduler();
   startPendingRfpDigestScheduler();
 
