@@ -128,7 +128,8 @@ function textOf(dom: FakeDom, target: FakeNode): string {
 function matchNodes(dom: FakeDom, selector: string, within: string[] | null): FakeNode[] {
   const parts = selector.split(",").map((s) => s.trim()).filter(Boolean);
   return dom.nodes.filter((candidate) => {
-    if (!parts.some((part) => candidate.matches.includes(part))) return false;
+    // `*` is every element — how the Create climb asks "is this ancestor inside the editor scope?".
+    if (!parts.some((part) => part === "*" || candidate.matches.includes(part))) return false;
     return within === null || isWithin(dom, candidate, within);
   });
 }

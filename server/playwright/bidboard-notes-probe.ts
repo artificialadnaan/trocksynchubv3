@@ -374,7 +374,9 @@ export async function probeBidBoardNotesUi(page: ProbePage, options: ProbeOption
       const create = await resolveNoteCreateControl(
         editor.editorScope as any,
         editorTimeoutMs,
-        structural && editor.input ? { nearInput: editor.input.locator as any } : undefined,
+        structural && editor.input
+          ? { nearInput: editor.input.locator as any, within: editor.editorScope as any, notesSection: sectionLocator as any }
+          : undefined,
       );
       resolvedCreateSelector = create?.selector ?? null;
     }

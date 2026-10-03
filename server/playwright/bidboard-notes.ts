@@ -923,22 +923,48 @@ const CREATE_CLIMB_LIMIT = 6;
 const EDITABLE_FIELD = 'textarea:not([aria-hidden="true"]), [contenteditable="true"]';
 
 /**
+ * Where the Create climb may look, for a note typed into a STRUCTURALLY-found card.
+ *
+ * `within` is the container the note field was found in (the resolved Notes card, or a validated dialog): the climb
+ * never examines an ancestor outside it. `notesSection` is the resolved Notes card, whose "+" marks the composer's
+ * upper edge. Both are required — the composer edge alone let the climb leave the card whenever the "+" was gone.
+ */
+export type CreateClimbBounds = { nearInput: Locator; within: Locator; notesSection: Locator };
+
+/**
  * The Create control for a note typed into a STRUCTURALLY-found card: the innermost ancestor of the note field that
  * holds a visible Create candidate, provided that ancestor is still INSIDE the composer — it holds neither the
- * card's "+" nor a second text field — and holds exactly ONE visible Create candidate. Two Creates are ambiguous. Either way it declines — Create was never confirmed on the live page, and the card's container may
- * hold other cards, so "the first Create in the card" is not specific enough to click.
+ * card's "+" nor a second text field — and INSIDE `within`, and holds exactly ONE visible Create candidate. Two
+ * Creates are ambiguous. Either way it declines — Create was never confirmed on the live page, and the card's
+ * container may hold other cards, so "the first Create in the card" is not specific enough to click.
+ *
+ * Two hard edges, both from the adversarial review of #73 (finding 1). The "+" edge only exists while the "+" does:
+ * Procore-style UIs unmount the add control while composing, and with it gone the climb rose out of the card and
+ * pressed a neighbouring card's Create whenever the composer's own Create was late or was labelled "Post". So a
+ * vanished "+" is a stop (the composer cannot be bounded), and no ancestor outside `within` is ever examined.
  */
-async function resolveCreateNearInput(input: Locator): Promise<{ locator: Locator; selector: string } | null | "unreadable"> {
-  const candidates = actableCandidates(PROCORE_SELECTORS.bidboard.newUi.notes.createButton).join(", ");
-  let node = input;
+async function resolveCreateNearInput(
+  bounds: CreateClimbBounds,
+): Promise<{ locator: Locator; selector: string } | null | "unreadable"> {
+  const notes = PROCORE_SELECTORS.bidboard.newUi.notes;
+  const candidates = actableCandidates(notes.createButton).join(", ");
+  const cardAnchors = await bounds.notesSection.locator(notes.sectionAnchor).count().catch(() => null);
+  if (cardAnchors === null) return "unreadable";
+  if (cardAnchors === 0) return null;
+  let node = bounds.nearInput;
   for (let depth = 1; depth <= CREATE_CLIMB_LIMIT; depth += 1) {
     node = node.locator("xpath=..");
     const exists = await node.count().catch(() => null);
     if (exists === null) return "unreadable";
     if (exists === 0) return null;
+    // INSIDE `within` (one of its descendants) or `within` itself — never above it.
+    const isWithin = await node.and(bounds.within).count().catch(() => null);
+    const insideWithin = await bounds.within.locator("*").and(node).count().catch(() => null);
+    if (isWithin === null || insideWithin === null) return "unreadable";
+    if (isWithin === 0 && insideWithin === 0) return null;
     // The COMPOSER boundary: an ancestor holding the Notes "+" is the card (or wider), where a neighbouring card's
     // Create is reachable even without a text field of its own. Create must be found strictly inside the composer.
-    const anchors = await node.locator(PROCORE_SELECTORS.bidboard.newUi.notes.sectionAnchor).count().catch(() => null);
+    const anchors = await node.locator(notes.sectionAnchor).count().catch(() => null);
     if (anchors === null) return "unreadable";
     if (anchors > 0) return null;
     const fields = await node.locator(EDITABLE_FIELD).count().catch(() => null);
@@ -954,6 +980,8 @@ async function resolveCreateNearInput(input: Locator): Promise<{ locator: Locato
     if (roleCount === null) return "unreadable";
     if (roleCount > 1) return null;
     if (roleCount === 1) return { locator: role.first(), selector: `note field ⇑${depth} — ${ROLE_MATCH_LABEL}` };
+    // `within` itself was just examined: there is nothing above it this climb may look at.
+    if (isWithin > 0) return null;
   }
   return null;
 }
@@ -966,12 +994,12 @@ async function resolveCreateNearInput(input: Locator): Promise<{ locator: Locato
 export async function resolveNoteCreateControl(
   editorScope: Scope,
   timeoutMs: number,
-  options?: { nearInput?: Locator },
+  options?: CreateClimbBounds,
 ): Promise<{ locator: Locator; selector: string } | null> {
-  if (options?.nearInput) {
+  if (options) {
     const until = Date.now() + timeoutMs;
     for (;;) {
-      const hit = await resolveCreateNearInput(options.nearInput);
+      const hit = await resolveCreateNearInput(options);
       if (hit === "unreadable") return null;
       if (hit) return hit;
       if (Date.now() >= until) return null;
@@ -1322,7 +1350,10 @@ export async function postBidBoardProjectNote(
     const createButton = await resolveNoteCreateControl(
       editorScope,
       stepBudget(CONTROL_TIMEOUT_MS),
-      section.structural ? { nearInput: input.locator } : undefined,
+      // Bounded by the container the field was found in AND by the resolved card's "+" — see resolveCreateNearInput.
+      section.structural
+        ? { nearInput: input.locator, within: editorScope as Locator, notesSection: section.locator }
+        : undefined,
     );
     if (!createButton) {
       return await fail(

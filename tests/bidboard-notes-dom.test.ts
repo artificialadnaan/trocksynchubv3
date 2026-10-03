@@ -46,6 +46,7 @@ const {
   readNoteTextsDetailed,
   hasMarkerNote,
   postBidBoardProjectNote,
+  resolveNoteCreateControl,
   CRM_ACTIVITY_NOTE_MARKER,
 } = await import("../server/playwright/bidboard-notes.ts");
 const { PROCORE_SELECTORS } = await import("../server/playwright/selectors.ts");
@@ -1057,6 +1058,112 @@ describe("adversarial review at c15e2a0, against real Chromium", () => {
     expect(result).toMatchObject({ ok: false, reason: "contaminated" });
     if (result.ok || result.reason !== "contaminated") throw new Error("unreachable");
     expect(result.selector).toMatch(/ambiguous/);
+  });
+
+  /** A Notes card whose "+" UNMOUNTS while composing, next to a Tasks card with its own submit control. */
+  const vanishingPlusPage = (tasksButton: string, composerSubmit: "late-create" | "post") => `
+    <div id="col">
+      <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div><div class="rows"></div></div>
+      <div id="tasksCard"><h3>Tasks</h3><button id="taskCreate">${tasksButton}</button></div>
+    </div>
+    ${DESCRIPTION_FIELD}
+    <script>
+      document.getElementById('taskCreate').addEventListener('click', () => {
+        document.getElementById('taskCreate').dataset.clicked = 'yes';
+      });
+      document.getElementById('notesPlus').addEventListener('click', () => {
+        const card = document.getElementById('notesCard');
+        document.getElementById('notesPlus').remove();
+        const composer = document.createElement('div');
+        const field = document.createElement('textarea'); field.name = 'value'; field.placeholder = 'Enter note';
+        composer.append(field); card.appendChild(composer);
+        if (${JSON.stringify(composerSubmit)} === 'post') {
+          const post = document.createElement('button'); post.textContent = 'Post'; composer.append(post);
+        } else {
+          setTimeout(() => {
+            const create = document.createElement('button'); create.id = 'notesCreate'; create.textContent = 'Create';
+            composer.append(create);
+          }, 800);
+        }
+      });
+    </script>
+  `;
+
+  it("finding 1: the '+' unmounts while composing and the composer's Create is late — never the Tasks Create", async () => {
+    await page.setContent(vanishingPlusPage("Create", "late-create"));
+    navigateToProjectMock.mockResolvedValue(true);
+    const result = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", ADV_OPTS);
+    expect(await page.locator("#taskCreate").getAttribute("data-clicked")).toBeNull();
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/Create button not found/i);
+  });
+
+  it("finding 1: the '+' unmounts and the composer's submit says 'Post' — never the Tasks 'Create Task'", async () => {
+    await page.setContent(vanishingPlusPage("Create Task", "post"));
+    navigateToProjectMock.mockResolvedValue(true);
+    const result = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", ADV_OPTS);
+    expect(await page.locator("#taskCreate").getAttribute("data-clicked")).toBeNull();
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/Create button not found/i);
+  });
+
+  it("finding 1: a vanished '+' is a stop even INSIDE the card — never a stray Create beside the composer", async () => {
+    // The card bound alone would allow the card itself, where a row's own "Create task" sits. Without the "+" there
+    // is no composer edge, so the climb must not reach the card level at all.
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("notesPlus")}</div>
+          <div class="rows"><div class="aid-note">Site walk <button id="rowCreate">Create</button></div></div></div>
+        <div id="tasksCard"><h3>Tasks</h3></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+      <script>
+        document.getElementById('rowCreate').addEventListener('click', () => {
+          document.getElementById('rowCreate').dataset.clicked = 'yes';
+        });
+        document.getElementById('notesPlus').addEventListener('click', () => {
+          const card = document.getElementById('notesCard');
+          document.getElementById('notesPlus').remove();
+          const composer = document.createElement('div');
+          const field = document.createElement('textarea'); field.name = 'value'; field.placeholder = 'Enter note';
+          composer.append(field); card.appendChild(composer);
+        });
+      </script>
+    `);
+    navigateToProjectMock.mockResolvedValue(true);
+    const result = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", ADV_OPTS);
+    expect(await page.locator("#rowCreate").getAttribute("data-clicked")).toBeNull();
+    expect(result.posted).toBe(false);
+    expect(result.error).toMatch(/Create button not found/i);
+  });
+
+  it("finding 1: the climb never examines an ancestor outside the Notes card, even with the '+' still mounted", async () => {
+    // The "+" stays, but sits OUTSIDE the composer's ancestor chain inside the card; the resolved card is
+    // `#notesCard`, and the only Create on the climb path above it belongs to the column.
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="rows"></div></div>
+        <button id="colCreate">Create</button>
+      </div>
+      <div id="hdrCol"><h3>Notes</h3>${PLUS("notesPlus")}</div>
+      ${DESCRIPTION_FIELD}
+    `);
+    // Resolve against a fixed card and composer directly: the bound under test is the climb's, not the resolver's.
+    await page.evaluate(() => {
+      const composer = document.createElement("div");
+      const field = document.createElement("textarea");
+      field.name = "value";
+      field.placeholder = "Enter note";
+      composer.append(field);
+      document.getElementById("notesCard")!.appendChild(composer);
+    });
+    const field = page.locator('textarea[name="value"]');
+    const create = await resolveNoteCreateControl(page.locator("#notesCard"), 300, {
+      nearInput: field,
+      within: page.locator("#notesCard"),
+      notesSection: page.locator("#hdrCol"),
+    });
+    expect(create).toBeNull();
   });
 
   it("finding 2: two 'Notes' labels inside ONE card are one card, not an ambiguity", async () => {
