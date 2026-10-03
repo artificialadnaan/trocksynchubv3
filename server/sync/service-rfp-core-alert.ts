@@ -20,6 +20,7 @@
 // drag that throw into rfp-approval.ts's module graph.
 import {
   escapeHtml,
+  realertMinutesFromEnv,
   recordPushOutcomeAndMaybeAlert,
   type PushAlertAction,
   type PushAlertEmailInput,
@@ -52,11 +53,39 @@ function displayOffice(officeSlug: string): string {
  *  - `unconfirmed`: an outcome this producer could not classify either way.
  *  - `recovered`: deliveries are working again.
  */
-export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subject: string; htmlBody: string } {
+/** Which approval the outcome was for, so the email names the RFP an operator has to re-drive. */
+export interface ServiceRfpAlertSubject {
+  requestId: number;
+  sourceDealId: string;
+  projectNumber?: string | null;
+  companyName?: string | null;
+}
+
+export function renderServiceRfpCoreAlertEmail(
+  e: PushAlertEmailInput,
+  rfp?: ServiceRfpAlertSubject,
+): { subject: string; htmlBody: string } {
   const office = displayOffice(e.office);
   const safeOffice = escapeHtml(office);
+  // The subject names the RFP by the number people use (the project number), else its request id.
+  const label = rfp ? ` — ${rfp.projectNumber?.trim() || `RFP request ${rfp.requestId}`}` : "";
+  const rfpLines = rfp
+    ? `
+      <p><strong>RFP request:</strong> ${escapeHtml(String(rfp.requestId))}</p>
+      <p><strong>Project number:</strong> ${escapeHtml(rfp.projectNumber?.trim() || "—")}</p>
+      <p><strong>Company:</strong> ${escapeHtml(rfp.companyName?.trim() || "—")}</p>
+      <p><strong>CRM deal:</strong> ${escapeHtml(rfp.sourceDealId)}</p>`
+    : "";
+  // Only the FIRST failure of a reason is emailed inside the re-alert window (a different reason always is), so
+  // the email says where the rest are.
+  const others = `
+      <p>Other approvals that failed for the same reason inside the alert window are not emailed one by one. List
+      the recent ones (last_error carries the reason shown above; a re-driven row keeps its created_at, so the
+      latest attempt decides) with <code>select rfp_request_id, source_deal_id, status, last_error,
+      coalesce(last_attempt_at, created_at) as failed_at from service_rfp_core_outbox where status in ('failed','dead')
+      and coalesce(last_attempt_at, created_at) &gt; now() - interval '1 day' order by failed_at desc</code>.</p>`;
 
-  const details = `
+  const details = `${rfpLines}
       <p><strong>Office:</strong> ${safeOffice}</p>
       <p><strong>When:</strong> ${e.now.toISOString()}</p>
       <p><strong>Delivery attempts:</strong> ${e.attempts ?? "—"}</p>
@@ -78,21 +107,21 @@ export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subjec
 
   if (e.kind === "request_rejected") {
     return {
-      subject: `⚠️ TROCK Core REJECTED an approved service RFP — office ${office}`,
+      subject: `⚠️ TROCK Core REJECTED an approved service RFP — office ${office}${label}`,
       htmlBody: `
       <h2>TROCK Core refused an approved service RFP</h2>${details}
       <p>Core returned a deterministic refusal (a 409 conflict, a bad request, or a rejected signature),
       or the approval could not be expressed on the v1 contract at all — a non-CRM source deal, an office
       with no Core tenant, or a missing CRM company/property uuid. Either way it will <strong>not</strong>
       be accepted as-is, so the row is recorded 'failed' in service_rfp_core_outbox and is never retried;
-      the Error above is the reason. Fix the cause and re-drive the row.</p>${unaffected}
+      the Error above is the reason. Fix the cause and re-drive the row.</p>${unaffected}${others}
     `,
     };
   }
 
   if (e.kind === "terminal_failure") {
     return {
-      subject: `⚠️ TROCK Core service-RFP delivery DEAD-LETTERED — office ${office}`,
+      subject: `⚠️ TROCK Core service-RFP delivery DEAD-LETTERED — office ${office}${label}`,
       htmlBody: `
       <h2>TROCK Core service-RFP delivery exhausted its retries</h2>${details}
       <p>The row reached its attempt ceiling and is now 'dead' in service_rfp_core_outbox. It will not be
@@ -100,20 +129,20 @@ export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subjec
       CORE_INGRESS_BASE_URL wrong or unreachable, Core still serving the ingress dark (404) or holding no
       secret of its own (503), or SERVICE_RFP_INGRESS_SECRET_CURRENT missing on this side / shorter than
       Core's 32-byte floor. Fix the cause, then re-drive the row. Further alerts are throttled to roughly
-      hourly until deliveries recover.</p>${unaffected}
+      hourly until deliveries recover.</p>${unaffected}${others}
     `,
     };
   }
 
   if (e.kind === "unconfirmed") {
     return {
-      subject: `⚠️ TROCK Core service-RFP delivery UNCONFIRMED — office ${office}`,
+      subject: `⚠️ TROCK Core service-RFP delivery UNCONFIRMED — office ${office}${label}`,
       htmlBody: `
       <h2>TROCK Core service-RFP delivery could not be confirmed</h2>${details}
       <p>The POST ended in a state this producer could not classify as accepted or refused. That is
       <strong>not</strong> proof Core dropped it — check whether a bid already exists for this deal in
       Core before re-driving the service_rfp_core_outbox row, so a retry cannot become a second
-      bid.</p>${unaffected}
+      bid.</p>${unaffected}${others}
     `,
     };
   }
@@ -124,7 +153,10 @@ export function renderServiceRfpCoreAlertEmail(e: PushAlertEmailInput): { subjec
     <h2>TROCK Core service-RFP delivery has recovered</h2>
     <p><strong>Office:</strong> ${safeOffice}</p>
     <p><strong>When:</strong> ${e.now.toISOString()}</p>
-    <p>An approved service RFP has reached Core again; the prior failure has cleared.</p>
+    ${rfpLines}
+    <p>An approved service RFP has reached Core again, so deliveries are working. This does <strong>not</strong>
+    re-send approvals that already failed or dead-lettered: those rows stay in service_rfp_core_outbox until
+    re-driven.</p>
   `,
   };
 }
@@ -139,6 +171,8 @@ export interface ServiceRfpCoreDeliveryOutcome {
   error?: string;
   /** A refusal that can never be accepted as-is, as opposed to a dead-lettered retry. Ignored when ok. */
   terminal?: boolean;
+  /** The approval this outcome is for; named in the email. */
+  rfp?: ServiceRfpAlertSubject;
 }
 
 /**
@@ -191,6 +225,29 @@ async function serializedByOffice<T>(officeSlug: string, work: () => Promise<T>)
 }
 
 /**
+ * The refusal reasons already EMAILED for each office inside the re-alert window (error text → when). A reason not in
+ * here is a new incident and is emailed even inside the window; one in here is throttled with the rest. Every reason
+ * in the window is remembered, not only the latest, so failures alternating between two reasons (a re-drive of mixed
+ * rows) stay one email per reason. Core's errors name a reason, never a row.
+ *
+ * In memory: SyncHub is one process, and a restart forgets at most one window (one extra email per reason). Cleared
+ * when the office recovers. Only touched inside serializedByOffice, so reads and writes for an office never interleave.
+ */
+const alertedReasons = new Map<string, Map<string, number>>();
+
+function reasonsInWindow(officeSlug: string, nowMs: number, windowMs: number): Map<string, number> {
+  const reasons = alertedReasons.get(officeSlug) ?? new Map<string, number>();
+  for (const [reason, at] of reasons) if (nowMs - at >= windowMs) reasons.delete(reason);
+  alertedReasons.set(officeSlug, reasons);
+  return reasons;
+}
+
+/** Test seam: forget every remembered reason. */
+export function resetServiceRfpCoreAlertReasons(): void {
+  alertedReasons.clear();
+}
+
+/**
  * Record one Core delivery outcome against the shared debounce, rendered in this stream's own words.
  * Never throws — recordPushOutcomeAndMaybeAlert wraps everything, because alerting must never be able
  * to fail the work it is reporting on.
@@ -199,8 +256,11 @@ export async function recordServiceRfpCoreDelivery(
   outcome: ServiceRfpCoreDeliveryOutcome,
 ): Promise<{ action: PushAlertAction } | { skipped: true }> {
   const officeSlug = serviceRfpCoreAlertOffice(outcome.office);
-  return serializedByOffice(officeSlug, () =>
-    recordPushOutcomeAndMaybeAlert(
+  return serializedByOffice(officeSlug, async () => {
+    const now = new Date();
+    const reasons = reasonsInWindow(officeSlug, now.getTime(), realertMinutesFromEnv() * 60_000);
+    const reason = outcome.error ?? "(none captured)";
+    const result = await recordPushOutcomeAndMaybeAlert(
       {
         pushResult: {
           ok: outcome.ok,
@@ -211,8 +271,17 @@ export async function recordServiceRfpCoreDelivery(
           terminalFailure: !outcome.ok && outcome.terminal !== true,
         },
         officeSlug,
+        now,
+        // A reason not yet emailed in this window is a new incident; a repeat of any emailed one is throttled.
+        signatureChanged: !outcome.ok && !reasons.has(reason),
       },
-      { render: renderServiceRfpCoreAlertEmail },
-    ),
-  );
+      { render: (input) => renderServiceRfpCoreAlertEmail(input, outcome.rfp) },
+    );
+    // Recovered (and the operator told so): the next failure of any reason is a new incident anyway.
+    if (outcome.ok && "action" in result && result.action === "alert_recovered" && result.sent) reasons.clear();
+    else if (!outcome.ok && "action" in result && result.action === "alert_failure" && result.sent) {
+      reasons.set(reason, now.getTime());
+    }
+    return "action" in result ? { action: result.action } : result;
+  });
 }

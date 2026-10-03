@@ -11,7 +11,7 @@ vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 vi.mock("../server/db.ts", () => ({ pool: poolMock }));
 vi.mock("../server/email-service.ts", () => ({ sendEmail: vi.fn(async () => ({ success: true })) }));
 
-const { renderServiceRfpCoreAlertEmail, serviceRfpCoreAlertOffice, recordServiceRfpCoreDelivery } = await import(
+const { renderServiceRfpCoreAlertEmail, serviceRfpCoreAlertOffice, recordServiceRfpCoreDelivery, resetServiceRfpCoreAlertReasons } = await import(
   "../server/sync/service-rfp-core-alert.ts"
 );
 
@@ -105,6 +105,87 @@ describe("renderServiceRfpCoreAlertEmail", () => {
       expect(htmlBody, kind).not.toMatch(/create (ran|succeeded|completed|went ahead)/i);
       expect(htmlBody, kind).toMatch(/proceeds|attempted|independently/i);
     }
+  });
+});
+
+describe("renderServiceRfpCoreAlertEmail names the RFP (service-board hardening #4)", () => {
+  const RFP = { requestId: 4242, sourceDealId: "0b5e0c1e-1111-4222-8333-944445555666", projectNumber: "SV-26-0412",
+    companyName: "Acme <Roofing>" };
+
+  it("puts the project number in every subject and the request, deal and company in the body", () => {
+    for (const kind of KINDS) {
+      const { subject, htmlBody } = renderServiceRfpCoreAlertEmail(
+        { kind, office: "service-rfp-core:dallas", error: "Core refused the approval: live_project", now: NOW }, RFP);
+      if (kind !== "recovered") expect(subject, kind).toContain("SV-26-0412");
+      expect(htmlBody, kind).toContain("4242");
+      expect(htmlBody, kind).toContain(RFP.sourceDealId);
+      expect(htmlBody, kind).toContain("Acme &lt;Roofing&gt;");
+    }
+  });
+
+  it("falls back to the request id in the subject when the RFP has no project number", () => {
+    const { subject } = renderServiceRfpCoreAlertEmail(
+      { kind: "request_rejected", office: "service-rfp-core:dallas", now: NOW }, { ...RFP, projectNumber: null });
+    expect(subject).toContain("RFP request 4242");
+  });
+
+  it("a recovery does not claim the earlier failures were re-sent", () => {
+    const { htmlBody } = renderServiceRfpCoreAlertEmail({ kind: "recovered", office: "service-rfp-core:dallas", now: NOW });
+    expect(htmlBody).toMatch(/re-driven/);
+  });
+});
+
+describe("recordServiceRfpCoreDelivery debounce (hardening #4)", () => {
+  const OLD_RECIPIENT = process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+  let row: { state: string; last_alerted_at: Date | null; last_success_at: Date | null; last_error: string | null } | null;
+
+  beforeEach(() => {
+    process.env.BIDBOARD_CRM_ALERT_RECIPIENT = "ops@trock.test";
+    resetServiceRfpCoreAlertReasons();
+    row = null;
+    poolMock.query.mockReset();
+    // A one-row in-memory alert state table: SELECT reads it, the upsert writes it.
+    poolMock.query.mockImplementation(async (text: string, params?: any[]) => {
+      if (/^\s*SELECT/i.test(text)) return { rows: row ? [row] : [] };
+      if (/INSERT INTO/i.test(text)) {
+        row = { state: params![1], last_alerted_at: params![2], last_success_at: params![3], last_error: params![4] };
+      }
+      return { rows: [] };
+    });
+  });
+
+  afterEach(() => {
+    if (OLD_RECIPIENT === undefined) delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    else process.env.BIDBOARD_CRM_ALERT_RECIPIENT = OLD_RECIPIENT;
+  });
+
+  const fail = (error: string, requestId: number) => recordServiceRfpCoreDelivery({ office: "dallas", ok: false,
+    attempts: 1, error, terminal: true, rfp: { requestId, sourceDealId: `deal-${requestId}` } });
+
+  it("emails a DIFFERENT refusal inside the window, but throttles a repeat of the same reason", async () => {
+    expect(await fail("Core refused the approval: live_project", 1)).toEqual({ action: "alert_failure" });
+    // Same reason, another deal, minutes later: one incident, throttled.
+    expect(await fail("Core refused the approval: live_project", 2)).toEqual({ action: "none" });
+    // A different reason is a new incident: never hidden behind the first.
+    expect(await fail("Core refused the approval: email_owned_elsewhere", 3)).toEqual({ action: "alert_failure" });
+    expect(await fail("Core refused the approval: email_owned_elsewhere", 4)).toEqual({ action: "none" });
+  });
+
+  it("failures alternating between two reasons stay one email per reason (a re-drive of mixed rows)", async () => {
+    const A = "Core refused the approval: live_project";
+    const B = "Core refused the approval: email_owned_elsewhere";
+    expect(await fail(A, 1)).toEqual({ action: "alert_failure" });
+    expect(await fail(B, 2)).toEqual({ action: "alert_failure" });
+    expect(await fail(A, 3)).toEqual({ action: "none" });
+    expect(await fail(B, 4)).toEqual({ action: "none" });
+  });
+
+  it("after a recovery, a reason emailed before is an incident again", async () => {
+    const A = "Core refused the approval: live_project";
+    expect(await fail(A, 1)).toEqual({ action: "alert_failure" });
+    expect(await recordServiceRfpCoreDelivery({ office: "dallas", ok: true, attempts: 1, status: 202 }))
+      .toEqual({ action: "alert_recovered" });
+    expect(await fail(A, 2)).toEqual({ action: "alert_failure" });
   });
 });
 

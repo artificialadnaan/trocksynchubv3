@@ -266,7 +266,7 @@ export interface RecordPushDeps {
   render?: (input: PushAlertEmailInput) => { subject: string; htmlBody: string };
 }
 
-function realertMinutesFromEnv(): number {
+export function realertMinutesFromEnv(): number {
   const n = Number(process.env.BIDBOARD_CRM_ALERT_REALERT_MINUTES);
   return Number.isFinite(n) && n > 0 ? n : 60;
 }
@@ -299,9 +299,15 @@ export async function recordPushOutcomeAndMaybeAlert(
     now?: Date;
     realertMinutes?: number;
     recipient?: string;
+    /**
+     * The caller classifies this failure as a NEW incident (decideAlertTransition's signatureChanged): it is
+     * emailed even inside the re-alert window. Default false, so the CRM push keeps its window-only throttle.
+     * ./service-rfp-core-alert sets it for a refusal reason not yet emailed in the window.
+     */
+    signatureChanged?: boolean;
   },
   deps: RecordPushDeps = {}
-): Promise<{ action: PushAlertAction } | { skipped: true }> {
+): Promise<{ action: PushAlertAction; sent?: boolean } | { skipped: true }> {
   try {
     if (args.pushResult.skipped) return { skipped: true };
 
@@ -320,12 +326,13 @@ export async function recordPushOutcomeAndMaybeAlert(
     // Self-heal the table so a standalone sync entrypoint (no web-boot migration) can't throw here.
     await ensurePushAlertStateTable(db);
     const prior = await readPushAlertState(args.officeSlug, db);
-    const decision = decidePushAlert({
-      pushOk: args.pushResult.ok,
+    const decision = decideAlertTransition({
+      healthy: args.pushResult.ok,
       prevState: prior?.state ?? null,
       lastAlertedAt: prior?.last_alerted_at ?? null,
       now,
       realertMinutes,
+      signatureChanged: args.signatureChanged === true,
     });
 
     // Send first so the throttle anchor / state flip can be gated on a SUCCESSFUL send: a failed first
@@ -390,7 +397,8 @@ export async function recordPushOutcomeAndMaybeAlert(
       db
     );
 
-    return { action: decision.action };
+    // `sent` lets a caller that tracks what it already emailed record only what an operator actually received.
+    return { action: decision.action, sent };
   } catch (err) {
     // Alerting must never crash the sync. Swallow and log (defensively, even logging is guarded).
     try {
