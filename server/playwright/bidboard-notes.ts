@@ -613,7 +613,14 @@ export async function resolveNotesSectionByAnchor(
         climbUnreadable = true;
         break;
       }
-      if (exists === 0) break;
+      // Zero is not "the top of the page" here: <html> is a page root and hard-stops the climb before it could be
+      // passed. An ancestor that VANISHES between two counts is an SPA re-render, and stopping on it would hand back
+      // `best` — the header row, if the card was the level that vanished — blinding the idempotency read (adversarial
+      // review of #73). Above a good ancestor that is an unknown, and an unknown fails closed.
+      if (exists === 0) {
+        if (best) climbUnreadable = true;
+        break;
+      }
 
       const verdict = await classifyNotesCandidate(node);
       if (verdict === "ok") {

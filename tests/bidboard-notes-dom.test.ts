@@ -954,3 +954,56 @@ describe("the card boundary never leaves the header as the Notes card, against r
     expect(await resolvedIdentity(result)).toBe("DIV#notesCard");
   });
 });
+
+/**
+ * Adversarial review of #73 at c15e2a0 — three cases reproduced in real Chromium, ported from the reviewer's
+ * fixtures (/private/tmp/pr73-adv/adv.test.ts) with assertions in place of their diagnostics.
+ */
+describe("adversarial review at c15e2a0, against real Chromium", () => {
+  const NOTE_TEXT = [`${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab (as of Oct 2, 2026)`, "", "Owner confirmed scope."].join("\n");
+  const ADV_OPTS = { verifyTimeoutMs: 3000, overallTimeoutMs: 20000, stepTimeoutMs: 2000 };
+
+  it("finding 3: a card that vanishes mid-climb (SPA re-render) fails CLOSED instead of returning the header", async () => {
+    await page.setContent(`
+      <div id="col"><div id="slot">
+        <div id="card"><div id="header"><h3>Notes</h3>${PLUS("plus")}</div>
+          <div id="cardBody"><div class="aid-note">Colby · ${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab</div></div></div>
+      </div><div><h3>Tasks</h3></div></div>
+      ${DESCRIPTION_FIELD}
+    `);
+    // Re-render the card's slot at the moment the climb counts the CARD level (label ⇑2), and restore it 150 ms
+    // later — the window in which `count()` sees zero for that ancestor.
+    let fired = false;
+    const wrap = (loc: any): any =>
+      new Proxy(loc, {
+        get(target, prop) {
+          if (prop === "count") {
+            return async () => {
+              if (!fired && String(target).endsWith(".locator('..').locator('..')")) {
+                fired = true;
+                await page.evaluate(() => {
+                  const slot = document.getElementById("slot")!;
+                  const html = slot.innerHTML;
+                  slot.innerHTML = '<div class="skeleton">Loading…</div>';
+                  setTimeout(() => {
+                    slot.innerHTML = html;
+                  }, 150);
+                });
+              }
+              return target.count();
+            };
+          }
+          const value = target[prop];
+          if (["locator", "nth", "filter", "first", "last"].includes(prop as string)) {
+            return (...args: any[]) => wrap(value.apply(target, args));
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    const result = await resolveNotesSectionByAnchor({ locator: (selector: string) => wrap(page.locator(selector)) } as any);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fired).toBe(true);
+    // Was `ok` with the HEADER, whose read cannot see the existing CRM note.
+    expect(result).toMatchObject({ ok: false, reason: "unreadable" });
+  });
+});
