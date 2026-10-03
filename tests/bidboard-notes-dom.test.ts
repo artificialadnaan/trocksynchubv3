@@ -1006,4 +1006,71 @@ describe("adversarial review at c15e2a0, against real Chromium", () => {
     // Was `ok` with the HEADER, whose read cannot see the existing CRM note.
     expect(result).toMatchObject({ ok: false, reason: "unreadable" });
   });
+
+  it("finding 2: a header-only refusal of the real card declines everything — never a second 'Notes' card", async () => {
+    // The real card's rows are unrecognisable and hold the CRM note, so its climb is refused as header-only. The
+    // next "Notes" label then resolved #notes2 and posted a duplicate there.
+    await page.setContent(`
+      <div id="col1">
+        <div id="card"><div id="header"><h3>Notes</h3>${PLUS("plus1")}</div>
+          <div id="cardBody"><article class="row"><h6>Colby Burling</h6><p>${CRM_ACTIVITY_NOTE_MARKER} DFW-2-12345-ab</p></article></div></div>
+      </div>
+      <div id="col2">
+        <div id="notes2"><div class="hdr"><h3>Notes</h3>${PLUS("plus2")}</div><div class="rows"></div></div>
+        <div><h3>Other</h3></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+      <script>
+        document.getElementById('plus2').addEventListener('click', () => {
+          const card = document.getElementById('notes2');
+          if (card.querySelector('textarea')) return;
+          const composer = document.createElement('div');
+          const field = document.createElement('textarea'); field.name = 'value'; field.placeholder = 'Enter note';
+          const create = document.createElement('button'); create.textContent = 'Create';
+          composer.append(field, create); card.appendChild(composer);
+          create.addEventListener('click', () => {
+            const row = document.createElement('div'); row.className = 'aid-note'; row.textContent = field.value;
+            card.querySelector('.rows').appendChild(row); composer.remove();
+          });
+        });
+      </script>
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+    if (result.ok || result.reason !== "contaminated") throw new Error("unreachable");
+    expect(result.selector).toContain("header");
+
+    navigateToProjectMock.mockResolvedValue(true);
+    const posted = await postBidBoardProjectNote(page, "9001", NOTE_TEXT, "DFW-2-12345-ab", ADV_OPTS);
+    expect(posted).toMatchObject({ posted: false, skipped: false });
+    expect(await page.locator("#notes2 .aid-note").count()).toBe(0);
+    expect(await page.locator("#plus2").count()).toBe(1);
+  });
+
+  it("finding 2: two separate, valid 'Notes' cards are ambiguous — decline rather than pick the first", async () => {
+    await page.setContent(`
+      <div id="col1"><div id="notesA"><h3>Notes</h3>${PLUS("plusA")}<div class="rows"></div></div><div><h3>Files</h3></div></div>
+      <div id="col2"><div id="notesB"><h3>Notes</h3>${PLUS("plusB")}<div class="rows"></div></div><div><h3>Tasks</h3></div></div>
+      ${DESCRIPTION_FIELD}
+    `);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result).toMatchObject({ ok: false, reason: "contaminated" });
+    if (result.ok || result.reason !== "contaminated") throw new Error("unreachable");
+    expect(result.selector).toMatch(/ambiguous/);
+  });
+
+  it("finding 2: two 'Notes' labels inside ONE card are one card, not an ambiguity", async () => {
+    await page.setContent(`
+      <div id="col">
+        <div id="notesCard"><div class="hdr"><h3>Notes</h3>${PLUS("plus")}</div>
+          <div class="rows"><div class="aid-note"><span>Notes</span> from the walkthrough</div></div></div>
+        <div><h3>Tasks</h3></div>
+      </div>
+      ${DESCRIPTION_FIELD}
+    `);
+    expect(await page.locator(NOTES.sectionLabel).count()).toBe(2);
+    const result = await resolveNotesSectionByAnchor(page);
+    expect(result.ok).toBe(true);
+    expect(await resolvedIdentity(result)).toBe("DIV#notesCard");
+  });
 });

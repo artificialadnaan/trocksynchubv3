@@ -233,6 +233,17 @@ function makeLocator(dom: FakeDom, resolve: () => FakeNode[], selector = ""): an
     // Only the `visible` filter is modelled — the structural Create climb counts VISIBLE candidates.
     filter: (opts?: { visible?: boolean }) =>
       makeLocator(dom, () => resolve().filter((n) => opts?.visible !== true || !n.hidden), selector),
+    // `a.and(b)`: the nodes BOTH resolve to — how the resolver asks "is this the same element?" without evaluate().
+    and: (other: any) =>
+      makeLocator(
+        dom,
+        () => {
+          const ids = new Set((other.resolveNodes() as FakeNode[]).map((n) => n.id));
+          return resolve().filter((n) => ids.has(n.id));
+        },
+        selector,
+      ),
+    resolveNodes: resolve,
   };
   return locator;
 }

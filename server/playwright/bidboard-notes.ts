@@ -590,8 +590,18 @@ export async function resolveNotesSectionByAnchor(
 
   let contaminatedSelector: string | null = null;
   let sawUnreadable = false;
+  // EVERY label is walked, not just up to the first card: a second, distinct "Notes" card is an ambiguity this
+  // resolver cannot settle, and returning whichever came first in DOM order is a coin toss over which card gets
+  // the note — and which card the idempotency read covers (adversarial review of #73, finding 2).
+  const found: Array<{ locator: Locator; depth: number }> = [];
+  // Labels that were never examined (the budget ran out, or past LABEL_CANDIDATE_LIMIT) could each be that second
+  // card, so with a card in hand they are an unknown, not an absence.
+  let unexamined = total > LABEL_CANDIDATE_LIMIT;
   for (let i = 0; i < Math.min(total, LABEL_CANDIDATE_LIMIT); i += 1) {
-    if (i > 0 && Date.now() >= deadline) break;
+    if (i > 0 && Date.now() >= deadline) {
+      unexamined = true;
+      break;
+    }
     const label = labels.nth(i);
     const labelVisible = await label.isVisible().catch(() => null);
     if (labelVisible === null) {
@@ -654,8 +664,10 @@ export async function resolveNotesSectionByAnchor(
         if (outside === null) {
           climbUnreadable = true;
         } else if (outside) {
-          if (!contaminatedSelector) contaminatedSelector = describeClimb(best.depth, "header-only");
-          best = null;
+          // The WHOLE resolution declines, not just this label. This label found the real Notes card and could
+          // not scope it safely; moving on to the next "Notes" label would post into some other card while the
+          // real one — which may already hold the CRM note — is ignored (adversarial review of #73, finding 2).
+          return { ok: false, reason: "contaminated", selector: describeClimb(best.depth, "header-only") };
         }
       }
       break;
@@ -668,12 +680,32 @@ export async function resolveNotesSectionByAnchor(
       sawUnreadable = true;
       continue;
     }
-    if (best) return { ok: true, locator: best.locator, selector: describeClimb(best.depth, "ok") };
+    if (best) {
+      // Two labels inside ONE card (a count badge, a label repeated in the card) climb to the same element; that
+      // is one card, not two.
+      let duplicate = false;
+      for (const card of found) {
+        const same = await card.locator
+          .and(best.locator)
+          .count()
+          .catch(() => null);
+        if (same === null) return { ok: false, reason: "unreadable", selector: describeClimb(best.depth, "ok") };
+        if (same > 0) duplicate = true;
+      }
+      if (!duplicate) found.push(best);
+    }
   }
   // Unknown BEFORE contaminated: a failed query may have hidden the real card while a decoy label produced the
-  // contaminated verdict, and the operator's next step differs (re-run, versus fix a wrapper). Both decline.
-  if (sawUnreadable) {
+  // contaminated verdict, and the operator's next step differs (re-run, versus fix a wrapper). Both decline. It
+  // also outranks a card in hand: the label that could not be read may be a second one.
+  if (sawUnreadable || (found.length > 0 && unexamined)) {
     return { ok: false, reason: "unreadable", selector: null };
+  }
+  if (found.length > 1) {
+    return { ok: false, reason: "contaminated", selector: `${found.length} "Notes" labels resolve to separate cards — ambiguous` };
+  }
+  if (found.length === 1) {
+    return { ok: true, locator: found[0].locator, selector: describeClimb(found[0].depth, "ok") };
   }
   if (contaminatedSelector) {
     return { ok: false, reason: "contaminated", selector: contaminatedSelector };
