@@ -20,6 +20,7 @@
 // drag that throw into rfp-approval.ts's module graph.
 import {
   escapeHtml,
+  realertMinutesFromEnv,
   recordPushOutcomeAndMaybeAlert,
   type PushAlertAction,
   type PushAlertEmailInput,
@@ -78,9 +79,10 @@ export function renderServiceRfpCoreAlertEmail(
   // Only the FIRST failure of a reason is emailed inside the re-alert window (a different reason always is), so
   // the email says where the rest are.
   const others = `
-      <p>Other approvals that failed for the same reason inside the alert window are not emailed one by one: list
-      them with <code>select rfp_request_id, source_deal_id, status, last_error from service_rfp_core_outbox where
-      status in ('failed','dead') order by updated_at desc</code>.</p>`;
+      <p>Other approvals that failed for the same reason inside the alert window are not emailed one by one. List
+      the recent ones (last_error carries the reason shown above) with <code>select rfp_request_id, source_deal_id,
+      status, last_error, created_at from service_rfp_core_outbox where status in ('failed','dead') and created_at
+      &gt; now() - interval '1 day' order by created_at desc</code>.</p>`;
 
   const details = `${rfpLines}
       <p><strong>Office:</strong> ${safeOffice}</p>
@@ -222,6 +224,29 @@ async function serializedByOffice<T>(officeSlug: string, work: () => Promise<T>)
 }
 
 /**
+ * The refusal reasons already EMAILED for each office inside the re-alert window (error text → when). A reason not in
+ * here is a new incident and is emailed even inside the window; one in here is throttled with the rest. Every reason
+ * in the window is remembered, not only the latest, so failures alternating between two reasons (a re-drive of mixed
+ * rows) stay one email per reason. Core's errors name a reason, never a row.
+ *
+ * In memory: SyncHub is one process, and a restart forgets at most one window (one extra email per reason). Cleared
+ * when the office recovers. Only touched inside serializedByOffice, so reads and writes for an office never interleave.
+ */
+const alertedReasons = new Map<string, Map<string, number>>();
+
+function reasonsInWindow(officeSlug: string, nowMs: number, windowMs: number): Map<string, number> {
+  const reasons = alertedReasons.get(officeSlug) ?? new Map<string, number>();
+  for (const [reason, at] of reasons) if (nowMs - at >= windowMs) reasons.delete(reason);
+  alertedReasons.set(officeSlug, reasons);
+  return reasons;
+}
+
+/** Test seam: forget every remembered reason. */
+export function resetServiceRfpCoreAlertReasons(): void {
+  alertedReasons.clear();
+}
+
+/**
  * Record one Core delivery outcome against the shared debounce, rendered in this stream's own words.
  * Never throws — recordPushOutcomeAndMaybeAlert wraps everything, because alerting must never be able
  * to fail the work it is reporting on.
@@ -230,8 +255,11 @@ export async function recordServiceRfpCoreDelivery(
   outcome: ServiceRfpCoreDeliveryOutcome,
 ): Promise<{ action: PushAlertAction } | { skipped: true }> {
   const officeSlug = serviceRfpCoreAlertOffice(outcome.office);
-  return serializedByOffice(officeSlug, () =>
-    recordPushOutcomeAndMaybeAlert(
+  return serializedByOffice(officeSlug, async () => {
+    const now = new Date();
+    const reasons = reasonsInWindow(officeSlug, now.getTime(), realertMinutesFromEnv() * 60_000);
+    const reason = outcome.error ?? "(none captured)";
+    const result = await recordPushOutcomeAndMaybeAlert(
       {
         pushResult: {
           ok: outcome.ok,
@@ -242,10 +270,17 @@ export async function recordServiceRfpCoreDelivery(
           terminalFailure: !outcome.ok && outcome.terminal !== true,
         },
         officeSlug,
-        // Errors here name a reason, never a row: a different reason is a new incident, the same one is throttled.
-        alertOnNewError: true,
+        now,
+        // A reason not yet emailed in this window is a new incident; a repeat of any emailed one is throttled.
+        signatureChanged: !outcome.ok && !reasons.has(reason),
       },
       { render: (input) => renderServiceRfpCoreAlertEmail(input, outcome.rfp) },
-    ),
-  );
+    );
+    // Recovered (and the operator told so): the next failure of any reason is a new incident anyway.
+    if (outcome.ok && "action" in result && result.action === "alert_recovered" && result.sent) reasons.clear();
+    else if (!outcome.ok && "action" in result && result.action === "alert_failure" && result.sent) {
+      reasons.set(reason, now.getTime());
+    }
+    return "action" in result ? { action: result.action } : result;
+  });
 }

@@ -759,7 +759,8 @@ export async function handOffServiceRfpApprovalToCore(
       });
       if (!inserted) return { status: "duplicate" };
       await reportDelivery({ office, ok: false, attempts: 0, error, terminal: true,
-        rfp: { requestId: input.rfpRequestId, sourceDealId: input.sourceDealId, projectNumber: input.projectNumber } });
+        rfp: { requestId: input.rfpRequestId, sourceDealId: input.sourceDealId, projectNumber: input.projectNumber,
+          companyName: wireString(effectiveField(input, "company_name"), MAX.companyName) } });
       log(`[service-rfp-core] Service RFP ${input.rfpRequestId} cannot reach Core — ${error}`, "sync");
       return { status: "failed" };
     }

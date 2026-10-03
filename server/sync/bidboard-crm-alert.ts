@@ -198,12 +198,11 @@ interface PersistedPushAlertState {
   state: PushAlertState;
   last_alerted_at: Date | null;
   last_success_at: Date | null;
-  last_error: string | null;
 }
 
 export async function readPushAlertState(officeSlug: string, db: Querier = pool): Promise<PersistedPushAlertState | null> {
   const { rows } = await db.query(
-    `SELECT state, last_alerted_at, last_success_at, last_error FROM bidboard_crm_push_alert_state WHERE office_slug = $1`,
+    `SELECT state, last_alerted_at, last_success_at FROM bidboard_crm_push_alert_state WHERE office_slug = $1`,
     [officeSlug]
   );
   if (rows.length === 0) return null;
@@ -212,7 +211,6 @@ export async function readPushAlertState(officeSlug: string, db: Querier = pool)
     state: r.state as PushAlertState,
     last_alerted_at: r.last_alerted_at ? new Date(r.last_alerted_at) : null,
     last_success_at: r.last_success_at ? new Date(r.last_success_at) : null,
-    last_error: r.last_error ?? null,
   };
 }
 
@@ -268,7 +266,7 @@ export interface RecordPushDeps {
   render?: (input: PushAlertEmailInput) => { subject: string; htmlBody: string };
 }
 
-function realertMinutesFromEnv(): number {
+export function realertMinutesFromEnv(): number {
   const n = Number(process.env.BIDBOARD_CRM_ALERT_REALERT_MINUTES);
   return Number.isFinite(n) && n > 0 ? n : 60;
 }
@@ -302,15 +300,14 @@ export async function recordPushOutcomeAndMaybeAlert(
     realertMinutes?: number;
     recipient?: string;
     /**
-     * Treat a failure whose error differs from the last recorded one as a NEW incident, even inside the re-alert
-     * window (decideAlertTransition's signatureChanged). For a producer whose errors name a reason, not a row
-     * (./service-rfp-core-alert): a second, different refusal is not hidden behind the first, while a burst of
-     * the same reason stays one email. Default false: the CRM push keeps its window-only throttle.
+     * The caller classifies this failure as a NEW incident (decideAlertTransition's signatureChanged): it is
+     * emailed even inside the re-alert window. Default false, so the CRM push keeps its window-only throttle.
+     * ./service-rfp-core-alert sets it for a refusal reason not yet emailed in the window.
      */
-    alertOnNewError?: boolean;
+    signatureChanged?: boolean;
   },
   deps: RecordPushDeps = {}
-): Promise<{ action: PushAlertAction } | { skipped: true }> {
+): Promise<{ action: PushAlertAction; sent?: boolean } | { skipped: true }> {
   try {
     if (args.pushResult.skipped) return { skipped: true };
 
@@ -335,8 +332,7 @@ export async function recordPushOutcomeAndMaybeAlert(
       lastAlertedAt: prior?.last_alerted_at ?? null,
       now,
       realertMinutes,
-      signatureChanged: args.alertOnNewError === true && !args.pushResult.ok && prior?.state === "failing" &&
-        (args.pushResult.error ?? null) !== prior.last_error,
+      signatureChanged: args.signatureChanged === true,
     });
 
     // Send first so the throttle anchor / state flip can be gated on a SUCCESSFUL send: a failed first
@@ -395,18 +391,14 @@ export async function recordPushOutcomeAndMaybeAlert(
         lastAlertedAt,
         // Record the success instant only when the push actually succeeded; preserve prior otherwise.
         lastSuccessAt: args.pushResult.ok ? now : (prior?.last_success_at ?? null),
-        // A new error whose email failed to send keeps the PRIOR error, so the next report still reads as new and
-        // retries the alert (the procore-login-alert rule), instead of being throttled as a repeat nobody saw.
-        lastError: args.pushResult.ok ? null
-          : args.alertOnNewError === true && decision.action === "alert_failure" && !sent && prior?.state === "failing"
-            ? prior.last_error
-            : (args.pushResult.error ?? null),
+        lastError: args.pushResult.ok ? null : (args.pushResult.error ?? null),
         now,
       },
       db
     );
 
-    return { action: decision.action };
+    // `sent` lets a caller that tracks what it already emailed record only what an operator actually received.
+    return { action: decision.action, sent };
   } catch (err) {
     // Alerting must never crash the sync. Swallow and log (defensively, even logging is guarded).
     try {
