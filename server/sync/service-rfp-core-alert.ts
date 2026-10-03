@@ -80,9 +80,10 @@ export function renderServiceRfpCoreAlertEmail(
   // the email says where the rest are.
   const others = `
       <p>Other approvals that failed for the same reason inside the alert window are not emailed one by one. List
-      the recent ones (last_error carries the reason shown above) with <code>select rfp_request_id, source_deal_id,
-      status, last_error, created_at from service_rfp_core_outbox where status in ('failed','dead') and created_at
-      &gt; now() - interval '1 day' order by created_at desc</code>.</p>`;
+      the recent ones (last_error carries the reason shown above; a re-driven row keeps its created_at, so the
+      latest attempt decides) with <code>select rfp_request_id, source_deal_id, status, last_error,
+      coalesce(last_attempt_at, created_at) as failed_at from service_rfp_core_outbox where status in ('failed','dead')
+      and coalesce(last_attempt_at, created_at) &gt; now() - interval '1 day' order by failed_at desc</code>.</p>`;
 
   const details = `${rfpLines}
       <p><strong>Office:</strong> ${safeOffice}</p>

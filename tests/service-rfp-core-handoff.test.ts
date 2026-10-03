@@ -90,6 +90,8 @@ vi.mock("../server/sync/bidboard-crm-alert.ts", () => ({
   // service-rfp-core-alert renders through this. Identity, not behaviour: the escaping itself is
   // covered against the REAL implementation in tests/service-rfp-core-alert.test.ts.
   escapeHtml: (s: string) => s,
+  // The re-alert window service-rfp-core-alert keys its per-reason memory on.
+  realertMinutesFromEnv: () => 60,
 }));
 
 // A pass-through spy, not a stub: the real handoff still runs. It exists only so the "one source of
