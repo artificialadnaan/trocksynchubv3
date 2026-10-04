@@ -267,7 +267,7 @@ export interface IStorage {
   /** Get user by username for authentication */
   getUserByUsername(username: string): Promise<User | undefined>;
   /** Create a new user with hashed password */
-  createUser(user: InsertUser & { role?: string }): Promise<User>;
+  createUser(user: InsertUser & { role: string }): Promise<User>;
 
   // ==================== SYNC MAPPINGS ====================
   // Sync mappings are the core data structure linking entities across systems
@@ -510,9 +510,18 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  async createUser(insertUser: InsertUser & { role?: string }): Promise<User> {
+  /**
+   * `role` is REQUIRED and always written explicitly. The users.role column still defaults to "admin" (the historical
+   * default, left as is so no existing account changes), so a caller that omitted it would silently mint an admin.
+   */
+  async createUser(insertUser: InsertUser & { role: string }): Promise<User> {
+    const role = typeof insertUser.role === "string" ? insertUser.role.trim() : "";
+    if (!role) throw new Error("createUser: role is required");
     const hashedPassword = await bcrypt.hash(insertUser.password, 10);
-    const [user] = await db.insert(users).values({ ...insertUser, password: hashedPassword }).returning();
+    const [user] = await db
+      .insert(users)
+      .values({ username: insertUser.username, password: hashedPassword, role })
+      .returning();
     return user;
   }
 
