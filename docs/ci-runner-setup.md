@@ -31,6 +31,13 @@ That's an owner action, so no lane has done it.
 5. **Optional:** make **CI / typecheck-and-test** a required check on `main` (Settings → Branches). Do this only after
    it has passed once.
 
+## Trust model
+
+The runner is long-lived and the image allows `sudo`, so whatever it runs can change the host. That's why the
+workflow runs only for pushes to `main` and for PRs whose branch lives in this repo (people with write access).
+A PR from a fork is skipped. This matches the CRM, Core and Expense runners. For stronger isolation, start the
+runner as an ephemeral one (`--ephemeral`, re-registered after every job) on a host that runs nothing else.
+
 ## What the job needs
 
 - Node 20 (installed by `actions/setup-node`) and `npm ci`.

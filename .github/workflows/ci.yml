@@ -17,6 +17,9 @@ permissions:
 
 jobs:
   typecheck-and-test:
+    # The runner is persistent, so only trusted revisions may run on it: pushes to main and PRs from branches in
+    # this repo (people with write access). A PR from a fork never runs here; the job is skipped.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
     steps:
