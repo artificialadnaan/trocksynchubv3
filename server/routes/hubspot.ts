@@ -1,6 +1,7 @@
 import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
+import { bumpPollingVersion } from "../polling-auth-alert";
 import {
   testHubSpotConnection,
   runFullHubSpotSync,
@@ -44,6 +45,7 @@ export function registerHubSpotRoutes(app: Express, requireAuth: RequestHandler)
       accessToken: trimmedAccessToken,
       tokenType: "Bearer",
     });
+    await bumpPollingVersion("hubspot_polling");
 
     await storage.upsertAutomationConfig({
       key: "hubspot_config",
