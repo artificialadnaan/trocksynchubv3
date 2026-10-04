@@ -18,6 +18,11 @@
 //    longer describes that event.
 // Re-enabling (POST /api/settings/polling/:job/enable, or the Settings toggle) rewrites the row without
 // disabledReason, so the next expiry is a new event and alerts again.
+//  - The disable is a compare-and-set on the row version the failing cycle STARTED with (cycleVersion): a cycle that
+//    started with the old token and fails after an admin re-enabled writes nothing ("superseded"), so it cannot
+//    clobber the re-enable.
+//  - The send is claimed in email_send_log BEFORE it goes out (claimEmailSend), so two replicas never both send one
+//    event: the dedupe row is shared, the in-process guards are only a first line.
 //
 // Recipient: BIDBOARD_CRM_ALERT_RECIPIENT, the same ops inbox as the Procore sign-in alert and the Bid
 // Board → CRM push alert, with the same "inert until configured" posture. With no recipient the alert
@@ -161,7 +166,13 @@ const PERSIST_ATTEMPTS = 3;
 export const POLLING_ALERT_RESEND_WINDOW_MS = 30 * 24 * 60 * 60_000;
 
 /**
- * In-process guards against a second copy: a send of the same event already in flight (a repeat trigger racing a
+ * A 'sending' claim older than this belongs to a sender that died mid-send (or delivered but could not mark it sent),
+ * and may be claimed again. Longer than any single send.
+ */
+export const POLLING_ALERT_STALE_CLAIM_MINUTES = 30;
+
+/**
+ * In-process guards against a second copy (a first line only; the shared guard is the claimed dedupe row): a send of the same event already in flight (a repeat trigger racing a
  * scheduled retry), and an event delivered whose send-log row could not be banked.
  */
 const inFlight = new Set<string>();
@@ -184,8 +195,19 @@ function defaultScheduleRetry(fn: () => void, ms: number): void {
   (t as { unref?: () => void }).unref?.();
 }
 
+/**
+ * `cycleVersion`: the job's config row version (storage.getAutomationConfigVersion) read when the failing cycle
+ * STARTED. With it, a new disable is written only if the row is unchanged since then. Omitted or null (the start read
+ * failed), the disable is written unconditionally, as before.
+ */
+export interface PollingAuthExpiryArgs {
+  job: PollingJobKey;
+  error: string;
+  cycleVersion?: string | null;
+}
+
 export async function recordPollingAuthExpiry(
-  args: { job: PollingJobKey; error: string },
+  args: PollingAuthExpiryArgs,
   deps: PollingAuthExpiryDeps = {},
 ): Promise<PollingAuthExpiryResult> {
   const result = await recordOnce(args, deps);
@@ -210,8 +232,17 @@ export async function recordPollingAuthExpiry(
  * try. Polling stays off across the restart, so no cycle would ever reach recordPollingAuthExpiry again.
  * Never throws.
  */
-export async function resendPendingPollingAlerts(deps: PollingAuthExpiryDeps = {}): Promise<void> {
+/** The boot check retries a job whose READ failed, at these delays; a send failure has its own retries. */
+export const BOOT_RESEND_RETRY_DELAYS_MS: readonly number[] = Object.freeze([2 * 60_000, 10 * 60_000, 30 * 60_000]);
+
+export async function resendPendingPollingAlerts(
+  deps: PollingAuthExpiryDeps = {},
+  boot: { attempt?: number; jobs?: readonly PollingJobKey[] } = {},
+): Promise<void> {
+  const attempt = boot.attempt ?? 0;
+  const failed: PollingJobKey[] = [];
   for (const job of [POLLING_JOBS.procore, POLLING_JOBS.hubspot]) {
+    if (boot.jobs && !boot.jobs.includes(job.key)) continue;
     try {
       const prior: any = (await storage.getAutomationConfig(job.key))?.value ?? null;
       if (!prior || prior.enabled === true || prior.disabledReason !== "auth_expired" || typeof prior.disabledAt !== "string") continue;
@@ -224,7 +255,19 @@ export async function resendPendingPollingAlerts(deps: PollingAuthExpiryDeps = {
       // changed and stops, rather than treating the enabled row as a new expiry and disabling it again.
       await recordPollingAuthExpiry({ job: job.key, error }, { ...deps, retry: { attempt: 0, disabledAt: prior.disabledAt, persisted: true } });
     } catch (err) {
+      // A failed read (the config row or the dedupe check) says nothing about whether an alert is owed. It used to
+      // wait for the next restart; it is retried, bounded, for this job only.
+      failed.push(job.key);
       console.warn(`[PollingAlert] Pending-alert check failed for ${job.key}:`, err instanceof Error ? err.message : err);
+    }
+  }
+  if (failed.length > 0 && attempt < BOOT_RESEND_RETRY_DELAYS_MS.length) {
+    try {
+      (deps.scheduleRetry ?? defaultScheduleRetry)(() => {
+        void resendPendingPollingAlerts(deps, { attempt: attempt + 1, jobs: failed });
+      }, BOOT_RESEND_RETRY_DELAYS_MS[attempt]!);
+    } catch (err) {
+      console.warn(`[PollingAlert] Could not schedule a pending-alert re-check:`, err instanceof Error ? err.message : err);
     }
   }
 }
@@ -237,7 +280,7 @@ function withinResendWindow(disabledAt: string, deps: PollingAuthExpiryDeps): bo
 }
 
 async function recordOnce(
-  args: { job: PollingJobKey; error: string },
+  args: PollingAuthExpiryArgs,
   deps: PollingAuthExpiryDeps,
 ): Promise<PollingAuthExpiryResult> {
   const job = pollingJobByKey(args.job);
@@ -285,20 +328,31 @@ async function recordOnce(
       disabledAt = prior.disabledAt;
     } else {
       const priorInterval = Number(prior?.intervalMinutes);
+      const row = {
+        key: job.key,
+        value: {
+          enabled: false,
+          intervalMinutes: Number.isFinite(priorInterval) && priorInterval > 0 ? priorInterval : job.defaultIntervalMinutes,
+          disabledReason: "auth_expired",
+          disabledAt,
+          disabledError: String(args.error ?? "").slice(0, DISABLED_ERROR_MAX),
+        },
+        description: job.description,
+      };
       persisted = false;
       for (let i = 0; i < PERSIST_ATTEMPTS && !persisted; i++) {
         try {
-          await storage.upsertAutomationConfig({
-            key: job.key,
-            value: {
-              enabled: false,
-              intervalMinutes: Number.isFinite(priorInterval) && priorInterval > 0 ? priorInterval : job.defaultIntervalMinutes,
-              disabledReason: "auth_expired",
-              disabledAt,
-              disabledError: String(args.error ?? "").slice(0, DISABLED_ERROR_MAX),
-            },
-            description: job.description,
-          });
+          if (typeof args.cycleVersion === "string") {
+            // Compare-and-set on the version the cycle started with. A changed row (an admin re-enabled, or someone
+            // edited the config, while this cycle ran on the old token) is not ours to turn off: nothing is written,
+            // audited or emailed.
+            if (!(await storage.upsertAutomationConfigIfVersion(row, args.cycleVersion))) {
+              console.warn(`[PollingAlert] ${job.key} changed since the failing cycle started; not disabling it (superseded)`);
+              return { newEvent: false, disabledAt, persisted: false, alert: "superseded" };
+            }
+          } else {
+            await storage.upsertAutomationConfig(row);
+          }
           persisted = true;
         } catch (err) {
           console.warn(`[PollingAlert] Failed to persist ${job.key} disable on auth expiry (attempt ${i + 1}):`, err instanceof Error ? err.message : err);
@@ -362,43 +416,51 @@ async function recordOnce(
     }
     inFlight.add(dedupeKey);
     try {
-      if (await storage.checkEmailDedupeKey(dedupeKey)) {
-        return { newEvent, disabledAt, persisted, alert: "already_sent" };
-      }
-
       const { subject, htmlBody } = renderPollingDisabledEmail({ job, disabledAt, error: args.error, persisted });
+      // The SHARED guard, checked before the send: claim the dedupe row ('sending'). Another replica, or another
+      // process after a restart, that already sent this event or is sending it right now gets no claim.
+      const claimId = await storage.claimEmailSend(
+        { templateKey: "polling_auto_disabled_alert", recipientEmail: recipient, subject, dedupeKey, metadata: { job: job.key, disabledAt, persisted } },
+        POLLING_ALERT_STALE_CLAIM_MINUTES,
+      );
+      if (claimId == null) return { newEvent, disabledAt, persisted, alert: "already_sent" };
+
       const send: SendEmail = deps.send ?? (await import("./email-service")).sendEmail;
       let sent = false;
+      let sendError = "send returned success: false";
       try {
         // Ops alert → only the configured recipient; skip the customer-facing GLOBAL_CC.
         const res = await send({ to: recipient, subject, htmlBody, bypassGlobalCc: true, fromName: "T-Rock Sync Hub Alerts" });
         sent = Boolean(res?.success);
       } catch (err) {
-        console.error(`[PollingAlert] ${job.key} alert email send FAILED:`, err instanceof Error ? err.message : err);
+        sendError = err instanceof Error ? err.message : String(err);
+        console.error(`[PollingAlert] ${job.key} alert email send FAILED:`, sendError);
       }
-      if (!sent) return { newEvent, disabledAt, persisted, alert: "send_failed" };
+      if (!sent) {
+        // Release the claim so a retry (here or on another replica) may claim it again. If even that write fails,
+        // the claim goes stale after POLLING_ALERT_STALE_CLAIM_MINUTES and is reclaimable then.
+        try {
+          await storage.settleEmailSend(claimId, { status: "failed", error: sendError });
+        } catch (err) {
+          console.warn(`[PollingAlert] ${job.key} could not release its send claim:`, err instanceof Error ? err.message : err);
+        }
+        return { newEvent, disabledAt, persisted, alert: "send_failed" };
+      }
       delivered.add(dedupeKey);
 
-      // DELIVERED from here on. A failure to bank the dedupe row is not a failed send: retrying would email the
-      // recipient again. It is logged instead; this process remembers the delivery, so only a restart's boot check
-      // could send one more copy.
+      // DELIVERED from here on. A failure to mark the claim sent is not a failed send: retrying would email the
+      // recipient again. It is logged instead; the claim stays 'sending', which blocks every replica until it is
+      // POLLING_ALERT_STALE_CLAIM_MINUTES old, and this process remembers the delivery.
       let banked = false;
       for (let i = 0; i < PERSIST_ATTEMPTS && !banked; i++) {
         try {
-          await storage.createEmailSendLog({
-            templateKey: "polling_auto_disabled_alert",
-            recipientEmail: recipient,
-            subject,
-            dedupeKey,
-            status: "sent",
-            metadata: { job: job.key, disabledAt, persisted },
-          });
+          await storage.settleEmailSend(claimId, { status: "sent" });
           banked = true;
         } catch (err) {
           console.warn(`[PollingAlert] ${job.key} alert delivered but its send log failed (attempt ${i + 1}):`, err instanceof Error ? err.message : err);
         }
       }
-      if (!banked) console.error(`[PollingAlert] ${job.key} alert delivered but never logged; a restart may send it once more`);
+      if (!banked) console.error(`[PollingAlert] ${job.key} alert delivered but never logged as sent; a stale claim may send it once more`);
       console.log(`[PollingAlert] ${job.key} auto-disable alert email sent (disabledAt=${disabledAt}, persisted=${persisted})`);
       return { newEvent, disabledAt, persisted, alert: "sent" };
     } finally {

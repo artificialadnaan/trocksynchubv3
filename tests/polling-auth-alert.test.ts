@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => ({
     createAuditLog: vi.fn(),
     checkEmailDedupeKey: vi.fn(),
     createEmailSendLog: vi.fn(),
+    claimEmailSend: vi.fn(),
+    settleEmailSend: vi.fn(),
+    getAutomationConfigVersion: vi.fn(),
+    upsertAutomationConfigIfVersion: vi.fn(),
     getUser: vi.fn(),
   },
   sendEmail: vi.fn(),
@@ -59,25 +63,56 @@ const RECIPIENT = "ops-alerts@example.test";
 function backedStore(initial: Record<string, any> = {}) {
   const rows: Record<string, any> = { ...initial };
   const sentKeys = new Set<string>();
+  // Row versions (updated_at): every write bumps one, as storage's upserts do.
+  const versions: Record<string, number> = {};
+  let nextVersion = 1;
+  for (const key of Object.keys(rows)) versions[key] = nextVersion++;
+  const write = (data: any) => {
+    rows[data.key] = data.value;
+    versions[data.key] = nextVersion++;
+    return data;
+  };
+  // email_send_log by dedupe key: 'sending' (a claim), 'sent' or 'failed'. Its real SQL is pinned by the PGlite test.
+  const sendLog = new Map<string, { id: number; status: string }>();
+  let nextLogId = 1;
   mocks.storage.getAutomationConfig.mockImplementation(async (key: string) => (key in rows ? { key, value: rows[key] } : undefined));
   mocks.storage.getAutomationConfigs.mockImplementation(async () => Object.entries(rows).map(([key, value]) => ({ key, value })));
-  mocks.storage.upsertAutomationConfig.mockImplementation(async (data: any) => {
-    rows[data.key] = data.value;
-    return data;
-  });
+  mocks.storage.upsertAutomationConfig.mockImplementation(async (data: any) => write(data));
   mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockImplementation(async (data: any) => {
     // Stands in for the conditional ON CONFLICT DO UPDATE (its real SQL is pinned by the PGlite test).
     if (rows[data.key]?.disabledReason === "auth_expired") return null;
-    rows[data.key] = data.value;
-    return data;
+    return write(data);
+  });
+  mocks.storage.getAutomationConfigVersion.mockImplementation(async (key: string) => (key in rows ? String(versions[key]) : "absent"));
+  mocks.storage.upsertAutomationConfigIfVersion.mockImplementation(async (data: any, version: string) => {
+    const current = data.key in rows ? String(versions[data.key]) : "absent";
+    return current === version ? write(data) : null;
   });
   mocks.storage.checkEmailDedupeKey.mockImplementation(async (k: string) => sentKeys.has(k));
   mocks.storage.createEmailSendLog.mockImplementation(async (d: any) => {
     if (d.status === "sent") sentKeys.add(d.dedupeKey);
     return d;
   });
-  return { rows, sentKeys };
+  mocks.storage.claimEmailSend.mockImplementation(async (d: any) => {
+    const row = sendLog.get(d.dedupeKey);
+    if (row && row.status !== "failed") return null;
+    const id = row?.id ?? nextLogId++;
+    sendLog.set(d.dedupeKey, { id, status: "sending" });
+    return id;
+  });
+  mocks.storage.settleEmailSend.mockImplementation(async (id: number, outcome: any) => {
+    for (const [key, row] of sendLog) {
+      if (row.id === id && row.status === "sending") {
+        row.status = outcome.status;
+        if (outcome.status === "sent") sentKeys.add(key);
+      }
+    }
+  });
+  return { rows, sentKeys, sendLog, versions };
 }
+
+/** The settle calls that marked an alert delivered (status "sent"). */
+const sentSettles = () => mocks.storage.settleEmailSend.mock.calls.filter((c: any[]) => c[1]?.status === "sent");
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
@@ -254,7 +289,7 @@ describe("recordPollingAuthExpiry", () => {
     const scheduled: (() => void)[] = [];
     await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401" }, { recipient: RECIPIENT, scheduleRetry: (fn) => void scheduled.push(fn) });
     scheduled[0]!();
-    await vi.waitFor(() => expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sentSettles()).toHaveLength(1));
     expect(mocks.sendEmail).toHaveBeenCalledTimes(2);
     expect(scheduled).toHaveLength(1);
   });
@@ -282,13 +317,13 @@ describe("recordPollingAuthExpiry", () => {
 
     // The retry resends the "not saved" alert only: it never writes the row, which an admin may have re-enabled.
     scheduled[0]!();
-    await vi.waitFor(() => expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sentSettles()).toHaveLength(1));
     expect(mocks.storage.upsertAutomationConfig).toHaveBeenCalledTimes(3);
     expect(mocks.storage.createAuditLog).toHaveBeenCalledTimes(1);
     const mail = mocks.sendEmail.mock.calls[1][0];
     expect(mail.subject).toMatch(/NOT saved/);
     expect(mail.htmlBody).toContain("next restart or deploy starts polling again");
-    expect(mocks.storage.createEmailSendLog.mock.calls[0][0].dedupeKey).toMatch(/^polling_auto_disable_not_saved:procore_polling:/);
+    expect(mocks.storage.claimEmailSend.mock.calls.at(-1)![0].dedupeKey).toMatch(/^polling_auto_disable_not_saved:procore_polling:/);
   });
 
   it("at boot, a saved disable whose email never went out is sent once; a banked or re-enabled one is not", async () => {
@@ -349,14 +384,14 @@ describe("recordPollingAuthExpiry", () => {
 
   it("a delivered email whose send log fails is NOT retried (the recipient already has it)", async () => {
     backedStore({ hubspot_polling: { enabled: true } });
-    mocks.storage.createEmailSendLog.mockRejectedValue(new Error("db blip"));
+    mocks.storage.settleEmailSend.mockRejectedValue(new Error("db blip"));
     const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
     const scheduled: (() => void)[] = [];
     const out = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401" }, { recipient: RECIPIENT, scheduleRetry: (fn) => void scheduled.push(fn) });
     expect(out.alert).toBe("sent");
     expect(scheduled).toHaveLength(0);
     expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
-    expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(3);
+    expect(sentSettles()).toHaveLength(3);
   });
 
   it("a retry whose config read fails keeps retrying instead of dropping the alert as superseded", async () => {
@@ -376,7 +411,7 @@ describe("recordPollingAuthExpiry", () => {
 
     // Retry 2: the read works, the row still holds the event, and the alert goes out once.
     scheduled[1]!();
-    await vi.waitFor(() => expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sentSettles()).toHaveLength(1));
     expect(mocks.sendEmail).toHaveBeenCalledTimes(2);
     expect(rows.procore_polling.disabledAt).toBe("2026-06-10T08:00:00.000Z");
     expect(mocks.storage.upsertAutomationConfig).toHaveBeenCalledTimes(1);
@@ -408,6 +443,7 @@ describe("recordPollingAuthExpiry", () => {
     expect(repeat).toMatchObject({ newEvent: false, alert: "too_old", disabledAt: old.disabledAt });
     expect(mocks.sendEmail).not.toHaveBeenCalled();
     expect(mocks.storage.checkEmailDedupeKey).not.toHaveBeenCalled();
+    expect(mocks.storage.claimEmailSend).not.toHaveBeenCalled();
     expect(rows.procore_polling).toEqual(old);
 
     // Just inside the window it is still resent, once.
@@ -444,7 +480,7 @@ describe("recordPollingAuthExpiry", () => {
 
   it("a delivered email whose send log never banked is not sent again by a later repeat in the same process", async () => {
     backedStore({ hubspot_polling: { enabled: true } });
-    mocks.storage.createEmailSendLog.mockRejectedValue(new Error("db blip"));
+    mocks.storage.settleEmailSend.mockRejectedValue(new Error("db blip"));
     const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
     const first = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401" }, { recipient: RECIPIENT });
     const repeat = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401" }, { recipient: RECIPIENT });
@@ -453,14 +489,14 @@ describe("recordPollingAuthExpiry", () => {
     expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
   });
 
-  it("two calls racing on the dedupe LOOKUP deliver one email: the event is claimed before the await", async () => {
+  it("two calls racing on the shared CLAIM deliver one email: the event is also claimed in-process before the await", async () => {
     backedStore({
       procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" },
     });
     const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
     // Every lookup is held open, so if both callers reached it they would both be suspended on it at once.
-    const pending: ((v: boolean) => void)[] = [];
-    mocks.storage.checkEmailDedupeKey.mockImplementation(() => new Promise<boolean>((r) => pending.push(r)));
+    const pending: ((v: number) => void)[] = [];
+    mocks.storage.claimEmailSend.mockImplementation(() => new Promise<number>((r) => pending.push(r)));
     const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z") };
 
     const a = recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { ...deps, retry: { attempt: 1, disabledAt: "2026-06-10T08:00:00.000Z", persisted: true } });
@@ -468,7 +504,7 @@ describe("recordPollingAuthExpiry", () => {
     await vi.waitFor(() => expect(pending.length).toBeGreaterThanOrEqual(1));
     await new Promise((r) => setTimeout(r, 20));
     const lookups = pending.length;
-    pending.forEach((r) => r(false));
+    pending.forEach((r) => r(1));
     const results = [(await a).alert, (await b).alert].sort();
 
     expect(lookups).toBe(1);
@@ -481,7 +517,7 @@ describe("recordPollingAuthExpiry", () => {
       procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" },
     });
     const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
-    mocks.storage.checkEmailDedupeKey.mockRejectedValueOnce(new Error("db blip"));
+    mocks.storage.claimEmailSend.mockRejectedValueOnce(new Error("db blip"));
     const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z"), scheduleRetry: () => {} };
 
     expect((await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps)).alert).toBe("send_failed");
@@ -491,11 +527,102 @@ describe("recordPollingAuthExpiry", () => {
     expect(mocks.sendEmail).toHaveBeenCalledTimes(2);
   });
 
+  // L207: the disable is a compare-and-set on the row version the failing cycle STARTED with.
+  it("a cycle that started before an admin re-enable cannot re-disable it (compare-and-set on the start version)", async () => {
+    const { rows } = backedStore({ procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" } });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const startedWith = await mocks.storage.getAutomationConfigVersion("procore_polling");
+    // The admin re-enables while the cycle (old token) is still running.
+    await mocks.storage.upsertAutomationConfig({ key: "procore_polling", value: { enabled: true, intervalMinutes: 17 } });
+    const writes = mocks.storage.upsertAutomationConfig.mock.calls.length;
+
+    const out = await recordPollingAuthExpiry({ job: "procore_polling", error: "401", cycleVersion: startedWith }, { recipient: RECIPIENT });
+
+    expect(out.alert).toBe("superseded");
+    expect(rows.procore_polling).toEqual({ enabled: true, intervalMinutes: 17 });
+    expect(mocks.storage.upsertAutomationConfig.mock.calls.length).toBe(writes);
+    expect(mocks.storage.createAuditLog).not.toHaveBeenCalled();
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("an unchanged row is disabled through the compare-and-set, and alerts as before", async () => {
+    const { rows } = backedStore({ hubspot_polling: { enabled: true, intervalMinutes: 11 } });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const startedWith = await mocks.storage.getAutomationConfigVersion("hubspot_polling");
+    const out = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401", cycleVersion: startedWith }, { recipient: RECIPIENT });
+    expect(out).toMatchObject({ newEvent: true, persisted: true, alert: "sent" });
+    expect(rows.hubspot_polling).toMatchObject({ enabled: false, disabledReason: "auth_expired" });
+    expect(mocks.storage.upsertAutomationConfigIfVersion).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.upsertAutomationConfig).not.toHaveBeenCalled();
+  });
+
+  // L208: the shared dedupe row is claimed before the send, so a second REPLICA (its own module, its own in-process
+  // guards, the same database) cannot send the same event.
+  it("two replicas alerting the same event deliver ONE email: the shared claim, not the in-process guard, decides", async () => {
+    backedStore({
+      procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" },
+    });
+    const replicaA = await import("../server/polling-auth-alert.ts");
+    vi.resetModules();
+    const replicaB = await import("../server/polling-auth-alert.ts");
+    expect(replicaB).not.toBe(replicaA);
+    let release!: () => void;
+    mocks.sendEmail.mockImplementationOnce(() => new Promise((r) => (release = () => r({ success: true }))));
+    const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z") };
+
+    const a = replicaA.recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
+    await vi.waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledTimes(1));
+    const b = await replicaB.recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
+    release();
+
+    expect((await a).alert).toBe("sent");
+    expect(b.alert).toBe("already_sent");
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  // L209: the boot resend re-checks a job whose READ failed, bounded, instead of waiting for the next restart.
+  it("the boot check retries a failed read, bounded, and still sends the owed alert", async () => {
+    backedStore({
+      procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" },
+      hubspot_polling: { enabled: true, intervalMinutes: 11 },
+    });
+    const { resendPendingPollingAlerts, BOOT_RESEND_RETRY_DELAYS_MS } = await import("../server/polling-auth-alert.ts");
+    const scheduled: Array<{ fn: () => void; ms: number }> = [];
+    const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z"), scheduleRetry: (fn: () => void, ms: number) => void scheduled.push({ fn, ms }) };
+
+    mocks.storage.getAutomationConfig.mockRejectedValueOnce(new Error("db not ready")); // procore's read at boot
+    await resendPendingPollingAlerts(deps);
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+    expect(scheduled.map((x) => x.ms)).toEqual([BOOT_RESEND_RETRY_DELAYS_MS[0]]);
+
+    scheduled[0]!.fn();
+    await vi.waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledTimes(1));
+    expect(mocks.sendEmail.mock.calls[0][0].subject).toMatch(/Procore/);
+    expect(scheduled).toHaveLength(1);
+  });
+
+  it("the boot re-check is bounded: a read that never recovers stops after the last delay", async () => {
+    backedStore({});
+    const { resendPendingPollingAlerts, BOOT_RESEND_RETRY_DELAYS_MS } = await import("../server/polling-auth-alert.ts");
+    mocks.storage.getAutomationConfig.mockRejectedValue(new Error("db down"));
+    const scheduled: Array<{ fn: () => void; ms: number }> = [];
+    const deps = { recipient: RECIPIENT, scheduleRetry: (fn: () => void, ms: number) => void scheduled.push({ fn, ms }) };
+    await resendPendingPollingAlerts(deps);
+    for (let i = 0; i < 10 && i < scheduled.length; i++) {
+      scheduled[i]!.fn();
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(scheduled.map((x) => x.ms)).toEqual([...BOOT_RESEND_RETRY_DELAYS_MS]);
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+  });
+
   it("never throws, even when storage is down", async () => {
     mocks.storage.getAutomationConfig.mockRejectedValue(new Error("db down"));
     mocks.storage.upsertAutomationConfig.mockRejectedValue(new Error("db down"));
     mocks.storage.createAuditLog.mockRejectedValue(new Error("db down"));
     mocks.storage.checkEmailDedupeKey.mockRejectedValue(new Error("db down"));
+    mocks.storage.claimEmailSend.mockRejectedValue(new Error("db down"));
+    mocks.storage.settleEmailSend.mockRejectedValue(new Error("db down"));
     const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
     await expect(recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { recipient: RECIPIENT })).resolves.toMatchObject({
       newEvent: true,
@@ -623,6 +750,25 @@ describe("enable-all-automations → alert", () => {
 });
 
 describe("polling cycles → alert", () => {
+  it("procore_polling: a re-enable that lands while the cycle runs is not undone by its auth failure", async () => {
+    vi.stubEnv("BIDBOARD_CRM_ALERT_RECIPIENT", RECIPIENT);
+    const { rows } = backedStore({ procore_polling: { enabled: false, intervalMinutes: 20, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" } });
+    // The cycle runs on the old token; mid-cycle an admin reconnects and re-enables; then the old token fails.
+    mocks.runFullProcoreSync.mockImplementation(async () => {
+      await mocks.storage.upsertAutomationConfig({ key: "procore_polling", value: { enabled: true, intervalMinutes: 20 } });
+      throw new Error("Request failed with status code 401");
+    });
+    const { registerSettingsRoutes } = await import("../server/routes/settings.ts");
+    const app = createFakeApp();
+    registerSettingsRoutes(app as any, passAuth);
+
+    await invokeRoute(app.routes["POST /api/automation/procore-polling/trigger"]);
+    await vi.waitFor(() => expect(mocks.storage.upsertAutomationConfigIfVersion).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rows.procore_polling).toEqual({ enabled: true, intervalMinutes: 20 });
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["procore_polling", "/api/automation/procore-polling/trigger", () => mocks.runFullProcoreSync, "Request failed with status code 401"],
     ["hubspot_polling", "/api/automation/polling/trigger", () => mocks.runFullHubSpotSync, "EXPIRED_AUTHENTICATION"],
@@ -636,7 +782,7 @@ describe("polling cycles → alert", () => {
 
     await invokeRoute(app.routes[`POST ${path}`]);
     await vi.waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(mocks.storage.createEmailSendLog).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sentSettles()).toHaveLength(1));
     expect(rows[key]).toMatchObject({ enabled: false, intervalMinutes: 20, disabledReason: "auth_expired" });
     const firstDisabledAt = rows[key].disabledAt;
 

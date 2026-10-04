@@ -319,6 +319,8 @@ export interface IStorage {
 
   getAutomationConfigs(): Promise<AutomationConfig[]>;
   getAutomationConfig(key: string): Promise<AutomationConfig | undefined>;
+  getAutomationConfigVersion(key: string): Promise<string>;
+  upsertAutomationConfigIfVersion(data: InsertAutomationConfig, version: string): Promise<AutomationConfig | null>;
   upsertAutomationConfig(data: InsertAutomationConfig): Promise<AutomationConfig>;
   upsertAutomationConfigUnlessAuthDisabled(data: InsertAutomationConfig): Promise<AutomationConfig | null>;
   /** Merge `patch` into an automation config's jsonb value ATOMICALLY, leaving untouched keys alone. */
@@ -443,6 +445,11 @@ export interface IStorage {
   updateEmailTemplate(id: number, data: Partial<InsertEmailTemplate>): Promise<EmailTemplate | undefined>;
 
   createEmailSendLog(data: InsertEmailSendLog): Promise<EmailSendLog>;
+  claimEmailSend(
+    data: Pick<InsertEmailSendLog, "templateKey" | "recipientEmail" | "subject" | "dedupeKey" | "metadata">,
+    staleClaimMinutes: number,
+  ): Promise<number | null>;
+  settleEmailSend(id: number, outcome: { status: "sent" } | { status: "failed"; error: string }): Promise<void>;
   checkEmailDedupeKey(dedupeKey: string): Promise<boolean>;
   getEmailSendLogs(filters: { templateKey?: string; limit?: number; offset?: number }): Promise<{ data: EmailSendLog[]; total: number }>;
   getEmailSendLogCounts(): Promise<{ total: number; sent: number; failed: number }>;
@@ -862,6 +869,37 @@ export class DatabaseStorage implements IStorage {
         target: automationConfig.key,
         set: { ...data, updatedAt: new Date() },
         setWhere: sql`(${automationConfig.value} ->> 'disabledReason') IS DISTINCT FROM 'auth_expired'`,
+      }).returning();
+    return result ?? null;
+  }
+
+  /**
+   * The row's version for a compare-and-set: its updated_at as Postgres prints it (so no JS Date rounding), "" when
+   * the column is null, and "absent" when there is no row. Every config write bumps updated_at.
+   */
+  async getAutomationConfigVersion(key: string): Promise<string> {
+    const r: any = await db.execute(
+      sql`SELECT COALESCE(${automationConfig.updatedAt}::text, '') AS v FROM ${automationConfig} WHERE ${automationConfig.key} = ${key}`,
+    );
+    const rows = r?.rows ?? r;
+    return rows?.[0] ? String(rows[0].v) : "absent";
+  }
+
+  /**
+   * The upsert, but only while the row is still at `version` (getAutomationConfigVersion): "absent" inserts only when
+   * there is still no row. Evaluated by the INSERT / ON CONFLICT DO UPDATE itself, under the row lock. Returns null,
+   * writing nothing, when the row has changed since `version` was read.
+   */
+  async upsertAutomationConfigIfVersion(data: InsertAutomationConfig, version: string): Promise<AutomationConfig | null> {
+    if (version === "absent") {
+      const [created] = await db.insert(automationConfig).values(data).onConflictDoNothing({ target: automationConfig.key }).returning();
+      return created ?? null;
+    }
+    const [result] = await db.insert(automationConfig).values(data)
+      .onConflictDoUpdate({
+        target: automationConfig.key,
+        set: { ...data, updatedAt: new Date() },
+        setWhere: sql`COALESCE(${automationConfig.updatedAt}::text, '') = ${version}`,
       }).returning();
     return result ?? null;
   }
@@ -1914,6 +1952,39 @@ export class DatabaseStorage implements IStorage {
       }
       throw err;
     }
+  }
+
+  /**
+   * Claim an email send ACROSS replicas, before sending: the dedupe row itself is the lock (dedupe_key is unique). A
+   * new key, a key whose last attempt failed, or a 'sending' claim older than `staleClaimMinutes` (a sender that died
+   * mid-send) is claimed and its id returned. A key already 'sent', or claimed by another sender just now, returns
+   * null: do not send. Settle the claim with settleEmailSend.
+   */
+  async claimEmailSend(
+    data: Pick<InsertEmailSendLog, "templateKey" | "recipientEmail" | "subject" | "dedupeKey" | "metadata">,
+    staleClaimMinutes: number,
+  ): Promise<number | null> {
+    const r: any = await db.execute(sql`
+      INSERT INTO ${emailSendLog} (template_key, recipient_email, subject, dedupe_key, status, metadata, sent_at, created_at)
+      VALUES (${data.templateKey}, ${data.recipientEmail}, ${data.subject}, ${data.dedupeKey}, 'sending',
+              ${JSON.stringify(data.metadata ?? null)}::jsonb, NULL, now())
+      ON CONFLICT (dedupe_key) DO UPDATE
+        SET status = 'sending', recipient_email = EXCLUDED.recipient_email, subject = EXCLUDED.subject,
+            metadata = EXCLUDED.metadata, error_message = NULL, sent_at = NULL, created_at = now()
+        WHERE ${emailSendLog}.status = 'failed'
+           OR (${emailSendLog}.status = 'sending' AND ${emailSendLog}.created_at < now() - make_interval(mins => ${staleClaimMinutes}))
+      RETURNING id`);
+    const rows = r?.rows ?? r;
+    return rows?.[0]?.id != null ? Number(rows[0].id) : null;
+  }
+
+  /** Settle a claim from claimEmailSend: 'sent' (delivered) or 'failed' (so a retry may claim it again). */
+  async settleEmailSend(id: number, outcome: { status: "sent" } | { status: "failed"; error: string }): Promise<void> {
+    await db.update(emailSendLog)
+      .set(outcome.status === "sent"
+        ? { status: "sent", sentAt: new Date(), errorMessage: null }
+        : { status: "failed", errorMessage: outcome.error.slice(0, 500) })
+      .where(and(eq(emailSendLog.id, id), eq(emailSendLog.status, "sending")));
   }
 
   async checkEmailDedupeKey(dedupeKey: string): Promise<boolean> {

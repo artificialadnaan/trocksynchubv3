@@ -143,6 +143,16 @@ export function recordWebhookRoleEvent() {
 }
 
 // ─── HubSpot polling cycle ────────────────────────────────────────────────────
+/** The polling row's version (storage.getAutomationConfigVersion), or null when it cannot be read (the disable is then unconditional). */
+async function pollingConfigVersion(key: "hubspot_polling" | "procore_polling"): Promise<string | null> {
+  try {
+    return await storage.getAutomationConfigVersion(key);
+  } catch (err: any) {
+    console.warn(`[Polling] Could not read the ${key} version at cycle start:`, err?.message ?? err);
+    return null;
+  }
+}
+
 async function runPollingCycle() {
   if (pollingRunning) {
     console.log('[Polling] Skipping — previous cycle still running');
@@ -150,6 +160,9 @@ async function runPollingCycle() {
   }
   pollingRunning = true;
   console.log('[Polling] Starting HubSpot sync cycle...');
+  // The config row's version as this cycle starts with today's token: an auth-expiry disable is a compare-and-set
+  // on it, so a re-enable that lands while this cycle runs is never undone by it.
+  const cycleVersion = await pollingConfigVersion("hubspot_polling");
   try {
     const result = await runFullHubSpotSync();
     let procoreAutoSync = null;
@@ -206,9 +219,10 @@ async function runPollingCycle() {
     const isAuthError = e.message?.includes('expired') || e.message?.includes('401') || e.message?.includes('Unauthorized') || e.message?.includes('EXPIRED_AUTHENTICATION');
     if (isAuthError) {
       console.error('[Polling] HubSpot auth failed (token expired or invalid) — disabling polling. Please reconnect HubSpot.');
-      stopPolling();
-      // Persists the disable AND alerts once per disable event (audit row + ops email). Never throws.
-      await recordPollingAuthExpiry({ job: "hubspot_polling", error: e.message ?? String(e) });
+      // Persists the disable AND alerts once per disable event (audit row + ops email). Never throws. "superseded":
+      // the row changed since this cycle started (an admin re-enabled), so the timer running now is theirs; keep it.
+      const outcome = await recordPollingAuthExpiry({ job: "hubspot_polling", error: e.message ?? String(e), cycleVersion });
+      if (outcome.alert !== "superseded") stopPolling();
     }
     console.error('[Polling] HubSpot sync failed:', e.message);
     lastPollAt = new Date();
@@ -242,6 +256,8 @@ async function runProcorePollingCycle() {
   procorePollingRunning = true;
   const startTime = Date.now();
   console.log('[ProcorePolling] Starting Procore data sync cycle...');
+  // See runPollingCycle: the auth-expiry disable is a compare-and-set on this version.
+  const cycleVersion = await pollingConfigVersion("procore_polling");
   try {
     const result = await runFullProcoreSync();
     const duration = Date.now() - startTime;
@@ -270,9 +286,9 @@ async function runProcorePollingCycle() {
     const isAuthError = e.message?.includes('expired') || e.message?.includes('401') || e.message?.includes('Unauthorized');
     if (isAuthError) {
       console.error('[ProcorePolling] Procore auth failed — disabling polling. Please re-authenticate Procore.');
-      stopProcorePolling();
-      // Persists the disable AND alerts once per disable event (audit row + ops email). Never throws.
-      await recordPollingAuthExpiry({ job: "procore_polling", error: e.message ?? String(e) });
+      // Persists the disable AND alerts once per disable event. Never throws. See runPollingCycle for "superseded".
+      const outcome = await recordPollingAuthExpiry({ job: "procore_polling", error: e.message ?? String(e), cycleVersion });
+      if (outcome.alert !== "superseded") stopProcorePolling();
     }
     console.error('[ProcorePolling] Procore sync failed:', e.message);
     lastProcorePollAt = new Date();
