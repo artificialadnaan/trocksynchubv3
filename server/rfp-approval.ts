@@ -23,6 +23,7 @@ import {
   type RfpDeclinedCallbackPayload,
 } from './sync/bidboard-callback-worker';
 import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox';
+import { buildApprovalEditedFieldsOverride, serviceRetypeRefusal, serviceRetypeRefusedMessage } from './rfp-service-retype';
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
 
 const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
@@ -1474,6 +1475,14 @@ export async function processRfpApproval(
     const identity = sourceIdentityForRequest(request);
     await auditRfpApprovalAttempt(request, 'attempted', approverEmail);
 
+    // Before ANY side effect (HubSpot writes, stage move, BidBoard create): the approve route refuses this already,
+    // so this guards every other caller of the processor.
+    const retypeGap = serviceRetypeRefusal(request, editedFields);
+    if (retypeGap) {
+      await auditRfpApprovalAttempt(request, 'service_retype_incomplete', approverEmail, retypeGap);
+      return { success: false, error: 'service_retype_incomplete', statusCode: 422, message: serviceRetypeRefusedMessage(retypeGap) };
+    }
+
     const eligibility = await checkRfpApprovalSourceEligibility(request);
     if (!eligibility.eligible) {
       return cancelIneligibleRfpApproval(request, approverEmail, eligibility.reason || 'Source deal is no longer eligible');
@@ -1587,27 +1596,7 @@ export async function processRfpApproval(
     // view of this approval's field values, and BOTH the TROCK Core payload and the Procore Playwright
     // create are built from it — built inline, the two systems could be told different things about a
     // single approval and nothing would notice.
-    const editedFieldsOverride: Record<string, string> = {
-      // The CRM activity log travels here rather than via normalizedDealData, which is passed
-      // ONLY for trock_crm — a hubspot-sourced request that carried crmActivityLog would
-      // otherwise be persisted in deal_data and then silently dropped before the create, so the
-      // field would be "accepted but unused" on that path. editedFieldsOverride is passed for
-      // BOTH source systems, so routing it through here keeps accepted == used everywhere.
-      // (In practice only the CRM sends the field today; this removes the divergence rather than
-      // documenting it.)
-      ...(dealData.crm_activity_log ? { crm_activity_log: String(dealData.crm_activity_log) } : {}),
-      // Enriched dealData fields as fallbacks (description, company, contact, address from HubSpot API associations)
-      ...(dealData.description ? { description: String(dealData.description) } : {}),
-      ...(dealData.company_name ? { company_name: String(dealData.company_name) } : {}),
-      ...(dealData.contact_name ? { contact_name: String(dealData.contact_name) } : {}),
-      ...(dealData.address ? { address: String(dealData.address) } : {}),
-      ...(dealData.city ? { city: String(dealData.city) } : {}),
-      ...(dealData.state ? { state: String(dealData.state) } : {}),
-      ...(dealData.zip ? { zip: String(dealData.zip) } : {}),
-      // User-edited fields override the enriched fallbacks
-      ...editedFields,
-      project_types: finalProjectTypeDigit,
-    };
+    const editedFieldsOverride = buildApprovalEditedFieldsOverride(dealData, editedFields, finalProjectTypeDigit);
 
     // Tell TROCK Core about the service job BEFORE the multi-minute Procore automation, so the card is
     // in the service estimating lane immediately. FAIL-OPEN by construction: this never throws and its
