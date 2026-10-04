@@ -186,8 +186,30 @@ export interface PollingAuthExpiryResult {
   /**
    * superseded: a resend found the event gone (re-enabled, or replaced by a newer disable), so it sent nothing.
    * too_old: an existing event older than POLLING_ALERT_RESEND_WINDOW_MS is never resent (its dedupe row may be gone).
+   * claimed_elsewhere: another sender holds the claim but has not marked it sent (it may have died mid-send); the
+   * bounded retries continue, so a stale claim is reclaimed rather than the alert being lost.
    */
-  alert: "sent" | "already_sent" | "no_recipient" | "send_failed" | "superseded" | "too_old";
+  alert: "sent" | "already_sent" | "claimed_elsewhere" | "no_recipient" | "send_failed" | "superseded" | "too_old";
+}
+
+/**
+ * A person rotated this job's credentials (OAuth reconnect, saved token): move its polling row's version, so a cycle
+ * still running on the old token cannot disable the job when that token's request fails. Best-effort; never throws.
+ */
+export async function bumpPollingVersion(job: PollingJobKey): Promise<void> {
+  try {
+    await storage.bumpAutomationConfigVersion(job);
+  } catch (err) {
+    console.warn(`[PollingAlert] Could not mark ${job} credentials as rotated:`, err instanceof Error ? err.message : err);
+  }
+}
+
+function stopTimer(args: PollingAuthExpiryArgs): void {
+  try {
+    args.onDisabled?.();
+  } catch (err) {
+    console.warn(`[PollingAlert] Stopping the ${args.job} timer failed:`, err instanceof Error ? err.message : err);
+  }
 }
 
 function defaultScheduleRetry(fn: () => void, ms: number): void {
@@ -204,6 +226,12 @@ export interface PollingAuthExpiryArgs {
   job: PollingJobKey;
   error: string;
   cycleVersion?: string | null;
+  /**
+   * Stops the caller's polling timer. Called SYNCHRONOUSLY right after the disable is confirmed (written, already in
+   * place, or failed to save), before any further await, so a re-enable that lands during the audit/email work
+   * starts a timer this never touches. Never called for a superseded event or a resend.
+   */
+  onDisabled?: () => void;
 }
 
 export async function recordPollingAuthExpiry(
@@ -212,7 +240,7 @@ export async function recordPollingAuthExpiry(
 ): Promise<PollingAuthExpiryResult> {
   const result = await recordOnce(args, deps);
   const attempt = deps.retry?.attempt ?? 0;
-  if (result.alert === "send_failed" && attempt < POLLING_ALERT_RETRY_DELAYS_MS.length) {
+  if ((result.alert === "send_failed" || result.alert === "claimed_elsewhere") && attempt < POLLING_ALERT_RETRY_DELAYS_MS.length) {
     try {
       (deps.scheduleRetry ?? defaultScheduleRetry)(() => {
         void recordPollingAuthExpiry(args, {
@@ -326,6 +354,7 @@ async function recordOnce(
     } else if (alreadyDisabledForAuth) {
       newEvent = false;
       disabledAt = prior.disabledAt;
+      stopTimer(args);
     } else {
       const priorInterval = Number(prior?.intervalMinutes);
       const row = {
@@ -339,6 +368,16 @@ async function recordOnce(
         },
         description: job.description,
       };
+      // Did THIS attempt's disable land? A write that errored may still have committed (a reset after COMMIT), and
+      // then a later compare-and-set finds the version moved by our own write. The row says: our disabledAt.
+      const landed = async (): Promise<boolean> => {
+        try {
+          const now: any = (await storage.getAutomationConfig(job.key))?.value ?? null;
+          return now?.disabledReason === "auth_expired" && now?.disabledAt === disabledAt;
+        } catch {
+          return false;
+        }
+      };
       persisted = false;
       for (let i = 0; i < PERSIST_ATTEMPTS && !persisted; i++) {
         try {
@@ -347,6 +386,10 @@ async function recordOnce(
             // edited the config, while this cycle ran on the old token) is not ours to turn off: nothing is written,
             // audited or emailed.
             if (!(await storage.upsertAutomationConfigIfVersion(row, args.cycleVersion))) {
+              if (i > 0 && (await landed())) {
+                persisted = true;
+                break;
+              }
               console.warn(`[PollingAlert] ${job.key} changed since the failing cycle started; not disabling it (superseded)`);
               return { newEvent: false, disabledAt, persisted: false, alert: "superseded" };
             }
@@ -356,8 +399,11 @@ async function recordOnce(
           persisted = true;
         } catch (err) {
           console.warn(`[PollingAlert] Failed to persist ${job.key} disable on auth expiry (attempt ${i + 1}):`, err instanceof Error ? err.message : err);
+          if (await landed()) persisted = true;
         }
       }
+      // Saved or not, this process stops polling the dead token (an unsaved disable says a restart resumes it).
+      stopTimer(args);
     }
 
     const recipient = deps.recipient !== undefined ? deps.recipient : recipientFromEnv();
@@ -423,7 +469,13 @@ async function recordOnce(
         { templateKey: "polling_auto_disabled_alert", recipientEmail: recipient, subject, dedupeKey, metadata: { job: job.key, disabledAt, persisted } },
         POLLING_ALERT_STALE_CLAIM_MINUTES,
       );
-      if (claimId == null) return { newEvent, disabledAt, persisted, alert: "already_sent" };
+      if (claimId == null) {
+        // Refused: either the event was delivered ('sent'), or another sender holds a claim it has not settled. That
+        // sender may have died mid-send, so an unsettled claim is not "sent": keep retrying until it goes stale and
+        // can be reclaimed (POLLING_ALERT_STALE_CLAIM_MINUTES), or until the other sender marks it sent.
+        const wasSent = await storage.checkEmailDedupeKey(dedupeKey);
+        return { newEvent, disabledAt, persisted, alert: wasSent ? "already_sent" : "claimed_elsewhere" };
+      }
 
       const send: SendEmail = deps.send ?? (await import("./email-service")).sendEmail;
       let sent = false;

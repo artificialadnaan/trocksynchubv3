@@ -77,6 +77,23 @@ describe("upsertAutomationConfigIfVersion (real Postgres)", () => {
   });
 });
 
+describe("bumpAutomationConfigVersion (real Postgres)", () => {
+  it("moves the version without touching the value, so a cycle's compare-and-set from before no longer matches", async () => {
+    await pg.query(`INSERT INTO automation_config (key, value) VALUES ('procore_polling', '{"enabled": true}')`);
+    const started = await storage.getAutomationConfigVersion("procore_polling");
+    await new Promise((r) => setTimeout(r, 5));
+    await storage.bumpAutomationConfigVersion("procore_polling");
+    expect(await storage.getAutomationConfigVersion("procore_polling")).not.toBe(started);
+    expect(await read("procore_polling")).toEqual({ enabled: true });
+    expect(await storage.upsertAutomationConfigIfVersion(DISABLE, started)).toBeNull();
+  });
+
+  it("is a no-op without a row", async () => {
+    await storage.bumpAutomationConfigVersion("hubspot_polling");
+    expect(await storage.getAutomationConfigVersion("hubspot_polling")).toBe("absent");
+  });
+});
+
 describe("claimEmailSend / settleEmailSend (real Postgres)", () => {
   const ALERT = { templateKey: "polling_auto_disabled_alert", recipientEmail: "ops@example.test", subject: "s", dedupeKey: "polling_auto_disabled:procore_polling:2026-06-10T08:00:00.000Z", metadata: { job: "procore_polling" } };
   const status = async () => (await pg.query<{ status: string }>(`SELECT status FROM email_send_log WHERE dedupe_key = $1`, [ALERT.dedupeKey])).rows[0]?.status;

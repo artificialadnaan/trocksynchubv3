@@ -219,10 +219,11 @@ async function runPollingCycle() {
     const isAuthError = e.message?.includes('expired') || e.message?.includes('401') || e.message?.includes('Unauthorized') || e.message?.includes('EXPIRED_AUTHENTICATION');
     if (isAuthError) {
       console.error('[Polling] HubSpot auth failed (token expired or invalid) — disabling polling. Please reconnect HubSpot.');
-      // Persists the disable AND alerts once per disable event (audit row + ops email). Never throws. "superseded":
-      // the row changed since this cycle started (an admin re-enabled), so the timer running now is theirs; keep it.
-      const outcome = await recordPollingAuthExpiry({ job: "hubspot_polling", error: e.message ?? String(e), cycleVersion });
-      if (outcome.alert !== "superseded") stopPolling();
+      // Persists the disable AND alerts once per disable event (audit row + ops email). Never throws. A "superseded"
+      // event (the row changed since this cycle started: an admin re-enabled) never stops the timer running now.
+      // onDisabled stops the timer the moment the disable is confirmed, before the audit/email awaits, so a re-enable
+      // landing during them keeps the timer it starts.
+      await recordPollingAuthExpiry({ job: "hubspot_polling", error: e.message ?? String(e), cycleVersion, onDisabled: stopPolling });
     }
     console.error('[Polling] HubSpot sync failed:', e.message);
     lastPollAt = new Date();
@@ -287,8 +288,7 @@ async function runProcorePollingCycle() {
     if (isAuthError) {
       console.error('[ProcorePolling] Procore auth failed — disabling polling. Please re-authenticate Procore.');
       // Persists the disable AND alerts once per disable event. Never throws. See runPollingCycle for "superseded".
-      const outcome = await recordPollingAuthExpiry({ job: "procore_polling", error: e.message ?? String(e), cycleVersion });
-      if (outcome.alert !== "superseded") stopProcorePolling();
+      await recordPollingAuthExpiry({ job: "procore_polling", error: e.message ?? String(e), cycleVersion, onDisabled: stopProcorePolling });
     }
     console.error('[ProcorePolling] Procore sync failed:', e.message);
     lastProcorePollAt = new Date();

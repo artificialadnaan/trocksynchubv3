@@ -570,14 +570,110 @@ describe("recordPollingAuthExpiry", () => {
     mocks.sendEmail.mockImplementationOnce(() => new Promise((r) => (release = () => r({ success: true }))));
     const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z") };
 
+    const retriesB: (() => void)[] = [];
     const a = replicaA.recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
     await vi.waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledTimes(1));
-    const b = await replicaB.recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
+    // B is refused the claim while A is still sending: not "sent" yet, so B keeps a bounded retry.
+    const b = await replicaB.recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, { ...deps, scheduleRetry: (fn) => void retriesB.push(fn) });
+    expect(b.alert).toBe("claimed_elsewhere");
+    expect(retriesB).toHaveLength(1);
     release();
-
     expect((await a).alert).toBe("sent");
-    expect(b.alert).toBe("already_sent");
+
+    // B's retry finds the event delivered and stops.
+    retriesB[0]!();
+    await new Promise((r) => setTimeout(r, 20));
     expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
+    expect(retriesB).toHaveLength(1);
+  });
+
+  // Codex R1 on #97: an unsettled claim (a sender that died mid-send) is not "sent": retry until it can be reclaimed.
+  it("a claim left unsettled by a dead sender is retried, not reported sent, and the alert still goes out", async () => {
+    const { sendLog } = backedStore({
+      procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" },
+    });
+    sendLog.set("polling_auto_disabled:procore_polling:2026-06-10T08:00:00.000Z", { id: 99, status: "sending" });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const scheduled: (() => void)[] = [];
+    const deps = { recipient: RECIPIENT, now: () => new Date("2026-06-10T09:00:00Z"), scheduleRetry: (fn: () => void) => void scheduled.push(fn) };
+
+    const first = await recordPollingAuthExpiry({ job: "procore_polling", error: "401" }, deps);
+    expect(first.alert).toBe("claimed_elsewhere");
+    expect(scheduled).toHaveLength(1);
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+
+    // The dead sender's claim goes stale (storage then lets it be claimed again).
+    sendLog.get("polling_auto_disabled:procore_polling:2026-06-10T08:00:00.000Z")!.status = "failed";
+    scheduled[0]!();
+    await vi.waitFor(() => expect(mocks.sendEmail).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sentSettles()).toHaveLength(1));
+  });
+
+  // Codex R1 on #97 (P1): the timer is stopped the moment the disable is confirmed, before the audit/email awaits, so
+  // a re-enable that lands during them keeps the timer it starts.
+  it("onDisabled runs synchronously after the disable is written, before the audit and the email", async () => {
+    backedStore({ hubspot_polling: { enabled: true, intervalMinutes: 11 } });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const order: string[] = [];
+    mocks.storage.createAuditLog.mockImplementation(async () => void order.push("audit"));
+    mocks.sendEmail.mockImplementation(async () => {
+      order.push("email");
+      return { success: true };
+    });
+    const startedWith = await mocks.storage.getAutomationConfigVersion("hubspot_polling");
+    await recordPollingAuthExpiry(
+      { job: "hubspot_polling", error: "401", cycleVersion: startedWith, onDisabled: () => void order.push("stop") },
+      { recipient: RECIPIENT },
+    );
+    expect(order).toEqual(["stop", "audit", "email"]);
+  });
+
+  it("onDisabled is never called for a superseded event or a resend", async () => {
+    backedStore({ procore_polling: { enabled: false, intervalMinutes: 17, disabledReason: "auth_expired", disabledAt: "2026-06-10T08:00:00.000Z" } });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const onDisabled = vi.fn();
+    const startedWith = await mocks.storage.getAutomationConfigVersion("procore_polling");
+    await mocks.storage.upsertAutomationConfig({ key: "procore_polling", value: { enabled: true, intervalMinutes: 17 } });
+    expect((await recordPollingAuthExpiry({ job: "procore_polling", error: "401", cycleVersion: startedWith, onDisabled }, { recipient: RECIPIENT })).alert).toBe("superseded");
+    await recordPollingAuthExpiry(
+      { job: "procore_polling", error: "401", onDisabled },
+      { recipient: RECIPIENT, retry: { attempt: 1, disabledAt: "2026-06-10T08:00:00.000Z", persisted: true } },
+    );
+    expect(onDisabled).not.toHaveBeenCalled();
+  });
+
+  // Codex R1 on #97: a compare-and-set that committed but reported an error is recognised as ours on the retry.
+  it("a disable that committed behind an error is persisted, not superseded", async () => {
+    const { rows } = backedStore({ hubspot_polling: { enabled: true, intervalMinutes: 11 } });
+    const real = mocks.storage.upsertAutomationConfigIfVersion.getMockImplementation()!;
+    mocks.storage.upsertAutomationConfigIfVersion.mockImplementationOnce(async (data: any, v: string) => {
+      await real(data, v); // committed...
+      throw new Error("connection reset"); // ...but the client saw an error
+    });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const onDisabled = vi.fn();
+    const startedWith = await mocks.storage.getAutomationConfigVersion("hubspot_polling");
+    const out = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401", cycleVersion: startedWith, onDisabled }, { recipient: RECIPIENT });
+    expect(out).toMatchObject({ newEvent: true, persisted: true, alert: "sent" });
+    expect(rows.hubspot_polling).toMatchObject({ enabled: false, disabledReason: "auth_expired", disabledAt: out.disabledAt });
+    expect(onDisabled).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.createAuditLog.mock.calls.map((c) => c[0].action)).toEqual(["polling_auto_disabled"]);
+  });
+
+  it("a disable that committed behind an error is persisted even when every later attempt errors too", async () => {
+    const { rows } = backedStore({ procore_polling: { enabled: true, intervalMinutes: 17 } });
+    const real = mocks.storage.upsertAutomationConfigIfVersion.getMockImplementation()!;
+    let calls = 0;
+    mocks.storage.upsertAutomationConfigIfVersion.mockImplementation(async (data: any, v: string) => {
+      if (++calls === 1) await real(data, v); // the first one commits...
+      throw new Error("connection reset"); // ...and every attempt reports an error
+    });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const startedWith = await mocks.storage.getAutomationConfigVersion("procore_polling");
+    const out = await recordPollingAuthExpiry({ job: "procore_polling", error: "401", cycleVersion: startedWith }, { recipient: RECIPIENT });
+    expect(out).toMatchObject({ newEvent: true, persisted: true, alert: "sent" });
+    expect(rows.procore_polling).toMatchObject({ disabledReason: "auth_expired", disabledAt: out.disabledAt });
+    expect(mocks.storage.createAuditLog.mock.calls.map((c) => c[0].action)).toEqual(["polling_auto_disabled"]);
   });
 
   // L209: the boot resend re-checks a job whose READ failed, bounded, instead of waiting for the next restart.

@@ -1,6 +1,7 @@
 import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
+import { bumpPollingVersion } from "../polling-auth-alert";
 
 export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   // ============= Procore OAuth =============
@@ -46,6 +47,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
       tokenType: "Bearer",
       expiresAt,
     });
+    await bumpPollingVersion("procore_polling");
 
     await storage.createAuditLog({
       action: "oauth_connect",
@@ -99,6 +101,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
       tokenType: "Bearer",
       expiresAt: new Date(Date.now() + tokens.expiresIn * 1000),
     });
+    await bumpPollingVersion("hubspot_polling");
 
     await storage.createAuditLog({
       action: "oauth_connect",

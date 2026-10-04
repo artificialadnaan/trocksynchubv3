@@ -320,6 +320,7 @@ export interface IStorage {
   getAutomationConfigs(): Promise<AutomationConfig[]>;
   getAutomationConfig(key: string): Promise<AutomationConfig | undefined>;
   getAutomationConfigVersion(key: string): Promise<string>;
+  bumpAutomationConfigVersion(key: string): Promise<void>;
   upsertAutomationConfigIfVersion(data: InsertAutomationConfig, version: string): Promise<AutomationConfig | null>;
   upsertAutomationConfig(data: InsertAutomationConfig): Promise<AutomationConfig>;
   upsertAutomationConfigUnlessAuthDisabled(data: InsertAutomationConfig): Promise<AutomationConfig | null>;
@@ -883,6 +884,16 @@ export class DatabaseStorage implements IStorage {
     );
     const rows = r?.rows ?? r;
     return rows?.[0] ? String(rows[0].v) : "absent";
+  }
+
+  /**
+   * Move the row's version (updated_at) without changing its value. Called when a job's CREDENTIALS are rotated by a
+   * person (an OAuth reconnect, a saved token), which live in oauth_tokens: a polling cycle still running on the old
+   * token then cannot disable the job on its 401 (its compare-and-set no longer matches). Never on a routine token
+   * refresh, which a cycle does itself. No row, no-op.
+   */
+  async bumpAutomationConfigVersion(key: string): Promise<void> {
+    await db.update(automationConfig).set({ updatedAt: new Date() }).where(eq(automationConfig.key, key));
   }
 
   /**
