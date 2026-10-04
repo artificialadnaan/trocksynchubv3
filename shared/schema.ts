@@ -1235,7 +1235,8 @@ export const reportScheduleConfig = pgTable("report_schedule_config", {
   timezone: varchar("timezone", { length: 64 }).notNull().default("America/Chicago"),
   recipients: text("recipients").array().notNull().default([]),
   includeRfpLog: boolean("include_rfp_log").notNull().default(true),
-  includeChangeHistory: boolean("include_change_history").notNull().default(true),
+  // include_change_history was dropped from the code in #41 (the toggle had no effect since #38). The column is
+  // removed by a manual migration AFTER this deploys: migrations/0027_drop_include_change_history.sql.
   includeApprovalSummary: boolean("include_approval_summary").notNull().default(true),
   /**
    * When a report was last DELIVERED. Powers the scheduler's cadence guard, i.e. delivery
