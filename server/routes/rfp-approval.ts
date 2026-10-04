@@ -494,6 +494,15 @@ export function registerRfpApprovalRoutes(app: Express) {
     const { token } = req.params as { token: string };
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).send(renderRfpPage('Not Found', '<p>This review link is invalid or has expired.</p>'));
+
+    // #47: the link must be signed to a recipient of THIS RFP. An unsigned (pre-#47) or forged one is refused; the
+    // evening pending digest re-sends a signed link for every pending RFP. Checked BEFORE the expired and
+    // already-processed pages, which name the project and the approver or decliner.
+    const recipientEmail = verifyRecipientLink(token, req.query.r);
+    if (!recipientEmail) {
+      return res.status(403).send(renderRfpPage('Link Out of Date', `<p>${RECIPIENT_LINK_REFUSED_MESSAGE}</p>`));
+    }
+
     if (isRfpApprovalRequestExpired(request)) {
       return res.status(410).send(renderRfpPage('Link Expired', `<p>${buildExpiredRfpMessage(request)}</p>`));
     }
@@ -502,13 +511,6 @@ export function registerRfpApprovalRoutes(app: Express) {
         ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>`
         : `<p>This RFP was <strong>declined</strong> by ${request.declinedBy || 'a reviewer'}.</p>`;
       return res.send(renderRfpPage('Already Processed', statusMsg));
-    }
-
-    // #47: the link must be signed to a recipient of THIS RFP. An unsigned (pre-#47) or forged one is refused; the
-    // evening pending digest re-sends a signed link for every pending RFP.
-    const recipientEmail = verifyRecipientLink(token, req.query.r);
-    if (!recipientEmail) {
-      return res.status(403).send(renderRfpPage('Link Out of Date', `<p>${RECIPIENT_LINK_REFUSED_MESSAGE}</p>`));
     }
 
     let d = request.dealData as Record<string, any>;

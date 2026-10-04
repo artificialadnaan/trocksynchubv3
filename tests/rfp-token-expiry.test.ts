@@ -112,12 +112,31 @@ describe("RFP token expiry enforcement", () => {
     requestRow.current = makeRequest({ tokenExpiresAt: new Date(Date.now() - 1000) });
 
     await withApp(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/rfp-review/token-1`);
+      // #47: the link is verified first, so the expired page needs a signed one (an unsigned link gets 403).
+      const response = await fetch(`${baseUrl}/rfp-review/token-1?r=${await signedLink("token-1", "sgibson@trockgc.com")}`);
       const html = await response.text();
 
       expect(response.status).toBe(410);
       expect(html).toContain("This RFP review link has expired.");
       expect(html).toContain("Contact the sender if you still need to review this request.");
+    });
+  });
+
+  // Codex P2 on #100: the already-processed page names the approver or decliner, so an unsigned, forged or
+  // other-RFP link must be refused before it renders.
+  it("refuses an unsigned or other-RFP link before the already-processed page (no approver disclosed)", async () => {
+    requestRow.current = makeRequest({ status: "declined", declinedBy: "jhelms@trockgc.com" });
+
+    await withApp(async (baseUrl) => {
+      for (const query of ["", `?r=${await signedLink("token-OTHER", "sgibson@trockgc.com")}`]) {
+        const response = await fetch(`${baseUrl}/rfp-review/token-1${query}`);
+        const html = await response.text();
+        expect(response.status, query || "unsigned").toBe(403);
+        expect(html, query || "unsigned").not.toContain("jhelms@trockgc.com");
+      }
+      const signed = await fetch(`${baseUrl}/rfp-review/token-1?r=${await signedLink("token-1", "sgibson@trockgc.com")}`);
+      expect(signed.status).toBe(200);
+      expect(await signed.text()).toContain("declined</strong> by jhelms@trockgc.com");
     });
   });
 

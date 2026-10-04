@@ -621,32 +621,51 @@ async function selectConfiguredRfpRecipients(type: string, source: string): Prom
   return selected?.approverEmails?.length ? selected.approverEmails : null;
 }
 
-export async function getRfpReviewRecipients(projectType: string | null | undefined, sourceSystem: string | null | undefined = 'hubspot'): Promise<string[]> {
+/**
+ * Who receives an RFP's review email, and whether that answer may be turned into AUTHORITY.
+ *
+ * `trusted` is false only when the rfp_approver_config READ THREW: the hardcoded safety net then still receives the
+ * notification, but it is not known to match the live authorized set, so #47's signed links (which are the
+ * authorization) must not be issued to it. A missing config row is the legit, intended fallback and stays trusted,
+ * exactly as isAuthorizedRfpApprover treats it. An untrusted answer is never cached, so the next send re-reads.
+ */
+export async function resolveRfpReviewRecipients(
+  projectType: string | null | undefined,
+  sourceSystem: string | null | undefined = 'hubspot',
+): Promise<{ recipients: string[]; trusted: boolean }> {
   const type = String(projectType || '').trim();
   const source = String(sourceSystem || 'hubspot').trim();
   const cacheKey = `${type || '*'}:${source}`;
   const cached = rfpApproverCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < RFP_APPROVER_CACHE_TTL_MS) {
-    return cached.recipients;
+    return { recipients: cached.recipients, trusted: true };
   }
 
+  let readFailed = false;
   try {
     const configured = await selectConfiguredRfpRecipients(type, source);
     if (configured?.length) {
       rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: configured });
-      return configured;
+      return { recipients: configured, trusted: true };
     }
   } catch (error: any) {
-    // Notification routing is NOT a security decision — keep delivering to the safety net on a
-    // config read error so review emails still go out. (The authz gate fails closed instead.)
-    console.warn(`[rfp-approval] Failed to load RFP approver config, using hardcoded safety net: ${error?.message || error}`);
+    // Notification routing still delivers to the safety net on a config read error so review emails go out; the
+    // caller withholds signed links from it (trusted: false), and the authz gate fails closed.
+    readFailed = true;
+    console.warn(`[rfp-approval] Failed to load RFP approver config, using hardcoded safety net (unsigned links): ${error?.message || error}`);
   }
 
   // Safety net: preserve the original hardcoded routing if DB config is missing or invalid.
-  console.warn(`[rfp-approval] No active RFP approver config for projectType=${type || '*'}, sourceSystem=${source}; using hardcoded safety net`);
   const fallbackRecipients = hardcodedRfpSafetyNetRecipients(type);
+  if (readFailed) return { recipients: fallbackRecipients, trusted: false };
+  console.warn(`[rfp-approval] No active RFP approver config for projectType=${type || '*'}, sourceSystem=${source}; using hardcoded safety net`);
   rfpApproverCache.set(cacheKey, { timestamp: Date.now(), recipients: fallbackRecipients });
-  return fallbackRecipients;
+  return { recipients: fallbackRecipients, trusted: true };
+}
+
+/** Notification-only view of resolveRfpReviewRecipients: the addresses, whether or not the config read succeeded. */
+export async function getRfpReviewRecipients(projectType: string | null | undefined, sourceSystem: string | null | undefined = 'hubspot'): Promise<string[]> {
+  return (await resolveRfpReviewRecipients(projectType, sourceSystem)).recipients;
 }
 
 const normalizeApproverEmail = (email: string | null | undefined): string =>
@@ -1171,8 +1190,13 @@ async function sendRfpReviewEmails(params: {
   // at send time → this resolves parseProjectTypeFromNumber(project_number) ?? project_types ?? '2',
   // a NO-OP for consistent rows (project_types already equals the number's type digit).
   const effectiveProjectType = resolveEffectiveRfpProjectType(params.dealData);
-  const rfpRecipients = await getRfpReviewRecipients(effectiveProjectType, params.input.sourceSystem);
-  console.log(`[rfp-approval] Project type: ${effectiveProjectType || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
+  const { recipients: rfpRecipients, trusted: recipientsTrusted } = await resolveRfpReviewRecipients(effectiveProjectType, params.input.sourceSystem);
+  console.log(`[rfp-approval] Project type: ${effectiveProjectType || 'none'}, recipients: ${rfpRecipients.join(', ')}${recipientsTrusted ? '' : ' (config unreadable: unsigned links)'}`);
+  // A signed link IS the authorization (#47), so only a trusted recipient set is signed. When the config read failed,
+  // the safety net still gets the email, with the unsigned link: the review page refuses it and points to the evening
+  // digest, which re-sends signed links once the config can be read. The GLOBAL_CC directors don't depend on the
+  // config (isAuthorizedRfpApprover allows them even when it is unreadable), so they are always signed.
+  const globalCcDirectors = new Set((emailService.GLOBAL_CC_RECIPIENTS || []).map((r) => normalizeApproverEmail(r)).filter(Boolean));
   // #47: the GLOBAL_CC directors (already copied on every review email, and authorized for every RFP) get their OWN
   // signed copy instead of a CC of someone else's: a CC'd copy would carry that recipient's signed link, so the
   // director would act, and be audited, as them. Hence bypassGlobalCc below and one deduplicated send per address.
@@ -1184,7 +1208,10 @@ async function sendRfpReviewEmails(params: {
     try {
       // Each recipient's copy carries a link signed to THEM (server/rfp-recipient-link.ts); the review page acts as that
       // recipient. The shared base link appears only inside this template string, never in a sent email.
-      const recipientHtml = htmlBody.split(reviewUrl).join(recipientReviewUrl(appUrl, params.token, recipient));
+      const signable = recipientsTrusted || globalCcDirectors.has(recipient);
+      const recipientHtml = signable
+        ? htmlBody.split(reviewUrl).join(recipientReviewUrl(appUrl, params.token, recipient))
+        : htmlBody;
       const result = await sendEmail({
         to: recipient,
         subject,

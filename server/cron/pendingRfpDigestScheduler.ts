@@ -13,9 +13,9 @@ import cron from "node-cron";
 import { eq, asc } from "drizzle-orm";
 import { db } from "../db";
 import { rfpApprovalRequests } from "@shared/schema";
-import { getRfpReviewRecipients, isRfpApprovalRequestExpired } from "../rfp-approval";
+import { resolveRfpReviewRecipients, isRfpApprovalRequestExpired } from "../rfp-approval";
 import { buildPendingRfpDigest } from "../pendingRfpDigest";
-import { sendEmail } from "../email-service";
+import { sendEmail, GLOBAL_CC_RECIPIENTS } from "../email-service";
 
 let cronTask: ReturnType<typeof cron.schedule> | null = null;
 
@@ -48,9 +48,16 @@ async function runPendingRfpDigest(): Promise<void> {
         sourceSystem: r.sourceSystem,
         tokenExpiresAt: r.tokenExpiresAt,
       })),
-      getRfpReviewRecipients,
+      // An unreadable approver config yields null: no signed link for that row's configured approvers (#47).
+      async (projectType, sourceSystem) => {
+        const { recipients, trusted } = await resolveRfpReviewRecipients(projectType, sourceSystem);
+        return trusted ? recipients : null;
+      },
       appUrl,
-      isRfpApprovalRequestExpired
+      isRfpApprovalRequestExpired,
+      undefined,
+      // The GLOBAL_CC directors get their own signed copy, as in the initial review email.
+      GLOBAL_CC_RECIPIENTS || []
     );
     if (digest.skip || digest.perRecipient.length === 0) {
       console.log(

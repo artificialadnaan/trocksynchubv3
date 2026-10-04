@@ -54,11 +54,15 @@ export interface PendingRfpDigest {
   perRecipient: PendingRfpRecipientDigest[];
 }
 
-/** Resolves the approver recipients for one row (prod = getRfpReviewRecipients). */
+/**
+ * Resolves the approver recipients for one row (prod: resolveRfpReviewRecipients, mapped). null means the approver
+ * config could not be read: the safety net is not known to be the authorized set, so no signed link is issued for
+ * that row's configured approvers (#47; the GLOBAL_CC directors below are config-independent and still get one).
+ */
 export type RfpRecipientResolver = (
   projectType: string | null | undefined,
   sourceSystem: string | null | undefined
-) => Promise<string[]>;
+) => Promise<string[] | null>;
 
 /** Normalize null/undefined/blank-string to undefined so `??` chains skip blanks like `||` did. */
 function blankToUndef(v: unknown): unknown {
@@ -169,6 +173,10 @@ export async function buildPendingRfpDigest(
   isExpired: (row: { tokenExpiresAt?: Date | string | null }) => boolean,
   // How a recipient's link is built (#47). Default: signed to that recipient with SESSION_SECRET's HKDF key.
   linkFor: RfpReviewLinkFor = (token, recipient) => recipientReviewUrl(appUrl, token, recipient),
+  // Approvers authorized for EVERY RFP regardless of type (prod: the GLOBAL_CC directors). The initial review email
+  // sends each of them a signed copy (#47), so the digest must too: after a deploy or a SESSION_SECRET rotation it is
+  // the only path that reissues their links for RFPs already pending. Never RFP_ADMIN_EMAIL (a personal inbox).
+  alwaysAuthorized: readonly string[] = [],
 ): Promise<PendingRfpDigest> {
   // Only actionable (non-expired) pending RFPs belong in the reminder.
   const actionable = rows.filter((row) => !isExpired(row));
@@ -214,20 +222,21 @@ export async function buildPendingRfpDigest(
     const createdType = resolveEffectiveRfpProjectType(dealData, editedFields);
     // Trim AND lowercase, matching the approve gate's normalizeApproverEmail, so the baseline∩created
     // intersection is case-insensitive (an approver in both sets under different casing still matches).
-    const normRecipients = (list: string[]) =>
+    const normRecipients = (list: readonly string[]) =>
       new Set(list.map((r) => String(r ?? "").trim().toLowerCase()).filter((r) => r.length > 0));
+    // An unreadable config (null) contributes nobody: an empty set fails the intersection closed.
     const baselineRecipients = normRecipients(
-      await resolveRecipients(baselineType, row.sourceSystem ?? null)
+      (await resolveRecipients(baselineType, row.sourceSystem ?? null)) ?? []
     );
     const createdRecipients =
       createdType === baselineType
         ? baselineRecipients
-        : normRecipients(await resolveRecipients(createdType, row.sourceSystem ?? null));
+        : normRecipients((await resolveRecipients(createdType, row.sourceSystem ?? null)) ?? []);
     const awaiting = Array.from(baselineRecipients).filter((r) => createdRecipients.has(r));
 
     const cell: DigestCell = { projectName, projectNumber, dateSent, awaiting, token: row.token };
-    // Scope: this RFP only goes to its own authorized approvers.
-    for (const approver of awaiting) {
+    // Scope: this RFP only goes to its own authorized approvers, plus the directors authorized for every RFP.
+    for (const approver of new Set([...awaiting, ...normRecipients(alwaysAuthorized)])) {
       const list = buckets.get(approver);
       if (list) list.push(cell);
       else buckets.set(approver, [cell]);
