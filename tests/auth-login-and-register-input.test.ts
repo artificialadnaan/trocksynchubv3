@@ -13,7 +13,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const usersById = vi.hoisted(() => new Map<string, any>());
 const createUserMock = vi.hoisted(() =>
   vi.fn(async (input: any) => {
-    const row = { id: `new-${input.username}`, username: input.username, password: "hashed", role: input.role };
+    // Hashed as storage.createUser does, so an account made here can sign in through the login route.
+    const row = { id: `new-${input.username}`, username: input.username, password: await bcrypt.hash(input.password, 4), role: input.role };
     usersById.set(row.id, row);
     return row;
   }),
@@ -115,6 +116,10 @@ describe("POST /api/auth/register input", () => {
       const res = await post(baseUrl, "/api/auth/register", { username: " alice ", password: "pw-123456" }, "admin");
       expect(res.status).toBe(200);
       expect(createUserMock).toHaveBeenCalledWith({ username: " alice ", password: "pw-123456", role: "user" });
+      // ...and the same credentials sign in.
+      const login = await post(baseUrl, "/api/auth/login", { username: " alice ", password: "pw-123456" });
+      expect(login.status).toBe(200);
+      expect((await login.json()).username).toBe(" alice ");
     });
   });
 
