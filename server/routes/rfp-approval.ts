@@ -12,6 +12,7 @@ import {
   resolveEffectiveRfpProjectType,
   resolveRfpDescription,
 } from "../rfp-approval";
+import { serviceRetypeRefusal, serviceRetypeRefusedMessage } from "../rfp-service-retype";
 
 const UNAUTHORIZED_APPROVER_MESSAGE =
   'This email address is not an authorized approver for this RFP. Please use the address the review request was sent to, or contact an administrator.';
@@ -605,6 +606,14 @@ export function registerRfpApprovalRoutes(app: Express) {
               : 'Approver not in the authorized set for the canonical created project type',
           );
           return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
+        }
+
+        // Here, not only in the processor: the approval runs in the background after the 202, so a refusal there
+        // would never reach the approver's screen.
+        const retypeGap = serviceRetypeRefusal(request, editedFields);
+        if (retypeGap) {
+          await auditRouteAttempt(request, 'rfp_approval_attempt', 'service_retype_incomplete', approverEmail, retypeGap);
+          return res.status(422).json({ success: false, error: 'service_retype_incomplete', message: serviceRetypeRefusedMessage(retypeGap) });
         }
 
         const eligibility = await checkRfpApprovalSourceEligibility(request);
