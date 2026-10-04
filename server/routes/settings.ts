@@ -163,6 +163,9 @@ async function runPollingCycle() {
   // The config row's version as this cycle starts with today's token: an auth-expiry disable is a compare-and-set
   // on it, so a re-enable that lands while this cycle runs is never undone by it.
   const cycleVersion = await pollingConfigVersion("hubspot_polling");
+  // The interval this cycle runs under. A disable stops THIS one only: a re-enable that commits while the disable's
+  // compare-and-set is resolving starts a new interval, and the stored row is enabled, so that one must keep running.
+  const cycleTimer = pollingTimer;
   try {
     const result = await runFullHubSpotSync();
     let procoreAutoSync = null;
@@ -223,7 +226,10 @@ async function runPollingCycle() {
       // event (the row changed since this cycle started: an admin re-enabled) never stops the timer running now.
       // onDisabled stops the timer the moment the disable is confirmed, before the audit/email awaits, so a re-enable
       // landing during them keeps the timer it starts.
-      await recordPollingAuthExpiry({ job: "hubspot_polling", error: e.message ?? String(e), cycleVersion, onDisabled: stopPolling });
+      await recordPollingAuthExpiry({
+        job: "hubspot_polling", error: e.message ?? String(e), cycleVersion,
+        onDisabled: () => { if (pollingTimer === cycleTimer) stopPolling(); },
+      });
     }
     console.error('[Polling] HubSpot sync failed:', e.message);
     lastPollAt = new Date();
@@ -259,6 +265,8 @@ async function runProcorePollingCycle() {
   console.log('[ProcorePolling] Starting Procore data sync cycle...');
   // See runPollingCycle: the auth-expiry disable is a compare-and-set on this version.
   const cycleVersion = await pollingConfigVersion("procore_polling");
+  // See runPollingCycle: a disable stops only the interval this cycle runs under.
+  const cycleTimer = procorePollingTimer;
   try {
     const result = await runFullProcoreSync();
     const duration = Date.now() - startTime;
@@ -288,7 +296,10 @@ async function runProcorePollingCycle() {
     if (isAuthError) {
       console.error('[ProcorePolling] Procore auth failed — disabling polling. Please re-authenticate Procore.');
       // Persists the disable AND alerts once per disable event. Never throws. See runPollingCycle for "superseded".
-      await recordPollingAuthExpiry({ job: "procore_polling", error: e.message ?? String(e), cycleVersion, onDisabled: stopProcorePolling });
+      await recordPollingAuthExpiry({
+        job: "procore_polling", error: e.message ?? String(e), cycleVersion,
+        onDisabled: () => { if (procorePollingTimer === cycleTimer) stopProcorePolling(); },
+      });
     }
     console.error('[ProcorePolling] Procore sync failed:', e.message);
     lastProcorePollAt = new Date();

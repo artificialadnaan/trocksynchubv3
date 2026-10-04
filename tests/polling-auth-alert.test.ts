@@ -97,12 +97,13 @@ function backedStore(initial: Record<string, any> = {}) {
     const row = sendLog.get(d.dedupeKey);
     if (row && row.status !== "failed") return null;
     const id = row?.id ?? nextLogId++;
-    sendLog.set(d.dedupeKey, { id, status: "sending" });
-    return id;
+    const token = `t${nextLogId++}`;
+    sendLog.set(d.dedupeKey, { id, status: "sending", token });
+    return { id, token };
   });
-  mocks.storage.settleEmailSend.mockImplementation(async (id: number, outcome: any) => {
+  mocks.storage.settleEmailSend.mockImplementation(async (claim: any, outcome: any) => {
     for (const [key, row] of sendLog) {
-      if (row.id === id && row.status === "sending") {
+      if (row.id === claim.id && row.token === claim.token && row.status === "sending") {
         row.status = outcome.status;
         if (outcome.status === "sent") sentKeys.add(key);
       }
@@ -626,6 +627,25 @@ describe("recordPollingAuthExpiry", () => {
       { recipient: RECIPIENT },
     );
     expect(order).toEqual(["stop", "audit", "email"]);
+  });
+
+  it("a cycle straddling a token save is superseded, and the next failing cycle disables the job", async () => {
+    // A cycle snapshots the version, a person saves a new token (which moves the version), and the cycle then fails
+    // on whichever token it read. That one failure is not treated as authoritative. The NEXT cycle starts at the new
+    // version (nothing but admin writes moves it), so if the saved token is bad, its 401 disables the job: one extra
+    // failing cycle, never an indefinitely enabled job polling a bad token.
+    const { rows } = backedStore({ hubspot_polling: { enabled: true, intervalMinutes: 15 } });
+    const { recordPollingAuthExpiry } = await import("../server/polling-auth-alert.ts");
+    const straddling = await mocks.storage.getAutomationConfigVersion("hubspot_polling");
+    await mocks.storage.upsertAutomationConfig({ key: "hubspot_polling", value: rows.hubspot_polling }); // the token save's bump
+    const first = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401", cycleVersion: straddling }, { recipient: RECIPIENT });
+    expect(first.alert).toBe("superseded");
+    expect(rows.hubspot_polling.enabled).toBe(true);
+
+    const next = await mocks.storage.getAutomationConfigVersion("hubspot_polling");
+    const second = await recordPollingAuthExpiry({ job: "hubspot_polling", error: "401", cycleVersion: next }, { recipient: RECIPIENT });
+    expect(second).toMatchObject({ newEvent: true, persisted: true });
+    expect(rows.hubspot_polling).toMatchObject({ enabled: false, disabledReason: "auth_expired" });
   });
 
   it("onDisabled is never called for a superseded event or a resend", async () => {

@@ -99,6 +99,10 @@ import {
   reportScheduleConfig, type ReportScheduleConfig, type InsertReportScheduleConfig,
 } from "@shared/schema";
 import bcrypt from "bcrypt";
+import { randomUUID } from "crypto";
+
+/** A claim from claimEmailSend: the row id and the token that fences it to this claimant. */
+export type EmailSendClaim = { id: number; token: string };
 
 export type SourceSystem = "hubspot" | "trock_crm" | string;
 
@@ -449,8 +453,8 @@ export interface IStorage {
   claimEmailSend(
     data: Pick<InsertEmailSendLog, "templateKey" | "recipientEmail" | "subject" | "dedupeKey" | "metadata">,
     staleClaimMinutes: number,
-  ): Promise<number | null>;
-  settleEmailSend(id: number, outcome: { status: "sent" } | { status: "failed"; error: string }): Promise<void>;
+  ): Promise<EmailSendClaim | null>;
+  settleEmailSend(claim: EmailSendClaim, outcome: { status: "sent" } | { status: "failed"; error: string }): Promise<void>;
   checkEmailDedupeKey(dedupeKey: string): Promise<boolean>;
   getEmailSendLogs(filters: { templateKey?: string; limit?: number; offset?: number }): Promise<{ data: EmailSendLog[]; total: number }>;
   getEmailSendLogCounts(): Promise<{ total: number; sent: number; failed: number }>;
@@ -1968,17 +1972,23 @@ export class DatabaseStorage implements IStorage {
   /**
    * Claim an email send ACROSS replicas, before sending: the dedupe row itself is the lock (dedupe_key is unique). A
    * new key, a key whose last attempt failed, or a 'sending' claim older than `staleClaimMinutes` (a sender that died
-   * mid-send) is claimed and its id returned. A key already 'sent', or claimed by another sender just now, returns
+   * mid-send) is claimed and returned. A key already 'sent', or claimed by another sender just now, returns
    * null: do not send. Settle the claim with settleEmailSend.
+   *
+   * Every claim writes a fresh token into the row's metadata, and settling requires it. A sender that stalled past
+   * the stale window and was reclaimed by another replica therefore cannot settle (e.g. mark 'failed') the new
+   * owner's claim: its token no longer matches.
    */
   async claimEmailSend(
     data: Pick<InsertEmailSendLog, "templateKey" | "recipientEmail" | "subject" | "dedupeKey" | "metadata">,
     staleClaimMinutes: number,
-  ): Promise<number | null> {
+  ): Promise<EmailSendClaim | null> {
+    const token = randomUUID();
+    const metadata = { ...((data.metadata as Record<string, unknown> | null) ?? {}), claimToken: token };
     const r: any = await db.execute(sql`
       INSERT INTO ${emailSendLog} (template_key, recipient_email, subject, dedupe_key, status, metadata, sent_at, created_at)
       VALUES (${data.templateKey}, ${data.recipientEmail}, ${data.subject}, ${data.dedupeKey}, 'sending',
-              ${JSON.stringify(data.metadata ?? null)}::jsonb, NULL, now())
+              ${JSON.stringify(metadata)}::jsonb, NULL, now())
       ON CONFLICT (dedupe_key) DO UPDATE
         SET status = 'sending', recipient_email = EXCLUDED.recipient_email, subject = EXCLUDED.subject,
             metadata = EXCLUDED.metadata, error_message = NULL, sent_at = NULL, created_at = now()
@@ -1986,16 +1996,23 @@ export class DatabaseStorage implements IStorage {
            OR (${emailSendLog}.status = 'sending' AND ${emailSendLog}.created_at < now() - make_interval(mins => ${staleClaimMinutes}))
       RETURNING id`);
     const rows = r?.rows ?? r;
-    return rows?.[0]?.id != null ? Number(rows[0].id) : null;
+    return rows?.[0]?.id != null ? { id: Number(rows[0].id), token } : null;
   }
 
-  /** Settle a claim from claimEmailSend: 'sent' (delivered) or 'failed' (so a retry may claim it again). */
-  async settleEmailSend(id: number, outcome: { status: "sent" } | { status: "failed"; error: string }): Promise<void> {
+  /**
+   * Settle a claim from claimEmailSend: 'sent' (delivered) or 'failed' (so a retry may claim it again). Only the
+   * current claim settles: a superseded claim's token no longer matches, and its settle changes nothing.
+   */
+  async settleEmailSend(claim: EmailSendClaim, outcome: { status: "sent" } | { status: "failed"; error: string }): Promise<void> {
     await db.update(emailSendLog)
       .set(outcome.status === "sent"
         ? { status: "sent", sentAt: new Date(), errorMessage: null }
         : { status: "failed", errorMessage: outcome.error.slice(0, 500) })
-      .where(and(eq(emailSendLog.id, id), eq(emailSendLog.status, "sending")));
+      .where(and(
+        eq(emailSendLog.id, claim.id),
+        eq(emailSendLog.status, "sending"),
+        sql`${emailSendLog.metadata} ->> 'claimToken' = ${claim.token}`,
+      ));
   }
 
   async checkEmailDedupeKey(dedupeKey: string): Promise<boolean> {

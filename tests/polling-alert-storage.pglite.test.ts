@@ -99,20 +99,20 @@ describe("claimEmailSend / settleEmailSend (real Postgres)", () => {
   const status = async () => (await pg.query<{ status: string }>(`SELECT status FROM email_send_log WHERE dedupe_key = $1`, [ALERT.dedupeKey])).rows[0]?.status;
 
   it("one claim per event: a second claimant (another replica) gets none while the first is sending", async () => {
-    const id = await storage.claimEmailSend(ALERT, 30);
-    expect(id).toEqual(expect.any(Number));
+    const claim = await storage.claimEmailSend(ALERT, 30);
+    expect(claim).toEqual({ id: expect.any(Number), token: expect.any(String) });
     expect(await status()).toBe("sending");
     expect(await storage.claimEmailSend(ALERT, 30)).toBeNull();
   });
 
   it("a delivered send is never claimed again; a failed one can be", async () => {
-    const id = (await storage.claimEmailSend(ALERT, 30))!;
-    await storage.settleEmailSend(id, { status: "failed", error: "smtp 421" });
+    const first = (await storage.claimEmailSend(ALERT, 30))!;
+    await storage.settleEmailSend(first, { status: "failed", error: "smtp 421" });
     expect(await status()).toBe("failed");
     expect(await storage.checkEmailDedupeKey(ALERT.dedupeKey)).toBe(false);
 
     const again = (await storage.claimEmailSend(ALERT, 30))!;
-    expect(again).toBe(id);
+    expect(again.id).toBe(first.id);
     await storage.settleEmailSend(again, { status: "sent" });
     expect(await status()).toBe("sent");
     expect(await storage.checkEmailDedupeKey(ALERT.dedupeKey)).toBe(true);
@@ -122,7 +122,23 @@ describe("claimEmailSend / settleEmailSend (real Postgres)", () => {
   it("a stale 'sending' claim (a sender that died) can be claimed again; a fresh one cannot", async () => {
     await storage.claimEmailSend(ALERT, 30);
     await pg.query(`UPDATE email_send_log SET created_at = now() - interval '31 minutes' WHERE dedupe_key = $1`, [ALERT.dedupeKey]);
-    expect(await storage.claimEmailSend(ALERT, 30)).toEqual(expect.any(Number));
+    expect(await storage.claimEmailSend(ALERT, 30)).toEqual({ id: expect.any(Number), token: expect.any(String) });
     expect(await storage.claimEmailSend(ALERT, 30)).toBeNull();
+  });
+
+  it("a stalled sender whose claim was reclaimed cannot settle the new owner's claim", async () => {
+    // Replica A claims, stalls past the stale window; replica B reclaims the same row. A's late "failed" must not
+    // release B's in-flight claim, or a third sender could claim it and send concurrently with B.
+    const stalled = (await storage.claimEmailSend(ALERT, 30))!;
+    await pg.query(`UPDATE email_send_log SET created_at = now() - interval '31 minutes' WHERE dedupe_key = $1`, [ALERT.dedupeKey]);
+    const owner = (await storage.claimEmailSend(ALERT, 30))!;
+    expect(owner.id).toBe(stalled.id);
+
+    await storage.settleEmailSend(stalled, { status: "failed", error: "timed out" });
+    expect(await status()).toBe("sending");
+    expect(await storage.claimEmailSend(ALERT, 30)).toBeNull();
+
+    await storage.settleEmailSend(owner, { status: "sent" });
+    expect(await status()).toBe("sent");
   });
 });

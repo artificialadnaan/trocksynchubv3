@@ -465,11 +465,11 @@ async function recordOnce(
       const { subject, htmlBody } = renderPollingDisabledEmail({ job, disabledAt, error: args.error, persisted });
       // The SHARED guard, checked before the send: claim the dedupe row ('sending'). Another replica, or another
       // process after a restart, that already sent this event or is sending it right now gets no claim.
-      const claimId = await storage.claimEmailSend(
+      const claim = await storage.claimEmailSend(
         { templateKey: "polling_auto_disabled_alert", recipientEmail: recipient, subject, dedupeKey, metadata: { job: job.key, disabledAt, persisted } },
         POLLING_ALERT_STALE_CLAIM_MINUTES,
       );
-      if (claimId == null) {
+      if (claim == null) {
         // Refused: either the event was delivered ('sent'), or another sender holds a claim it has not settled. That
         // sender may have died mid-send, so an unsettled claim is not "sent": keep retrying until it goes stale and
         // can be reclaimed (POLLING_ALERT_STALE_CLAIM_MINUTES), or until the other sender marks it sent.
@@ -492,7 +492,7 @@ async function recordOnce(
         // Release the claim so a retry (here or on another replica) may claim it again. If even that write fails,
         // the claim goes stale after POLLING_ALERT_STALE_CLAIM_MINUTES and is reclaimable then.
         try {
-          await storage.settleEmailSend(claimId, { status: "failed", error: sendError });
+          await storage.settleEmailSend(claim, { status: "failed", error: sendError });
         } catch (err) {
           console.warn(`[PollingAlert] ${job.key} could not release its send claim:`, err instanceof Error ? err.message : err);
         }
@@ -506,7 +506,7 @@ async function recordOnce(
       let banked = false;
       for (let i = 0; i < PERSIST_ATTEMPTS && !banked; i++) {
         try {
-          await storage.settleEmailSend(claimId, { status: "sent" });
+          await storage.settleEmailSend(claim, { status: "sent" });
           banked = true;
         } catch (err) {
           console.warn(`[PollingAlert] ${job.key} alert delivered but its send log failed (attempt ${i + 1}):`, err instanceof Error ? err.message : err);
