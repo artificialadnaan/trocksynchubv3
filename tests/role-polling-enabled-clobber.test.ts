@@ -16,7 +16,12 @@ const mocks = vi.hoisted(() => ({
     getAutomationConfig: vi.fn(),
     getAutomationConfigs: vi.fn(),
     upsertAutomationConfig: vi.fn(),
+    upsertAutomationConfigUnlessAuthDisabled: vi.fn(),
     patchAutomationConfig: vi.fn(),
+    // #63: the rotation lease. Single replica here, so it is always granted unless a test says otherwise.
+    tryAcquireAutomationLease: vi.fn(),
+    releaseAutomationLease: vi.fn(),
+    patchAutomationConfigIfLeaseHeld: vi.fn(),
   },
   syncProcoreRoleAssignments: vi.fn(),
   syncProcoreRoleAssignmentsBatch: vi.fn(),
@@ -120,6 +125,16 @@ function backedStore(initial: Record<string, any> = {}) {
     rows[data.key] = data.value;
     return data;
   });
+  // Mirrors storage: a row disabled for auth_expired is left untouched and null comes back.
+  mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockImplementation(async (data: any) => {
+    if ((rows[data.key] as any)?.disabledReason === "auth_expired") return null;
+    rows[data.key] = data.value;
+    return data;
+  });
+  mocks.storage.patchAutomationConfigIfLeaseHeld.mockImplementation(async (key: string, patch: Record<string, unknown>) => {
+    rows[key] = { ...(rows[key] ?? {}), ...patch };
+    return true;
+  });
   return rows;
 }
 
@@ -137,6 +152,10 @@ describe("role polling — the enabled-key clobber", () => {
     vi.unstubAllEnvs();
     mocks.storage.getAutomationConfig.mockResolvedValue(undefined);
     mocks.storage.upsertAutomationConfig.mockResolvedValue({});
+    mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockResolvedValue({});
+    mocks.storage.tryAcquireAutomationLease.mockResolvedValue(true);
+    mocks.storage.releaseAutomationLease.mockResolvedValue(undefined);
+    mocks.storage.patchAutomationConfigIfLeaseHeld.mockResolvedValue(true);
     mocks.storage.patchAutomationConfig.mockImplementation(async (key: string, patch: any) => ({ key, value: patch }));
   });
 
@@ -304,8 +323,9 @@ describe("role polling — the enabled-key clobber", () => {
     await bootWith({ ...CLOBBERED_ROW, enabled: true }, { batchCursor: 0 });
     await vi.advanceTimersByTimeAsync(150_000);
 
-    expect(mocks.storage.patchAutomationConfig).toHaveBeenCalledWith(
-      "role_assignment_polling_cursor", { batchCursor: 150 }, expect.any(String),
+    // Fenced by the rotation lease (#63): only the replica that owns the rotation moves the cursor.
+    expect(mocks.storage.patchAutomationConfigIfLeaseHeld).toHaveBeenCalledWith(
+      "role_assignment_polling_cursor", { batchCursor: 150 }, "role_assignment_polling_lease", expect.any(String), expect.any(String),
     );
     expect(
       mocks.storage.patchAutomationConfig.mock.calls.filter((c: any[]) => c[0] === "role_assignment_polling"),
