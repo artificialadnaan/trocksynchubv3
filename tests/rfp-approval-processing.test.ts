@@ -78,13 +78,17 @@ describe("processRfpApproval", () => {
     });
 
     expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+    // The create takes one args object (the positional dealId/stage/options form is the legacy overload).
     expect(createBidBoardProjectFromDeal).toHaveBeenCalledWith(
-      "321011207920",
-      "Estimate in Progress",
       expect.objectContaining({
-        syncDocuments: true,
-        attachmentsOverride: [],
-        proposalId: "456",
+        sourceSystem: "hubspot",
+        sourceDealId: "321011207920",
+        bidboardStage: "Estimate in Progress",
+        options: expect.objectContaining({
+          syncDocuments: true,
+          attachmentsOverride: [],
+          proposalId: "456",
+        }),
       }),
     );
     expect(withBrowserLock).not.toHaveBeenCalled();

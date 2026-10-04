@@ -136,7 +136,7 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     const fs = await import('fs/promises');
     const path = await import('path');
     const storageDir = process.env.PLAYWRIGHT_STORAGE_DIR || ".playwright-storage";
-    const filename = path.basename(req.params.filename);
+    const filename = path.basename(String(req.params.filename));
     const filePath = path.join(storageDir, filename);
     try {
       await fs.access(filePath);
@@ -157,7 +157,7 @@ export function registerTestingRoutes(app: Express, requireAuth: RequestHandler)
     const fs = await import('fs/promises');
     const path = await import('path');
     const storageDir = process.env.PLAYWRIGHT_STORAGE_DIR || ".playwright-storage";
-    const filename = path.basename(req.params.filename);
+    const filename = path.basename(String(req.params.filename));
     const filePath = path.join(storageDir, filename);
     await fs.unlink(filePath);
     res.json({ success: true });

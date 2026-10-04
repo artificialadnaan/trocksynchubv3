@@ -27,14 +27,14 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
   }));
 
   app.get("/api/reports/rfps/:id/changes", requireAuth, asyncHandler(async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     if (isNaN(id)) return res.status(400).json({ message: "Invalid RFP ID" });
     const logs = await storage.getRfpChangeLog(id);
     res.json(logs);
   }));
 
   app.get("/api/reports/rfps/:id/approvals", requireAuth, asyncHandler(async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     if (isNaN(id)) return res.status(400).json({ message: "Invalid RFP ID" });
     const chain = await getRfpApprovalChain(id);
     res.json(chain);
@@ -179,13 +179,13 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
 
   app.get("/api/change-orders/:projectId", requireAuth, asyncHandler(async (req, res) => {
     const { calculateTotalContractValue } = await import('../change-order-sync');
-    const contractValue = await calculateTotalContractValue(req.params.projectId);
+    const contractValue = await calculateTotalContractValue(String(req.params.projectId));
     res.json(contractValue);
   }));
 
   app.post("/api/change-orders/sync/:projectId", requireAuth, asyncHandler(async (req, res) => {
     const { syncChangeOrdersToHubSpot } = await import('../change-order-sync');
-    const result = await syncChangeOrdersToHubSpot(req.params.projectId);
+    const result = await syncChangeOrdersToHubSpot(String(req.params.projectId));
     res.json(result);
   }));
 
@@ -215,6 +215,10 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
       const d = log.details as any;
       const dealId = log.entityId;
       const previousAmount = d.previousAmount;
+      if (!dealId) {
+        errors.push({ dealId, error: 'Audit log has no deal id' });
+        continue;
+      }
       try {
         await updateHubSpotDeal(dealId, { amount: String(previousAmount) });
         restored.push({ dealId, restoredAmount: previousAmount });

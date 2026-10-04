@@ -30,7 +30,7 @@ export function validateEstimatorList(
     if (!estimator.name) {
       errors.push(`Estimator ${rowNumber} is missing a name.`);
     } else if (seenNames.has(normalizedName)) {
-      errors.push(`Estimator ${rowNumber} has a duplicate name: "${estimators[index]?.name ?? estimator.name}".`);
+      errors.push(`Estimator ${rowNumber} has a duplicate name: "${String(estimators[index]?.name ?? estimator.name).trim()}".`);
     } else {
       seenNames.add(normalizedName);
     }
@@ -40,7 +40,7 @@ export function validateEstimatorList(
     } else if (!EMAIL_REGEX.test(estimator.email)) {
       errors.push(`Estimator ${rowNumber} has an invalid email address.`);
     } else if (seenEmails.has(normalizedEmail)) {
-      errors.push(`Estimator ${rowNumber} has a duplicate email: "${estimators[index]?.email ?? estimator.email}".`);
+      errors.push(`Estimator ${rowNumber} has a duplicate email: "${String(estimators[index]?.email ?? estimator.email).trim()}".`);
     } else {
       seenEmails.add(normalizedEmail);
     }

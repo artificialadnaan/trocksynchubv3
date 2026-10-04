@@ -1385,7 +1385,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
   // POST /api/webhooks/replay/:id — re-process a failed webhook from stored payload
   app.post("/api/webhooks/replay/:id", auth, asyncHandler(async (req, res) => {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     if (isNaN(id)) return res.status(400).json({ error: "Invalid webhook ID" });
 
     // Get the webhook log by ID

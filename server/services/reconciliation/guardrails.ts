@@ -221,6 +221,7 @@ function buildNormalizedFromHubspot(d: {
   amount?: string | number | null;
   properties?: Record<string, unknown> | null;
   dealStage?: string | null;
+  dealStageName?: string | null;
 }): NormalizedProject {
   const p = (d.properties || {}) as Record<string, unknown>;
   const address =
@@ -238,6 +239,7 @@ function buildNormalizedFromHubspot(d: {
     dealName: d.dealName || "",
     projectNumber: projectNumber || null,
     dealStage: d.dealStage || null,
+    dealStageName: d.dealStageName || null,
     pipelineId: (p.pipeline as string) ?? null,
     amount,
     address: address || null,
@@ -259,7 +261,9 @@ function buildNormalizedFromHubspot(d: {
     normalizedNumber: normalizeProjectNumber(projectNumber || null),
     location,
     amount,
-    stage: d.dealStage || null,
+    // Same as the fetcher: compare by stage name. The raw stage is a HubSpot id, which never equals a Procore
+    // stage name, so a re-check would always see stage drift.
+    stage: d.dealStageName || d.dealStage || null,
     rawData: snapshot,
   };
 }
@@ -318,6 +322,7 @@ export async function detectFieldDrift(
     amount: hubspotRow.amount,
     properties: hubspotRow.properties as Record<string, unknown>,
     dealStage: hubspotRow.dealStage,
+    dealStageName: hubspotRow.dealStageName,
   });
 
   const freshConflicts = computeFieldConflicts(procore, hubspot);

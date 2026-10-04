@@ -317,7 +317,7 @@ const SAMPLE_DATA: Record<string, { data: any[]; generator: string; title: strin
 // Download a single sample PDF: GET /api/archive/test-pdf/:type
 router.get('/api/archive/test-pdf/:type', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
-    const type = req.params.type;
+    const type = String(req.params.type);
     const sample = SAMPLE_DATA[type];
     if (!sample) {
       return res.status(400).json({ message: `Unknown type: ${type}. Available: ${Object.keys(SAMPLE_DATA).join(', ')}` });

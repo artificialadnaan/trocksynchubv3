@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// bidboard-export imports playwright/auth, whose import chain reaches server/index.ts. Unmocked, that boots the
+// whole app as a side effect, and its SESSION_SECRET check becomes an unhandled rejection that fails the run.
+vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
+vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
+
 describe("openBidBoardExportMenu", () => {
   beforeEach(() => {
     vi.resetAllMocks();
