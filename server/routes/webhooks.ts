@@ -11,6 +11,7 @@ import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMi
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
+import { requireWebhookAuth, verifyHubSpotV3, verifyProcoreToken } from "../webhooks/signature";
 import { db } from "../db";
 import { webhookLogs } from "@shared/schema";
 import { eq, and, lt, desc } from "drizzle-orm";
@@ -20,33 +21,20 @@ const recentRoleCheckTimestamps = new Map<string, number>();
 const ROLE_CHECK_DEBOUNCE_MS = 60_000;
 
 export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
-  // Log signature verification status once on startup, not per request
+  // Fail closed (server/webhooks/signature.ts): with a secret unset the webhook answers 503, never "unverified OK".
   if (!process.env.HUBSPOT_CLIENT_SECRET) {
-    console.warn('[webhook] HUBSPOT_CLIENT_SECRET not set — HubSpot signature verification disabled');
+    console.warn('[webhook] HUBSPOT_CLIENT_SECRET not set — /webhooks/hubspot refuses every request (503)');
   }
   if (!process.env.PROCORE_WEBHOOK_SECRET) {
-    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — Procore signature verification disabled');
+    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — /webhooks/procore* refuse every request (503)');
   }
+  // The secrets are read per request, so a rotation takes effect without re-registering routes.
+  const hubspotAuth = requireWebhookAuth("hubspot", (req) => verifyHubSpotV3(req, process.env.HUBSPOT_CLIENT_SECRET));
+  const procoreAuth = requireWebhookAuth("procore", (req) => verifyProcoreToken(req, process.env.PROCORE_WEBHOOK_SECRET));
 
   // ── HubSpot webhook ─────────────────────────────────────────────────────────
-  app.post("/webhooks/hubspot", async (req, res) => {
+  app.post("/webhooks/hubspot", hubspotAuth, async (req, res) => {
     try {
-      // C-1: HubSpot signature verification (optional — skipped if secret not configured)
-      const hubspotSecret = process.env.HUBSPOT_CLIENT_SECRET;
-      if (hubspotSecret) {
-        const signature = req.headers['x-hubspot-signature-v3'] || req.headers['x-hubspot-signature'];
-        if (signature) {
-          const crypto = await import('crypto');
-          const requestBody = JSON.stringify(req.body);
-          const hash = crypto.createHmac('sha256', hubspotSecret)
-            .update(requestBody)
-            .digest('hex');
-          if (hash !== signature) {
-            console.warn('[webhook] HubSpot signature verification FAILED');
-            return res.status(401).json({ error: 'Invalid signature' });
-          }
-        }
-      }
 
       // H-4: HubSpot payload validation
       if (!req.body || (typeof req.body !== 'object')) {
@@ -64,7 +52,14 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
       const events = Array.isArray(req.body) ? req.body : [req.body];
       for (const event of events) {
-        const idempotencyKey = `hs_${event.eventId || event.objectId}_${Date.now()}`;
+        // A redelivery of one HubSpot event must dedupe: the key is the event's own id. (It used to append Date.now(),
+        // so no two deliveries ever shared a key.) Without an eventId, the object + subscription + occurredAt name the
+        // event; with none of those, there is nothing stable to dedupe on, so it is processed (never swallowed).
+        const idempotencyKey = event.eventId != null
+          ? `hs_${event.eventId}`
+          : event.occurredAt != null
+            ? `hs_${event.objectId}_${event.subscriptionType || event.eventType || "event"}_${event.occurredAt}`
+            : `hs_${event.objectId}_${Date.now()}`;
         const existing = await storage.checkIdempotencyKey(idempotencyKey);
         if (existing) continue;
 
@@ -310,28 +305,12 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
   // ── Procore project-events webhook ──────────────────────────────────────────
   // Procore Projects webhook (Add to Portfolio → Phase 2)
-  app.post("/webhooks/procore/project-events", handleProcoreProjectWebhook);
+  app.post("/webhooks/procore/project-events", procoreAuth, handleProcoreProjectWebhook);
 
   // ── Procore main webhook ────────────────────────────────────────────────────
-  app.post("/webhooks/procore", async (req, res) => {
+  app.post("/webhooks/procore", procoreAuth, async (req, res) => {
     let webhookLog: any = null;
     try {
-      // C-1: Procore signature verification (optional — skipped if secret not configured)
-      const procoreSecret = process.env.PROCORE_WEBHOOK_SECRET;
-      if (procoreSecret) {
-        const signature = req.headers['x-procore-signature'] || req.headers['x-webhook-signature'];
-        if (signature) {
-          const crypto = await import('crypto');
-          const requestBody = JSON.stringify(req.body);
-          const hash = crypto.createHmac('sha256', procoreSecret)
-            .update(requestBody)
-            .digest('hex');
-          if (hash !== signature) {
-            console.warn('[webhook] Procore signature verification FAILED');
-            return res.status(401).json({ error: 'Invalid signature' });
-          }
-        }
-      }
 
       // H-4: Procore payload validation
       if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
