@@ -1,14 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockClient = {
-  get: vi.fn(),
-};
+// Hoisted: vi.mock factories run before the module body, so plain consts are still uninitialised there.
+const { mockClient, mockUpdateHubSpotDeal, mockStorage } = vi.hoisted(() => ({
+  mockClient: { get: vi.fn() },
+  mockUpdateHubSpotDeal: vi.fn(),
+  mockStorage: {
+    getSyncMappings: vi.fn(),
+    getProcoreProjectByProcoreId: vi.fn(),
+    getAutomationConfig: vi.fn(),
+    getSyncMappingByProcoreProjectId: vi.fn(),
+    getHubspotDealByHubspotId: vi.fn(),
+    createAuditLog: vi.fn(),
+  },
+}));
 
-const mockUpdateHubSpotDeal = vi.fn();
-const mockStorage = {
-  getSyncMappings: vi.fn(),
-  getProcoreProjectByProcoreId: vi.fn(),
-};
+// storage.ts imports db.ts, which throws without DATABASE_URL; the real storage object is spread below, so
+// stub the connection rather than require a database for a unit test.
+vi.mock('../server/db.ts', () => ({ db: {}, pool: {} }));
 
 vi.mock('../server/procore.ts', () => ({
   getProcoreClient: vi.fn(async () => mockClient),
@@ -130,6 +138,11 @@ describe('getProjectChangeOrders', () => {
       },
     ]);
     mockStorage.getProcoreProjectByProcoreId.mockResolvedValue({ active: true });
+    // syncChangeOrdersToHubSpot is gated on the Sync Config toggle and reads the deal's current amount.
+    mockStorage.getAutomationConfig.mockResolvedValue({ key: 'sync_change_orders', value: { enabled: true } });
+    mockStorage.getSyncMappingByProcoreProjectId.mockResolvedValue({ hubspotDealId: '321711034098' });
+    mockStorage.getHubspotDealByHubspotId.mockResolvedValue({ amount: '28571.43' });
+    mockStorage.createAuditLog.mockResolvedValue({});
 
     mockClient.get.mockImplementation(async (path: string) => {
       if (path === '/rest/v1.0/prime_contracts') {

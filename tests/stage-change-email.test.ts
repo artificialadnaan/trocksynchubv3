@@ -7,6 +7,7 @@ const mockStorage = {
   createEmailSendLog: vi.fn(),
   getSyncMappingByProcoreProjectId: vi.fn(),
   getProcoreProjectByProcoreId: vi.fn(),
+  getHubspotDealByHubspotId: vi.fn(),
 };
 
 const mockSendEmail = vi.fn();
@@ -40,6 +41,7 @@ describe("stage change notification rendering", () => {
       companyCamProjectId: null,
       procoreProjectNumber: "DFW-1-02226-ac",
     });
+    mockStorage.getHubspotDealByHubspotId.mockResolvedValue(undefined);
     mockStorage.getProcoreProjectByProcoreId.mockResolvedValue({
       projectNumber: "DFW-1-02226-ac",
     });

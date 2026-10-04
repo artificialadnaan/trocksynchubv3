@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     getAutomationConfig: vi.fn(),
     getAutomationConfigs: vi.fn(),
     upsertAutomationConfig: vi.fn(),
+    upsertAutomationConfigUnlessAuthDisabled: vi.fn(),
     patchAutomationConfig: vi.fn(),
   },
   syncProcoreRoleAssignments: vi.fn(),
@@ -120,6 +121,12 @@ function backedStore(initial: Record<string, any> = {}) {
     rows[data.key] = data.value;
     return data;
   });
+  // Mirrors storage: a row disabled for auth_expired is left untouched and null comes back.
+  mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockImplementation(async (data: any) => {
+    if ((rows[data.key] as any)?.disabledReason === "auth_expired") return null;
+    rows[data.key] = data.value;
+    return data;
+  });
   return rows;
 }
 
@@ -137,6 +144,7 @@ describe("role polling — the enabled-key clobber", () => {
     vi.unstubAllEnvs();
     mocks.storage.getAutomationConfig.mockResolvedValue(undefined);
     mocks.storage.upsertAutomationConfig.mockResolvedValue({});
+    mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockResolvedValue({});
     mocks.storage.patchAutomationConfig.mockImplementation(async (key: string, patch: any) => ({ key, value: patch }));
   });
 
