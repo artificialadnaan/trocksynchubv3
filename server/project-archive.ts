@@ -278,6 +278,71 @@ function countDocWithUrl(docs: any[]): number {
   return docs.filter((d) => d.downloadUrl || (d as any).contentBuffer).length;
 }
 
+/**
+ * How many files an archive run will upload: the denominator of the dashboard's "N / total files". Every upload
+ * branch in the executor must be counted here; a branch left out reads as more files uploaded than exist.
+ */
+export function countArchiveTotalFiles(docs: any, options: any): number {
+  let totalFiles = 0;
+  if (options.includeDocuments) totalFiles += countFolderFiles(docs.folders);
+  if (options.includeDrawings) totalFiles += countDocWithUrl(docs.drawings);
+  if (options.includeSubmittals) totalFiles += countDocWithUrl(docs.submittals);
+  if (options.includeRFIs) totalFiles += countDocWithUrl(docs.rfis);
+  if (options.includeBidPackages) totalFiles += countDocWithUrl(docs.bidPackages);
+  if (options.includePhotos) totalFiles += countDocWithUrl(docs.photos);
+  if (options.includeBudget && docs.budget.summary) totalFiles += 1;
+  if (options.includeEmails) totalFiles += docs.emails.length;
+  if (options.includeIncidents) totalFiles += docs.incidents.length;
+  if (options.includePunchList) totalFiles += docs.punchList.length;
+  if (options.includeMeetings) totalFiles += docs.meetings.length;
+  if (options.includeSchedule) totalFiles += docs.schedule.length;
+  if (options.includeDailyLogs)
+    totalFiles += docs.dailyLogs.attachments.length + (docs.dailyLogs.items.length > 0 ? 1 : 0);
+  if (options.includeSpecifications) totalFiles += docs.specifications.length;
+  if (options.includePrimeContracts) {
+    totalFiles += countDocWithUrl(docs.primeContracts);
+    if (docs.primeContractsData?.length) totalFiles += 1;
+  }
+  if (options.includeCommitments) {
+    totalFiles += countDocWithUrl(docs.commitments.subcontracts) + countDocWithUrl(docs.commitments.purchaseOrders);
+    if (docs.commitmentsData?.subcontracts?.length) totalFiles += 1;
+    if (docs.commitmentsData?.purchaseOrders?.length) totalFiles += 1;
+  }
+  if (options.includeChangeOrders) {
+    totalFiles += countDocWithUrl(docs.changeOrders);
+    if (docs.changeOrdersData?.length) totalFiles += 1;
+  }
+  if (options.includeChangeEvents) {
+    totalFiles += countDocWithUrl(docs.changeEvents);
+    if (docs.changeEventsData?.length) totalFiles += 1;
+  }
+  if (options.includeDirectCosts) {
+    totalFiles += countDocWithUrl(docs.directCosts);
+    if (docs.directCostsData?.length) totalFiles += 1;
+  }
+  if (options.includeInvoicing) {
+    totalFiles += countDocWithUrl(docs.invoicing);
+    if (docs.invoicingData?.length) totalFiles += 1;
+  }
+  if (options.includeDirectory && docs.directory.length > 0) totalFiles += 1;
+  if (options.includeEstimating && docs.estimating.length > 0) totalFiles += 1;
+  // Field-management sections (Codex P2 on #101): each emits one generated report (PDF, or JSON on fallback) when
+  // its data is non-empty, and Observations/Action Plans also upload their attachments. Left out of the total,
+  // the dashboard read "3 / 0 files" for an archive holding only these.
+  if (options.includeObservations) {
+    totalFiles += (docs.observations || []).filter((d: any) => d.url || d.downloadUrl).length;
+    if (docs.observationsData?.length) totalFiles += 1;
+  }
+  if (options.includeActionPlans) {
+    totalFiles += (docs.actionPlans || []).filter((d: any) => d.url || d.downloadUrl).length;
+    if (docs.actionPlansData?.length) totalFiles += 1;
+  }
+  if (options.includeWeatherLogs && docs.weatherLogs?.length) totalFiles += 1;
+  if (options.includeSafetyViolations && docs.safetyViolations?.length) totalFiles += 1;
+  if (options.includeAccidentLogs && docs.accidentLogs?.length) totalFiles += 1;
+  return totalFiles;
+}
+
 export async function previewArchive(
   projectId: string,
   options: ArchivePreviewOptions = {}
@@ -538,50 +603,7 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
     const docs = await extractProjectDocuments(projectId);
     progress.projectName = docs.projectName;
 
-    let totalFiles = 0;
-    if (options.includeDocuments) totalFiles += countFolderFiles(docs.folders);
-    if (options.includeDrawings) totalFiles += countDocWithUrl(docs.drawings);
-    if (options.includeSubmittals) totalFiles += countDocWithUrl(docs.submittals);
-    if (options.includeRFIs) totalFiles += countDocWithUrl(docs.rfis);
-    if (options.includeBidPackages) totalFiles += countDocWithUrl(docs.bidPackages);
-    if (options.includePhotos) totalFiles += countDocWithUrl(docs.photos);
-    if (options.includeBudget && docs.budget.summary) totalFiles += 1;
-    if (options.includeEmails) totalFiles += docs.emails.length;
-    if (options.includeIncidents) totalFiles += docs.incidents.length;
-    if (options.includePunchList) totalFiles += docs.punchList.length;
-    if (options.includeMeetings) totalFiles += docs.meetings.length;
-    if (options.includeSchedule) totalFiles += docs.schedule.length;
-    if (options.includeDailyLogs)
-      totalFiles += docs.dailyLogs.attachments.length + (docs.dailyLogs.items.length > 0 ? 1 : 0);
-    if (options.includeSpecifications) totalFiles += docs.specifications.length;
-    if (options.includePrimeContracts) {
-      totalFiles += countDocWithUrl(docs.primeContracts);
-      if (docs.primeContractsData?.length) totalFiles += 1;
-    }
-    if (options.includeCommitments) {
-      totalFiles += countDocWithUrl(docs.commitments.subcontracts) + countDocWithUrl(docs.commitments.purchaseOrders);
-      if (docs.commitmentsData?.subcontracts?.length) totalFiles += 1;
-      if (docs.commitmentsData?.purchaseOrders?.length) totalFiles += 1;
-    }
-    if (options.includeChangeOrders) {
-      totalFiles += countDocWithUrl(docs.changeOrders);
-      if (docs.changeOrdersData?.length) totalFiles += 1;
-    }
-    if (options.includeChangeEvents) {
-      totalFiles += countDocWithUrl(docs.changeEvents);
-      if (docs.changeEventsData?.length) totalFiles += 1;
-    }
-    if (options.includeDirectCosts) {
-      totalFiles += countDocWithUrl(docs.directCosts);
-      if (docs.directCostsData?.length) totalFiles += 1;
-    }
-    if (options.includeInvoicing) {
-      totalFiles += countDocWithUrl(docs.invoicing);
-      if (docs.invoicingData?.length) totalFiles += 1;
-    }
-    if (options.includeDirectory && docs.directory.length > 0) totalFiles += 1;
-    if (options.includeEstimating && docs.estimating.length > 0) totalFiles += 1;
-
+    const totalFiles = countArchiveTotalFiles(docs, options);
     progress.totalFiles = totalFiles;
     progress.progress = 5;
 
