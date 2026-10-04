@@ -17,6 +17,7 @@ vi.mock("../server/storage.ts", () => ({
     checkIdempotencyKey: vi.fn(async () => false),
     createWebhookLog: vi.fn(async () => ({ id: 1 })),
     createIdempotencyKey: vi.fn(async () => ({ id: 1 })),
+    deleteIdempotencyKey: vi.fn(async () => undefined),
     createAuditLog: vi.fn(async () => ({ id: 1 })),
     updateWebhookLog: vi.fn(async () => ({ id: 1 })),
     getAutomationConfig: vi.fn(async () => ({ value: { enabled: true } })),
@@ -222,12 +223,95 @@ describe("inbound webhook authentication", () => {
     });
   });
 
-  it("HubSpot: a redelivery of one event dedupes on its eventId (no Date.now() in the key)", async () => {
+  it("HubSpot: a redelivery of one event dedupes on its stable identity (no Date.now(), no attemptNumber in the key)", async () => {
     const { storage } = await import("../server/storage.ts");
+    vi.mocked(storage.checkIdempotencyKey).mockClear();
+    const delivery = { ...hubspotRfpEvent(), portalId: 45644695, subscriptionId: 77, occurredAt: 1759600000000 };
+    await withWebhookServer(async (base) => {
+      for (const attemptNumber of [0, 1]) {
+        const body = JSON.stringify({ ...delivery, attemptNumber });
+        await post(`${base}/webhooks/hubspot`, body, hubspotV3Headers(base, "/webhooks/hubspot", body));
+      }
+    });
+    const keys = vi.mocked(storage.checkIdempotencyKey).mock.calls.map((c) => c[0]);
+    expect(keys).toEqual([
+      "hs_event-1_45644695_77_hubspot-deal-1_deal.propertyChange_1759600000000",
+      "hs_event-1_45644695_77_hubspot-deal-1_deal.propertyChange_1759600000000",
+    ]);
+  });
+
+  it("HubSpot: two different events that reuse an eventId get different keys (HubSpot does not guarantee it unique)", async () => {
+    const { storage } = await import("../server/storage.ts");
+    vi.mocked(storage.checkIdempotencyKey).mockClear();
+    const base0 = { ...hubspotRfpEvent(), portalId: 45644695, subscriptionId: 77, occurredAt: 1759600000000 };
+    await withWebhookServer(async (base) => {
+      const body = JSON.stringify([base0, { ...base0, objectId: "hubspot-deal-2" }, { ...base0, subscriptionId: 78 }]);
+      await post(`${base}/webhooks/hubspot`, body, hubspotV3Headers(base, "/webhooks/hubspot", body));
+    });
+    const keys = vi.mocked(storage.checkIdempotencyKey).mock.calls.map((c) => c[0]);
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(3);
+  });
+
+  it("HubSpot: an uncaught processing failure answers 500 and releases the key, so HubSpot's retry runs the event", async () => {
+    const { storage } = await import("../server/storage.ts");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(storage.deleteIdempotencyKey).mockClear();
+    createRfpApprovalRequestMock.mockClear();
+    vi.mocked(storage.getAutomationConfig).mockRejectedValueOnce(new Error("connection reset"));
+    const event = { ...hubspotRfpEvent(), portalId: 45644695, subscriptionId: 77, occurredAt: 1759600000000 };
+    const key = "hs_event-1_45644695_77_hubspot-deal-1_deal.propertyChange_1759600000000";
+    await withWebhookServer(async (base) => {
+      const body = JSON.stringify(event);
+      const first = await post(`${base}/webhooks/hubspot`, body, hubspotV3Headers(base, "/webhooks/hubspot", body));
+      expect(first.status).toBe(500);
+      expect(storage.createIdempotencyKey).toHaveBeenCalledWith(expect.objectContaining({ key }));
+      expect(storage.deleteIdempotencyKey).toHaveBeenCalledWith(key);
+      expect(createRfpApprovalRequestMock).not.toHaveBeenCalled();
+
+      // The retry (key released, so not found) runs the event.
+      const retry = JSON.stringify({ ...event, attemptNumber: 1 });
+      const second = await post(`${base}/webhooks/hubspot`, retry, hubspotV3Headers(base, "/webhooks/hubspot", retry));
+      expect(second.status).toBe(200);
+      expect(createRfpApprovalRequestMock).toHaveBeenCalledWith("hubspot-deal-1");
+    });
+  });
+
+  it("HubSpot: a processed event keeps its key (only a failure releases it)", async () => {
+    const { storage } = await import("../server/storage.ts");
+    vi.mocked(storage.deleteIdempotencyKey).mockClear();
     await withWebhookServer(async (base) => {
       const body = JSON.stringify(hubspotRfpEvent());
-      await post(`${base}/webhooks/hubspot`, body, hubspotV3Headers(base, "/webhooks/hubspot", body));
-      expect(storage.checkIdempotencyKey).toHaveBeenCalledWith("hs_event-1");
+      expect((await post(`${base}/webhooks/hubspot`, body, hubspotV3Headers(base, "/webhooks/hubspot", body))).status).toBe(200);
+    });
+    expect(storage.deleteIdempotencyKey).not.toHaveBeenCalled();
+  });
+
+  it("HubSpot: the signed URI has HubSpot's v3 escapes decoded, and every other escape left encoded", async () => {
+    await withWebhookServer(async (base) => {
+      const body = JSON.stringify(hubspotRfpEvent());
+      const sent = "/webhooks/hubspot?a=x%2Fy%3Az%28%29&b=one%20two%26three";
+      const signedByHubSpot = "/webhooks/hubspot?a=x/y:z()&b=one%20two%26three";
+      expect((await post(`${base}${sent}`, body, hubspotV3Headers(base, signedByHubSpot, body))).status).toBe(200);
+      // Signing the raw (still-encoded) URI is NOT what HubSpot does, so it must not verify.
+      expect((await post(`${base}${sent}`, body, hubspotV3Headers(base, sent, body))).status).toBe(401);
+      // Fully decoding the query is not it either: %20 and %26 stay encoded.
+      expect((await post(`${base}${sent}`, body, hubspotV3Headers(base, decodeURIComponent(sent), body))).status).toBe(401);
+    });
+  });
+
+  it("decodeHubSpotV3Uri decodes exactly HubSpot's twelve characters, case-insensitively", async () => {
+    const { decodeHubSpotV3Uri } = await import("../server/webhooks/signature.ts");
+    expect(decodeHubSpotV3Uri("/p%3A%2F%3F%40%21%24%27%28%29%2A%2C%3B")).toBe("/p:/?@!$'()*,;");
+    expect(decodeHubSpotV3Uri("/p%3a%2f")).toBe("/p:/");
+    expect(decodeHubSpotV3Uri("/p%20%26%3D%2B%25%23")).toBe("/p%20%26%3D%2B%25%23");
+  });
+
+  it("the test signer uses APP_URL's origin when it is set, as the verifier does", async () => {
+    process.env.APP_URL = "https://synchub.example.test/";
+    await withWebhookServer(async (base) => {
+      const body = JSON.stringify(hubspotRfpEvent());
+      expect((await post(`${base}/webhooks/hubspot`, body, hubspotV3Headers(base, "/webhooks/hubspot", body))).status).toBe(200);
     });
   });
 

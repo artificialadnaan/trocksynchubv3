@@ -313,6 +313,7 @@ export interface IStorage {
 
   checkIdempotencyKey(key: string): Promise<IdempotencyKey | undefined>;
   createIdempotencyKey(data: InsertIdempotencyKey): Promise<IdempotencyKey>;
+  deleteIdempotencyKey(key: string): Promise<void>;
 
   getOAuthToken(provider: string): Promise<OAuthToken | undefined>;
   upsertOAuthToken(data: InsertOAuthToken): Promise<OAuthToken>;
@@ -807,6 +808,10 @@ export class DatabaseStorage implements IStorage {
   async createIdempotencyKey(data: InsertIdempotencyKey): Promise<IdempotencyKey> {
     const [result] = await db.insert(idempotencyKeys).values(data).returning();
     return result;
+  }
+
+  async deleteIdempotencyKey(key: string): Promise<void> {
+    await db.delete(idempotencyKeys).where(eq(idempotencyKeys.key, key));
   }
 
   async getOAuthToken(provider: string): Promise<OAuthToken | undefined> {

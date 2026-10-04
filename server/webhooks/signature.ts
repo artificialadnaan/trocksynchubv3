@@ -43,10 +43,22 @@ function rawBodyOf(req: Request): Buffer {
   return Buffer.isBuffer(raw) ? raw : Buffer.alloc(0);
 }
 
-/** The full URL HubSpot signed: APP_URL's origin (the public one) plus the path and query as received. */
+// HubSpot v3 signs the URI with exactly these percent-escapes decoded (path AND query); every other escape stays
+// encoded, so the query is never fully decoded. Express keeps them encoded in req.originalUrl.
+// https://developers.hubspot.com/docs/api/webhooks/validating-requests
+const HUBSPOT_V3_DECODED: Record<string, string> = {
+  "%3A": ":", "%2F": "/", "%3F": "?", "%40": "@", "%21": "!", "%24": "$",
+  "%27": "'", "%28": "(", "%29": ")", "%2A": "*", "%2C": ",", "%3B": ";",
+};
+
+export function decodeHubSpotV3Uri(uri: string): string {
+  return uri.replace(/%(3A|2F|3F|40|21|24|27|28|29|2A|2C|3B)/gi, (m) => HUBSPOT_V3_DECODED[m.toUpperCase()]!);
+}
+
+/** The full URL HubSpot signed: APP_URL's origin (the public one) plus the path and query as received, normalised. */
 export function hubspotSignedUri(req: Request, appUrl = process.env.APP_URL): string {
   const base = appUrl?.trim() ? appUrl.trim().replace(/\/+$/, "") : `https://${req.get("host") ?? ""}`;
-  return `${base}${req.originalUrl}`;
+  return `${base}${decodeHubSpotV3Uri(req.originalUrl)}`;
 }
 
 export function verifyHubSpotV3(
