@@ -68,7 +68,8 @@ export function registerAuthRoutes(app: Express, requireAuth: RequestHandler) {
     if (!caller || caller.role !== "admin") {
       return res.status(403).json({ message: "Forbidden" });
     }
-    const username = nonEmptyString(req.body?.username)?.trim() ?? null;
+    // Stored exactly as submitted (as login looks it up): a blank name is refused, nothing is normalized.
+    const username = nonEmptyString(req.body?.username);
     const password = nonEmptyString(req.body?.password);
     if (!username || !password) {
       return res.status(400).json({ message: "Username and password are required" });

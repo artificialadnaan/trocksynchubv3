@@ -107,6 +107,17 @@ describe("POST /api/auth/register input", () => {
     });
   });
 
+  // Codex/CodeRabbit R1: register must store the username exactly as login looks it up, so it is never trimmed.
+  it("stores the username exactly as submitted, so the same credentials sign in", async () => {
+    sessions.admin = fakeSession("admin");
+    sessions.admin.userId = "admin-1";
+    await withApp(async (baseUrl) => {
+      const res = await post(baseUrl, "/api/auth/register", { username: " alice ", password: "pw-123456" }, "admin");
+      expect(res.status).toBe(200);
+      expect(createUserMock).toHaveBeenCalledWith({ username: " alice ", password: "pw-123456", role: "user" });
+    });
+  });
+
   it("a valid body still creates a least-privileged account", async () => {
     sessions.admin = fakeSession("admin");
     sessions.admin.userId = "admin-1";
