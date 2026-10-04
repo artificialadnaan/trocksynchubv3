@@ -1541,7 +1541,12 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
     try {
       const { sendEmail } = await import('../email-service');
       const { buildStageNotificationEmail } = await import('../stage-notifications');
-      const to = req.body?.to || 'adnaan.iqbal@gmail.com';
+      // An explicit recipient only (#86): this used to fall back to a hard-coded personal address, so a test email
+      // could land in a real person's inbox without anyone choosing it.
+      const to = typeof req.body?.to === "string" ? req.body.to.trim() : "";
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+        return res.status(400).json({ error: "Provide `to`: the email address to send the test stage email to" });
+      }
       const stage = req.body?.stage || 'Close Out - Final Invoice';
       const htmlBody = buildStageNotificationEmail('Test Project - DFW-4-08226-aa', 'Close Out', stage, '562949955661621');
       const result = await sendEmail({ to, subject: `Stage Update: Test Project → ${stage}`, htmlBody, fromName: 'T-Rock Sync Hub' });
