@@ -328,6 +328,15 @@ export interface IStorage {
     description?: string,
     insertDefaults?: Record<string, unknown>,
   ): Promise<AutomationConfig>;
+  tryAcquireAutomationLease(key: string, owner: string, ttlMs: number, description?: string): Promise<boolean>;
+  releaseAutomationLease(key: string, owner: string): Promise<void>;
+  patchAutomationConfigIfLeaseHeld(
+    key: string,
+    patch: Record<string, unknown>,
+    leaseKey: string,
+    owner: string,
+    description?: string,
+  ): Promise<boolean>;
 
   getContractCounter(projectId: string, counterType: string): Promise<ContractCounter | undefined>;
   incrementContractCounter(projectId: string, projectNumber: string, counterType: string): Promise<number>;
@@ -896,6 +905,74 @@ export class DatabaseStorage implements IStorage {
         },
       }).returning();
     return result;
+  }
+
+  /**
+   * A lease kept in an automation_config row: `{ owner, expiresAt }`, expiresAt in epoch ms on the DATABASE clock,
+   * so replicas with skewed clocks agree on expiry. Take or renew it in ONE statement: it succeeds when there is no
+   * row, the row is this owner's, or the row has expired (a non-number or non-object value counts as expired).
+   * The conflict path holds the row lock, so two replicas can never both get it.
+   */
+  async tryAcquireAutomationLease(key: string, owner: string, ttlMs: number, description?: string): Promise<boolean> {
+    const r: any = await db.execute(sql`
+      INSERT INTO ${automationConfig} (key, value, description, updated_at)
+      VALUES (${key},
+              jsonb_build_object('owner', ${owner}::text,
+                                 'expiresAt', (extract(epoch from clock_timestamp()) * 1000)::bigint + ${Math.floor(ttlMs)}::bigint),
+              ${description ?? null}, now())
+      ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value, updated_at = now()
+        WHERE ${automationConfig}.value ->> 'owner' = ${owner}
+           OR (CASE WHEN jsonb_typeof(${automationConfig}.value -> 'expiresAt') = 'number'
+                    THEN (${automationConfig}.value ->> 'expiresAt')::numeric ELSE 0 END)
+              <= (extract(epoch from clock_timestamp()) * 1000)
+      RETURNING key`);
+    const rows = r?.rows ?? r;
+    return Array.isArray(rows) && rows.length > 0;
+  }
+
+  /** Give a held lease up now (expiresAt 0), so another replica can take it at once. Only the owner can. */
+  async releaseAutomationLease(key: string, owner: string): Promise<void> {
+    await db.execute(sql`
+      UPDATE ${automationConfig}
+         SET value = jsonb_set(${automationConfig}.value, '{expiresAt}', '0'::jsonb), updated_at = now()
+       WHERE key = ${key}
+         AND jsonb_typeof(${automationConfig}.value) = 'object'
+         AND ${automationConfig}.value ->> 'owner' = ${owner}`);
+  }
+
+  /**
+   * patchAutomationConfig, fenced by a lease: the merge happens only while `owner` holds an unexpired `leaseKey`.
+   * The lease row is read FOR SHARE, so a takeover cannot commit between the check and this write: it waits for
+   * this statement, or, if it committed first, the re-checked row no longer matches and nothing is written.
+   */
+  async patchAutomationConfigIfLeaseHeld(
+    key: string,
+    patch: Record<string, unknown>,
+    leaseKey: string,
+    owner: string,
+    description?: string,
+  ): Promise<boolean> {
+    const r: any = await db.execute(sql`
+      WITH held AS (
+        SELECT 1 FROM ${automationConfig}
+         WHERE key = ${leaseKey}
+           AND ${automationConfig}.value ->> 'owner' = ${owner}
+           AND (CASE WHEN jsonb_typeof(${automationConfig}.value -> 'expiresAt') = 'number'
+                     THEN (${automationConfig}.value ->> 'expiresAt')::numeric ELSE 0 END)
+               > (extract(epoch from clock_timestamp()) * 1000)
+         FOR SHARE
+      )
+      INSERT INTO ${automationConfig} (key, value, description, updated_at)
+      SELECT ${key}, ${JSON.stringify(patch)}::jsonb, ${description ?? null}, now() FROM held
+      ON CONFLICT (key) DO UPDATE
+        SET value = CASE WHEN jsonb_typeof(${automationConfig}.value) = 'object'
+                         THEN ${automationConfig}.value || EXCLUDED.value
+                         ELSE EXCLUDED.value END,
+            updated_at = now()
+      RETURNING key`);
+    const rows = r?.rows ?? r;
+    return Array.isArray(rows) && rows.length > 0;
   }
 
   // Testing Mode helpers

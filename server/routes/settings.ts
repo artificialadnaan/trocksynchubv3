@@ -1,4 +1,6 @@
 import type { Express } from "express";
+import { randomUUID } from "crypto";
+import { hostname } from "os";
 import { storage } from "../storage";
 import { requireInternalSecret } from "../internal-auth";
 import { sanitizeEstimatorList, validateEstimatorList } from "../../shared/estimators";
@@ -43,6 +45,71 @@ let rolePollingBatchCursor = 0;
  * would delete the cursor outright. Operational progress and operator intent do not belong in one value.
  */
 const ROLE_POLLING_CURSOR_KEY = "role_assignment_polling_cursor";
+
+/**
+ * SyncHub #63: ONE replica owns the rotation, by holding a lease row ({ owner, expiresAt }, expiry on the database
+ * clock). Every replica with polling enabled renews it on a heartbeat; whoever holds it runs the scheduled cycles,
+ * and the others skip theirs. A dead owner stops renewing and is replaced within one TTL.
+ *
+ * That gives the cursor a single writer. Each cycle reads the cursor from its row (never this process's memory,
+ * which goes stale the moment another replica owned a cycle), and writes it back only while still holding the
+ * lease, in one statement that row-locks the lease. A slow replica finishing an older batch after a takeover can no
+ * longer move the shared cursor backward.
+ *
+ * The TTL outlives a cycle's own timeout only with the heartbeat: the heartbeat keeps renewing during a long cycle.
+ */
+const ROLE_POLLING_LEASE_KEY = "role_assignment_polling_lease";
+const ROLE_POLLING_LEASE_TTL_MS = 3 * 60 * 1000;
+const ROLE_POLLING_LEASE_HEARTBEAT_MS = 60 * 1000;
+/** Unique per PROCESS: a restarted replica is a new owner and waits out (or is handed) the old lease. */
+const ROLE_POLLING_OWNER = `${process.env.RAILWAY_REPLICA_ID || hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
+let rolePollingLeaseTimer: ReturnType<typeof setInterval> | null = null;
+let rolePollingOwnsRotation = false;
+
+async function renewRolePollingLease(): Promise<boolean> {
+  try {
+    rolePollingOwnsRotation = await storage.tryAcquireAutomationLease(
+      ROLE_POLLING_LEASE_KEY,
+      ROLE_POLLING_OWNER,
+      ROLE_POLLING_LEASE_TTL_MS,
+      'Role assignment polling: the replica that owns the rotation (operational state)',
+    );
+  } catch (err: any) {
+    // Fail closed: a replica that cannot confirm it owns the rotation does not run it.
+    console.warn('[RolePolling] Could not renew the rotation lease:', err?.message ?? err);
+    rolePollingOwnsRotation = false;
+  }
+  return rolePollingOwnsRotation;
+}
+
+/**
+ * The stored rotation cursor: its own row first, then `batchCursor` on the policy row (rows written before the
+ * cursor had its own). First valid candidate wins.
+ *
+ * `??` alone let `""` or `false` through to Number(), which yields 0 — silently restarting the rotation at project
+ * #1, the very starvation the stored cursor exists to prevent. `Number.isFinite(Number(c))` accepts `false` (→ 0)
+ * and `[]` (→ 0), both reachable through the generic automation-config PUT — so a junk cursor row would be SELECTED
+ * over a valid legacy one and then floored to 0. Require a real non-negative number, or a string that is one.
+ * A failed read of the cursor row falls back to the policy row rather than throwing.
+ */
+async function readStoredRolePollingCursor(policy: any): Promise<number | undefined> {
+  const isCursor = (c: unknown) =>
+    (typeof c === 'number' || (typeof c === 'string' && c.trim() !== '')) &&
+    Number.isFinite(Number(c)) &&
+    Number(c) >= 0;
+  const firstFinite = (...candidates: unknown[]) => candidates.find(isCursor);
+  let stored: unknown = firstFinite(policy?.batchCursor);
+  try {
+    const cursorRow = ((await storage.getAutomationConfig(ROLE_POLLING_CURSOR_KEY))?.value as any) ?? null;
+    stored = firstFinite(cursorRow?.batchCursor, policy?.batchCursor);
+  } catch (cursorReadErr: any) {
+    console.warn(
+      '[RolePolling] Could not read the saved rotation cursor; falling back to the policy row:',
+      cursorReadErr?.message ?? cursorReadErr,
+    );
+  }
+  return stored === undefined ? undefined : Math.max(0, Math.floor(Number(stored)));
+}
 
 /**
  * The defaults, once. Boot fell back to 23 minutes and the config route to 30, so a row with no
@@ -316,6 +383,33 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
   const startTime = Date.now();
   const fullSync = opts?.fullSync ?? false;
   try {
+    if (!fullSync) {
+      // (1) The policy row decides, at the moment of THIS cycle (#63, part 2). A config handler that started a
+      // timer on a result a concurrent disable had already overtaken leaves a timer running against a disabled
+      // row: its first tick lands here, sees the row, and stops it. The row is the order; the timer is not.
+      let policy: any;
+      try {
+        policy = (await storage.getAutomationConfig("role_assignment_polling"))?.value ?? null;
+      } catch (policyErr: any) {
+        console.warn('[RolePolling] Could not read the policy row; skipping this cycle:', policyErr?.message ?? policyErr);
+        return;
+      }
+      if (!rolePollingEnabledFromRow(policy)) {
+        console.log('[RolePolling] Disabled in the database; stopping this replica\'s poller');
+        stopRolePolling();
+        return;
+      }
+      applyRolePollingBatchSize(policy);
+      // (2) One owner (#63, part 1).
+      if (!(await renewRolePollingLease())) {
+        console.log('[RolePolling] Another replica owns the rotation; skipping this cycle');
+        return;
+      }
+      // (3) Resume from the stored cursor, wherever the last owner left it.
+      const stored = await readStoredRolePollingCursor(policy);
+      if (stored !== undefined) rolePollingBatchCursor = stored;
+    }
+
     const result = fullSync
       ? await Promise.race([
           syncProcoreRoleAssignments(undefined, { fullSync: true }),
@@ -336,19 +430,27 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
     }
 
     if (!fullSync && 'nextCursor' in result) {
-      rolePollingBatchCursor = result.nextCursor;
       // Persist it. Held only in memory, the cursor reset to 0 on every deploy and crash, so the rotation
       // perpetually re-walked the lowest procoreIds and never reached the newest projects.
       //
       // Its OWN row, holding nothing but the cursor: no read-modify-write of the policy row, so a concurrent
       // enable/disable cannot be replayed by this write, and the enable-all route cannot delete it.
-      // Best-effort — losing the write costs one restart's progress and must never abort the cycle.
+      // FENCED by the lease (#63): a replica that lost ownership mid-cycle writes nothing, so it cannot rewind the
+      // cursor the new owner has moved on. Best-effort — losing the write costs one batch of progress and must
+      // never abort the cycle.
       try {
-        await storage.patchAutomationConfig(
+        const written = await storage.patchAutomationConfigIfLeaseHeld(
           ROLE_POLLING_CURSOR_KEY,
           { batchCursor: result.nextCursor },
+          ROLE_POLLING_LEASE_KEY,
+          ROLE_POLLING_OWNER,
           'Role assignment polling rotation cursor (operational state)',
         );
+        if (written) {
+          rolePollingBatchCursor = result.nextCursor;
+        } else {
+          console.warn('[RolePolling] Lost the rotation lease during this cycle; the cursor was left to the new owner');
+        }
       } catch (cursorErr: any) {
         console.warn('[RolePolling] Could not persist batch cursor:', cursorErr?.message ?? cursorErr);
       }
@@ -415,6 +517,9 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
 function startRolePolling(intervalMinutes: number) {
   stopRolePolling();
   console.log(`[RolePolling] Starting automatic role assignment sync every ${intervalMinutes} minutes`);
+  // The ownership heartbeat (#63). Renewing well inside the TTL keeps the owner the owner through a long cycle.
+  rolePollingLeaseTimer = setInterval(() => void renewRolePollingLease(), ROLE_POLLING_LEASE_HEARTBEAT_MS);
+  void renewRolePollingLease();
   rolePollingTimer = setInterval(() => runRolePollingCycle(), intervalMinutes * 60 * 1000);
   // The staggered first cycle is TRACKED, so stopping actually stops it.
   //
@@ -434,6 +539,17 @@ function startRolePolling(intervalMinutes: number) {
 }
 
 function stopRolePolling() {
+  if (rolePollingLeaseTimer) {
+    clearInterval(rolePollingLeaseTimer);
+    rolePollingLeaseTimer = null;
+  }
+  if (rolePollingOwnsRotation) {
+    // Hand the rotation over at once instead of making the next owner wait out the TTL.
+    rolePollingOwnsRotation = false;
+    storage.releaseAutomationLease(ROLE_POLLING_LEASE_KEY, ROLE_POLLING_OWNER).catch((err: any) =>
+      console.warn('[RolePolling] Could not release the rotation lease (it expires on its own):', err?.message ?? err),
+    );
+  }
   if (rolePollingStartupTimer) {
     clearTimeout(rolePollingStartupTimer);
     rolePollingStartupTimer = null;
@@ -617,29 +733,9 @@ export async function initPolling() {
     // and startRolePolling, so letting it reach the outer catch would mean one transient DB failure leaves
     // the poller down for the life of the process — the exact failure this file already fixed once. Losing
     // the cursor costs a rotation's progress; losing the START costs every kickoff email.
-    // First finite candidate wins. `??` alone let `""` or `false` through to Number(), which yields 0 —
-    // silently restarting the rotation at project #1, the very starvation this restore exists to prevent.
-    // `Number.isFinite(Number(c))` accepts `false` (→ 0) and `[]` (→ 0), both reachable through the generic
-    // automation-config PUT — so a junk cursor row would be SELECTED over a valid legacy one and then floored
-    // to 0, restarting the sweep at the oldest projects. Require a real non-negative number, or a string that
-    // is one.
-    const isCursor = (c: unknown) =>
-      (typeof c === 'number' || (typeof c === 'string' && c.trim() !== '')) &&
-      Number.isFinite(Number(c)) &&
-      Number(c) >= 0;
-    const firstFinite = (...candidates: unknown[]) => candidates.find(isCursor);
-    let storedCursor: unknown = firstFinite(val?.batchCursor);
-    try {
-      const cursorRow = ((await storage.getAutomationConfig(ROLE_POLLING_CURSOR_KEY))?.value as any) ?? null;
-      storedCursor = firstFinite(cursorRow?.batchCursor, val?.batchCursor);
-    } catch (cursorReadErr: any) {
-      console.warn(
-        '[RolePolling] Could not read the saved rotation cursor; falling back to the policy row:',
-        cursorReadErr?.message ?? cursorReadErr,
-      );
-    }
+    const storedCursor = await readStoredRolePollingCursor(val);
     if (storedCursor !== undefined) {
-      rolePollingBatchCursor = Math.max(0, Math.floor(Number(storedCursor)));
+      rolePollingBatchCursor = storedCursor;
     }
     if (looksClobbered(val)) {
       // Diagnosable, not silent. This exact shape took role polling down for weeks with nothing logged:
@@ -1099,6 +1195,8 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
           : false,
         batchSize: ROLE_POLLING_BATCH_SIZE,
         batchCursor: rolePollingBatchCursor,
+        // #63: whether THIS replica holds the rotation lease (only the holder runs scheduled cycles).
+        ownsRotation: rolePollingOwnsRotation,
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
