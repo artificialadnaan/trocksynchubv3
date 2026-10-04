@@ -1,4 +1,5 @@
 import crypto, { randomUUID } from 'crypto';
+import { recipientReviewUrl } from "./rfp-recipient-link";
 import fs from 'fs/promises';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import path from 'path';
@@ -1172,13 +1173,24 @@ async function sendRfpReviewEmails(params: {
   const effectiveProjectType = resolveEffectiveRfpProjectType(params.dealData);
   const rfpRecipients = await getRfpReviewRecipients(effectiveProjectType, params.input.sourceSystem);
   console.log(`[rfp-approval] Project type: ${effectiveProjectType || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
-  for (const recipient of rfpRecipients) {
+  // #47: the GLOBAL_CC directors (already copied on every review email, and authorized for every RFP) get their OWN
+  // signed copy instead of a CC of someone else's: a CC'd copy would carry that recipient's signed link, so the
+  // director would act, and be audited, as them. Hence bypassGlobalCc below and one deduplicated send per address.
+  // The same people receive the email as before; only the link inside is now theirs.
+  const signedRecipients = Array.from(new Set(
+    [...rfpRecipients, ...(emailService.GLOBAL_CC_RECIPIENTS || [])].map((r) => normalizeApproverEmail(r)).filter(Boolean),
+  ));
+  for (const recipient of signedRecipients) {
     try {
+      // Each recipient's copy carries a link signed to THEM (server/rfp-recipient-link.ts); the review page acts as that
+      // recipient. The shared base link appears only inside this template string, never in a sent email.
+      const recipientHtml = htmlBody.split(reviewUrl).join(recipientReviewUrl(appUrl, params.token, recipient));
       const result = await sendEmail({
         to: recipient,
         subject,
-        htmlBody,
+        htmlBody: recipientHtml,
         fromName: 'T-Rock Sync Hub',
+        bypassGlobalCc: true,
       });
 
       const metadata = params.input.sourceSystem === 'hubspot'

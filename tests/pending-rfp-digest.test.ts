@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { verifyRecipientLink } from "../server/rfp-recipient-link.ts";
 import {
   buildPendingRfpDigest,
   type PendingRfpRow,
@@ -24,6 +25,12 @@ const NON_SERVICE = [SIDNEY, JAMES, TIM];
 async function fakeResolver(projectType: string | null | undefined): Promise<string[]> {
   return String(projectType ?? "").trim() === "4" ? TYPE4 : NON_SERVICE;
 }
+
+// #47: digest links are signed per recipient with SESSION_SECRET's HKDF key (a test fixture, not a credential).
+const SESSION_SECRET = "test-session-secret-fixture";
+beforeAll(() => {
+  process.env.SESSION_SECRET = SESSION_SECRET;
+});
 
 const digestFor = (d: PendingRfpDigest, email: string) =>
   d.perRecipient.find((r) => r.recipient === email);
@@ -177,6 +184,24 @@ describe("buildPendingRfpDigest", () => {
     expect(sidney.htmlBody).toContain("https://hub.trockgc.com/rfp-review/abc123");
     // Regression: links derive from the passed public base URL, never localhost.
     expect(sidney.htmlBody).not.toContain("localhost");
+  });
+
+  // #47: each recipient's digest link is signed to THAT recipient, so it acts as them only.
+  it("signs each recipient's review link to that recipient", async () => {
+    const rows: PendingRfpRow[] = [
+      { token: "abc123", createdAt: new Date("2026-06-20T15:00:00Z"), dealData: { project_number: "DFW-2-555", project_types: "2" }, sourceSystem: "hubspot" },
+    ];
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
+    const rOf = (email: string) => {
+      const m = digestFor(digest, email)!.htmlBody.match(/rfp-review\/abc123\?r=([A-Za-z0-9_.-]+)/);
+      return m?.[1];
+    };
+    for (const email of NON_SERVICE) {
+      const r = rOf(email);
+      expect(r, email).toBeTruthy();
+      expect(verifyRecipientLink("abc123", r, SESSION_SECRET)).toBe(email);
+    }
+    expect(rOf(SIDNEY)).not.toBe(rOf(TIM));
   });
 
   it("strips a trailing slash from the base URL (no // in the link)", async () => {

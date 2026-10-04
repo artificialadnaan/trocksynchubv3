@@ -1,7 +1,8 @@
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Route-level coverage of the approve/decline authorization wiring. Mirrors
+// Route-level coverage of the approve/decline authorization wiring, recipient-bound since #47: the approver is the
+// SIGNED recipient of the review link (server/rfp-recipient-link.ts), never a typed address. Mirrors
 // tests/rfp-approval-route.test.ts: fully mock ../server/rfp-approval and drive the route's
 // 403/202/audit behavior off a controllable isAuthorizedRfpApprover stub. (The real authz logic
 // is covered in tests/rfp-approver-authz.test.ts.)
@@ -14,6 +15,7 @@ const processRfpDeclineMock = vi.hoisted(() => vi.fn(async () => ({ success: tru
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
+    getUser: vi.fn(async () => undefined),
     getRfpApprovalRequestByToken: vi.fn(async () => requestRow.current),
     updateRfpApprovalRequest: vi.fn(async (_id: number, data: any) => ({ ...requestRow.current, ...data })),
     createRfpApprovalEdit: vi.fn(async (row: any) => row),
@@ -75,9 +77,31 @@ async function withApp(fn: (baseUrl: string) => Promise<void>) {
   }
 }
 
-describe("RFP approve/decline route authorization", () => {
+const SECRET = "test-session-secret-fixture";
+const TOKEN = "tok-authz";
+const link = async (email: string, opts: { token?: string; secret?: string } = {}) => {
+  const { signRecipientLink } = await import("../server/rfp-recipient-link.ts");
+  return signRecipientLink(opts.token ?? TOKEN, email, opts.secret ?? SECRET);
+};
+async function approve(baseUrl: string, fields: Record<string, string>) {
+  const form = new FormData();
+  for (const [k, v] of Object.entries({ editedFields: JSON.stringify({}), ...fields })) form.append(k, v);
+  const res = await fetch(`${baseUrl}/api/rfp-approval/${TOKEN}/approve`, { method: "POST", body: form });
+  return { status: res.status, body: await res.json() };
+}
+async function decline(baseUrl: string, payload: Record<string, unknown>) {
+  const res = await fetch(`${baseUrl}/api/rfp-approval/${TOKEN}/decline`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+describe("RFP approve/decline: the signed recipient is the approver (#47)", () => {
   beforeEach(() => {
     vi.resetModules();
+    process.env.SESSION_SECRET = SECRET;
     auditRows.length = 0;
     authorize.mockReset();
     authorize.mockResolvedValue(true);
@@ -86,20 +110,63 @@ describe("RFP approve/decline route authorization", () => {
     requestRow.current = makeRequest();
   });
 
-  it("rejects an unauthorized approver with 403 and audits the attempt", async () => {
-    authorize.mockResolvedValue(false);
+  it("refuses an approve with no recipient link, even with a typed approver email (403, nothing processed)", async () => {
     await withApp(async (baseUrl) => {
-      const form = new FormData();
-      form.append("approverEmail", "sgibson@trockgc.com");
-      form.append("editedFields", JSON.stringify({}));
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
-      const body = await response.json();
-
-      expect(response.status).toBe(403);
-      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
+      const { status, body } = await approve(baseUrl, { approverEmail: "cburling@trockgc.com" });
+      expect(status).toBe(403);
+      expect(body).toMatchObject({ success: false, error: "recipient_link_required" });
       expect(processRfpApprovalMock).not.toHaveBeenCalled();
-      // Authorized against the original project type from the stored row.
+    });
+  });
+
+  it("refuses a forged link, and a link signed for another RFP", async () => {
+    await withApp(async (baseUrl) => {
+      expect((await approve(baseUrl, { recipientLink: await link("cburling@trockgc.com", { secret: "other" }) })).status).toBe(403);
+      expect((await approve(baseUrl, { recipientLink: await link("cburling@trockgc.com", { token: "tok-other" }) })).status).toBe(403);
+      expect((await approve(baseUrl, { recipientLink: "Y2J1cmxpbmc.bm90LWEtbWFj" })).status).toBe(403);
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("approves AS the signed recipient, with no live-config read for the routed type (the send-time snapshot)", async () => {
+    authorize.mockResolvedValue(false); // the live config no longer lists them: the snapshot still holds
+    await withApp(async (baseUrl) => {
+      const { status, body } = await approve(baseUrl, {
+        recipientLink: await link("cburling@trockgc.com"),
+        approverEmail: "someone-else@trockgc.com", // ignored
+      });
+      expect(status).toBe(202);
+      expect(body).toMatchObject({ success: true, queued: true });
+      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
+      expect(processRfpApprovalMock.mock.calls[0]![2]).toBe("cburling@trockgc.com");
+      expect(authorize).not.toHaveBeenCalled();
+    });
+  });
+
+  it("a FORWARDED link acts as its original recipient (delegation), never as whoever forwards or types", async () => {
+    await withApp(async (baseUrl) => {
+      const forwarded = await link("approver@trockgc.com");
+      await approve(baseUrl, { recipientLink: forwarded, approverEmail: "attacker@example.test" });
+      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
+      expect(processRfpApprovalMock.mock.calls[0]![2]).toBe("approver@trockgc.com");
+    });
+  });
+
+  it("an EDITED type the RFP was not routed by is still checked live, and refused (403, audited) when not authorized", async () => {
+    requestRow.current = makeRequest({
+      projectNumber: "DFW-2-42001",
+      dealData: { dealname: "Reno Job", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope" },
+    });
+    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2");
+    await withApp(async (baseUrl) => {
+      const { status, body } = await approve(baseUrl, {
+        recipientLink: await link("sgibson@trockgc.com"),
+        editedFields: JSON.stringify({ project_types: "4" }),
+      });
+      expect(status).toBe(403);
+      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
       expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
       expect(auditRows.at(-1)).toMatchObject({
         action: "rfp_approval_attempt",
         status: "failed",
@@ -108,206 +175,54 @@ describe("RFP approve/decline route authorization", () => {
     });
   });
 
-  it("allows an authorized approver through to background processing (202 regression)", async () => {
-    authorize.mockResolvedValue(true);
-    await withApp(async (baseUrl) => {
-      const form = new FormData();
-      form.append("approverEmail", "cburling@trockgc.com");
-      form.append("editedFields", JSON.stringify({}));
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
-      const body = await response.json();
-
-      expect(response.status).toBe(202);
-      expect(body).toMatchObject({ success: true, queued: true });
-      // The 202 must actually DISPATCH the background processor (it runs in setImmediate after the
-      // response), not just return the queued envelope — prove the authorized branch reached it.
-      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
-    });
-  });
-
-  it("rejects an approver who edits project_types into a routing group they're NOT authorized for", async () => {
-    // Non-service approver received a type-2 RFP, then edits it to type 4 (service) and approves.
+  it("an edit within live authority passes", async () => {
     requestRow.current = makeRequest({
       projectNumber: "DFW-2-42001",
       dealData: { dealname: "Reno Job", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope" },
     });
-    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
-    await withApp(async (baseUrl) => {
-      const form = new FormData();
-      form.append("approverEmail", "sgibson@trockgc.com");
-      form.append("editedFields", JSON.stringify({ project_types: "4" })); // re-classify to service
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
-      const body = await response.json();
-
-      expect(response.status).toBe(403);
-      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
-      expect(processRfpApprovalMock).not.toHaveBeenCalled();
-      // Baseline type (2, from DFW-2) passes, but the edit re-classifies to service (4): the non-service
-      // approver is rejected against the CREATED type (4), the type they'd actually create.
-      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "2", "hubspot");
-      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
-    });
-  });
-
-  it("rejects a forwarded-link approver who re-types the RFP to their own authority (baseline leak)", async () => {
-    // Leak vector: a type-2 approver is forwarded a SERVICE link (project_number 'DFW-4-...'). They edit
-    // project_types to '2' (their own type) so the CREATED type becomes 2. Gating on the created type
-    // alone would let them through; the BASELINE check (the project-number type 4, which they cannot
-    // edit away) blocks them from acting on an RFP they were never authorized for.
-    requestRow.current = makeRequest({
-      projectNumber: "DFW-4-42001",
-      dealData: { dealname: "Forwarded Service", project_number: "DFW-4-42001", project_types: "4", attachments: [], description: "Scope" },
-    });
-    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
-    await withApp(async (baseUrl) => {
-      const form = new FormData();
-      form.append("approverEmail", "sgibson@trockgc.com");
-      form.append("editedFields", JSON.stringify({ project_types: "2" })); // re-type down to their own authority
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
-      const body = await response.json();
-
-      expect(response.status).toBe(403);
-      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
-      expect(processRfpApprovalMock).not.toHaveBeenCalled();
-      // Rejected against the baseline (project-number) type 4, which the edit can't change.
-      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
-    });
-  });
-
-  it("allows an edit within authority (approver authorized for both the baseline and edited/created type)", async () => {
-    requestRow.current = makeRequest({
-      dealData: { dealname: "Reno Job", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope" },
-    });
-    authorize.mockResolvedValue(true); // e.g. James — in both the non-service and service sets
-    await withApp(async (baseUrl) => {
-      const form = new FormData();
-      form.append("approverEmail", "jhelms@trockgc.com");
-      form.append("editedFields", JSON.stringify({ project_types: "4" }));
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
-      const body = await response.json();
-
-      expect(response.status).toBe(202);
-      expect(body).toMatchObject({ success: true, queued: true });
-      // Must actually dispatch the processor, not just return the queued envelope.
-      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
-    });
-  });
-
-  it("rejects a non-service approver when the project NUMBER encodes a service type (canonical-type bypass, no edit)", async () => {
-    // The bypass: dealData.project_types is the routed type '2' (non-service) but the project NUMBER
-    // is 'DFW-4-...' (type 4 = service). processRfpApproval derives finalProjectTypeDigit '4' from the
-    // number and would create a SERVICE project. The OLD gate (routed project_types only) missed this;
-    // the canonical-created check catches it WITHOUT any edit.
-    requestRow.current = makeRequest({
-      projectNumber: "DFW-4-42001",
-      dealData: { dealname: "Sneaky Service", project_number: "DFW-4-42001", project_types: "2", attachments: [], description: "Scope" },
-    });
-    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
-    await withApp(async (baseUrl) => {
-      const form = new FormData();
-      form.append("approverEmail", "sgibson@trockgc.com");
-      form.append("editedFields", JSON.stringify({})); // NO edit — the bypass needs none
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
-      const body = await response.json();
-
-      expect(response.status).toBe(403);
-      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
-      expect(processRfpApprovalMock).not.toHaveBeenCalled();
-      // The gate authorizes the canonical created type (4 — parsed from the project number), which the
-      // non-service approver lacks, so they're rejected even though they own the routed type (2).
-      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
-    });
-  });
-
-  it("allows a service approver on a row whose project NUMBER encodes a service type (canonical match → 202)", async () => {
-    requestRow.current = makeRequest({
-      projectNumber: "DFW-4-42001",
-      dealData: { dealname: "Service Job", project_number: "DFW-4-42001", project_types: "2", attachments: [], description: "Scope" },
-    });
-    // Service approver authorized for the canonical created type (4) — they do NOT need the routed type (2).
-    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "4");
-    await withApp(async (baseUrl) => {
-      const form = new FormData();
-      form.append("approverEmail", "jhelms@trockgc.com");
-      form.append("editedFields", JSON.stringify({}));
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
-      const body = await response.json();
-
-      expect(response.status).toBe(202);
-      expect(body).toMatchObject({ success: true, queued: true });
-      // The canonical created type (4) was authorized, not just the routed type (2).
-      expect(authorize).toHaveBeenCalledWith("jhelms@trockgc.com", "4", "hubspot");
-      // Must actually dispatch the processor, not just return the queued envelope.
-      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
-    });
-  });
-
-  it("rejects an unauthorized decliner with 403 and audits the attempt", async () => {
-    authorize.mockResolvedValue(false);
-    await withApp(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/decline`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ declinerEmail: "sgibson@trockgc.com" }),
-      });
-      const body = await response.json();
-
-      expect(response.status).toBe(403);
-      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
-      expect(processRfpDeclineMock).not.toHaveBeenCalled();
-      expect(auditRows.at(-1)).toMatchObject({
-        action: "rfp_decline_attempt",
-        status: "failed",
-        details: expect.objectContaining({ outcome: "unauthorized_approver" }),
-      });
-    });
-  });
-
-  it("rejects a non-service decliner when the project NUMBER encodes a service type (canonical-type bypass)", async () => {
-    // Mirror of the approve canonical-bypass: dealData.project_types is the routed type '2'
-    // (non-service) but the project NUMBER is 'DFW-4-...' (service). A non-service approver authorized
-    // ONLY for '2' must NOT be able to DECLINE a row that would create a SERVICE project — the decline
-    // gate now checks the canonical created type ('4') too.
-    requestRow.current = makeRequest({
-      projectNumber: "DFW-4-42001",
-      dealData: { dealname: "Sneaky Service", project_number: "DFW-4-42001", project_types: "2", attachments: [], description: "Scope" },
-    });
-    authorize.mockImplementation(async (_email: string, projectType?: string | null) => projectType === "2"); // non-service only
-    await withApp(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/decline`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ declinerEmail: "sgibson@trockgc.com" }),
-      });
-      const body = await response.json();
-
-      expect(response.status).toBe(403);
-      expect(body).toMatchObject({ success: false, error: "unauthorized_approver" });
-      expect(processRfpDeclineMock).not.toHaveBeenCalled();
-      // The decline gate authorizes the canonical created type (4 — parsed from the project number),
-      // which the non-service decliner lacks, so they're rejected despite owning the routed type (2).
-      expect(authorize).toHaveBeenCalledWith("sgibson@trockgc.com", "4", "hubspot");
-      expect(auditRows.at(-1)).toMatchObject({
-        action: "rfp_decline_attempt",
-        status: "failed",
-        details: expect.objectContaining({ outcome: "unauthorized_approver" }),
-      });
-    });
-  });
-
-  it("allows an authorized decliner through to processRfpDecline", async () => {
     authorize.mockResolvedValue(true);
     await withApp(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/decline`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ declinerEmail: "jhelms@trockgc.com" }),
-      });
-      const body = await response.json();
+      const { status } = await approve(baseUrl, { recipientLink: await link("dual@trockgc.com"), editedFields: JSON.stringify({ project_types: "4" }) });
+      expect(status).toBe(202);
+      await vi.waitFor(() => expect(processRfpApprovalMock).toHaveBeenCalledTimes(1));
+    });
+  });
 
-      expect(response.status).toBe(200);
-      expect(body).toMatchObject({ success: true });
-      expect(processRfpDeclineMock).toHaveBeenCalledWith("tok-authz", "jhelms@trockgc.com");
+  it("decline: no or forged link is 403; a signed link declines AS its recipient", async () => {
+    await withApp(async (baseUrl) => {
+      expect((await decline(baseUrl, { declinerEmail: "cburling@trockgc.com" })).status).toBe(403);
+      expect((await decline(baseUrl, { recipientLink: await link("cburling@trockgc.com", { secret: "other" }) })).status).toBe(403);
+      expect(processRfpDeclineMock).not.toHaveBeenCalled();
+      const ok = await decline(baseUrl, { recipientLink: await link("cburling@trockgc.com"), declinerEmail: "x@example.test" });
+      expect(ok.status).toBe(200);
+      expect(processRfpDeclineMock).toHaveBeenCalledWith(TOKEN, "cburling@trockgc.com");
+    });
+  });
+
+  it("the review page: no or forged link is 403 'out of date'; a signed one shows who is acting, read-only", async () => {
+    await withApp(async (baseUrl) => {
+      const bare = await fetch(`${baseUrl}/rfp-review/${TOKEN}`);
+      expect(bare.status).toBe(403);
+      expect(await bare.text()).toContain("out of date");
+      const forged = await fetch(`${baseUrl}/rfp-review/${TOKEN}?r=${await link("a@trockgc.com", { secret: "other" })}`);
+      expect(forged.status).toBe(403);
+      const r = await link("cburling@trockgc.com");
+      const page = await fetch(`${baseUrl}/rfp-review/${TOKEN}?r=${r}`);
+      expect(page.status).toBe(200);
+      const html = await page.text();
+      expect(html).toContain('value="cburling@trockgc.com" readonly');
+      expect(html).toContain(`const RECIPIENT_LINK = "${r}"`);
+      expect(html).not.toContain("fd.append('approverEmail'");
+    });
+  });
+
+  it("reset needs a signed-in admin (it had no auth: any link holder could re-open an approved RFP)", async () => {
+    requestRow.current = makeRequest({ status: "approved" });
+    await withApp(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/rfp-approval/${TOKEN}/reset`, { method: "POST" });
+      expect(res.status).toBe(401);
+      const { storage } = await import("../server/storage.ts");
+      expect(storage.updateRfpApprovalRequest).not.toHaveBeenCalled();
     });
   });
 });

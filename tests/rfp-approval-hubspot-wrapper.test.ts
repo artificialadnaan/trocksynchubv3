@@ -88,6 +88,8 @@ vi.mock("../server/lib/fetch-with-timeout.ts", () => ({
 
 vi.mock("../server/email-service.ts", () => ({
   sendEmail: sendEmailMock,
+  // #47: the review email gives each GLOBAL_CC director their own signed copy; none in this test.
+  GLOBAL_CC_RECIPIENTS: [],
   renderTemplate: vi.fn(),
 }));
 
@@ -107,6 +109,7 @@ describe("legacy HubSpot RFP approval wrapper", () => {
     sendEmailMock.mockClear();
     dealProps.current = { ...LEGACY_DEAL_PROPS };
     process.env.APP_URL = "https://synchub.example.com";
+    process.env.SESSION_SECRET = "test-session-secret-fixture";
   });
 
   it("keeps the webhook-facing createRfpApprovalRequest outcome: one pending row and one review email", async () => {
@@ -135,6 +138,11 @@ describe("legacy HubSpot RFP approval wrapper", () => {
       fromName: "T-Rock Sync Hub",
     });
     expect(sendEmailMock.mock.calls[0][0].htmlBody).toContain("View in HubSpot");
+    // #47: the recipient's copy links with a signature bound to THEM, and no global CC rides along.
+    expect(sendEmailMock.mock.calls[0][0].bypassGlobalCc).toBe(true);
+    const r = sendEmailMock.mock.calls[0][0].htmlBody.match(/rfp-review\/[^?"]+\?r=([A-Za-z0-9_.-]+)/)?.[1];
+    const { verifyRecipientLink } = await import("../server/rfp-recipient-link.ts");
+    expect(verifyRecipientLink(result.token!, r, "test-session-secret-fixture")).toBe("reviewer@trockgc.com");
     expect(emailLogs).toHaveLength(1);
     expect(emailLogs[0]).toMatchObject({
       templateKey: "rfp_review",

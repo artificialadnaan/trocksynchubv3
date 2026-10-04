@@ -22,6 +22,7 @@
 // Canonical-type resolver — imported from the dependency-free constants module (NOT rfp-approval) so
 // this builder stays PURE/unit-testable without a DB. Same single source the approve/decline gates
 // and the review-email routing use, so the digest buckets each RFP under the approvers who can act.
+import { recipientReviewUrl } from "./rfp-recipient-link";
 import { resolveEffectiveRfpProjectType } from "./constants";
 
 /** Minimal shape of a pending rfp_approval_requests row this builder needs. */
@@ -102,11 +103,18 @@ type DigestCell = {
   projectNumber: string;
   dateSent: string;
   awaiting: string[];
-  reviewUrl: string;
+  /** The RFP's request token; each recipient's link is signed to THEM at render time (#47). */
+  token: string;
 };
 
+/**
+ * The review link one recipient receives for one RFP token (#47). Prod: recipientReviewUrl (server/rfp-recipient-link.ts),
+ * signed to that recipient, so a digest link acts as its recipient only. Injected to keep this builder pure.
+ */
+export type RfpReviewLinkFor = (token: string, recipient: string) => string;
+
 /** Render one approver's scoped digest table (only the RFPs awaiting them). */
-function renderRecipientDigestHtml(cells: DigestCell[]): string {
+function renderRecipientDigestHtml(cells: DigestCell[], recipient: string, linkFor: RfpReviewLinkFor): string {
   const count = cells.length;
   const tableRows = cells
     .map(
@@ -116,7 +124,7 @@ function renderRecipientDigestHtml(cells: DigestCell[]): string {
           <td style="${CELL_STYLE}">${esc(c.projectNumber)}</td>
           <td style="${CELL_STYLE}">${esc(c.dateSent)}</td>
           <td style="${CELL_STYLE}">${c.awaiting.length ? esc(c.awaiting.join(", ")) : "—"}</td>
-          <td style="${CELL_STYLE}"><a href="${esc(c.reviewUrl)}" style="color:#d11921;text-decoration:underline;">Review</a></td>
+          <td style="${CELL_STYLE}"><a href="${esc(linkFor(c.token, recipient))}" style="color:#d11921;text-decoration:underline;">Review</a></td>
         </tr>`
     )
     .join("");
@@ -158,7 +166,9 @@ export async function buildPendingRfpDigest(
   // the SAME check the public review route uses to 410 the link). Expired-but-still-'pending'
   // rows are dropped: re-sending a /rfp-review/<token> link that can no longer be approved only
   // frustrates approvers. Rows with null tokenExpiresAt are legacy never-expiring links → kept.
-  isExpired: (row: { tokenExpiresAt?: Date | string | null }) => boolean
+  isExpired: (row: { tokenExpiresAt?: Date | string | null }) => boolean,
+  // How a recipient's link is built (#47). Default: signed to that recipient with SESSION_SECRET's HKDF key.
+  linkFor: RfpReviewLinkFor = (token, recipient) => recipientReviewUrl(appUrl, token, recipient),
 ): Promise<PendingRfpDigest> {
   // Only actionable (non-expired) pending RFPs belong in the reminder.
   const actionable = rows.filter((row) => !isExpired(row));
@@ -167,9 +177,7 @@ export async function buildPendingRfpDigest(
     return { skip: true, pendingCount: 0, perRecipient: [] };
   }
 
-  // Strip any trailing slash so a configured base URL like "https://host/" doesn't
-  // produce a malformed "//rfp-review/..." link.
-  const baseUrl = appUrl.replace(/\/+$/, "");
+  // (recipientReviewUrl strips a trailing slash from appUrl, so "https://host/" never yields "//rfp-review/".)
 
   // Bucket each RFP under ONLY its authorized approvers (resolveRecipients = the same
   // rfp_approver_config routing the approval email uses). Each approver's digest therefore
@@ -194,7 +202,6 @@ export async function buildPendingRfpDigest(
         "—"
     );
     const dateSent = formatDateSent(row.createdAt);
-    const reviewUrl = `${baseUrl}/rfp-review/${row.token}`;
 
     // "Who it's awaiting" = the approvers who can ACTUALLY act on this row, mirroring the approve gate
     // EXACTLY: authorized for BOTH the BASELINE (project-number) type AND the CREATED (edited) type.
@@ -218,7 +225,7 @@ export async function buildPendingRfpDigest(
         : normRecipients(await resolveRecipients(createdType, row.sourceSystem ?? null));
     const awaiting = Array.from(baselineRecipients).filter((r) => createdRecipients.has(r));
 
-    const cell: DigestCell = { projectName, projectNumber, dateSent, awaiting, reviewUrl };
+    const cell: DigestCell = { projectName, projectNumber, dateSent, awaiting, token: row.token };
     // Scope: this RFP only goes to its own authorized approvers.
     for (const approver of awaiting) {
       const list = buckets.get(approver);
@@ -238,7 +245,7 @@ export async function buildPendingRfpDigest(
       recipient,
       count: cells.length,
       subject: `RFPs Awaiting Your Approval — ${cells.length} pending`,
-      htmlBody: renderRecipientDigestHtml(cells),
+      htmlBody: renderRecipientDigestHtml(cells, recipient, linkFor),
     }));
 
   return { skip: false, pendingCount, perRecipient };
