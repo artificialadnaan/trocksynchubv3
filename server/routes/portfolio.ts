@@ -148,7 +148,7 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
   }));
 
   app.get("/api/portfolio-automation/documents/:filename", requireAuth, asyncHandler(async (req, res) => {
-    const filename = decodeURIComponent(req.params.filename || "");
+    const filename = decodeURIComponent(String(req.params.filename || ""));
     if (!safeFilename(path.basename(filename))) {
       return res.status(400).json({ error: "Invalid filename" });
     }
@@ -165,7 +165,7 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
   }));
 
   app.get("/api/portfolio-automation/screenshots/:filename", requireAuth, asyncHandler(async (req, res) => {
-    const filename = decodeURIComponent(req.params.filename || "");
+    const filename = decodeURIComponent(String(req.params.filename || ""));
     if (!safeFilename(path.basename(filename))) {
       return res.status(400).json({ error: "Invalid filename" });
     }
@@ -455,7 +455,7 @@ export function registerPortfolioRoutes(app: Express, requireAuth: RequestHandle
   }));
 
   app.get("/api/portfolio-automation/test/status/:jobId", requireAuth, asyncHandler(async (req, res) => {
-    const { jobId } = req.params;
+    const jobId = String(req.params.jobId);
     const job = testJobResults.get(jobId);
     if (!job) {
       return res.status(404).json({ error: "Job not found", jobId });

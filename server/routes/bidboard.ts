@@ -797,7 +797,7 @@ export function registerBidboardRoutes(app: Express, requireAuth: RequestHandler
   }));
 
   app.post("/api/bidboard/sync-project/:projectId", requireAuth, asyncHandler(async (req, res) => {
-    const { projectId } = req.params;
+    const projectId = String(req.params.projectId);
     const result = await manualSyncProject(projectId);
     res.json(result || { success: false, error: "Project not found" });
   }));
@@ -896,7 +896,7 @@ export function registerBidboardRoutes(app: Express, requireAuth: RequestHandler
   }));
 
   app.post("/api/bidboard/send-to-portfolio/:projectId", requireAuth, asyncHandler(async (req, res) => {
-    const { projectId } = req.params;
+    const projectId = String(req.params.projectId);
     const { importToBudget, createPrimeContract, sendKickoffEmail, addClientToDirectory, clientData } = req.body;
 
     if (importToBudget || createPrimeContract || sendKickoffEmail || addClientToDirectory) {

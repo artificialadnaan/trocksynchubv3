@@ -335,7 +335,7 @@ async function runRolePollingCycle(opts?: { fullSync?: boolean }) {
       return;
     }
 
-    if (!fullSync && 'nextCursor' in result) {
+    if (!fullSync && 'nextCursor' in result && typeof result.nextCursor === 'number') {
       rolePollingBatchCursor = result.nextCursor;
       // Persist it. Held only in memory, the cursor reset to 0 on every deploy and crash, so the rotation
       // perpetually re-walked the lowest procoreIds and never reached the newest projects.
@@ -1543,7 +1543,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       const { buildStageNotificationEmail } = await import('../stage-notifications');
       const to = req.body?.to || 'adnaan.iqbal@gmail.com';
       const stage = req.body?.stage || 'Close Out - Final Invoice';
-      const htmlBody = buildStageNotificationEmail('Test Project - DFW-4-08226-aa', 'Close Out', stage, '562949955661621');
+      const htmlBody = buildStageNotificationEmail('Test Project - DFW-4-08226-aa', 'Close Out', stage, 'Procore ID', '562949955661621');
       const result = await sendEmail({ to, subject: `Stage Update: Test Project → ${stage}`, htmlBody, fromName: 'T-Rock Sync Hub' });
       res.json({ success: result.success, provider: result.provider, error: result.error });
     } catch (e: any) {
@@ -1562,15 +1562,15 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
         const mappings = await storage.getSyncMappings();
         const pn = projectNumber.toLowerCase();
         const match = mappings.find(m =>
-          m.projectNumber?.toLowerCase() === pn ||
-          m.projectNumber?.toLowerCase().includes(pn) ||
-          pn.includes(m.projectNumber?.toLowerCase() || '___') ||
+          m.procoreProjectNumber?.toLowerCase() === pn ||
+          m.procoreProjectNumber?.toLowerCase().includes(pn) ||
+          pn.includes(m.procoreProjectNumber?.toLowerCase() || '___') ||
           m.hubspotDealName?.toLowerCase().includes(pn)
         );
         if (!match) {
           // Return sample mappings for debugging
           const samples = mappings.slice(0, 10).map(m => ({
-            projectNumber: m.projectNumber,
+            projectNumber: m.procoreProjectNumber,
             hubspotDealName: m.hubspotDealName,
             procoreProjectId: m.procoreProjectId,
             portfolioProjectId: m.portfolioProjectId,
