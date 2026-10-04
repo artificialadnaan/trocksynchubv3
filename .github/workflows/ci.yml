@@ -1,0 +1,50 @@
+name: CI
+
+# Type check and the vitest suite on every PR and on main.
+# Runs on T-Rock's self-hosted runners (hosted runners are billing-blocked for this account): see
+# docs/ci-runner-setup.md. Until a runner is registered for this repo, jobs sit in "Queued".
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck-and-test:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Matches the production image (Dockerfile: node:20-slim).
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      # tests/bidboard-notes-dom.test.ts drives a real Chromium and refuses to skip without one: the fake-DOM
+      # suite cannot express the selector semantics it covers.
+      - name: Install Chromium for the real-DOM tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Tests
+        # No database or credentials: suites mock server/db.ts, storage and the external APIs. DATABASE_URL only
+        # satisfies db.ts's import-time check for modules that load it; it points at a closed port, so a test
+        # that really queries fails loudly instead of reaching any database.
+        env:
+          DATABASE_URL: postgres://ci:ci@127.0.0.1:9/none
+        run: npx vitest run
