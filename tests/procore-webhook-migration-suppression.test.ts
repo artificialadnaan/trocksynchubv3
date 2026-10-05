@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mountJsonBodyParsers } from "../server/json-body";
+import { procoreAuthHeaders, TEST_PROCORE_WEBHOOK_SECRET } from "./helpers/webhook-signing";
 import express from "express";
 import { createServer, type Server } from "node:http";
 
@@ -115,7 +117,7 @@ vi.mock("../server/hubspot-bidboard-trigger.ts", () => ({
 async function postProcoreWebhook(body: Record<string, unknown>): Promise<Response> {
   const { registerWebhookRoutes } = await import("../server/routes/webhooks.ts");
   const app = express();
-  app.use(express.json());
+  mountJsonBodyParsers(app); // the production parser: it keeps req.rawBody for the signature check
   registerWebhookRoutes(app);
 
   const server: Server = createServer(app);
@@ -126,7 +128,7 @@ async function postProcoreWebhook(body: Record<string, unknown>): Promise<Respon
   try {
     const response = await fetch(`http://127.0.0.1:${address.port}/webhooks/procore`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...procoreAuthHeaders() },
       body: JSON.stringify(body),
     });
     await vi.waitFor(() => {
@@ -143,6 +145,7 @@ async function postProcoreWebhook(body: Record<string, unknown>): Promise<Respon
 
 describe("Procore project-stage webhook migration-mode suppression", () => {
   beforeEach(async () => {
+    process.env.PROCORE_WEBHOOK_SECRET = TEST_PROCORE_WEBHOOK_SECRET;
     vi.useRealTimers();
     vi.clearAllMocks();
 
@@ -237,6 +240,7 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
   });
 
   afterEach(() => {
+    delete process.env.PROCORE_WEBHOOK_SECRET;
     vi.useRealTimers();
   });
 
@@ -428,90 +432,6 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
     await vi.waitFor(() => {
       expect(vi.mocked(enqueueTrockCrmProjectStageChangedRelay)).toHaveBeenCalled();
     });
-  });
-
-  it("suppresses HubSpot webhook stage-change emails under Bid Board migration mode", async () => {
-    const { registerWebhookRoutes } = await import("../server/routes/webhooks.ts");
-    const { sendStageChangeEmail } = await import("../server/email-notifications.ts");
-    const { processDealStageChange } = await import("../server/hubspot-bidboard-trigger.ts");
-
-    mockStorage.getAutomationConfig.mockImplementation(async (key: string) => {
-      if (key === "hubspot_webhook_processing") return { key, value: { enabled: true } };
-      if (key === "bidboard_stage_sync") {
-        return {
-          key,
-          value: {
-            mode: "migration",
-            suppressHubSpotWrites: true,
-            suppressStageNotifications: true,
-            logSuppressedActions: true,
-            cycleId: "cycle-hubspot-webhook-test",
-          },
-        };
-      }
-      return undefined;
-    });
-    mockStorage.getHubspotDealByHubspotId.mockResolvedValue({
-      dealName: "HubSpot Canary Deal",
-      dealStageName: "Proposal Sent",
-    });
-    mockStorage.getSyncMappingByHubspotDealId.mockResolvedValue({
-      hubspotDealId: "323528245957",
-      procoreProjectId: "598134326587649",
-      procoreProjectName: "Canary Project",
-    });
-
-    const app = express();
-    app.use(express.json());
-    registerWebhookRoutes(app);
-    const server: Server = createServer(app);
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("Expected TCP server address");
-
-    try {
-      const response = await fetch(`http://127.0.0.1:${address.port}/webhooks/hubspot`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          eventId: "hs-event-1",
-          subscriptionType: "deal.propertyChange",
-          objectType: "deal",
-          objectId: "323528245957",
-          propertyName: "dealstage",
-          propertyValue: "closedwon",
-          changeSource: "CRM_UI",
-        }),
-      });
-      await vi.waitFor(() => {
-        expect(mockStorage.updateWebhookLog).toHaveBeenCalledWith(
-          expect.anything(),
-          expect.objectContaining({ status: "processed" }),
-        );
-      });
-
-      expect(response.status).toBe(200);
-      expect(vi.mocked(processDealStageChange)).toHaveBeenCalledWith("323528245957", "closedwon");
-      expect(vi.mocked(sendStageChangeEmail)).not.toHaveBeenCalled();
-      expect(mockStorage.createBidboardAutomationLog).toHaveBeenCalledWith(expect.objectContaining({
-        projectId: "598134326587649",
-        projectName: "Canary Project",
-        action: "hubspot_webhook:suppressed_stage_notification",
-        status: "suppressed",
-        details: expect.objectContaining({
-          cycleId: "cycle-hubspot-webhook-test",
-          previousStage: "Proposal Sent",
-          newStage: "Closed Won",
-          wouldHaveAction: "send_stage_change_email",
-          targetValue: "Closed Won",
-          hubspotDealId: "323528245957",
-          mappingSource: "sync_mappings",
-          mode: "migration",
-        }),
-      }));
-    } finally {
-      server.close();
-    }
   });
 
   it("uses fresh migration-mode config inside the delayed role notification callback", async () => {

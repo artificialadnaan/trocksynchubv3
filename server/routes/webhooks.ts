@@ -11,6 +11,7 @@ import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMi
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
+import { requireWebhookAuth, verifyProcoreToken } from "../webhooks/signature";
 import { db } from "../db";
 import { webhookLogs } from "@shared/schema";
 import { eq, and, lt, desc } from "drizzle-orm";
@@ -20,318 +21,28 @@ const recentRoleCheckTimestamps = new Map<string, number>();
 const ROLE_CHECK_DEBOUNCE_MS = 60_000;
 
 export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
-  // Log signature verification status once on startup, not per request
-  if (!process.env.HUBSPOT_CLIENT_SECRET) {
-    console.warn('[webhook] HUBSPOT_CLIENT_SECRET not set — HubSpot signature verification disabled');
-  }
+  // Fail closed (server/webhooks/signature.ts): with the secret unset the webhook answers 503, never "unverified OK".
   if (!process.env.PROCORE_WEBHOOK_SECRET) {
-    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — Procore signature verification disabled');
+    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — /webhooks/procore* refuse every request (503)');
   }
+  // The secret is read per request, so a rotation takes effect without re-registering routes.
+  const procoreAuth = requireWebhookAuth("procore", (req) => verifyProcoreToken(req, process.env.PROCORE_WEBHOOK_SECRET));
 
-  // ── HubSpot webhook ─────────────────────────────────────────────────────────
-  app.post("/webhooks/hubspot", async (req, res) => {
-    try {
-      // C-1: HubSpot signature verification (optional — skipped if secret not configured)
-      const hubspotSecret = process.env.HUBSPOT_CLIENT_SECRET;
-      if (hubspotSecret) {
-        const signature = req.headers['x-hubspot-signature-v3'] || req.headers['x-hubspot-signature'];
-        if (signature) {
-          const crypto = await import('crypto');
-          const requestBody = JSON.stringify(req.body);
-          const hash = crypto.createHmac('sha256', hubspotSecret)
-            .update(requestBody)
-            .digest('hex');
-          if (hash !== signature) {
-            console.warn('[webhook] HubSpot signature verification FAILED');
-            return res.status(401).json({ error: 'Invalid signature' });
-          }
-        }
-      }
-
-      // H-4: HubSpot payload validation
-      if (!req.body || (typeof req.body !== 'object')) {
-        return res.status(400).json({ error: 'Invalid payload: expected object or array' });
-      }
-      const rawEvents = Array.isArray(req.body) ? req.body : [req.body];
-      for (const evt of rawEvents) {
-        if (!evt.subscriptionType && !evt.eventType) {
-          return res.status(400).json({ error: 'Invalid payload: each event must have subscriptionType' });
-        }
-        if (evt.objectId == null) {
-          return res.status(400).json({ error: 'Invalid payload: each event must have objectId' });
-        }
-      }
-
-      const events = Array.isArray(req.body) ? req.body : [req.body];
-      for (const event of events) {
-        const idempotencyKey = `hs_${event.eventId || event.objectId}_${Date.now()}`;
-        const existing = await storage.checkIdempotencyKey(idempotencyKey);
-        if (existing) continue;
-
-        const webhookLog = await storage.createWebhookLog({
-          source: "hubspot",
-          eventType: event.subscriptionType || event.eventType || "unknown",
-          resourceId: String(event.objectId || ""),
-          resourceType: event.objectType || "unknown",
-          status: "received",
-          payload: event,
-          idempotencyKey,
-        });
-
-        await storage.createIdempotencyKey({
-          key: idempotencyKey,
-          source: "hubspot",
-          eventType: event.subscriptionType || "unknown",
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        });
-
-        await storage.createAuditLog({
-          action: "webhook_received",
-          entityType: event.objectType || "unknown",
-          entityId: String(event.objectId || ""),
-          source: "hubspot",
-          status: "received",
-          details: event,
-          idempotencyKey,
-        });
-
-        await storage.updateWebhookLog(webhookLog.id, { status: "processing" });
-
-        // Per-automation gate: if hubspot_webhook_processing is not enabled, log only
-        const hsProcessingConfig = await storage.getAutomationConfig('hubspot_webhook_processing');
-        if (!(hsProcessingConfig?.value as any)?.enabled) {
-          const evtType = event.subscriptionType || event.eventType || "unknown";
-          const objType = event.objectType || "unknown";
-          console.log(`[webhook] HubSpot ${evtType} for ${objType} ${event.objectId} — logged, processing disabled`);
-          await storage.updateWebhookLog(webhookLog.id, { status: "dry_run", processedAt: new Date() });
-          continue;
-        }
-
-        let hubspotProcessingError: string | null = null;
-        const eventType = event.subscriptionType || event.eventType || "";
-        const objectType = event.objectType || (eventType.startsWith("deal.") ? "deal" : eventType.startsWith("contact.") ? "contact" : eventType.startsWith("company.") ? "company" : "");
-        const objectId = String(event.objectId || "");
-
-        // Capture previous stage BEFORE deal sync overwrites it (HubSpot has already updated the deal; our DB still has old stage)
-        let previousStageForEmail: string | null = null;
-        if (objectType === "deal" && eventType.includes("propertyChange") && (event.propertyName || "") === "dealstage") {
-          const dealBeforeSync = await storage.getHubspotDealByHubspotId(objectId);
-          if (dealBeforeSync?.dealStageName) {
-            previousStageForEmail = dealBeforeSync.dealStageName;
-          } else if (dealBeforeSync?.dealStage) {
-            const resolved = await resolveHubspotStageId(dealBeforeSync.dealStage);
-            previousStageForEmail = resolved?.stageName || dealBeforeSync.dealStage;
-          }
-        }
-
-        try {
-          await processHubspotWebhookForProcore(eventType, objectType, objectId);
-        } catch (autoErr: any) {
-          console.error(`HubSpot→Procore auto-sync error for ${objectType} ${objectId}:`, autoErr.message);
-        }
-
-        // Sync deal to local cache on any deal webhook event
-        if (objectType === "deal") {
-          try {
-            const { syncSingleHubSpotDeal } = await import("../hubspot");
-            await syncSingleHubSpotDeal(objectId);
-          } catch (dealSyncErr: any) {
-            console.error(`[hubspot] Deal cache sync error for ${objectId}:`, dealSyncErr.message);
-          }
-        }
-
-        // Assign project number on any deal webhook event (not just deal.creation which is unreliable)
-        // assignProjectNumber short-circuits if the deal already has one, so this is safe to call repeatedly
-        if (objectType === "deal") {
-          try {
-            await processNewDealWebhook(objectId);
-          } catch (pnErr: any) {
-            console.error(`[project-number] Webhook error for deal ${objectId}:`, pnErr.message);
-          }
-        }
-
-        // Handle deal stage changes - trigger BidBoard project creation + stage change email
-        if (objectType === "deal" && eventType.includes("propertyChange")) {
-          const changedProperty = event.propertyName || "";
-          const newValue = event.propertyValue || "";
-
-          if (changedProperty === "dealstage") {
-            // Skip stage change email when change was triggered by SyncHub itself (e.g. RFP approval handler)
-            const changeSource = (event as any).changeSource;
-            const skipStageChangeEmail = changeSource === "INTEGRATION" || changeSource === "CLONE_OBJECTS";
-            const resolvedNewStage = await resolveHubspotStageId(newValue);
-            const stageName = (resolvedNewStage?.stageName || newValue).toLowerCase();
-            const stageId = newValue.toLowerCase();
-            console.log(`[hubspot-webhook] Deal ${objectId} stage change: stageId="${stageId}", resolved="${stageName}", changeSource="${changeSource || 'unknown'}"`);
-            const isRfpStage = stageName.includes('rfp') || stageId.includes('rfp');
-            if (isRfpStage) {
-              const hubspotRfpTriggerEnabled = process.env.HUBSPOT_RFP_TRIGGER_ENABLED !== "false";
-              if (!hubspotRfpTriggerEnabled) {
-                console.info(`HubSpot RFP trigger disabled — ignoring deal ${objectId} stage change to RFP`);
-                continue;
-              }
-              try {
-                const { createRfpApprovalRequest } = await import("../rfp-approval");
-                const result = await createRfpApprovalRequest(objectId);
-                console.log(`[hubspot-webhook] RFP approval request for deal ${objectId}: ${result.success ? 'created' : result.error}`);
-              } catch (rfpErr: any) {
-                console.error(`[hubspot-webhook] RFP approval error for deal ${objectId}:`, rfpErr.message);
-              }
-            } else {
-              try {
-                const { processDealStageChange } = await import("../hubspot-bidboard-trigger");
-                await processDealStageChange(objectId, newValue);
-              } catch (stageErr: any) {
-                console.error(`[hubspot-bidboard] Stage change error for deal ${objectId}:`, stageErr.message);
-              }
-            }
-            // Send deal stage change email to assigned deal members (deal owner)
-            // Skip when changeSource is INTEGRATION — SyncHub triggered the change (e.g. RFP approval), so we already know about it
-            if (!skipStageChangeEmail) {
-              try {
-                const mapping = await storage.getSyncMappingByHubspotDealId(objectId);
-                const deal = await storage.getHubspotDealByHubspotId(objectId);
-                const resolvedStage = await resolveHubspotStageId(newValue);
-                const newStageName = resolvedStage?.stageName || newValue;
-                const oldStageName = previousStageForEmail ?? "Previous stage";
-
-                // Skip email if stage didn't actually change (HubSpot sends propertyChange events even for same-value updates)
-                if (oldStageName.toLowerCase().trim() === newStageName.toLowerCase().trim()) {
-                  console.log(`[hubspot-webhook] Skipping stage change email for deal ${objectId} — stage unchanged: "${oldStageName}"`);
-                } else {
-                  const webhookMigrationConfig = await getWebhookMigrationModeConfig();
-                  if (isMigrationMode(webhookMigrationConfig) && webhookMigrationConfig.suppressStageNotifications) {
-                    await logWebhookSuppressedAction(webhookMigrationConfig, {
-                      action: "hubspot_webhook:suppressed_stage_notification",
-                      projectId: mapping?.procoreProjectId || null,
-                      projectName: mapping?.procoreProjectName || "Not yet linked to Procore",
-                      previousStage: oldStageName,
-                      newStage: newStageName,
-                      wouldHaveAction: "send_stage_change_email",
-                      targetValue: newStageName,
-                      hubspotDealId: objectId,
-                      mappingSource: mapping ? "sync_mappings" : "none",
-                      webhookEventId: String(event.eventId || ""),
-                      webhookResourceName: objectType,
-                      webhookEventType: eventType,
-                    });
-                  } else {
-                    await sendStageChangeEmail({
-                      hubspotDealId: objectId,
-                      dealName: deal?.dealName || mapping?.hubspotDealName || "Unknown Deal",
-                      procoreProjectId: mapping?.procoreProjectId || "",
-                      procoreProjectName: mapping?.procoreProjectName || "Not yet linked to Procore",
-                      oldStage: oldStageName,
-                      newStage: newStageName,
-                      hubspotStageName: newStageName,
-                    });
-                  }
-                }
-              } catch (emailErr: any) {
-                console.error(`[hubspot-webhook] Stage change email error for deal ${objectId}:`, emailErr.message);
-              }
-            }
-            // Closeout survey is only triggered by Procore project stage → Closed, not by HubSpot deal stage changes
-          }
-        }
-
-        // Handle contact events - sync contact data in real-time via webhook
-        if (objectType === "contact") {
-          try {
-            const { syncSingleHubSpotContact, deleteHubSpotContact } = await import("../hubspot");
-            if (eventType.includes("deletion") || eventType.includes("delete")) {
-              await deleteHubSpotContact(objectId);
-            } else {
-              // creation, propertyChange, or any other contact event - fetch and sync
-              await syncSingleHubSpotContact(objectId);
-            }
-          } catch (contactErr: any) {
-            console.error(`[hubspot] Contact sync error for ${objectId}:`, contactErr.message);
-          }
-        }
-
-        // Handle company events - sync company data in real-time via webhook
-        if (objectType === "company") {
-          try {
-            const { syncSingleHubSpotCompany } = await import("../hubspot");
-            if (!eventType.includes("deletion") && !eventType.includes("delete")) {
-              await syncSingleHubSpotCompany(objectId);
-              // Also sync to Procore vendor directory so BidBoard customer search finds them
-              try {
-                const { syncHubspotCompanyToProcore } = await import("../hubspot-procore-sync");
-                const result = await syncHubspotCompanyToProcore(objectId);
-                console.log(`[hubspot] Company ${objectId} synced to Procore: ${result.action} — ${result.message}`);
-              } catch (procoreErr: any) {
-                console.error(`[hubspot] Company ${objectId} Procore sync failed (non-blocking): ${procoreErr.message}`);
-              }
-            }
-            // Note: Company deletion would require implementing deleteHubspotCompany handler
-          } catch (companyErr: any) {
-            console.error(`[hubspot] Company sync error for ${objectId}:`, companyErr.message);
-          }
-        }
-
-        // Non-blocking drift detection for deals — don't fail the webhook if this errors
-        if (objectType === "deal" && objectId) {
-          const dealId = objectId;
-          setImmediate(async () => {
-            try {
-              const { detectFieldDrift } = await import("../services/reconciliation/guardrails");
-              const { reconciliationProjects } = await import("@shared/reconciliation-schema");
-              const { db } = await import("../db");
-              const { eq } = await import("drizzle-orm");
-
-              const [recon] = await db
-                .select()
-                .from(reconciliationProjects)
-                .where(eq(reconciliationProjects.hubspotDealId, String(dealId)))
-                .limit(1);
-              if (recon) {
-                await detectFieldDrift(recon.id);
-              }
-            } catch (e) {
-              console.error("[reconciliation] Drift detection on HubSpot webhook failed:", e);
-            }
-          });
-        }
-
-        // Mark webhook as processed (or failed if any critical error was caught)
-        await storage.updateWebhookLog(webhookLog.id, {
-          status: hubspotProcessingError ? "failed" : "processed",
-          processedAt: new Date(),
-          errorMessage: hubspotProcessingError,
-        });
-      }
-      res.status(200).json({ received: true });
-    } catch (e: any) {
-      res.status(500).json({ message: e.message });
-    }
+  // ── HubSpot webhook: RETIRED ────────────────────────────────────────────────
+  // T-Rock no longer uses HubSpot (owner, 2026-10-04). Hard-disabled: the handler reads nothing from the request,
+  // processes nothing, writes no log and needs no secret. 410 Gone tells a HubSpot app still pointed here to stop.
+  app.post("/webhooks/hubspot", (_req, res) => {
+    res.status(410).json({ error: "gone", message: "HubSpot webhooks are retired" });
   });
 
   // ── Procore project-events webhook ──────────────────────────────────────────
   // Procore Projects webhook (Add to Portfolio → Phase 2)
-  app.post("/webhooks/procore/project-events", handleProcoreProjectWebhook);
+  app.post("/webhooks/procore/project-events", procoreAuth, handleProcoreProjectWebhook);
 
   // ── Procore main webhook ────────────────────────────────────────────────────
-  app.post("/webhooks/procore", async (req, res) => {
+  app.post("/webhooks/procore", procoreAuth, async (req, res) => {
     let webhookLog: any = null;
     try {
-      // C-1: Procore signature verification (optional — skipped if secret not configured)
-      const procoreSecret = process.env.PROCORE_WEBHOOK_SECRET;
-      if (procoreSecret) {
-        const signature = req.headers['x-procore-signature'] || req.headers['x-webhook-signature'];
-        if (signature) {
-          const crypto = await import('crypto');
-          const requestBody = JSON.stringify(req.body);
-          const hash = crypto.createHmac('sha256', procoreSecret)
-            .update(requestBody)
-            .digest('hex');
-          if (hash !== signature) {
-            console.warn('[webhook] Procore signature verification FAILED');
-            return res.status(401).json({ error: 'Invalid signature' });
-          }
-        }
-      }
 
       // H-4: Procore payload validation
       if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
