@@ -24,6 +24,7 @@ import {
   type StageChange,
 } from "./bidboard-stage-sync";
 import { pushBidBoardRowsToCrm } from "./bidboard-crm-ingestion";
+import { pushBidBoardRowsToCore } from "./bidboard-core-ingestion";
 import { recordPushOutcomeAndMaybeAlert } from "./bidboard-crm-alert";
 import { log } from "../index";
 import { storage } from "../storage";
@@ -107,10 +108,12 @@ export async function runBidBoardStageSync(
 
   try {
     const rows = parseActiveProjectsSheet(exportPath);
+    // ONE extraction instant for both targets: Core keys newest-wins on it, and the two copies are the same snapshot.
+    const extractedAt = new Date().toISOString();
     const pushResult = await pushBidBoardRowsToCrm({
       rows,
       sourceFilename: exportPath,
-      extractedAt: new Date().toISOString(),
+      extractedAt,
     });
     if (!pushResult.ok && !pushResult.skipped) {
       const reason = pushResult.terminalFailure
@@ -128,6 +131,9 @@ export async function runBidBoardStageSync(
       officeSlug: process.env.CRM_BID_BOARD_SYNC_OFFICE_SLUG ?? "dallas",
       sourceFilename: exportPath,
     });
+    // The second target, Core (trock-core #1836), AFTER the CRM push and its alerting, so it can never delay or alter
+    // them. Dark unless ENABLE_CORE_BID_BOARD_EXPORT; never throws.
+    await pushBidBoardRowsToCore({ rows, sourceFilename: exportPath, extractedAt });
 
     if (initialize) {
       await diffBidBoardStages(exportPath, { initializeOnly: true });
