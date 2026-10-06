@@ -16,7 +16,7 @@ import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 export const SERVICE_RFP_CONTRACT_VERSION = "trock.crm.service-rfp-approved.v1";
 
 /** Core's own minimum. Enforced here so a short secret fails loudly at the producer, not as a 401. */
-const MIN_INGRESS_SECRET_BYTES = 32;
+export const MIN_INGRESS_SECRET_BYTES = 32;
 
 /** Core is on the critical path of an email approval; 5 s then fall through to the retry worker. */
 export const SERVICE_RFP_INGRESS_TIMEOUT_MS = 5_000;
@@ -62,8 +62,18 @@ export function buildServiceRfpIngressTargetUrl(
   office: string,
   baseUrl = process.env.CORE_INGRESS_BASE_URL,
 ): string | null {
+  const base = validCoreIngressBase(baseUrl);
+  if (!base || !office) return null;
+  return `${base}/webhooks/crm/${encodeURIComponent(office)}/service-rfp/v1`;
+}
+
+/**
+ * CORE_INGRESS_BASE_URL, trimmed of trailing slashes, or null when it is unusable. Shared by every Core ingress SyncHub
+ * posts to (the service-RFP handoff, the Bid Board export), so each refuses a bad base the same way.
+ */
+export function validCoreIngressBase(baseUrl: string | undefined): string | null {
   const trimmed = baseUrl?.trim().replace(/\/+$/, "");
-  if (!trimmed || !office) return null;
+  if (!trimmed) return null;
   // HTTPS ONLY. This body carries the customer's name, contact email and site address, and the HMAC
   // authenticates the bytes without concealing them — over plain http the whole payload is readable on
   // the wire. A misconfigured base URL is the realistic way that happens, so it is refused at the point
@@ -89,7 +99,7 @@ export function buildServiceRfpIngressTargetUrl(
   // inside the query and the request goes to `/` — the exact misrouting this guard exists to stop, from
   // the input most likely to be a copy-paste accident.
   if (trimmed.includes("?") || trimmed.includes("#")) return null;
-  return `${trimmed}/webhooks/crm/${encodeURIComponent(office)}/service-rfp/v1`;
+  return trimmed;
 }
 
 /**
@@ -109,9 +119,14 @@ export function resolveServiceRfpIngressSecret(env: NodeJS.ProcessEnv = process.
  * caller passes both from the same values it hands to fetch, never re-derived or re-serialized.
  */
 export function signServiceRfpIngress(input: { path: string; rawBody: string; secret: string }): string {
+  return signCoreIngress({ ...input, domain: SERVICE_RFP_CONTRACT_VERSION });
+}
+
+/** The same domain-separated MAC for any Core ingress contract: domain ‖ 0x00 ‖ POST ‖ 0x00 ‖ path ‖ 0x00 ‖ rawBody. */
+export function signCoreIngress(input: { domain: string; path: string; rawBody: string; secret: string }): string {
   const NUL = Buffer.from([0]);
   const preimage = Buffer.concat([
-    Buffer.from(SERVICE_RFP_CONTRACT_VERSION, "utf8"), NUL,
+    Buffer.from(input.domain, "utf8"), NUL,
     Buffer.from("POST", "utf8"), NUL,
     Buffer.from(input.path, "utf8"), NUL,
     Buffer.from(input.rawBody, "utf8"),
