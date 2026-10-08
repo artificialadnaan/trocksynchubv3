@@ -8,6 +8,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import * as XLSX from "xlsx";
 
 vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
@@ -32,7 +34,7 @@ vi.mock("../server/playwright/portfolio-automation.ts", () => ({ triggerPortfoli
 function writeTempXlsx(rows: Record<string, unknown>[]): string {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Active Projects");
-  const tmp = `/tmp/bidboard-dup-${Date.now()}-${Math.random().toString(36).slice(2)}.xlsx`;
+  const tmp = path.join(os.tmpdir(), `bidboard-dup-${Date.now()}-${Math.random().toString(36).slice(2)}.xlsx`);
   fs.writeFileSync(tmp, Buffer.from(XLSX.write(wb, { type: "buffer", bookType: "xlsx" })));
   return tmp;
 }
@@ -59,7 +61,7 @@ describe("diffBidBoardStages with a duplicated Project #", () => {
     vi.mocked(storage.getManualReviewQueueEntry).mockResolvedValue(undefined as any);
     vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
     const file = writeTempXlsx(ROWS);
-
+    try {
     const changes = await diffBidBoardStages(file);
     expect(changes).toEqual([]);
     expect(storage.upsertBidboardSyncState).not.toHaveBeenCalled();
@@ -76,6 +78,24 @@ describe("diffBidBoardStages with a duplicated Project #", () => {
     expect(await diffBidBoardStages(file)).toEqual([]);
     expect(storage.createAuditLog).toHaveBeenCalledTimes(1);
     expect(storage.createManualReviewQueueEntry).toHaveBeenCalledTimes(1);
-    fs.unlinkSync(file);
+    } finally {
+      fs.unlinkSync(file);
+    }
+  });
+
+  it("still raises the alert when queueing the manual review fails", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { diffBidBoardStages } = await import("../server/sync/bidboard-stage-sync.ts");
+    vi.mocked(storage.getBidboardSyncStates).mockResolvedValue([] as any);
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getUnresolvedManualReviewQueueEntry).mockResolvedValue(undefined as any);
+    vi.mocked(storage.getManualReviewQueueEntry).mockRejectedValue(new Error("queue table unavailable"));
+    const file = writeTempXlsx(ROWS.slice(0, 2));
+    try {
+      expect(await diffBidBoardStages(file)).toEqual([]);
+      expect(storage.createAuditLog).toHaveBeenCalledTimes(1);
+    } finally {
+      fs.unlinkSync(file);
+    }
   });
 });

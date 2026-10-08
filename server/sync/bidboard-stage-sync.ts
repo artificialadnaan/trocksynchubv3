@@ -489,11 +489,17 @@ async function flagDuplicateProjectNumber(
   const same = rows.filter((r) => normalizeKey(r["Project #"]?.toString()?.trim() ?? "") === normalizeKey(projectNumber));
   const summary = same.map((r) => `"${r.Name?.toString()?.trim() ?? ""}" (${r.Status?.toString()?.trim() ?? ""})`).join(", ");
   log(`[sync] Stage sync skip: Project # ${projectNumber} is on ${same.length} Bid Board rows (${summary}) — not synced until each has its own number`, "sync");
+  let queued = false;
   try {
     if (await storage.getUnresolvedManualReviewQueueEntry(projectNumber)) return;
+  } catch (err) {
+    log(`[sync] Could not check the manual-review queue for duplicate Project # ${projectNumber}: ${err instanceof Error ? err.message : String(err)}`, "sync");
+  }
+  // The queue and the alert are isolated, so either signal can land if the other's write fails (Codex P2 on #106).
+  try {
     const modeConfig = await getBidBoardStageSyncModeConfig(modeConfigOverride);
     const first = same[0]!;
-    const queued = await queueManualReviewForUnmappedPortfolioTrigger({
+    queued = await queueManualReviewForUnmappedPortfolioTrigger({
       projectId: projectNumber,
       projectNumber,
       projectName: first.Name?.toString()?.trim() || projectNumber,
@@ -505,6 +511,10 @@ async function flagDuplicateProjectNumber(
       mappingSource: "stage_mappings",
       modeConfig,
     });
+  } catch (err) {
+    log(`[sync] Could not queue manual review for duplicate Project # ${projectNumber}: ${err instanceof Error ? err.message : String(err)}`, "sync");
+  }
+  try {
     await storage.createAuditLog({
       action: "bidboard_stage_sync_duplicate_project_number",
       entityType: "bidboard_project",
@@ -516,7 +526,7 @@ async function flagDuplicateProjectNumber(
       details: { projectNumber, rows: same.map((r) => ({ name: r.Name ?? null, status: r.Status ?? null, customer: r["Customer Name"] ?? null })) },
     });
   } catch (err) {
-    log(`[sync] Could not flag duplicate Project # ${projectNumber}: ${err instanceof Error ? err.message : String(err)}`, "sync");
+    log(`[sync] Could not record the duplicate Project # ${projectNumber} alert: ${err instanceof Error ? err.message : String(err)}`, "sync");
   }
 }
 

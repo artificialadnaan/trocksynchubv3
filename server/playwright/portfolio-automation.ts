@@ -3184,6 +3184,27 @@ export async function triggerPortfolioAutomationFromStageChange(
     };
   }
 
+  // NON-RETRYABLE CAP: the last run for this Bid Board project failed portfolio identity validation, and nothing has
+  // validated since. Don't re-run the browser automation (and re-send its failure email) every cycle.
+  // Checked BEFORE the global company-id skip (Codex P1 on #106): a per-deal block must reach manual review even during
+  // a config outage, as no_bidboard_project_id does. A read failure FAILS CLOSED: it throws, so the stage sync retries
+  // next cycle WITHOUT running the browser automation for a project that may be blocked.
+  const identityOutcome = await storage.getLatestPortfolioIdentityOutcome(bidboardProjectId);
+  if (identityOutcome === "failed") {
+    log(
+      `[portfolio-auto] Not re-triggering Phase 1 for bidboard project ${bidboardProjectId} (${projectName}): its last run failed portfolio identity validation — routing to manual review`,
+      "playwright"
+    );
+    return {
+      skipped: true,
+      reason: "portfolio_identity_blocked",
+      projectName,
+      projectNumber: projectNumber ?? null,
+      customerName,
+      hubspotDealId: hubspotDealId ?? null,
+    };
+  }
+
   const config = await storage.getAutomationConfig("procore_config");
   const companyId = (config?.value as { companyId?: string })?.companyId;
   if (!companyId) {
@@ -3193,29 +3214,6 @@ export async function triggerPortfolioAutomationFromStageChange(
     return {
       skipped: true,
       reason: "no_company_id",
-      projectName,
-      projectNumber: projectNumber ?? null,
-      customerName,
-      hubspotDealId: hubspotDealId ?? null,
-    };
-  }
-
-  // NON-RETRYABLE CAP: the last run for this Bid Board project failed portfolio identity validation, and nothing has
-  // validated since. Don't re-run the browser automation (and re-send its failure email) every cycle.
-  let identityOutcome: "success" | "failed" | null = null;
-  try {
-    identityOutcome = await storage.getLatestPortfolioIdentityOutcome(bidboardProjectId);
-  } catch (err) {
-    log(`[portfolio-auto] Could not read the last identity outcome for ${bidboardProjectId}: ${err instanceof Error ? err.message : String(err)}`, "playwright");
-  }
-  if (identityOutcome === "failed") {
-    log(
-      `[portfolio-auto] Not re-triggering Phase 1 for bidboard project ${bidboardProjectId} (${projectName}): its last run failed portfolio identity validation — routing to manual review`,
-      "playwright"
-    );
-    return {
-      skipped: true,
-      reason: "portfolio_identity_blocked",
       projectName,
       projectNumber: projectNumber ?? null,
       customerName,

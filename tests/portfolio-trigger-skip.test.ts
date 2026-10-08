@@ -127,4 +127,19 @@ describe("triggerPortfolioAutomationFromStageChange skip returns (real implement
     }
     expect(runner.runPhase1WithRetry).toHaveBeenCalledTimes(2);
   });
+
+  it("checks the identity block BEFORE the global company-id skip, and fails closed when it cannot read it", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const runner = await import("../server/portfolio-automation-runner.ts");
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue({ hubspotDealId: "hs-5", bidboardProjectId: "562949956000005" } as any);
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue(undefined as any); // company id missing
+    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue("failed");
+    expect(await triggerPortfolioAutomationFromStageChange("Proj E", null, "Cust E", "hs-5")).toMatchObject({ skipped: true, reason: "portfolio_identity_blocked" });
+
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({ key: "procore_config", value: { companyId: "12345" } } as any);
+    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockRejectedValue(new Error("db down"));
+    await expect(triggerPortfolioAutomationFromStageChange("Proj E", null, "Cust E", "hs-5")).rejects.toThrow(/db down/);
+    expect(runner.runPhase1WithRetry).not.toHaveBeenCalled();
+  });
 });
