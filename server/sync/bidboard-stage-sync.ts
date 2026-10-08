@@ -385,7 +385,8 @@ async function handlePortfolioTriggerSkip(
   // (no_company_id, a global config outage that we don't queue per-deal). The alert message + details below
   // reflect this so an operator is never pointed at a queue row that was never created.
   let manualReviewQueued: boolean | null = null;
-  if (skip.reason === "no_bidboard_project_id") {
+  // Both per-deal skips (not the global no_company_id) queue ONE manual review and ONE alert, deduped across cycles.
+  if (skip.reason === "no_bidboard_project_id" || skip.reason === "portfolio_identity_blocked") {
     // Cross-cycle dedup: if this project already has an UNRESOLVED review row (e.g. a prior cycle whose
     // HubSpot write failed and re-detected the same transition under a fresh cycleId), don't create a
     // duplicate row OR a duplicate alert — it is already flagged and awaiting attention.
@@ -419,7 +420,7 @@ async function handlePortfolioTriggerSkip(
         currentStage: change.newStage,
         previousStage: change.previousStage,
         cycleId: opts.modeConfig.cycleId,
-        reason: "portfolio_trigger_no_bidboard_project_id",
+        reason: skip.reason === "portfolio_identity_blocked" ? "portfolio_trigger_identity_blocked" : "portfolio_trigger_no_bidboard_project_id",
         mappingSource: opts.mappingSource,
         modeConfig: opts.modeConfig,
         hubspotDealId: change.hubspotDealId ?? null,
@@ -433,8 +434,15 @@ async function handlePortfolioTriggerSkip(
   }
 
   const prefix = `Portfolio automation could not fire for "${change.projectName}" at stage "${change.newStage}": `;
+  const reviewNote = manualReviewQueued
+    ? `Queued for manual review.`
+    : `Manual-review queuing did NOT create an active entry (the write failed or a prior review was already resolved) — verify this deal directly.`;
   const errorMessage =
-    skip.reason === "no_bidboard_project_id"
+    skip.reason === "portfolio_identity_blocked"
+      ? prefix +
+        `its last portfolio run failed identity validation (Procore's Portfolio project is not this job, e.g. a "- Duplicate"), so it is not re-run every cycle. Fix it in Procore, then run it manually. ` +
+        reviewNote
+      : skip.reason === "no_bidboard_project_id"
       ? prefix +
         `the sync mapping has no bidboard_project_id. ` +
         // Reflect the ACTUAL queue outcome — the alert digest renders this errorMessage.
@@ -467,6 +475,59 @@ async function handlePortfolioTriggerSkip(
       mappingSource: opts.mappingSource,
     },
   });
+}
+
+/**
+ * A Project # shared by several Bid Board rows: log it, and queue ONE manual review + ONE alert (deduped across cycles by
+ * the unresolved-review check, like the per-deal portfolio skips). Best-effort: a failure here never stops the cycle.
+ */
+async function flagDuplicateProjectNumber(
+  projectNumber: string,
+  rows: BidBoardExcelRow[],
+  modeConfigOverride?: BidBoardStageSyncModeConfig,
+): Promise<void> {
+  const same = rows.filter((r) => normalizeKey(r["Project #"]?.toString()?.trim() ?? "") === normalizeKey(projectNumber));
+  const summary = same.map((r) => `"${r.Name?.toString()?.trim() ?? ""}" (${r.Status?.toString()?.trim() ?? ""})`).join(", ");
+  log(`[sync] Stage sync skip: Project # ${projectNumber} is on ${same.length} Bid Board rows (${summary}) — not synced until each has its own number`, "sync");
+  let queued = false;
+  try {
+    if (await storage.getUnresolvedManualReviewQueueEntry(projectNumber)) return;
+  } catch (err) {
+    log(`[sync] Could not check the manual-review queue for duplicate Project # ${projectNumber}: ${err instanceof Error ? err.message : String(err)}`, "sync");
+  }
+  // The queue and the alert are isolated, so either signal can land if the other's write fails (Codex P2 on #106).
+  try {
+    const modeConfig = await getBidBoardStageSyncModeConfig(modeConfigOverride);
+    const first = same[0]!;
+    queued = await queueManualReviewForUnmappedPortfolioTrigger({
+      projectId: projectNumber,
+      projectNumber,
+      projectName: first.Name?.toString()?.trim() || projectNumber,
+      customerName: first["Customer Name"]?.toString()?.trim() || "",
+      currentStage: first.Status?.toString()?.trim() || "",
+      previousStage: "",
+      cycleId: modeConfig.cycleId,
+      reason: "duplicate_project_number_in_bid_board",
+      mappingSource: "stage_mappings",
+      modeConfig,
+    });
+  } catch (err) {
+    log(`[sync] Could not queue manual review for duplicate Project # ${projectNumber}: ${err instanceof Error ? err.message : String(err)}`, "sync");
+  }
+  try {
+    await storage.createAuditLog({
+      action: "bidboard_stage_sync_duplicate_project_number",
+      entityType: "bidboard_project",
+      entityId: projectNumber,
+      source: "bidboard_stage_sync",
+      status: "error",
+      category: "sync",
+      errorMessage: `Project # ${projectNumber} is on ${same.length} Bid Board projects (${summary}). Stage sync and the portfolio automation skip it until each has its own number. ${queued ? "Queued for manual review." : "Manual-review queuing did NOT create an active entry — check it directly."}`,
+      details: { projectNumber, rows: same.map((r) => ({ name: r.Name ?? null, status: r.Status ?? null, customer: r["Customer Name"] ?? null })) },
+    });
+  } catch (err) {
+    log(`[sync] Could not record the duplicate Project # ${projectNumber} alert: ${err instanceof Error ? err.message : String(err)}`, "sync");
+  }
 }
 
 /**
@@ -619,8 +680,26 @@ export async function diffBidBoardStages(
   const changes: StageChange[] = [];
   const prevStates = await storage.getBidboardSyncStates();
   const prevMap = new Map(prevStates.map((s) => [s.projectId, s]));
+  // A Project # on TWO OR MORE export rows (a duplicated Bid Board project) cannot be stage-synced: the sync state is
+  // keyed by Project #, so the rows overwrite each other every cycle (Won ↔ Estimate in Progress) and each flip back to
+  // a trigger stage re-fires the portfolio automation (the 2026-10-08 LYV Austin DFW-1-25726-al loop). Skipped and
+  // sent to manual review ONCE (deduped across cycles) until a person gives the duplicate its own number.
+  const numberCounts = new Map<string, number>();
+  for (const row of rows) {
+    const pn = row["Project #"]?.toString()?.trim();
+    if (pn) numberCounts.set(normalizeKey(pn), (numberCounts.get(normalizeKey(pn)) ?? 0) + 1);
+  }
+  const duplicateNumbersHandled = new Set<string>();
 
   for (const row of rows) {
+    const duplicateNumber = row["Project #"]?.toString()?.trim();
+    if (duplicateNumber && (numberCounts.get(normalizeKey(duplicateNumber)) ?? 0) > 1) {
+      if (!duplicateNumbersHandled.has(normalizeKey(duplicateNumber))) {
+        duplicateNumbersHandled.add(normalizeKey(duplicateNumber));
+        await flagDuplicateProjectNumber(duplicateNumber, rows, options?.modeConfigOverride);
+      }
+      continue;
+    }
     const projectId = getProjectId(row);
     const newStatus = row.Status?.toString()?.trim() || "";
     const prev = prevMap.get(projectId);

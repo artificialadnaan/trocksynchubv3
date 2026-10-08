@@ -150,8 +150,12 @@ export interface PortfolioTriggerSkip {
    *    manual review + an alert).
    *  - "no_company_id": Procore company id is not configured (a GLOBAL config outage that blocks EVERY
    *    trigger — alert only; per-deal manual review would flood the queue).
+   *  - "portfolio_identity_blocked": this Bid Board project's LAST portfolio run failed identity validation (the
+   *    Portfolio project Procore reached is not this one, e.g. "<number>- Duplicate"). That is not transient: re-running
+   *    every stage-sync cycle only repeats the failure and its email (the 2026-10-08 LYV Austin loop). Per-deal: manual
+   *    review + one alert; it re-arms when a run (a manual one, after a person fixes Procore) validates successfully.
    */
-  reason: "no_bidboard_project_id" | "no_company_id";
+  reason: "no_bidboard_project_id" | "no_company_id" | "portfolio_identity_blocked";
   projectName: string;
   projectNumber: string | null;
   customerName: string;
@@ -3173,6 +3177,27 @@ export async function triggerPortfolioAutomationFromStageChange(
     return {
       skipped: true,
       reason: "no_bidboard_project_id",
+      projectName,
+      projectNumber: projectNumber ?? null,
+      customerName,
+      hubspotDealId: hubspotDealId ?? null,
+    };
+  }
+
+  // NON-RETRYABLE CAP: the last run for this Bid Board project failed portfolio identity validation, and nothing has
+  // validated since. Don't re-run the browser automation (and re-send its failure email) every cycle.
+  // Checked BEFORE the global company-id skip (Codex P1 on #106): a per-deal block must reach manual review even during
+  // a config outage, as no_bidboard_project_id does. A read failure FAILS CLOSED: it throws, so the stage sync retries
+  // next cycle WITHOUT running the browser automation for a project that may be blocked.
+  const identityOutcome = await storage.getLatestPortfolioIdentityOutcome(bidboardProjectId);
+  if (identityOutcome === "failed") {
+    log(
+      `[portfolio-auto] Not re-triggering Phase 1 for bidboard project ${bidboardProjectId} (${projectName}): its last run failed portfolio identity validation — routing to manual review`,
+      "playwright"
+    );
+    return {
+      skipped: true,
+      reason: "portfolio_identity_blocked",
       projectName,
       projectNumber: projectNumber ?? null,
       customerName,

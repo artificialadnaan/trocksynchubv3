@@ -454,6 +454,8 @@ export interface IStorage {
   getPortfolioAutomationLogs(limit?: number): Promise<BidboardAutomationLog[]>;
   createBidboardAutomationLog(data: { projectId?: string; projectName?: string; action: string; status: string; details?: any; errorMessage?: string; screenshotPath?: string }): Promise<BidboardAutomationLog>;
   getManualReviewQueueEntry(projectNumber: string, cycleId: string): Promise<ManualReviewQueue | undefined>;
+  /** The latest portfolio identity-validation outcome logged for a Bid Board project ("success" | "failed"), or null. */
+  getLatestPortfolioIdentityOutcome(bidboardProjectId: string): Promise<"success" | "failed" | null>;
   /** Any UNRESOLVED review row for the project, regardless of cycleId — for cross-cycle dedup. */
   getUnresolvedManualReviewQueueEntry(projectNumber: string): Promise<ManualReviewQueue | undefined>;
   createManualReviewQueueEntry(data: InsertManualReviewQueue): Promise<ManualReviewQueue>;
@@ -1975,6 +1977,23 @@ export class DatabaseStorage implements IStorage {
 
   async getBidboardAutomationLogs(limit: number = 50): Promise<BidboardAutomationLog[]> {
     return db.select().from(bidboardAutomationLogs).orderBy(desc(bidboardAutomationLogs.createdAt)).limit(limit);
+  }
+
+  async getLatestPortfolioIdentityOutcome(bidboardProjectId: string): Promise<"success" | "failed" | null> {
+    const [row] = await db
+      .select({ status: bidboardAutomationLogs.status })
+      .from(bidboardAutomationLogs)
+      .where(and(
+        eq(bidboardAutomationLogs.projectId, bidboardProjectId),
+        or(
+          eq(bidboardAutomationLogs.action, "portfolio_automation:validate_portfolio_identity"),
+          eq(bidboardAutomationLogs.action, "portfolio_automation:revalidate_portfolio_identity"),
+        ),
+        or(eq(bidboardAutomationLogs.status, "success"), eq(bidboardAutomationLogs.status, "failed")),
+      ))
+      .orderBy(desc(bidboardAutomationLogs.createdAt))
+      .limit(1);
+    return row ? (row.status as "success" | "failed") : null;
   }
 
   async getPortfolioAutomationLogs(limit: number = 300): Promise<BidboardAutomationLog[]> {
