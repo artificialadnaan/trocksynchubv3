@@ -165,6 +165,25 @@ function wireString(value: unknown, max: number): string | null {
   return `${collapsed.slice(0, max - 1).trim()}…`;
 }
 
+/**
+ * The CRM company's bill address as Core #2163 takes it (crm-ingress/company-address.ts RULES): an object of exactly
+ * {address, city, state, zip}, each a string non-empty after trim; address <= 255; state two letters; ZIP 5 digits or
+ * ZIP+4. Anything else is null, so the key is OMITTED: Core answers a malformed one with a 400 for the WHOLE body, and
+ * an RFP must never be lost over it. city <= 255 is this producer's own bound (Core sets none) so a runaway value can
+ * never push the body past Core's 32 KiB. Values are sent trimmed, otherwise as the CRM has them (Core upper-cases the
+ * state itself).
+ */
+function wireCompanyBillAddress(value: unknown): { address: string; city: string; state: string; zip: string } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const parts = [raw.address, raw.city, raw.state, raw.zip];
+  if (parts.some((part) => typeof part !== "string")) return null;
+  const [address, city, state, zip] = (parts as string[]).map((part) => part.trim());
+  if (!address || !city || address.length > 255 || city.length > 255) return null;
+  if (!/^[A-Za-z]{2}$/.test(state) || !/^\d{5}(-\d{4})?$/.test(zip)) return null;
+  return { address, city, state, zip };
+}
+
 function wireUuid(value: unknown): string | null {
   const raw = wireString(value, 36)?.toLowerCase();
   return raw && UUID_RE.test(raw) ? raw : null;
@@ -407,6 +426,8 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
   const bidDue = effectiveField(input, "bid_due_date");
   const dueAt = wireString(bidDue, 64) ? wireDueAt(bidDue, crmDue) : wireDueAt(effectiveField(input, "due_date"), crmDue);
 
+  const billAddress = wireCompanyBillAddress(input.dealData.crm_company_bill_address);
+
   const approvedAt = input.approvedAt ?? new Date();
   return {
     ok: true,
@@ -419,7 +440,8 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
       rfp: { requestId: input.rfpRequestId, approvedAt: approvedAt.toISOString() },
       // `ownerEmail` is always PRESENT, null when absent. DEPLOY ORDER: Core must accept the key first.
       deal: { id: dealId, rfpProjectNumber, ownerEmail },
-      company: { id: companyId, name: companyName },
+      // `billAddress` only when usable: absent, the company (and the whole body) is byte-for-byte what it was before.
+      company: billAddress ? { id: companyId, name: companyName, billAddress } : { id: companyId, name: companyName },
       // NULL, NOT OMITTED, when there is no usable email: Core's parser demands the exact key set, so the
       // key is always present and an absent contact is an explicit `null` (JSON.stringify keeps it).
       //

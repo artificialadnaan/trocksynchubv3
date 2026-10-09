@@ -56,6 +56,11 @@ export interface NormalizedRfpRequestInput {
     propertyId?: string | null;
     /** The CRM property's name: what TROCK Core names the job site (absent on bodies predating the CRM field). */
     propertyName?: string | null;
+    /**
+     * The CRM company's bill address (absent on bodies predating the CRM flag). Stored as sent; the Core handoff puts it
+     * on its body only when it meets Core's rules (service-rfp-core-outbox.ts wireCompanyBillAddress).
+     */
+    companyBillAddress?: { address?: string | null; city?: string | null; state?: string | null; zip?: string | null } | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -1014,6 +1019,8 @@ export function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: 
     crm_property_id: input.deal.propertyId || null,
     // The job site's NAME for the Core handoff (null when the CRM sent none: the handoff falls back to the street).
     crm_property_name: input.deal.propertyName || null,
+    // The CRM company's bill address for the Core handoff, as sent (null when the CRM sent none).
+    crm_company_bill_address: input.deal.companyBillAddress ?? null,
     bid_due_date: input.deal.dueDate || '',
     due_date: input.deal.dueDate || '',
     workflowRoute: input.deal.workflowRoute || '',

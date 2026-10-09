@@ -41,6 +41,15 @@ export const rfpRequestBodySchema = z.object({
     // The CRM property's NAME ("Tides North Dallas"), which TROCK Core names the job site with. Soft like the ids:
     // a malformed value is dropped (the handoff then falls back to the street address), never a 422.
     propertyName: z.string().trim().nullable().optional().catch(undefined),
+    // The CRM company's bill address (CRM flag; TROCK Core #2163 fills a BLANK Core company address from it). Soft like
+    // the ids: a malformed value is DROPPED, never a 422. Its parts are checked against Core's rules only when the Core
+    // body is built (service-rfp-core-outbox.ts wireCompanyBillAddress), so an unusable one is simply not sent.
+    companyBillAddress: z.object({
+      address: z.string().nullable().optional(),
+      city: z.string().nullable().optional(),
+      state: z.string().nullable().optional(),
+      zip: z.string().nullable().optional(),
+    }).nullable().optional().catch(undefined),
     companyName: z.string().trim().nullable(),
     contactName: z.string().trim().nullable(),
     clientEmail: z.string().trim().email().nullable(),
