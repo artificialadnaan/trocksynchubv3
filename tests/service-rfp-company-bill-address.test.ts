@@ -119,6 +119,19 @@ describe("the Core service-RFP body: company.billAddress (Core #2163)", () => {
     expect(built.ok).toBe(true);
   });
 
+  it("never sends a control character: collapses them like every other wire string (v12 P2 on #107)", async () => {
+    const body = await build({
+      crm_company_bill_address: { address: "2601\u0007Network\nBlvd", city: "Fri\u0000sco", state: "TX", zip: "75034" },
+    });
+    expect((body.company as any).billAddress).toEqual({ address: "2601 Network Blvd", city: "Fri sco", state: "TX", zip: "75034" });
+    expect(JSON.stringify(body)).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+  });
+
+  it("omits an address whose part is ONLY control characters", async () => {
+    const absent = JSON.stringify(await build());
+    expect(JSON.stringify(await build({ crm_company_bill_address: { ...GOOD, city: "\u0001\u0002" } }))).toBe(absent);
+  });
+
   it("accepts the edge values Core accepts: a 255-character street and a ZIP+4", async () => {
     const body = await build({ crm_company_bill_address: { ...GOOD, address: "a".repeat(255), zip: "75034-0001" } });
     expect((body.company as any).billAddress).toEqual({ ...GOOD, address: "a".repeat(255), zip: "75034-0001" });
