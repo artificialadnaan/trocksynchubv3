@@ -42,7 +42,12 @@ export interface ServiceRfpApprovedBody {
    * refuses the extra deal key with a 400.
    */
   deal: { id: string; rfpProjectNumber: string; ownerEmail: string | null };
-  company: { id: string; name: string };
+  /**
+   * `billAddress` (TROCK Core #2163): the CRM company's bill address, OMITTED unless all four parts meet Core's rules
+   * (an absent key keeps the body byte-identical to before; a malformed one would be Core's 400). Requires a Core that
+   * accepts the key: an older one refuses the extra company key, so the CRM sender stays behind its flag until then.
+   */
+  company: { id: string; name: string; billAddress?: { address: string; city: string; state: string; zip: string } };
   /**
    * Null when the CRM deal has no usable contact email. Always PRESENT (Core checks the exact key set),
    * never omitted. Requires a Core that accepts the null: an older one answers 400.
