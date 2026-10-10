@@ -92,9 +92,16 @@ async function withApp(fn: (baseUrl: string) => Promise<void>) {
   }
 }
 
+const SESSION_SECRET_FIXTURE = "test-session-secret-fixture";
+const signedLink = async (token: string, email: string) => {
+  const { signRecipientLink } = await import("../server/rfp-recipient-link.ts");
+  return signRecipientLink(token, email, SESSION_SECRET_FIXTURE);
+};
+
 describe("RFP token expiry enforcement", () => {
   beforeEach(() => {
     vi.resetModules();
+    process.env.SESSION_SECRET = SESSION_SECRET_FIXTURE;
     auditRows.length = 0;
     processRfpApprovalMock.mockClear();
     processRfpDeclineMock.mockClear();
@@ -105,7 +112,8 @@ describe("RFP token expiry enforcement", () => {
     requestRow.current = makeRequest({ tokenExpiresAt: new Date(Date.now() - 1000) });
 
     await withApp(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/rfp-review/token-1`);
+      // #47: the link is verified first, so the expired page needs a signed one (an unsigned link gets 403).
+      const response = await fetch(`${baseUrl}/rfp-review/token-1?r=${await signedLink("token-1", "sgibson@trockgc.com")}`);
       const html = await response.text();
 
       expect(response.status).toBe(410);
@@ -114,12 +122,30 @@ describe("RFP token expiry enforcement", () => {
     });
   });
 
+  // Codex P2 on #100: the already-processed page names the approver or decliner, so an unsigned, forged or
+  // other-RFP link must be refused before it renders.
+  it("refuses an unsigned or other-RFP link before the already-processed page (no approver disclosed)", async () => {
+    requestRow.current = makeRequest({ status: "declined", declinedBy: "jhelms@trockgc.com" });
+
+    await withApp(async (baseUrl) => {
+      for (const query of ["", `?r=${await signedLink("token-OTHER", "sgibson@trockgc.com")}`]) {
+        const response = await fetch(`${baseUrl}/rfp-review/token-1${query}`);
+        const html = await response.text();
+        expect(response.status, query || "unsigned").toBe(403);
+        expect(html, query || "unsigned").not.toContain("jhelms@trockgc.com");
+      }
+      const signed = await fetch(`${baseUrl}/rfp-review/token-1?r=${await signedLink("token-1", "sgibson@trockgc.com")}`);
+      expect(signed.status).toBe(200);
+      expect(await signed.text()).toContain("declined</strong> by jhelms@trockgc.com");
+    });
+  });
+
   it("returns 410 for expired approve attempts and writes an audit log", async () => {
     requestRow.current = makeRequest({ tokenExpiresAt: new Date(Date.now() - 1000) });
 
     await withApp(async (baseUrl) => {
       const form = new FormData();
-      form.append("approverEmail", "approver@trockgc.com");
+      form.append("recipientLink", await signedLink("token-1", "approver@trockgc.com"));
       form.append("editedFields", JSON.stringify({}));
       const response = await fetch(`${baseUrl}/api/rfp-approval/token-1/approve`, { method: "POST", body: form });
       const body = await response.json();
@@ -143,7 +169,7 @@ describe("RFP token expiry enforcement", () => {
       const response = await fetch(`${baseUrl}/api/rfp-approval/token-1/decline`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ declinerEmail: "decliner@trockgc.com" }),
+        body: JSON.stringify({ recipientLink: await signedLink("token-1", "decliner@trockgc.com") }),
       });
       const body = await response.json();
 
@@ -162,7 +188,7 @@ describe("RFP token expiry enforcement", () => {
     requestRow.current = makeRequest({ tokenExpiresAt: null });
 
     await withApp(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/rfp-review/token-1`);
+      const response = await fetch(`${baseUrl}/rfp-review/token-1?r=${await signedLink("token-1", "sgibson@trockgc.com")}`);
       const html = await response.text();
 
       expect(response.status).toBe(200);
@@ -174,7 +200,7 @@ describe("RFP token expiry enforcement", () => {
     await withApp(async (baseUrl) => {
       const form = new FormData();
       // Authorized approver for project type "2" (safety-net routing → sgibson + jhelms).
-      form.append("approverEmail", "sgibson@trockgc.com");
+      form.append("recipientLink", await signedLink("token-1", "sgibson@trockgc.com"));
       form.append("editedFields", JSON.stringify({}));
       const response = await fetch(`${baseUrl}/api/rfp-approval/token-1/approve`, { method: "POST", body: form });
       const body = await response.json();

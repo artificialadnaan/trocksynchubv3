@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { verifyRecipientLink } from "../server/rfp-recipient-link.ts";
 import {
   buildPendingRfpDigest,
   type PendingRfpRow,
@@ -24,6 +25,12 @@ const NON_SERVICE = [SIDNEY, JAMES, TIM];
 async function fakeResolver(projectType: string | null | undefined): Promise<string[]> {
   return String(projectType ?? "").trim() === "4" ? TYPE4 : NON_SERVICE;
 }
+
+// #47: digest links are signed per recipient with SESSION_SECRET's HKDF key (a test fixture, not a credential).
+const SESSION_SECRET = "test-session-secret-fixture";
+beforeAll(() => {
+  process.env.SESSION_SECRET = SESSION_SECRET;
+});
 
 const digestFor = (d: PendingRfpDigest, email: string) =>
   d.perRecipient.find((r) => r.recipient === email);
@@ -177,6 +184,57 @@ describe("buildPendingRfpDigest", () => {
     expect(sidney.htmlBody).toContain("https://hub.trockgc.com/rfp-review/abc123");
     // Regression: links derive from the passed public base URL, never localhost.
     expect(sidney.htmlBody).not.toContain("localhost");
+  });
+
+  // #47: each recipient's digest link is signed to THAT recipient, so it acts as them only.
+  it("signs each recipient's review link to that recipient", async () => {
+    const rows: PendingRfpRow[] = [
+      { token: "abc123", createdAt: new Date("2026-06-20T15:00:00Z"), dealData: { project_number: "DFW-2-555", project_types: "2" }, sourceSystem: "hubspot" },
+    ];
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired);
+    const rOf = (email: string) => {
+      const m = digestFor(digest, email)!.htmlBody.match(/rfp-review\/abc123\?r=([A-Za-z0-9_.-]+)/);
+      return m?.[1];
+    };
+    for (const email of NON_SERVICE) {
+      const r = rOf(email);
+      expect(r, email).toBeTruthy();
+      expect(verifyRecipientLink("abc123", r, SESSION_SECRET)).toBe(email);
+    }
+    expect(rOf(SIDNEY)).not.toBe(rOf(TIM));
+  });
+
+  // Codex P2 on #100: the GLOBAL_CC directors are authorized for every RFP and get a signed copy of every initial
+  // review email, so after a deploy or a SESSION_SECRET rotation the digest has to reissue THEIR links too.
+  it("gives each always-authorized director a signed link to every actionable RFP", async () => {
+    const DIRECTOR = "director@trockgc.com";
+    const rows: PendingRfpRow[] = [
+      { token: "tok-svc", createdAt: new Date("2026-06-20T15:00:00Z"), dealData: { project_number: "DFW-4-100", project_types: "4" }, sourceSystem: "hubspot" },
+      { token: "tok-reno", createdAt: new Date("2026-06-21T15:00:00Z"), dealData: { project_number: "DFW-2-200", project_types: "2" }, sourceSystem: "hubspot" },
+    ];
+    const digest = await buildPendingRfpDigest(rows, fakeResolver, APP_URL, isExpired, undefined, [` ${DIRECTOR.toUpperCase()} `]);
+    const director = digestFor(digest, DIRECTOR)!;
+    expect(director.count).toBe(2);
+    for (const token of ["tok-svc", "tok-reno"]) {
+      const r = director.htmlBody.match(new RegExp(`rfp-review/${token}\\?r=([A-Za-z0-9_.-]+)`))?.[1];
+      expect(verifyRecipientLink(token, r, SESSION_SECRET), token).toBe(DIRECTOR);
+    }
+    // Scoping for everyone else is unchanged.
+    expect(digestFor(digest, COLBY)!.count).toBe(1);
+  });
+
+  // Codex P1 on #100: a resolver answer of null means the approver config could not be read, so the safety net is
+  // not known to be the authorized set and gets no signed link; the config-independent directors still do.
+  it("issues no signed link to configured approvers when the config is unreadable (null)", async () => {
+    const rows: PendingRfpRow[] = [
+      { token: "tok-x", createdAt: new Date("2026-06-20T15:00:00Z"), dealData: { project_number: "DFW-2-300", project_types: "2" }, sourceSystem: "hubspot" },
+    ];
+    const unreadable = async () => null;
+    const none = await buildPendingRfpDigest(rows, unreadable, APP_URL, isExpired);
+    expect(none.skip).toBe(true);
+    expect(none.perRecipient).toEqual([]);
+    const withDirector = await buildPendingRfpDigest(rows, unreadable, APP_URL, isExpired, undefined, ["director@trockgc.com"]);
+    expect(withDirector.perRecipient.map((d) => d.recipient)).toEqual(["director@trockgc.com"]);
   });
 
   it("strips a trailing slash from the base URL (no // in the link)", async () => {

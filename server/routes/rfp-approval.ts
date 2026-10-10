@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { verifyRecipientLink } from "../rfp-recipient-link";
 import { asyncHandler } from "../lib/async-handler";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { storage } from "../storage";
@@ -12,6 +13,23 @@ import {
   resolveEffectiveRfpProjectType,
   resolveRfpDescription,
 } from "../rfp-approval";
+
+/** A signed-in admin session (settings.ts requireAdmin's rule), kept local so this module does not import settings.ts. */
+async function requireAdminSession(req: any, res: any, next: any) {
+  const userId = req.session?.userId;
+  if (!userId) return res.status(401).json({ message: "Unauthorized" });
+  try {
+    const user = await storage.getUser(userId);
+    if (!user || user.role !== "admin") return res.status(403).json({ message: "Admin only" });
+    return next();
+  } catch (e: any) {
+    return res.status(500).json({ message: e.message });
+  }
+}
+
+/** #47: an unsigned (pre-#47), forged, or other-RFP review link. */
+const RECIPIENT_LINK_REFUSED_MESSAGE =
+  'This review link is out of date or not addressed to you. Use the link in your latest RFP review email or in the evening "RFPs awaiting your approval" digest.';
 
 const UNAUTHORIZED_APPROVER_MESSAGE =
   'This email address is not an authorized approver for this RFP. Please use the address the review request was sent to, or contact an administrator.';
@@ -86,7 +104,8 @@ function renderRfpPage(title: string, content: string): string {
 async function renderRfpReviewPage(
   token: string,
   d: Record<string, any>,
-  source: { system: string; label: string; url?: string | null }
+  source: { system: string; label: string; url?: string | null },
+  recipient: { email: string; link: string },
 ): Promise<string> {
   const esc = (s: any) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   // The SAME chain and formatter the Core handoff compares an approval's posted date against.
@@ -269,8 +288,8 @@ async function renderRfpReviewPage(
         <input type="hidden" name="attachmentsOverride" id="attachmentsOverride">
 
         <div class="email-field">
-          <label>Your Email (required for approval tracking)</label>
-          <input type="email" id="approverEmail" required placeholder="your.email@trockgc.com">
+          <label>Acting as (the address this review link was sent to)</label>
+          <input type="email" id="approverEmail" value="${esc(recipient.email)}" readonly>
         </div>
 
         <div class="actions">
@@ -291,6 +310,8 @@ async function renderRfpReviewPage(
 
   <script>
     const TOKEN = '${token}';
+    // #47: this link's signed recipient. Approve/decline act as that recipient; no email is typed.
+    const RECIPIENT_LINK = ${JSON.stringify(recipient.link).replace(/</g, "\\u003c")};
     const INITIAL_ATTACHMENTS = ${JSON.stringify((d.attachments || []).map((a: any) => ({ name: a.name, url: a.url, type: a.type, size: a.size })))};
     const newFilesStore = [];
 
@@ -388,7 +409,7 @@ async function renderRfpReviewPage(
       try {
         const fd = new FormData();
         fd.append('editedFields', JSON.stringify(getFormData()));
-        fd.append('approverEmail', email);
+        fd.append('recipientLink', RECIPIENT_LINK);
         fd.append('attachmentsOverride', document.getElementById('attachmentsOverride').value);
         newFilesStore.forEach((f, i) => fd.append('newFiles', f.file));
         const resp = await fetch('/api/rfp-approval/' + TOKEN + '/approve', {
@@ -434,7 +455,7 @@ async function renderRfpReviewPage(
         const resp = await fetch('/api/rfp-approval/' + TOKEN + '/decline', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ declinerEmail: email }),
+          body: JSON.stringify({ recipientLink: RECIPIENT_LINK }),
         });
         const raw = await resp.text();
         let data;
@@ -473,6 +494,15 @@ export function registerRfpApprovalRoutes(app: Express) {
     const { token } = req.params as { token: string };
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).send(renderRfpPage('Not Found', '<p>This review link is invalid or has expired.</p>'));
+
+    // #47: the link must be signed to a recipient of THIS RFP. An unsigned (pre-#47) or forged one is refused; the
+    // evening pending digest re-sends a signed link for every pending RFP. Checked BEFORE the expired and
+    // already-processed pages, which name the project and the approver or decliner.
+    const recipientEmail = verifyRecipientLink(token, req.query.r);
+    if (!recipientEmail) {
+      return res.status(403).send(renderRfpPage('Link Out of Date', `<p>${RECIPIENT_LINK_REFUSED_MESSAGE}</p>`));
+    }
+
     if (isRfpApprovalRequestExpired(request)) {
       return res.status(410).send(renderRfpPage('Link Expired', `<p>${buildExpiredRfpMessage(request)}</p>`));
     }
@@ -523,7 +553,7 @@ export function registerRfpApprovalRoutes(app: Express) {
     }
     const sourceLabel = request.sourceSystem === 'trock_crm' ? 'T Rock CRM' : 'HubSpot';
     const sourceUrl = (d.sourceDealUrl || d.hubspotDealUrl) as string | undefined;
-    res.send(await renderRfpReviewPage(token, d, { system: request.sourceSystem, label: sourceLabel, url: sourceUrl }));
+    res.send(await renderRfpReviewPage(token, d, { system: request.sourceSystem, label: sourceLabel, url: sourceUrl }, { email: recipientEmail, link: String(req.query.r) }));
   }));
 
   app.post("/api/rfp-approval/:token/approve", async (req, res, next) => {
@@ -531,7 +561,7 @@ export function registerRfpApprovalRoutes(app: Express) {
     const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
     upload.fields([
       { name: 'editedFields', maxCount: 1 },
-      { name: 'approverEmail', maxCount: 1 },
+      { name: 'recipientLink', maxCount: 1 },
       { name: 'attachmentsOverride', maxCount: 1 },
       { name: 'newFiles', maxCount: 20 },
     ])(req as any, res, async (err: any) => {
@@ -545,8 +575,11 @@ export function registerRfpApprovalRoutes(app: Express) {
           const ef = body.editedFields;
           editedFields = typeof ef === 'string' ? JSON.parse(ef) : ef || {};
         } catch { /* fallback to empty */ }
-        const approverEmail = (body.approverEmail || '').trim();
-        if (!approverEmail) return res.status(400).json({ success: false, error: 'Approver email is required' });
+        // #47: the approver is the link's SIGNED recipient, never a typed address (a typed approverEmail is ignored).
+        const approverEmail = verifyRecipientLink(token, body.recipientLink);
+        if (!approverEmail) {
+          return res.status(403).json({ success: false, error: 'recipient_link_required', message: RECIPIENT_LINK_REFUSED_MESSAGE });
+        }
         let attachmentsOverride: Array<{ name: string; url?: string; _new?: boolean }> = [];
         try {
           const ao = body.attachmentsOverride;
@@ -592,17 +625,18 @@ export function registerRfpApprovalRoutes(app: Express) {
         const dealData = (request.dealData as Record<string, any> | null);
         const baselineProjectType = resolveEffectiveRfpProjectType(dealData);
         const createdProjectType = resolveEffectiveRfpProjectType(dealData, editedFields);
-        const authorizedForBaseline = await isAuthorizedRfpApprover(approverEmail, baselineProjectType, request.sourceSystem);
-        const authorizedForCreated = await isAuthorizedRfpApprover(approverEmail, createdProjectType, request.sourceSystem);
-        if (!authorizedForBaseline || !authorizedForCreated) {
+        // (1) BASELINE: the signed recipient IS the send-time snapshot (#47): the review email and the digest are sent only
+        //     to the routed approvers for this type, so a valid signature proves this address was one of them. No
+        //     live-config read, so a config change inside the token window neither strands nor admits anyone.
+        // (2) CREATED: an EDITED type the RFP was not routed by has no snapshot, so it is still checked live.
+        if (createdProjectType !== baselineProjectType
+          && !(await isAuthorizedRfpApprover(approverEmail, createdProjectType, request.sourceSystem))) {
           await auditRouteAttempt(
             request,
             'rfp_approval_attempt',
             'unauthorized_approver',
             approverEmail,
-            !authorizedForBaseline
-              ? 'Approver not authorized for the baseline (project-number) type of this RFP'
-              : 'Approver not in the authorized set for the canonical created project type',
+            'Approver not in the authorized set for the edited (created) project type',
           );
           return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
         }
@@ -665,8 +699,11 @@ export function registerRfpApprovalRoutes(app: Express) {
 
   app.post("/api/rfp-approval/:token/decline", asyncHandler(async (req, res) => {
     const { token } = req.params as { token: string };
-    const { declinerEmail } = req.body;
-    if (!declinerEmail) return res.status(400).json({ success: false, error: 'Email is required' });
+    // #47: the decliner is the link's SIGNED recipient, never a typed address.
+    const declinerEmail = verifyRecipientLink(token, req.body?.recipientLink);
+    if (!declinerEmail) {
+      return res.status(403).json({ success: false, error: 'recipient_link_required', message: RECIPIENT_LINK_REFUSED_MESSAGE });
+    }
 
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
@@ -688,27 +725,17 @@ export function registerRfpApprovalRoutes(app: Express) {
     // project_number 'DFW-4-...' = a SERVICE RFP). The review email + pending digest route by this same
     // canonical type, so the approvers notified are exactly the ones authorized here — nothing strands.
     // (No HMAC override path for decline → no exemption; recipient-binding is the #47 follow-up.)
-    const declineDealData = (request.dealData as Record<string, any> | null);
-    const declineCreatedType = resolveEffectiveRfpProjectType(declineDealData);
-    const declineAuthorized = await isAuthorizedRfpApprover(declinerEmail, declineCreatedType, request.sourceSystem);
-    if (!declineAuthorized) {
-      await auditRouteAttempt(
-        request,
-        'rfp_decline_attempt',
-        'unauthorized_approver',
-        declinerEmail,
-        'Decliner not in the authorized set for the canonical project type',
-      );
-      return res.status(403).json({ success: false, error: 'unauthorized_approver', message: UNAUTHORIZED_APPROVER_MESSAGE });
-    }
+    // #47: decline has no edited type, so the signed recipient (the send-time snapshot) is the whole authorization.
 
     const { processRfpDecline } = await import('../rfp-approval');
     const result = await processRfpDecline(token, declinerEmail);
     res.json(result);
   }));
 
-  // Reset an approval request back to pending (admin endpoint for retrying failed BidBoard creation)
-  app.post("/api/rfp-approval/:token/reset", asyncHandler(async (req, res) => {
+  // Reset an approval request back to pending (admin endpoint for retrying failed BidBoard creation). It had NO auth:
+  // anyone holding a review link could flip an approved or declined RFP back to pending (and so re-approve it). It now
+  // needs a signed-in admin session (#47), the same rule as settings.ts requireAdmin.
+  app.post("/api/rfp-approval/:token/reset", requireAdminSession, asyncHandler(async (req, res) => {
     const { token } = req.params as { token: string };
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });

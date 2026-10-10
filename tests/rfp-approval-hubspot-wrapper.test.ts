@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const rfpRows = vi.hoisted(() => [] as any[]);
 const emailLogs = vi.hoisted(() => [] as any[]);
 const sendEmailMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
+// GLOBAL_CC directors, mutable per test (empty unless a test adds one).
+const globalCc = vi.hoisted(() => [] as string[]);
 // Mutable HubSpot deal properties so a test can swap in a routing/number mismatch.
 const LEGACY_DEAL_PROPS = vi.hoisted(() => ({
   dealname: "Legacy HubSpot RFP",
@@ -88,6 +90,8 @@ vi.mock("../server/lib/fetch-with-timeout.ts", () => ({
 
 vi.mock("../server/email-service.ts", () => ({
   sendEmail: sendEmailMock,
+  // #47: the review email gives each GLOBAL_CC director their own signed copy; none unless a test adds one.
+  GLOBAL_CC_RECIPIENTS: globalCc,
   renderTemplate: vi.fn(),
 }));
 
@@ -105,8 +109,10 @@ describe("legacy HubSpot RFP approval wrapper", () => {
     rfpRows.length = 0;
     emailLogs.length = 0;
     sendEmailMock.mockClear();
+    globalCc.length = 0;
     dealProps.current = { ...LEGACY_DEAL_PROPS };
     process.env.APP_URL = "https://synchub.example.com";
+    process.env.SESSION_SECRET = "test-session-secret-fixture";
   });
 
   it("keeps the webhook-facing createRfpApprovalRequest outcome: one pending row and one review email", async () => {
@@ -135,6 +141,11 @@ describe("legacy HubSpot RFP approval wrapper", () => {
       fromName: "T-Rock Sync Hub",
     });
     expect(sendEmailMock.mock.calls[0][0].htmlBody).toContain("View in HubSpot");
+    // #47: the recipient's copy links with a signature bound to THEM, and no global CC rides along.
+    expect(sendEmailMock.mock.calls[0][0].bypassGlobalCc).toBe(true);
+    const r = sendEmailMock.mock.calls[0][0].htmlBody.match(/rfp-review\/[^?"]+\?r=([A-Za-z0-9_.-]+)/)?.[1];
+    const { verifyRecipientLink } = await import("../server/rfp-recipient-link.ts");
+    expect(verifyRecipientLink(result.token!, r, "test-session-secret-fixture")).toBe("reviewer@trockgc.com");
     expect(emailLogs).toHaveLength(1);
     expect(emailLogs[0]).toMatchObject({
       templateKey: "rfp_review",
@@ -142,6 +153,41 @@ describe("legacy HubSpot RFP approval wrapper", () => {
       dedupeKey: `rfp_review:hs-deal-1:reviewer@trockgc.com:${result.token}`,
       metadata: { hubspotDealId: "hs-deal-1", token: result.token },
     });
+  });
+
+  // Codex P1 on #100: a signed link IS the authorization, so the hardcoded safety net used when the approver config
+  // READ FAILS must not receive one. It still gets the email (unsigned: the page refuses it and points to the digest);
+  // a GLOBAL_CC director, authorized independently of the config, still gets a signed copy.
+  it("withholds signed links from the safety net when the approver config cannot be read", async () => {
+    globalCc.push("director@trockgc.com");
+    const { storage } = await import("../server/storage.ts");
+    vi.mocked(storage.getRfpApproverConfigs).mockRejectedValueOnce(new Error("db down"));
+    const { createRfpApprovalRequest } = await import("../server/rfp-approval.ts");
+    const { verifyRecipientLink } = await import("../server/rfp-recipient-link.ts");
+
+    const result = await createRfpApprovalRequest("hs-deal-unreadable");
+    expect(result).toMatchObject({ success: true });
+
+    const byRecipient = new Map(sendEmailMock.mock.calls.map((c: any) => [c[0].to, c[0].htmlBody as string]));
+    // Type 2's safety net, all notified, none signed.
+    for (const fallback of ["sgibson@trockgc.com", "jhelms@trockgc.com", "tmitchell@trockgc.com"]) {
+      const html = byRecipient.get(fallback);
+      expect(html, fallback).toBeTruthy();
+      expect(html, fallback).toContain(`/rfp-review/${result.token}"`);
+      expect(html, fallback).not.toMatch(/\?r=/);
+    }
+    const directorR = byRecipient.get("director@trockgc.com")?.match(/rfp-review\/[^?"]+\?r=([A-Za-z0-9_.-]+)/)?.[1];
+    expect(verifyRecipientLink(result.token!, directorR, "test-session-secret-fixture")).toBe("director@trockgc.com");
+  });
+
+  it("signs the safety net when the config simply has no matching row (the intended fallback)", async () => {
+    const { storage } = await import("../server/storage.ts");
+    vi.mocked(storage.getRfpApproverConfigs).mockResolvedValueOnce([]);
+    const { createRfpApprovalRequest } = await import("../server/rfp-approval.ts");
+
+    await createRfpApprovalRequest("hs-deal-norow");
+    const html = sendEmailMock.mock.calls.find((c: any) => c[0].to === "sgibson@trockgc.com")?.[0].htmlBody;
+    expect(html).toMatch(/rfp-review\/[^?"]+\?r=/);
   });
 
   it("routes the review email by the CANONICAL type when project_number's digit differs from project_types", async () => {

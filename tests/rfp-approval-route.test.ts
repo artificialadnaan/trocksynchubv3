@@ -75,7 +75,9 @@ describe("RFP approval route", () => {
 
     const form = new FormData();
     form.append("editedFields", JSON.stringify({ dealname: "Queued Approval" }));
-    form.append("approverEmail", "approver@trockgc.com");
+    process.env.SESSION_SECRET = "test-session-secret-fixture";
+    const { signRecipientLink } = await import("../server/rfp-recipient-link.ts");
+    form.append("recipientLink", signRecipientLink("test-token", "approver@trockgc.com", "test-session-secret-fixture"));
     form.append("attachmentsOverride", "[]");
 
     const controller = new AbortController();
@@ -97,7 +99,10 @@ describe("RFP approval route", () => {
     try {
       const response = await Promise.race([
         responsePromise,
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 10)),
+        // The response must arrive while processRfpApproval is still unresolved (finishApproval is only called at
+        // the end), which is what "returns immediately" means. The wall-clock bound is loose so cold module/crypto
+        // init in a fresh worker (the #47 link check) cannot flake it.
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 2000)),
       ]);
       outcome = { ok: true, response, body: await response.json() };
     } catch (error) {
