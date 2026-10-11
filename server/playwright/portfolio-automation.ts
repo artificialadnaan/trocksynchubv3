@@ -422,8 +422,6 @@ async function validatePortfolioProjectIdentityOrThrow(
   const mismatch = detectPortfolioIdentityMismatch(expected, actual);
 
   if (!mismatch) {
-    // A validated run re-arms the trigger: the durable quarantine (read when the logs are gone) is cleared too.
-    await clearPortfolioIdentityQuarantine(result.bidboardProjectId);
     await logStep(page, result, stepName, "success", Date.now() - start, {
       metadata: {
         portfolioProjectId,
@@ -3066,57 +3064,6 @@ export async function quarantinePortfolioIdentityMismatch(
   });
 }
 
-/** The mapping's durable quarantine is active (written by quarantinePortfolioIdentityMismatch, cleared on a validated run). */
-export function portfolioIdentityQuarantineActive(metadata: unknown): boolean {
-  const q = (metadata as { portfolioIdentityQuarantine?: { status?: unknown } } | null | undefined)?.portfolioIdentityQuarantine;
-  return q?.status === "active";
-}
-
-/**
- * Is this Bid Board project blocked from re-running (its last identity validation failed)? The latest identity LOG says
- * failed; or the mapping's durable quarantine is active and no identity log NEWER than it says success. A quarantine is
- * written before its failed log, so a lost failed-log insert must not let an OLDER success re-arm the trigger (Codex P1
- * on #109); a pruned log falls back to the quarantine alone. An active quarantine with no readable detectedAt stays
- * blocked until a validated run clears it.
- */
-export function portfolioIdentityBlocked(
-  latest: { status: "success" | "failed"; createdAt: Date | string | null } | null,
-  metadata: unknown,
-): boolean {
-  if (latest?.status === "failed") return true;
-  if (!portfolioIdentityQuarantineActive(metadata)) return false;
-  if (!latest) return true;
-  const detectedAt = Date.parse(
-    String((metadata as { portfolioIdentityQuarantine?: { detectedAt?: unknown } }).portfolioIdentityQuarantine?.detectedAt ?? ""),
-  );
-  // A log with no time cannot be ordered against the quarantine: treated as older (blocked until a validated run clears).
-  const loggedAt = latest.createdAt == null ? Number.NaN : new Date(latest.createdAt).getTime();
-  return Number.isNaN(detectedAt) || Number.isNaN(loggedAt) || loggedAt < detectedAt;
-}
-
-/**
- * Clear an active quarantine once a run validates (status "cleared", kept for the record). Best-effort: a failed write
- * only matters once the success log is also pruned, so it is logged rather than failing a run that validated.
- */
-export async function clearPortfolioIdentityQuarantine(bidboardProjectId: string): Promise<void> {
-  try {
-    const mapping = await storage.getSyncMappingByBidboardProjectId(bidboardProjectId);
-    if (!mapping?.id || !portfolioIdentityQuarantineActive(mapping.metadata)) return;
-    const metadata = (mapping.metadata as Record<string, unknown> | undefined) ?? {};
-    const previous = metadata.portfolioIdentityQuarantine as Record<string, unknown>;
-    await storage.updateSyncMapping(mapping.id, {
-      metadata: mergeMetadata(metadata, {
-        portfolioIdentityQuarantine: { ...previous, status: "cleared", clearedAt: new Date().toISOString() },
-      }),
-    });
-  } catch (err) {
-    log(
-      `[portfolio-auto] Could not clear the identity quarantine for bidboard project ${bidboardProjectId}: ${err instanceof Error ? err.message : String(err)}`,
-      "playwright"
-    );
-  }
-}
-
 /**
  * Trigger portfolio automation when stage changes to "Sent to Production".
  * Called from bidboard-stage-sync after successful HubSpot stage update.
@@ -3242,11 +3189,8 @@ export async function triggerPortfolioAutomationFromStageChange(
   // Checked BEFORE the global company-id skip (Codex P1 on #106): a per-deal block must reach manual review even during
   // a config outage, as no_bidboard_project_id does. A read failure FAILS CLOSED: it throws, so the stage sync retries
   // next cycle WITHOUT running the browser automation for a project that may be blocked.
-  // The logs live in bidboard_automation_logs, which data_retention prunes (>= 30 days): with no identity log left, the
-  // mapping's DURABLE quarantine decides (v13 on #106), so a pruned failure does not re-arm the trigger unvalidated. A
-  // later validated run (a success log, and the cleared quarantine) re-arms it.
-  const identityLog = await storage.getLatestPortfolioIdentityLog(bidboardProjectId);
-  if (portfolioIdentityBlocked(identityLog, mapping?.metadata)) {
+  const identityOutcome = await storage.getLatestPortfolioIdentityOutcome(bidboardProjectId);
+  if (identityOutcome === "failed") {
     log(
       `[portfolio-auto] Not re-triggering Phase 1 for bidboard project ${bidboardProjectId} (${projectName}): its last run failed portfolio identity validation — routing to manual review`,
       "playwright"

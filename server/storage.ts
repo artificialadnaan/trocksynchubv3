@@ -456,7 +456,6 @@ export interface IStorage {
   getManualReviewQueueEntry(projectNumber: string, cycleId: string): Promise<ManualReviewQueue | undefined>;
   /** The latest portfolio identity-validation outcome logged for a Bid Board project ("success" | "failed"), or null. */
   getLatestPortfolioIdentityOutcome(bidboardProjectId: string): Promise<"success" | "failed" | null>;
-  getLatestPortfolioIdentityLog(bidboardProjectId: string): Promise<{ status: "success" | "failed"; createdAt: Date | null } | null>;
   /** Any UNRESOLVED review row for the project, regardless of cycleId — for cross-cycle dedup. */
   getUnresolvedManualReviewQueueEntry(projectNumber: string, reason?: string): Promise<ManualReviewQueue | undefined>;
   createManualReviewQueueEntry(data: InsertManualReviewQueue): Promise<ManualReviewQueue>;
@@ -1981,13 +1980,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getLatestPortfolioIdentityOutcome(bidboardProjectId: string): Promise<"success" | "failed" | null> {
-    return (await this.getLatestPortfolioIdentityLog(bidboardProjectId))?.status ?? null;
-  }
-
-  /** The latest identity-validation log WITH its time, so a caller can order it against the durable quarantine. */
-  async getLatestPortfolioIdentityLog(bidboardProjectId: string): Promise<{ status: "success" | "failed"; createdAt: Date | null } | null> {
     const [row] = await db
-      .select({ status: bidboardAutomationLogs.status, createdAt: bidboardAutomationLogs.createdAt })
+      .select({ status: bidboardAutomationLogs.status })
       .from(bidboardAutomationLogs)
       .where(and(
         eq(bidboardAutomationLogs.projectId, bidboardProjectId),
@@ -1999,7 +1993,7 @@ export class DatabaseStorage implements IStorage {
       ))
       .orderBy(desc(bidboardAutomationLogs.createdAt))
       .limit(1);
-    return row ? { status: row.status as "success" | "failed", createdAt: row.createdAt } : null;
+    return row ? (row.status as "success" | "failed") : null;
   }
 
   async getPortfolioAutomationLogs(limit: number = 300): Promise<BidboardAutomationLog[]> {
