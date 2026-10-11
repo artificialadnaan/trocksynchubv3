@@ -178,7 +178,12 @@ function wireCompanyBillAddress(value: unknown): { address: string; city: string
   const raw = value as Record<string, unknown>;
   const parts = [raw.address, raw.city, raw.state, raw.zip];
   if (parts.some((part) => typeof part !== "string")) return null;
-  const [address, city, state, zip] = (parts as string[]).map((part) => part.trim());
+  // wireString's collapse, without its truncation: a control character (C0, DEL, C1) becomes a space before the
+  // checks (a truncated address would be a wrong address, so the bounds still omit). It never reaches Core, and a part
+  // that was ONLY control characters is blank, which omits the whole address.
+  const [address, city, state, zip] = (parts as string[]).map((part) =>
+    part.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim(),
+  );
   if (!address || !city || address.length > 255 || city.length > 255) return null;
   if (!/^[A-Za-z]{2}$/.test(state) || !/^\d{5}(-\d{4})?$/.test(zip)) return null;
   return { address, city, state, zip };
