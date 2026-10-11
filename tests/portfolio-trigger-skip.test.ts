@@ -19,7 +19,7 @@ vi.mock("../server/storage.ts", () => ({
     getHubspotDealByProjectNumber: vi.fn(),
     createSyncMapping: vi.fn(),
     getAutomationConfig: vi.fn(),
-    getLatestPortfolioIdentityOutcome: vi.fn(),
+    getLatestPortfolioIdentityLog: vi.fn(),
     getSyncMappingByBidboardProjectId: vi.fn(),
     updateSyncMapping: vi.fn(),
   },
@@ -29,6 +29,9 @@ vi.mock("../server/portfolio-automation-runner.ts", () => ({ runPhase1WithRetry:
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 vi.mock("../server/playwright/auth.ts", () => ({ ensureLoggedIn: vi.fn() }));
 vi.mock("../server/playwright/browser.ts", () => ({ randomDelay: vi.fn(), takeScreenshot: vi.fn() }));
+
+/** One identity-validation log row as storage returns it. */
+const idLog = (status: "success" | "failed", at = "2026-10-01T00:00:00.000Z") => ({ status, createdAt: new Date(at) });
 
 describe("triggerPortfolioAutomationFromStageChange skip returns (real implementation)", () => {
   beforeEach(() => {
@@ -106,12 +109,12 @@ describe("triggerPortfolioAutomationFromStageChange skip returns (real implement
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue({ hubspotDealId: "hs-3", bidboardProjectId: "562949956166933" } as any);
     vi.mocked(storage.getAutomationConfig).mockResolvedValue({ key: "procore_config", value: { companyId: "12345" } } as any);
-    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue("failed");
+    vi.mocked(storage.getLatestPortfolioIdentityLog).mockResolvedValue(idLog("failed"));
 
     const result = await triggerPortfolioAutomationFromStageChange("LYV Austin Building 15", null, "Tides", "hs-3");
 
     expect(result).toMatchObject({ skipped: true, reason: "portfolio_identity_blocked", projectName: "LYV Austin Building 15" });
-    expect(storage.getLatestPortfolioIdentityOutcome).toHaveBeenCalledWith("562949956166933");
+    expect(storage.getLatestPortfolioIdentityLog).toHaveBeenCalledWith("562949956166933");
     expect(runner.runPhase1WithRetry).not.toHaveBeenCalled();
   });
 
@@ -123,7 +126,7 @@ describe("triggerPortfolioAutomationFromStageChange skip returns (real implement
     vi.mocked(storage.getAutomationConfig).mockResolvedValue({ key: "procore_config", value: { companyId: "12345" } } as any);
     vi.mocked(runner.runPhase1WithRetry).mockResolvedValue({ result: { success: true } } as any);
     for (const outcome of ["success", null] as const) {
-      vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue(outcome);
+      vi.mocked(storage.getLatestPortfolioIdentityLog).mockResolvedValue(outcome ? idLog(outcome) : null);
       const result = await triggerPortfolioAutomationFromStageChange("Proj D", null, "Cust D", "hs-4");
       expect((result as { skipped?: boolean }).skipped).not.toBe(true);
     }
@@ -137,11 +140,15 @@ describe("triggerPortfolioAutomationFromStageChange skip returns (real implement
     vi.mocked(storage.getAutomationConfig).mockResolvedValue({ key: "procore_config", value: { companyId: "12345" } } as any);
     vi.mocked(runner.runPhase1WithRetry).mockResolvedValue({ result: { success: true } } as any);
     const mappingWith = (status: string) =>
-      ({ hubspotDealId: "hs-6", bidboardProjectId: "562949956000006", metadata: { portfolioIdentityQuarantine: { status, reason: "portfolio_project_number_mismatch" } } }) as any;
+      ({
+        hubspotDealId: "hs-6",
+        bidboardProjectId: "562949956000006",
+        metadata: { portfolioIdentityQuarantine: { status, reason: "portfolio_project_number_mismatch", detectedAt: "2026-10-05T00:00:00.000Z" } },
+      }) as any;
 
     // Logs pruned (no identity outcome left), quarantine active: blocked, no browser run.
     vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(mappingWith("active"));
-    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue(null);
+    vi.mocked(storage.getLatestPortfolioIdentityLog).mockResolvedValue(null);
     expect(await triggerPortfolioAutomationFromStageChange("Proj F", null, "Cust F", "hs-6")).toMatchObject({ skipped: true, reason: "portfolio_identity_blocked" });
     expect(runner.runPhase1WithRetry).not.toHaveBeenCalled();
 
@@ -149,9 +156,24 @@ describe("triggerPortfolioAutomationFromStageChange skip returns (real implement
     vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(mappingWith("cleared"));
     expect((await triggerPortfolioAutomationFromStageChange("Proj F", null, "Cust F", "hs-6")) as { skipped?: boolean }).not.toMatchObject({ skipped: true });
     vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(mappingWith("active"));
-    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue("success");
+    vi.mocked(storage.getLatestPortfolioIdentityLog).mockResolvedValue(idLog("success", "2026-10-06T00:00:00.000Z"));
     expect((await triggerPortfolioAutomationFromStageChange("Proj F", null, "Cust F", "hs-6")) as { skipped?: boolean }).not.toMatchObject({ skipped: true });
     expect(runner.runPhase1WithRetry).toHaveBeenCalledTimes(2);
+  });
+
+  it("Codex P1 on #109: a success log OLDER than an active quarantine does not re-arm (the failed-log insert may have been lost)", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const runner = await import("../server/portfolio-automation-runner.ts");
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({ key: "procore_config", value: { companyId: "12345" } } as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue({
+      hubspotDealId: "hs-8",
+      bidboardProjectId: "562949956000008",
+      metadata: { portfolioIdentityQuarantine: { status: "active", detectedAt: "2026-10-05T00:00:00.000Z" } },
+    } as any);
+    vi.mocked(storage.getLatestPortfolioIdentityLog).mockResolvedValue(idLog("success", "2026-10-01T00:00:00.000Z"));
+    expect(await triggerPortfolioAutomationFromStageChange("Proj H", null, "Cust H", "hs-8")).toMatchObject({ skipped: true, reason: "portfolio_identity_blocked" });
+    expect(runner.runPhase1WithRetry).not.toHaveBeenCalled();
   });
 
   it("a validated run clears an active quarantine (kept for the record as status 'cleared'); a clear failure never throws", async () => {
@@ -178,11 +200,11 @@ describe("triggerPortfolioAutomationFromStageChange skip returns (real implement
     const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
     vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue({ hubspotDealId: "hs-5", bidboardProjectId: "562949956000005" } as any);
     vi.mocked(storage.getAutomationConfig).mockResolvedValue(undefined as any); // company id missing
-    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue("failed");
+    vi.mocked(storage.getLatestPortfolioIdentityLog).mockResolvedValue(idLog("failed"));
     expect(await triggerPortfolioAutomationFromStageChange("Proj E", null, "Cust E", "hs-5")).toMatchObject({ skipped: true, reason: "portfolio_identity_blocked" });
 
     vi.mocked(storage.getAutomationConfig).mockResolvedValue({ key: "procore_config", value: { companyId: "12345" } } as any);
-    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockRejectedValue(new Error("db down"));
+    vi.mocked(storage.getLatestPortfolioIdentityLog).mockRejectedValue(new Error("db down"));
     await expect(triggerPortfolioAutomationFromStageChange("Proj E", null, "Cust E", "hs-5")).rejects.toThrow(/db down/);
     expect(runner.runPhase1WithRetry).not.toHaveBeenCalled();
   });
