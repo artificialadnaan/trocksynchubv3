@@ -3080,7 +3080,7 @@ export function portfolioIdentityQuarantineActive(metadata: unknown): boolean {
  * blocked until a validated run clears it.
  */
 export function portfolioIdentityBlocked(
-  latest: { status: "success" | "failed"; createdAt: Date | string } | null,
+  latest: { status: "success" | "failed"; createdAt: Date | string | null } | null,
   metadata: unknown,
 ): boolean {
   if (latest?.status === "failed") return true;
@@ -3089,7 +3089,8 @@ export function portfolioIdentityBlocked(
   const detectedAt = Date.parse(
     String((metadata as { portfolioIdentityQuarantine?: { detectedAt?: unknown } }).portfolioIdentityQuarantine?.detectedAt ?? ""),
   );
-  const loggedAt = new Date(latest.createdAt).getTime();
+  // A log with no time cannot be ordered against the quarantine: treated as older (blocked until a validated run clears).
+  const loggedAt = latest.createdAt == null ? Number.NaN : new Date(latest.createdAt).getTime();
   return Number.isNaN(detectedAt) || Number.isNaN(loggedAt) || loggedAt < detectedAt;
 }
 
