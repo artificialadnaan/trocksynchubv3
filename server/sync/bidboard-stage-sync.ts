@@ -387,12 +387,15 @@ async function handlePortfolioTriggerSkip(
   let manualReviewQueued: boolean | null = null;
   // Both per-deal skips (not the global no_company_id) queue ONE manual review and ONE alert, deduped across cycles.
   if (skip.reason === "no_bidboard_project_id" || skip.reason === "portfolio_identity_blocked") {
+    const reviewReason =
+      skip.reason === "portfolio_identity_blocked" ? "portfolio_trigger_identity_blocked" : "portfolio_trigger_no_bidboard_project_id";
     // Cross-cycle dedup: if this project already has an UNRESOLVED review row (e.g. a prior cycle whose
     // HubSpot write failed and re-detected the same transition under a fresh cycleId), don't create a
     // duplicate row OR a duplicate alert — it is already flagged and awaiting attention.
     let existingUnresolved = null;
     try {
-      existingUnresolved = await storage.getUnresolvedManualReviewQueueEntry(projectNumber);
+      // Deduped by project number AND reason (v13 on #106): another reason's open review must not swallow this one.
+      existingUnresolved = await storage.getUnresolvedManualReviewQueueEntry(projectNumber, reviewReason);
     } catch (err) {
       log(
         `[sync] Could not check the manual-review queue for ${change.projectName}: ${err instanceof Error ? err.message : String(err)}`,
@@ -420,7 +423,7 @@ async function handlePortfolioTriggerSkip(
         currentStage: change.newStage,
         previousStage: change.previousStage,
         cycleId: opts.modeConfig.cycleId,
-        reason: skip.reason === "portfolio_identity_blocked" ? "portfolio_trigger_identity_blocked" : "portfolio_trigger_no_bidboard_project_id",
+        reason: reviewReason,
         mappingSource: opts.mappingSource,
         modeConfig: opts.modeConfig,
         hubspotDealId: change.hubspotDealId ?? null,
@@ -491,7 +494,7 @@ async function flagDuplicateProjectNumber(
   log(`[sync] Stage sync skip: Project # ${projectNumber} is on ${same.length} Bid Board rows (${summary}) — not synced until each has its own number`, "sync");
   let queued = false;
   try {
-    if (await storage.getUnresolvedManualReviewQueueEntry(projectNumber)) return;
+    if (await storage.getUnresolvedManualReviewQueueEntry(projectNumber, "duplicate_project_number_in_bid_board")) return;
   } catch (err) {
     log(`[sync] Could not check the manual-review queue for duplicate Project # ${projectNumber}: ${err instanceof Error ? err.message : String(err)}`, "sync");
   }

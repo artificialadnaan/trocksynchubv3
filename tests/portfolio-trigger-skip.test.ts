@@ -20,6 +20,8 @@ vi.mock("../server/storage.ts", () => ({
     createSyncMapping: vi.fn(),
     getAutomationConfig: vi.fn(),
     getLatestPortfolioIdentityOutcome: vi.fn(),
+    getSyncMappingByBidboardProjectId: vi.fn(),
+    updateSyncMapping: vi.fn(),
   },
 }));
 vi.mock("../server/portfolio-automation-runner.ts", () => ({ runPhase1WithRetry: vi.fn() }));
@@ -126,6 +128,48 @@ describe("triggerPortfolioAutomationFromStageChange skip returns (real implement
       expect((result as { skipped?: boolean }).skipped).not.toBe(true);
     }
     expect(runner.runPhase1WithRetry).toHaveBeenCalledTimes(2);
+  });
+
+  it("v13 on #106: with the identity logs PRUNED, the mapping's durable quarantine still blocks; a cleared one, or a later validated run, re-arms", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const runner = await import("../server/portfolio-automation-runner.ts");
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    vi.mocked(storage.getAutomationConfig).mockResolvedValue({ key: "procore_config", value: { companyId: "12345" } } as any);
+    vi.mocked(runner.runPhase1WithRetry).mockResolvedValue({ result: { success: true } } as any);
+    const mappingWith = (status: string) =>
+      ({ hubspotDealId: "hs-6", bidboardProjectId: "562949956000006", metadata: { portfolioIdentityQuarantine: { status, reason: "portfolio_project_number_mismatch" } } }) as any;
+
+    // Logs pruned (no identity outcome left), quarantine active: blocked, no browser run.
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(mappingWith("active"));
+    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue(null);
+    expect(await triggerPortfolioAutomationFromStageChange("Proj F", null, "Cust F", "hs-6")).toMatchObject({ skipped: true, reason: "portfolio_identity_blocked" });
+    expect(runner.runPhase1WithRetry).not.toHaveBeenCalled();
+
+    // A cleared quarantine with no logs runs; so does a later validated run even if the quarantine still reads active.
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(mappingWith("cleared"));
+    expect((await triggerPortfolioAutomationFromStageChange("Proj F", null, "Cust F", "hs-6")) as { skipped?: boolean }).not.toMatchObject({ skipped: true });
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(mappingWith("active"));
+    vi.mocked(storage.getLatestPortfolioIdentityOutcome).mockResolvedValue("success");
+    expect((await triggerPortfolioAutomationFromStageChange("Proj F", null, "Cust F", "hs-6")) as { skipped?: boolean }).not.toMatchObject({ skipped: true });
+    expect(runner.runPhase1WithRetry).toHaveBeenCalledTimes(2);
+  });
+
+  it("a validated run clears an active quarantine (kept for the record as status 'cleared'); a clear failure never throws", async () => {
+    const { storage } = await import("../server/storage.ts");
+    const { clearPortfolioIdentityQuarantine } = await import("../server/playwright/portfolio-automation.ts");
+    vi.mocked(storage.getSyncMappingByBidboardProjectId).mockResolvedValue({
+      id: 41,
+      metadata: { proposalId: "p-1", portfolioIdentityQuarantine: { status: "active", reason: "portfolio_project_number_mismatch" } },
+    } as any);
+    await clearPortfolioIdentityQuarantine("562949956000007");
+    expect(storage.updateSyncMapping).toHaveBeenCalledWith(41, {
+      metadata: expect.objectContaining({
+        proposalId: "p-1",
+        portfolioIdentityQuarantine: expect.objectContaining({ status: "cleared", reason: "portfolio_project_number_mismatch", clearedAt: expect.any(String) }),
+      }),
+    });
+    vi.mocked(storage.getSyncMappingByBidboardProjectId).mockRejectedValue(new Error("db down"));
+    await expect(clearPortfolioIdentityQuarantine("562949956000007")).resolves.toBeUndefined();
   });
 
   it("checks the identity block BEFORE the global company-id skip, and fails closed when it cannot read it", async () => {
