@@ -457,7 +457,7 @@ export interface IStorage {
   /** The latest portfolio identity-validation outcome logged for a Bid Board project ("success" | "failed"), or null. */
   getLatestPortfolioIdentityOutcome(bidboardProjectId: string): Promise<"success" | "failed" | null>;
   /** Any UNRESOLVED review row for the project, regardless of cycleId — for cross-cycle dedup. */
-  getUnresolvedManualReviewQueueEntry(projectNumber: string): Promise<ManualReviewQueue | undefined>;
+  getUnresolvedManualReviewQueueEntry(projectNumber: string, reason?: string): Promise<ManualReviewQueue | undefined>;
   createManualReviewQueueEntry(data: InsertManualReviewQueue): Promise<ManualReviewQueue>;
 
   createCloseoutSurvey(data: InsertCloseoutSurvey): Promise<CloseoutSurvey>;
@@ -2029,11 +2029,20 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
-  async getUnresolvedManualReviewQueueEntry(projectNumber: string): Promise<ManualReviewQueue | undefined> {
+  /**
+   * An unresolved review for this project, of THIS reason when one is given (v13 on #106, BACKLOG): keyed on the number
+   * alone, an open review for one reason (a duplicate Project #) swallowed a second reason's row and alert (an identity
+   * block). Without a reason: any open review, as before.
+   */
+  async getUnresolvedManualReviewQueueEntry(projectNumber: string, reason?: string): Promise<ManualReviewQueue | undefined> {
     const [result] = await db
       .select()
       .from(manualReviewQueue)
-      .where(and(eq(manualReviewQueue.projectNumber, projectNumber), isNull(manualReviewQueue.resolvedAt)))
+      .where(and(
+        eq(manualReviewQueue.projectNumber, projectNumber),
+        isNull(manualReviewQueue.resolvedAt),
+        ...(reason !== undefined ? [eq(manualReviewQueue.reason, reason)] : []),
+      ))
       .limit(1);
     return result;
   }

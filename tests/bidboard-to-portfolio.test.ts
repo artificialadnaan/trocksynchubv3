@@ -1139,6 +1139,46 @@ describe("Portfolio automation trigger", () => {
     );
   });
 
+  // v13 on #106 (BACKLOG): the cross-cycle dedupe is by project number AND reason. An open review for ANOTHER reason (a
+  // duplicate Project #) must not swallow an identity block's row and alert.
+  it("an open review for another reason does not swallow an identity-block review (dedupe by number + reason)", async () => {
+    const { triggerPortfolioAutomationFromStageChange } = await import("../server/playwright/portfolio-automation.ts");
+    const { updateHubSpotDealStage } = await import("../server/hubspot.ts");
+    const { resolveHubspotStageId, getTerminalStageGuard } = await import("../server/procore-hubspot-sync.ts");
+    const { storage } = await import("../server/storage.ts");
+    const { syncStagesToHubSpot } = await import("../server/sync/bidboard-stage-sync.ts");
+
+    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-cw", stageName: "Closed Won" });
+    vi.mocked(getTerminalStageGuard).mockResolvedValue(null);
+    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true, message: "ok" });
+    vi.mocked(storage.upsertBidboardSyncState).mockResolvedValue({} as any);
+    vi.mocked(storage.createBidboardAutomationLog).mockResolvedValue({} as any);
+    vi.mocked(storage.getSyncMappingByHubspotDealId).mockResolvedValue(undefined);
+    vi.mocked(storage.createManualReviewQueueEntry).mockResolvedValue({} as any);
+    vi.mocked(storage.createAuditLog).mockResolvedValue({} as any);
+    // Only the identity-block reason has no open review; any other lookup (or a reason-less one) finds one.
+    vi.mocked(storage.getUnresolvedManualReviewQueueEntry).mockImplementation(async (_n: string, reason?: string) =>
+      reason === "portfolio_trigger_identity_blocked" ? undefined : ({ id: 7, resolvedAt: null } as any),
+    );
+
+    vi.mocked(triggerPortfolioAutomationFromStageChange).mockResolvedValue({
+      skipped: true,
+      reason: "portfolio_identity_blocked",
+      projectName: "Production Project",
+      projectNumber: "TP-PROD",
+      customerName: "Zeta Corp",
+      hubspotDealId: "hs-deal-prod",
+    } as any);
+
+    await syncStagesToHubSpot([makeProductionChange("Sent to Production")]);
+
+    expect(vi.mocked(storage.getUnresolvedManualReviewQueueEntry)).toHaveBeenCalledWith(expect.any(String), "portfolio_trigger_identity_blocked");
+    expect(vi.mocked(storage.createManualReviewQueueEntry)).toHaveBeenCalled();
+    expect(vi.mocked(storage.createAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "portfolio_trigger_skipped_portfolio_identity_blocked" }),
+    );
+  });
+
   // The review ROW is what determines manualReviewQueued — a failure of the best-effort breadcrumb log after
   // the row was created must NOT flip the alert to "not queued".
   it("keeps manualReviewQueued=true when only the best-effort breadcrumb log fails after the row is created", async () => {

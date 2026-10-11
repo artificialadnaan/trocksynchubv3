@@ -73,6 +73,8 @@ describe("diffBidBoardStages with a duplicated Project #", () => {
     });
     expect(storage.createManualReviewQueueEntry).toHaveBeenCalledTimes(1);
 
+    // Deduped by number AND this reason (v13 on #106): another reason's open review would not count.
+    expect(storage.getUnresolvedManualReviewQueueEntry).toHaveBeenCalledWith("DFW-1-25726-al", "duplicate_project_number_in_bid_board");
     // The next cycle: the review row is still unresolved, so no second alert or queue row.
     vi.mocked(storage.getUnresolvedManualReviewQueueEntry).mockResolvedValue({ id: 1 } as any);
     expect(await diffBidBoardStages(file)).toEqual([]);
