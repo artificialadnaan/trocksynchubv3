@@ -137,12 +137,19 @@ const PROCORE_LOCK_QUERY_CLIENT_TIMEOUT_MS = 50_000;
 class ProcoreOAuthLockWaitTimeout extends Error {}
 
 /**
- * `work`, or a rejection as soon as `signal` aborts. The abort also reaches the request itself (fetchWithTimeout
- * forwards the caller's signal), so a real body read is cancelled; the race makes the bound hold regardless.
+ * `start()`'s result, or a rejection as soon as `signal` aborts. The abort also reaches the request itself
+ * (fetchWithTimeout forwards the caller's signal), so a real body read is cancelled; the race makes the bound hold
+ * regardless. A THUNK, so an already-aborted deadline never starts the read, and nothing is left to reject unhandled.
  */
-function beforeDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+function beforeDeadline<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
   const timedOut = () => new Error(`Procore token refresh timed out after ${PROCORE_REFRESH_FETCH_TIMEOUT_MS}ms`);
   if (signal.aborted) return Promise.reject(timedOut());
+  let work: Promise<T>;
+  try {
+    work = start();
+  } catch (err) {
+    return Promise.reject(err);
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(timedOut());
     signal.addEventListener("abort", onAbort, { once: true });
@@ -243,9 +250,9 @@ async function upsertProcoreTokenPair(
 
 /**
  * Cross-replica single flight for the single-use Procore refresh token, under the Procore OAuth lock: re-read the
- * oauth_tokens row once the lock is held. If another replica refreshed while we waited (the row has more than
- * `minValidityMs` left, OR its refresh token is no longer the one this caller read), return the row's access token
- * without calling Procore. Otherwise POST /oauth/token with the refresh token READ UNDER THE LOCK and write the new
+ * oauth_tokens row once the lock is held. If the stored access token has more than `minValidityMs` left (another
+ * replica refreshed while we waited), return it without calling Procore. Otherwise POST /oauth/token with the refresh
+ * token READ UNDER THE LOCK (never `callerRefreshToken`, which another replica may already have spent) and write the new
  * pair on the same client before COMMIT. If the lock wait itself times out, re-read the row and return it when it
  * is fresh; otherwise fail without calling Procore. Exported for tests; callers use getAccessToken().
  */
@@ -280,9 +287,10 @@ export async function refreshProcoreAccessTokenUnderLock(
         throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
       }
       const expiresAtMs = utcTimestampTextToMs(row.expires_at);
-      const refreshedMeanwhile =
-        (expiresAtMs !== null && expiresAtMs > Date.now() + minValidityMs) || row.refresh_token !== callerRefreshToken;
-      if (refreshedMeanwhile) {
+      // Short-circuit ONLY on a stored access token that is fresh enough. A rotated pair (another replica refreshed,
+      // so the row's refresh token differs from the caller's) that is itself near expiry is refreshed here: the
+      // single-use protection is that only the refresh token READ UNDER THE LOCK is ever sent, never the caller's.
+      if (expiresAtMs !== null && expiresAtMs > Date.now() + minValidityMs) {
         return row.access_token;
       }
       if (!row.refresh_token) {
@@ -315,11 +323,11 @@ export async function refreshProcoreAccessTokenUnderLock(
         );
 
         if (!response.ok) {
-          const errText = await beforeDeadline(response.text(), deadline.signal);
+          const errText = await beforeDeadline(() => response.text(), deadline.signal);
           throw new Error(`Failed to refresh Procore token: ${response.status} ${errText}`);
         }
 
-        data = await beforeDeadline(response.json(), deadline.signal);
+        data = await beforeDeadline(() => response.json(), deadline.signal);
       } finally {
         clearTimeout(deadlineTimer);
       }
