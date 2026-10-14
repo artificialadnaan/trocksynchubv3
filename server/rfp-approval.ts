@@ -42,6 +42,8 @@ export interface NormalizedRfpRequestInput {
     /** Deal owner / rep — the "Requested by" person (CRM-sourced; HubSpot resolves its own). */
     ownerName?: string | null;
     ownerEmail?: string | null;
+    /** Which CRM field ownerEmail came from (CRM resolveDealOwner); TROCK Core seats only "assigned_rep". */
+    ownerSource?: 'assigned_rep' | 'hubspot' | 'creator' | null;
     /**
      * `deals.company_id` / `deals.property_id` in the CRM — the customer and the job site as uuids.
      * They are what lets TROCK Core resolve both BY ID; matching them by name is unsafe in the other
@@ -1031,6 +1033,8 @@ export function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: 
     contact_name: input.deal.contactName || '',
     ownerName: ownerInfo.ownerName || '',
     ownerEmail: ownerInfo.ownerEmail || '',
+    // Only a trock_crm body names its owner's source; a HubSpot-sourced owner never seats a Core card.
+    ownerSource: input.sourceSystem === 'trock_crm' ? input.deal.ownerSource ?? null : null,
     attachments: input.attachments.map((attachment) => ({
       name: attachment.name,
       url: attachment.url,

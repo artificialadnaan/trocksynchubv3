@@ -41,7 +41,7 @@ export interface ServiceRfpApprovedBody {
    * null when absent or not an email. Always PRESENT. Requires a Core that accepts the key: an older one
    * refuses the extra deal key with a 400.
    */
-  deal: { id: string; rfpProjectNumber: string; ownerEmail: string | null };
+  deal: { id: string; rfpProjectNumber: string; ownerEmail: string | null; ownerSource?: "assigned_rep" | "hubspot" | "creator" };
   /**
    * `billAddress` (TROCK Core #2163): the CRM company's bill address, OMITTED unless all four parts meet Core's rules
    * (an absent key keeps the body byte-identical to before; a malformed one would be Core's 400). Requires a Core that

@@ -371,6 +371,10 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
   // not an email is sent as null rather than refusing the approval over it.
   const rawOwnerEmail = wireString(input.dealData.ownerEmail, MAX.email)?.toLowerCase();
   const ownerEmail = rawOwnerEmail && EMAIL_RE.test(rawOwnerEmail) ? rawOwnerEmail : null;
+  // Which CRM field that email came from (owner 2026-10-14): Core seats the card owner only from "assigned_rep".
+  const ownerSource = ["assigned_rep", "hubspot", "creator"].includes(input.dealData.ownerSource) && ownerEmail
+    ? (input.dealData.ownerSource as "assigned_rep" | "hubspot" | "creator")
+    : null;
   if (!title || !companyName || (contactEmail && !contactName) || !rfpProjectNumber) {
     const missing = [
       !title && "bid title",
@@ -444,7 +448,9 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
       occurredAt: approvedAt.toISOString(),
       rfp: { requestId: input.rfpRequestId, approvedAt: approvedAt.toISOString() },
       // `ownerEmail` is always PRESENT, null when absent. DEPLOY ORDER: Core must accept the key first.
-      deal: { id: dealId, rfpProjectNumber, ownerEmail },
+      // `ownerSource` only when known: absent, the deal (and the whole body) is byte-for-byte what it was before. DEPLOY
+      // ORDER: Core must accept the key first (trock-core v3/sb-rfp-owner).
+      deal: ownerSource ? { id: dealId, rfpProjectNumber, ownerEmail, ownerSource } : { id: dealId, rfpProjectNumber, ownerEmail },
       // `billAddress` only when usable: absent, the company (and the whole body) is byte-for-byte what it was before.
       company: billAddress ? { id: companyId, name: companyName, billAddress } : { id: companyId, name: companyName },
       // NULL, NOT OMITTED, when there is no usable email: Core's parser demands the exact key set, so the
