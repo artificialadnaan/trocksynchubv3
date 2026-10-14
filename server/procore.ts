@@ -39,6 +39,7 @@
 
 import { storage } from './storage';
 import { pool } from './db';
+import type { PoolClient, QueryConfig } from 'pg';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import { updateRateLimits, applyBackpressure } from './lib/rate-limit-tracker';
@@ -79,15 +80,23 @@ function getLoginUrl(environment: string): string {
 // Mutex: only one Procore token refresh at a time (refresh tokens are single-use)
 let refreshPromise: Promise<string> | null = null;
 
-export async function getAccessToken(): Promise<string> {
+/** By default a token with less than this much life left is refreshed first. Callers may ask for more. */
+const DEFAULT_MIN_VALIDITY_MS = 60_000;
+
+/**
+ * A valid Procore access token, refreshed first (under the cross-replica lock) when it has less than
+ * `minValidityMs` left. The default keeps the historical 60 s threshold; Core's token read asks for 5 minutes.
+ */
+export async function getAccessToken(opts: { minValidityMs?: number } = {}): Promise<string> {
+  const minValidityMs = opts.minValidityMs ?? DEFAULT_MIN_VALIDITY_MS;
   const token = await storage.getOAuthToken("procore");
   if (!token?.accessToken) {
     throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
   }
 
-  if (token.expiresAt && new Date(token.expiresAt).getTime() < Date.now() + 60000) {
+  if (token.expiresAt && new Date(token.expiresAt).getTime() < Date.now() + minValidityMs) {
     if (token.refreshToken) {
-      return await refreshAccessToken(token.refreshToken);
+      return await refreshAccessToken(token.refreshToken, minValidityMs);
     }
     throw new Error("Procore token expired and no refresh token available. Please re-authenticate.");
   }
@@ -95,13 +104,13 @@ export async function getAccessToken(): Promise<string> {
   return token.accessToken;
 }
 
-async function refreshAccessToken(refreshToken: string): Promise<string> {
+async function refreshAccessToken(refreshToken: string, minValidityMs: number): Promise<string> {
   // In-process mutex: callers in THIS process share one refresh. Across replicas the advisory lock below serialises.
   if (refreshPromise) {
     return refreshPromise;
   }
 
-  const promise = refreshProcoreAccessTokenUnderLock(refreshToken);
+  const promise = refreshProcoreAccessTokenUnderLock(refreshToken, minValidityMs);
   refreshPromise = promise;
   try {
     return await promise;
@@ -110,87 +119,186 @@ async function refreshAccessToken(refreshToken: string): Promise<string> {
   }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// The Procore OAuth row is written only under pg_advisory_xact_lock(hashtext('procore-oauth-refresh')), on ONE
+// dedicated pool client, inside one transaction: the refresh (which spends the single-use refresh token) and the
+// OAuth callback (which stores a freshly authorised pair). Timeouts, all above the 30 s Procore refresh fetch:
+//   lock_timeout 40 s      a waiter gives up on a holder that is still talking to Procore
+//   statement_timeout 45 s the pool's 30 s default would otherwise cancel a legitimate lock wait
+//   query_timeout 50 s     the pool's client-side 30 s read timeout, raised for the lock query only
+// ---------------------------------------------------------------------------------------------------------------
+const PROCORE_OAUTH_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('procore-oauth-refresh'))";
+const PROCORE_REFRESH_FETCH_TIMEOUT_MS = 30_000;
+const PROCORE_LOCK_TIMEOUT_MS = 40_000;
+const PROCORE_LOCK_STATEMENT_TIMEOUT_MS = 45_000;
+const PROCORE_LOCK_QUERY_CLIENT_TIMEOUT_MS = 50_000;
+
+class ProcoreOAuthLockWaitTimeout extends Error {}
+
+function isLockWaitTimeout(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  const message = err instanceof Error ? err.message : "";
+  // 55P03 lock_not_available (lock_timeout), 57014 query_canceled (statement_timeout), pg's client-side read timeout.
+  return code === "55P03" || code === "57014" || /query read timeout/i.test(message);
+}
+
 /**
- * Cross-replica single flight for the single-use Procore refresh token. On a dedicated pool client:
- *   BEGIN; pg_advisory_xact_lock(hashtext('procore-oauth-refresh')); re-read the oauth_tokens row under the lock.
- * If another replica refreshed while we waited (the row's expiresAt is > 60 s away, OR its refresh token is no longer
- * the one this caller read), return the row's access token without calling Procore. Otherwise POST /oauth/token with
- * the refresh token READ UNDER THE LOCK, upsert the new pair, and only then COMMIT (which releases the lock). Any
- * failure rolls back; the client is always released. Exported for tests; callers use getAccessToken().
+ * Run `work` inside BEGIN .. COMMIT on a dedicated client holding the Procore OAuth advisory lock. The client goes
+ * back to the pool with a plain release() ONLY after a clean COMMIT; on any other path it is rolled back (best
+ * effort) and destroyed with release(true), so a broken connection is never reused.
  */
-export async function refreshProcoreAccessTokenUnderLock(callerRefreshToken: string): Promise<string> {
+async function withProcoreOAuthLock<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
-  let open = false;
+  let committed = false;
   try {
     await client.query("BEGIN");
-    open = true;
-    await client.query("SELECT pg_advisory_xact_lock(hashtext('procore-oauth-refresh'))");
-    const { rows } = await client.query(
-      "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE provider = $1",
-      ["procore"],
-    );
-    const row = rows[0] as { access_token: string | null; refresh_token: string | null; expires_at: Date | string | null } | undefined;
-    if (!row?.access_token) {
-      throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
+    await client.query(`SET LOCAL statement_timeout = ${PROCORE_LOCK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL lock_timeout = ${PROCORE_LOCK_TIMEOUT_MS}`);
+    const lockQuery: QueryConfig & { query_timeout: number } = {
+      text: PROCORE_OAUTH_LOCK_SQL,
+      query_timeout: PROCORE_LOCK_QUERY_CLIENT_TIMEOUT_MS,
+    };
+    try {
+      await client.query(lockQuery);
+    } catch (err) {
+      if (isLockWaitTimeout(err)) {
+        throw new ProcoreOAuthLockWaitTimeout("Timed out waiting for the Procore OAuth lock (another refresh is running)");
+      }
+      throw err;
     }
-    const expiresAtMs = row.expires_at ? new Date(row.expires_at).getTime() : null;
-    const refreshedMeanwhile =
-      (expiresAtMs !== null && expiresAtMs > Date.now() + 60000) || row.refresh_token !== callerRefreshToken;
-    if (refreshedMeanwhile) {
-      await client.query("COMMIT");
-      open = false;
-      return row.access_token;
-    }
-    if (!row.refresh_token) {
-      throw new Error("Procore token expired and no refresh token available. Please re-authenticate.");
-    }
-    const lockedRefreshToken = row.refresh_token;
-
-    const config = await getProcoreConfig();
-    const loginUrl = getLoginUrl(config.environment);
-
-    const response = await fetchWithTimeout(`${loginUrl}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        refresh_token: lockedRefreshToken,
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Failed to refresh Procore token: ${response.status} ${errText}`);
-    }
-
-    const data = await response.json();
-    const expiresAt = new Date(Date.now() + (data.expires_in || 7200) * 1000);
-
-    // Through the pool, awaited BEFORE the COMMIT: a replica waiting on the lock re-reads only after this is visible.
-    await storage.upsertOAuthToken({
-      provider: "procore",
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token || lockedRefreshToken,
-      tokenType: "Bearer",
-      expiresAt,
-    });
-
+    const result = await work(client);
     await client.query("COMMIT");
-    open = false;
-    console.log("Procore token refreshed successfully");
-    return data.access_token;
+    committed = true;
+    return result;
   } finally {
-    if (open) {
+    if (!committed) {
       try {
         await client.query("ROLLBACK");
       } catch {
-        // the connection is unusable; release() below still returns it
+        // the connection is unusable; it is destroyed below either way
       }
     }
-    client.release();
+    client.release(committed ? undefined : true);
   }
+}
+
+/** oauth_tokens.expires_at is `timestamp` (no zone) holding UTC wall-clock time, as drizzle writes it. */
+function utcTimestampTextToMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const iso = value.trim().replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
+  const ms = Date.parse(/(Z|[+-]\d\d(:?\d\d)?)$/.test(iso) ? iso : `${iso}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** Upsert the Procore pair on the LOCKED client (same columns storage.upsertOAuthToken sets). */
+async function upsertProcoreTokenPair(
+  client: PoolClient,
+  pair: { accessToken: string; refreshToken: string | null; expiresAt: Date },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO oauth_tokens (provider, access_token, refresh_token, token_type, expires_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, now())
+     ON CONFLICT (provider) DO UPDATE SET
+       access_token = EXCLUDED.access_token,
+       refresh_token = EXCLUDED.refresh_token,
+       token_type = EXCLUDED.token_type,
+       expires_at = EXCLUDED.expires_at,
+       updated_at = now()`,
+    // toISOString(): stored as UTC wall-clock time in the zone-less column, exactly as drizzle stores it.
+    ["procore", pair.accessToken, pair.refreshToken, "Bearer", pair.expiresAt.toISOString()],
+  );
+}
+
+/**
+ * Cross-replica single flight for the single-use Procore refresh token, under the Procore OAuth lock: re-read the
+ * oauth_tokens row once the lock is held. If another replica refreshed while we waited (the row has more than
+ * `minValidityMs` left, OR its refresh token is no longer the one this caller read), return the row's access token
+ * without calling Procore. Otherwise POST /oauth/token with the refresh token READ UNDER THE LOCK and write the new
+ * pair on the same client before COMMIT. If the lock wait itself times out, re-read the row and return it when it
+ * is fresh; otherwise fail without calling Procore. Exported for tests; callers use getAccessToken().
+ */
+export async function refreshProcoreAccessTokenUnderLock(
+  callerRefreshToken: string,
+  minValidityMs: number = DEFAULT_MIN_VALIDITY_MS,
+): Promise<string> {
+  // Read before taking a connection + the lock, so no second pool connection is needed while the lock is held.
+  const config = await getProcoreConfig();
+  try {
+    return await withProcoreOAuthLock(async (client) => {
+      const { rows } = await client.query(
+        "SELECT access_token, refresh_token, expires_at::text AS expires_at FROM oauth_tokens WHERE provider = $1",
+        ["procore"],
+      );
+      const row = rows[0] as { access_token: string | null; refresh_token: string | null; expires_at: string | null } | undefined;
+      if (!row?.access_token) {
+        throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
+      }
+      const expiresAtMs = utcTimestampTextToMs(row.expires_at);
+      const refreshedMeanwhile =
+        (expiresAtMs !== null && expiresAtMs > Date.now() + minValidityMs) || row.refresh_token !== callerRefreshToken;
+      if (refreshedMeanwhile) {
+        return row.access_token;
+      }
+      if (!row.refresh_token) {
+        throw new Error("Procore token expired and no refresh token available. Please re-authenticate.");
+      }
+      const lockedRefreshToken = row.refresh_token;
+      const loginUrl = getLoginUrl(config.environment);
+
+      const response = await fetchWithTimeout(
+        `${loginUrl}/oauth/token`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grant_type: 'refresh_token',
+            client_id: config.clientId,
+            client_secret: config.clientSecret,
+            refresh_token: lockedRefreshToken,
+          }),
+        },
+        PROCORE_REFRESH_FETCH_TIMEOUT_MS,
+      );
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Failed to refresh Procore token: ${response.status} ${errText}`);
+      }
+
+      const data = await response.json();
+      const expiresAt = new Date(Date.now() + (data.expires_in || 7200) * 1000);
+
+      // Same client, same transaction, before COMMIT: Procore has now spent the old refresh token, so this write
+      // must not depend on getting a second pool connection.
+      await upsertProcoreTokenPair(client, {
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token || lockedRefreshToken,
+        expiresAt,
+      });
+      console.log("Procore token refreshed successfully");
+      return data.access_token as string;
+    });
+  } catch (err) {
+    if (!(err instanceof ProcoreOAuthLockWaitTimeout)) throw err;
+    // Another replica held the lock past lock_timeout (it is mid-refresh). Its result may already be stored.
+    const row = await storage.getOAuthToken("procore");
+    if (row?.accessToken && row.expiresAt && new Date(row.expiresAt).getTime() > Date.now() + minValidityMs) {
+      return row.accessToken;
+    }
+    throw new Error("Procore token refresh timed out waiting for another replica's refresh; try again shortly.");
+  }
+}
+
+/**
+ * Store a freshly authorised Procore pair (the OAuth callback) under the same lock as the refresh, so a reconnect
+ * can never interleave with a refresh's re-read / spend / write.
+ */
+export async function storeProcoreTokenPairUnderLock(pair: {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: Date;
+}): Promise<void> {
+  await withProcoreOAuthLock((client) => upsertProcoreTokenPair(client, pair));
 }
 
 async function fetchProcorePages<T>(endpoint: string, companyId: string): Promise<T[]> {

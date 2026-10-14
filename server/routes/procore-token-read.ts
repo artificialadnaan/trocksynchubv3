@@ -15,7 +15,7 @@
  * SyncHub stays the ONLY caller of Procore's /oauth/token: this route asks getAccessToken(), which refreshes through
  * the advisory-locked path when needed. It answers only { accessToken, expiresAt, companyId } and never the refresh
  * token or any client credential. Fails closed: secret unset/blank/< 32 bytes -> 503; bad signature or a timestamp
- * outside +-300 s -> 401; no usable token -> 503 (never an expired token).
+ * outside +-300 s -> 401; no token with >= 5 min left (after one retry) -> 503.
  *
  * The success body is written with res.send, not res.json: the /api request logger in server/index.ts echoes every
  * res.json body into the logs, and the access token must not land there.
@@ -29,6 +29,8 @@ export const PROCORE_TOKEN_READ_PATH = "/api/internal/procore/access-token";
 export const CORE_PROCORE_TOKEN_READ_SECRET_ENV = "CORE_PROCORE_TOKEN_READ_SECRET";
 const MIN_SECRET_BYTES = 32;
 const MAX_SKEW_SECONDS = 300;
+/** Never serve a token with less than this left (Core re-fetches below 2 minutes and on a 401). */
+const MIN_SERVED_VALIDITY_MS = 5 * 60_000;
 // Integer Unix seconds: no sign, no leading zeros, at most 15 digits (exact as a Number). Mirrors Expense's verifier.
 const TIMESTAMP_RE = /^(0|[1-9][0-9]{0,14})$/;
 const SIGNATURE_RE = /^sha256=([0-9a-f]{64})$/;
@@ -113,41 +115,44 @@ export const handleProcoreTokenRead: RequestHandler = async (req, res) => {
     return;
   }
 
-  let accessToken: string;
-  try {
-    accessToken = await getAccessToken();
-  } catch (err) {
-    unavailable(res, reasonFor(err));
-    return;
-  }
+  // Two tries: getAccessToken({ minValidityMs }) refreshes (under the cross-replica lock) a token with less than
+  // 5 minutes left; if the stored row is still short of that (another replica's pair, or a race), ask once more.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await getAccessToken({ minValidityMs: MIN_SERVED_VALIDITY_MS });
+    } catch (err) {
+      unavailable(res, reasonFor(err));
+      return;
+    }
 
-  let companyId: string;
-  let expiresAt: Date | null;
-  try {
-    const row = await storage.getOAuthToken("procore");
+    let row: Awaited<ReturnType<typeof storage.getOAuthToken>>;
+    try {
+      row = await storage.getOAuthToken("procore");
+    } catch {
+      unavailable(res, "the Procore token could not be read");
+      return;
+    }
     if (!row?.accessToken) {
       unavailable(res, "no Procore login is stored");
       return;
     }
-    // A newer token may have been written since getAccessToken() returned; serve the stored row's pair either way.
-    accessToken = row.accessToken;
-    expiresAt = row.expiresAt ? new Date(row.expiresAt) : null;
-    companyId = await getCompanyId();
-  } catch {
-    unavailable(res, "the Procore token or company could not be read");
-    return;
-  }
-  if (expiresAt === null || Number.isNaN(expiresAt.getTime())) {
-    unavailable(res, "the Procore token has no expiry time");
-    return;
-  }
-  if (expiresAt.getTime() <= Date.now()) {
-    unavailable(res, "the Procore token is expired");
-    return;
-  }
+    const expiresAt = row.expiresAt ? new Date(row.expiresAt) : null;
+    const fresh = expiresAt !== null && !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() > Date.now() + MIN_SERVED_VALIDITY_MS;
+    if (!fresh) continue;
 
-  console.log(`[procore-token-read] served the Procore access token to Core (expires ${expiresAt.toISOString()})`);
-  sendJson(res, 200, { accessToken, expiresAt: expiresAt.toISOString(), companyId });
+    let companyId: string;
+    try {
+      companyId = await getCompanyId();
+    } catch {
+      unavailable(res, "the Procore company is not configured");
+      return;
+    }
+    console.log(`[procore-token-read] served the Procore access token to Core (expires ${expiresAt!.toISOString()})`);
+    // The stored row's pair: a newer token may have been written since getAccessToken() returned.
+    sendJson(res, 200, { accessToken: row.accessToken, expiresAt: expiresAt!.toISOString(), companyId });
+    return;
+  }
+  unavailable(res, "the Procore token has less than 5 minutes left and could not be refreshed");
 };
 
 export function registerProcoreTokenReadRoutes(app: Express): void {

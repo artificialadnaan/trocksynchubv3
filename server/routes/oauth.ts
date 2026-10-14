@@ -39,13 +39,9 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
     const { access_token, refresh_token, expires_in } = response.data;
     const expiresAt = new Date(Date.now() + expires_in * 1000);
 
-    await storage.upsertOAuthToken({
-      provider: "procore",
-      accessToken: access_token,
-      refreshToken: refresh_token,
-      tokenType: "Bearer",
-      expiresAt,
-    });
+    // Under the same advisory lock as the token refresh, so a reconnect never interleaves with a refresh.
+    const { storeProcoreTokenPairUnderLock } = await import("../procore");
+    await storeProcoreTokenPairUnderLock({ accessToken: access_token, refreshToken: refresh_token, expiresAt });
 
     await storage.createAuditLog({
       action: "oauth_connect",

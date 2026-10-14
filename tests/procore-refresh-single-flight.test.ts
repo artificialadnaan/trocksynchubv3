@@ -78,14 +78,17 @@ const h = vi.hoisted(() => {
         }
         if (/^INSERT\s+INTO\s+oauth_tokens/i.test(sql.trim())) {
           ev("UPSERT");
-          const [provider, accessToken, refreshToken, , expiresAt] = params as [string, string, string, string, Date];
+          const [provider, accessToken, refreshToken, , expiresAt] = params as [string, string, string, string, string | Date];
           expect(provider).toBe("procore");
-          state.row = { access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt };
+          state.row = { access_token: accessToken, refresh_token: refreshToken, expires_at: new Date(expiresAt) };
           return { rows: [] };
         }
         if (/from\s+oauth_tokens/i.test(sql)) {
           ev("READ");
-          return { rows: state.row ? [{ ...state.row }] : [] };
+          // Postgres' text form of a zone-less timestamp (UTC wall clock), as `expires_at::text` returns it.
+          const r = state.row;
+          const text = r?.expires_at ? r.expires_at.toISOString().replace("T", " ").replace("Z", "") : null;
+          return { rows: r ? [{ ...r, expires_at: text }] : [] };
         }
         if (s.startsWith("COMMIT")) {
           ev("COMMIT");
