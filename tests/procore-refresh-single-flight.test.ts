@@ -234,13 +234,30 @@ describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () 
     expect(h.state.released).toBe(1);
   });
 
-  it("a stale refresh token passed in is never sent to Procore (the row's newer pair wins)", async () => {
-    // Another replica already spent RT-OLD and stored RT-NEW, even though the new pair is near expiry.
-    h.state.row = { access_token: "AT-NEW", refresh_token: "RT-NEW", expires_at: soon() };
+  it("a stale refresh token passed in is never sent to Procore; a rotated pair that is still fresh is returned as is", async () => {
+    // Another replica already spent RT-OLD and stored RT-NEW with plenty of life left.
+    h.state.row = { access_token: "AT-NEW", refresh_token: "RT-NEW", expires_at: later() };
     const token = await procore.refreshProcoreAccessTokenUnderLock("RT-OLD");
     expect(token).toBe("AT-NEW");
     expect(sentRefreshTokens()).not.toContain("RT-OLD");
     expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+  });
+
+  it("a rotated pair that is already near expiry is REFRESHED with the locked token, not returned stale", async () => {
+    // Another replica stored RT-NEW, but its access token has < minValidity left: refreshing is right, and the
+    // single-use protection comes from sending the token read under the lock (RT-NEW), never the caller's RT-OLD.
+    h.state.row = { access_token: "AT-NEW", refresh_token: "RT-NEW", expires_at: soon() };
+    const token = await procore.refreshProcoreAccessTokenUnderLock("RT-OLD");
+    expect(token).toBe("AT-2");
+    expect(h.fetchWithTimeout).toHaveBeenCalledTimes(1);
+    expect(sentRefreshTokens()).toEqual(["RT-NEW"]);
+    expect(h.state.row?.refresh_token).toBe("RT-2");
+  });
+
+  it("a rotated pair whose expiry is unknown (null) is refreshed too", async () => {
+    h.state.row = { access_token: "AT-NEW", refresh_token: "RT-NEW", expires_at: null };
+    await expect(procore.refreshProcoreAccessTokenUnderLock("RT-OLD")).resolves.toBe("AT-2");
+    expect(sentRefreshTokens()).toEqual(["RT-NEW"]);
   });
 
   it("the refresh sends the refresh token READ UNDER THE LOCK", async () => {
@@ -532,4 +549,40 @@ describe("a COMMIT that fails after Procore answered is logged at error level (t
     }
     expect(errors.join("\n")).not.toMatch(/stale/i);
   });
+});
+
+describe("Codex P2: a deadline that is already aborted never leaves the body promise rejecting unhandled", () => {
+  for (const kind of ["ok (json)", "error (text)"] as const) {
+    it(`${kind}: headers arrive after the deadline and the body rejects -> no unhandledRejection`, async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+        const bodyRejects = () => Promise.reject(new Error("BODY-ABORTED-UNHANDLED-PROBE"));
+        // A fetch that ignores the signal and answers only after the 30 s deadline has fired.
+        h.fetchWithTimeout.mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => resolve({ ok: kind === "ok (json)", status: kind === "ok (json)" ? 200 : 500, json: bodyRejects, text: bodyRejects }), 31_000),
+            ),
+        );
+        const p = procore.refreshProcoreAccessTokenUnderLock("RT-1");
+        p.catch(() => {});
+        await vi.advanceTimersByTimeAsync(31_000);
+        await expect(p).rejects.toThrow(/timed out/i);
+        vi.useRealTimers();
+        // Let Node's unhandled-rejection detection run (it fires after the microtask queue drains).
+        for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setTimeout(r, 20));
+        const probes = unhandled.filter((r) => r instanceof Error && r.message === "BODY-ABORTED-UNHANDLED-PROBE");
+        expect(probes).toEqual([]);
+        expect(h.state.releaseArgs).toEqual([true]);
+      } finally {
+        vi.useRealTimers();
+        process.off("unhandledRejection", onUnhandled);
+      }
+    });
+  }
 });
