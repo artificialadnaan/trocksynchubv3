@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Procore refresh tokens are SINGLE-USE. The in-process promise mutex only serialises refreshes inside one
 // Node process; two replicas (or a deploy overlap) could each read the same refresh token and both spend it,
@@ -190,6 +190,11 @@ beforeEach(() => {
     n++;
     return okRefreshResponse(n);
   });
+});
+
+// A test that times out never reaches its own finally: never let fake timers leak into the next test.
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () => {
