@@ -438,3 +438,52 @@ describe("v9 P3: the OAuth callback's write takes the same advisory lock", () =>
     expect(h.state.releaseArgs[0]).toBeTruthy();
   });
 });
+
+describe("Codex P2: the refresh's 30 s deadline covers reading the body, not just the headers", () => {
+  it("a body that never resolves aborts within 30 s; the lock is released (ROLLBACK + release(true)), nothing stored", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+      let signal: AbortSignal | undefined;
+      h.fetchWithTimeout.mockImplementation(async (_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined;
+        // Headers arrived; the body stalls forever (only an abort would end a real one).
+        return { ok: true, status: 200, json: () => new Promise(() => {}), text: () => new Promise(() => {}) };
+      });
+      let settled = false;
+      const p = procore.refreshProcoreAccessTokenUnderLock("RT-1").finally(() => (settled = true));
+      p.catch(() => {});
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(settled).toBe(false);
+      expect(signal, "the refresh passes its own deadline signal").toBeDefined();
+      expect(signal!.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_500);
+      await expect(p).rejects.toThrow(/timed out/i);
+      expect(signal!.aborted).toBe(true);
+      expect(h.state.events).toEqual(["BEGIN", "SET", "SET", "LOCK", "READ", "ROLLBACK"]);
+      expect(h.state.releaseArgs).toEqual([true]);
+      expect(upserts()).toBe(0);
+      // The lock is free again: a later refresh is not stuck behind the stalled one.
+      vi.useRealTimers();
+      h.fetchWithTimeout.mockImplementation(async () => okRefreshResponse(7));
+      await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).resolves.toBe("AT-7");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an error body that never resolves is bounded the same way", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+      h.fetchWithTimeout.mockImplementation(async () => ({ ok: false, status: 500, json: () => new Promise(() => {}), text: () => new Promise(() => {}) }));
+      const p = procore.refreshProcoreAccessTokenUnderLock("RT-1");
+      p.catch(() => {});
+      await vi.advanceTimersByTimeAsync(30_500);
+      await expect(p).rejects.toThrow(/timed out/i);
+      expect(h.state.releaseArgs).toEqual([true]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
