@@ -22,7 +22,7 @@ const h = vi.hoisted(() => {
     released: number;
     connects: number;
     releaseArgs: unknown[];
-    failOn: { BEGIN?: boolean; ROLLBACK?: boolean; LOCK?: boolean };
+    failOn: { BEGIN?: boolean; ROLLBACK?: boolean; LOCK?: boolean; COMMIT?: boolean };
   } = {
     row: null,
     events: [],
@@ -91,6 +91,7 @@ const h = vi.hoisted(() => {
           return { rows: r ? [{ ...r, expires_at: text }] : [] };
         }
         if (s.startsWith("COMMIT")) {
+          if (state.failOn.COMMIT) throw new Error("connection terminated during COMMIT");
           ev("COMMIT");
           endTx();
           return { rows: [] };
@@ -485,5 +486,45 @@ describe("Codex P2: the refresh's 30 s deadline covers reading the body, not jus
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("a COMMIT that fails after Procore answered is logged at error level (the stored pair may be stale)", () => {
+  it("logs the new pair's expiresAt and the attempt time, never a token", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    h.state.failOn.COMMIT = true;
+    const lines: Record<string, string[]> = { log: [], warn: [], error: [], info: [] };
+    const spies = (["log", "warn", "error", "info"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...a: unknown[]) => void lines[m].push(a.map((x) => (x instanceof Error ? `${x.message} ${x.stack}` : String(x))).join(" "))),
+    );
+    const before = Date.now();
+    try {
+      await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/COMMIT/);
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
+    expect(h.fetchWithTimeout).toHaveBeenCalledTimes(1); // Procore answered: RT-1 is spent, AT-2/RT-2 issued
+    const err = lines.error.join("\n");
+    expect(err).toMatch(/stale/i);
+    const isoStamps = err.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g) ?? [];
+    expect(isoStamps.length).toBeGreaterThanOrEqual(2); // the new pair's expiresAt and the attempt time
+    const expiresAtLogged = isoStamps.map((t) => Date.parse(t)).filter((t) => t > before + 7000 * 1000);
+    expect(expiresAtLogged.length).toBe(1); // expires_in 7200 s
+    const all = Object.values(lines).flat().join("\n");
+    for (const token of ["AT-2", "RT-2", "RT-1", "AT-1", "client-secret"]) expect(all).not.toContain(token);
+    expect(h.state.releaseArgs).toEqual([true]);
+  });
+
+  it("a COMMIT failure BEFORE any Procore call (refreshed-meanwhile path) logs no stale-pair error", async () => {
+    h.state.row = { access_token: "AT-FRESH", refresh_token: "RT-FRESH", expires_at: later() };
+    h.state.failOn.COMMIT = true;
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void errors.push(a.map(String).join(" ")));
+    try {
+      await expect(procore.refreshProcoreAccessTokenUnderLock("RT-FRESH")).rejects.toThrow(/COMMIT/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors.join("\n")).not.toMatch(/stale/i);
   });
 });
