@@ -298,7 +298,10 @@ describe("POST /api/rfp-requests", () => {
       }));
       expect(ok.status).toBe(201);
       expect(rfpRows[0].dealData).toMatchObject({ ownerEmail: "maria@trockgc.com", ownerSource: "assigned_rep" });
+      // Its own event and deal: the endpoint replays a repeated sourceEventId instead of storing a second request.
       const odd = await postRfpRequest(baseUrl, requestBody({
+        sourceEventId: "crm-event-ownsrc-2",
+        sourceDealId: "crm-deal-ownsrc-2",
         deal: { ...requestBody().deal, projectNumber: "OWNSRC-2", ownerEmail: "maria@trockgc.com", ownerSource: "boss" as any },
       }));
       expect(odd.status).toBe(201);
