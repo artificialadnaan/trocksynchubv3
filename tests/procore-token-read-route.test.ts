@@ -189,6 +189,30 @@ describe("POST /api/internal/procore/access-token", () => {
     expect(res.sent).not.toContain("AT-VALID");
   });
 
+  it("a stored token with <= 60 s left is never served: one more getAccessToken(), then 503 if still near expiry", async () => {
+    for (const msLeft of [10_000, 59_000]) {
+      h.getAccessToken.mockClear();
+      h.getOAuthToken.mockResolvedValue({ accessToken: "AT-NEAR", refreshToken: REFRESH_SECRET, expiresAt: new Date(Date.now() + msLeft) });
+      const { res, body } = await call(signed("{}"));
+      expect(res.statusCode).toBe(503);
+      expect(body.error).toBe("procore_token_unavailable");
+      expect(res.sent).not.toContain("AT-NEAR");
+      expect(h.getAccessToken).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("a near-expiry row is served only after the second getAccessToken() refreshed it", async () => {
+    const fresh = new Date(Date.now() + 2 * 3600_000);
+    h.getOAuthToken
+      .mockResolvedValueOnce({ accessToken: "AT-NEAR", refreshToken: REFRESH_SECRET, expiresAt: new Date(Date.now() + 10_000) })
+      .mockResolvedValueOnce({ accessToken: "AT-REFRESHED", refreshToken: "RT-2", expiresAt: fresh });
+    const { res, body } = await call(signed("{}"));
+    expect(res.statusCode).toBe(200);
+    expect(body).toEqual({ accessToken: "AT-REFRESHED", expiresAt: fresh.toISOString(), companyId: "4280" });
+    expect(res.sent).not.toContain("AT-NEAR");
+    expect(h.getAccessToken).toHaveBeenCalledTimes(2);
+  });
+
   it("no stored row -> 503 procore_token_unavailable", async () => {
     h.getAccessToken.mockRejectedValueOnce(new Error("No Procore OAuth token found. Please authenticate via OAuth first."));
     h.getOAuthToken.mockResolvedValue(undefined);

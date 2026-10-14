@@ -19,7 +19,9 @@ const h = vi.hoisted(() => {
     lockTail: Promise<void>;
     released: number;
     connects: number;
-  } = { row: null, events: [], queries: [], lockTail: Promise.resolve(), released: 0, connects: 0 };
+    releaseArgs: unknown[];
+    failOn: { BEGIN?: boolean; ROLLBACK?: boolean };
+  } = { row: null, events: [], queries: [], lockTail: Promise.resolve(), released: 0, connects: 0, releaseArgs: [], failOn: {} };
 
   /** A fake pg client: an advisory xact lock that really serialises, released on COMMIT/ROLLBACK. */
   function makeClient() {
@@ -35,6 +37,7 @@ const h = vi.hoisted(() => {
         state.queries.push({ sql, params });
         const s = sql.trim().toUpperCase();
         if (s.startsWith("BEGIN")) {
+          if (state.failOn.BEGIN) throw new Error("connection terminated during BEGIN");
           state.events.push("BEGIN");
           return { rows: [] };
         }
@@ -57,13 +60,15 @@ const h = vi.hoisted(() => {
           return { rows: [] };
         }
         if (s.startsWith("ROLLBACK")) {
+          if (state.failOn.ROLLBACK) throw new Error("connection terminated during ROLLBACK");
           state.events.push("ROLLBACK");
           endTx();
           return { rows: [] };
         }
         throw new Error(`unexpected SQL in test: ${sql}`);
       }),
-      release: vi.fn(() => {
+      release: vi.fn((arg?: unknown) => {
+        state.releaseArgs.push(arg);
         state.released++;
       }),
     };
@@ -123,6 +128,8 @@ beforeEach(() => {
   h.state.lockTail = Promise.resolve();
   h.state.released = 0;
   h.state.connects = 0;
+  h.state.releaseArgs = [];
+  h.state.failOn = {};
   h.fetchWithTimeout.mockReset();
   h.storage.upsertOAuthToken.mockClear();
   h.pool.connect.mockClear();
@@ -200,6 +207,47 @@ describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () 
     await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/No Procore OAuth token/);
     expect(h.fetchWithTimeout).not.toHaveBeenCalled();
     expect(h.state.released).toBe(1);
+  });
+});
+
+describe("the pool client is destroyed, never reused, unless the transaction ended in a clean COMMIT", () => {
+  it("a clean COMMIT returns the client with a plain release()", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    await procore.refreshProcoreAccessTokenUnderLock("RT-1");
+    expect(h.state.releaseArgs).toEqual([undefined]);
+  });
+
+  it("the refreshed-meanwhile COMMIT also returns it with a plain release()", async () => {
+    h.state.row = { access_token: "AT-FRESH", refresh_token: "RT-FRESH", expires_at: later() };
+    await procore.refreshProcoreAccessTokenUnderLock("RT-FRESH");
+    expect(h.state.releaseArgs).toEqual([undefined]);
+  });
+
+  it("ROLLBACK rejecting -> release is called with a truthy argument (destroy), and the original error surfaces", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    h.state.failOn.ROLLBACK = true;
+    h.fetchWithTimeout.mockImplementation(async () => ({ ok: false, status: 400, text: async () => "invalid_grant", json: async () => ({}) }));
+    await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/Failed to refresh Procore token/);
+    expect(h.state.releaseArgs).toHaveLength(1);
+    expect(h.state.releaseArgs[0]).toBeTruthy();
+  });
+
+  it("BEGIN throwing -> release is called with a truthy argument; no lock, no Procore call", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    h.state.failOn.BEGIN = true;
+    await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/BEGIN/);
+    expect(h.state.events).not.toContain("LOCK");
+    expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+    expect(h.state.releaseArgs).toHaveLength(1);
+    expect(h.state.releaseArgs[0]).toBeTruthy();
+  });
+
+  it("a failure rolled back cleanly still destroys the client (plain release only after COMMIT)", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    h.fetchWithTimeout.mockImplementation(async () => ({ ok: false, status: 400, text: async () => "invalid_grant", json: async () => ({}) }));
+    await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow();
+    expect(h.state.events).toContain("ROLLBACK");
+    expect(h.state.releaseArgs[0]).toBeTruthy();
   });
 });
 
