@@ -94,7 +94,12 @@ export async function getAccessToken(opts: { minValidityMs?: number } = {}): Pro
     throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
   }
 
-  if (token.expiresAt && new Date(token.expiresAt).getTime() < Date.now() + minValidityMs) {
+  // An unknown expiry (NULL) cannot be shown to have minValidityMs left: with a refresh token it is refreshed
+  // (under the lock) so the row gets a real expiry. Without one, the stored token is returned as before.
+  const expiresAtMs = token.expiresAt ? new Date(token.expiresAt).getTime() : null;
+  const needsRefresh =
+    expiresAtMs === null || Number.isNaN(expiresAtMs) ? Boolean(token.refreshToken) : expiresAtMs < Date.now() + minValidityMs;
+  if (needsRefresh) {
     if (token.refreshToken) {
       return await refreshAccessToken(token.refreshToken, minValidityMs);
     }
