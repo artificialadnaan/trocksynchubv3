@@ -38,6 +38,7 @@
  */
 
 import { storage } from './storage';
+import { pool } from './db';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import { updateRateLimits, applyBackpressure } from './lib/rate-limit-tracker';
@@ -95,11 +96,56 @@ export async function getAccessToken(): Promise<string> {
 }
 
 async function refreshAccessToken(refreshToken: string): Promise<string> {
+  // In-process mutex: callers in THIS process share one refresh. Across replicas the advisory lock below serialises.
   if (refreshPromise) {
     return refreshPromise;
   }
 
-  const doRefresh = async (): Promise<string> => {
+  const promise = refreshProcoreAccessTokenUnderLock(refreshToken);
+  refreshPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+/**
+ * Cross-replica single flight for the single-use Procore refresh token. On a dedicated pool client:
+ *   BEGIN; pg_advisory_xact_lock(hashtext('procore-oauth-refresh')); re-read the oauth_tokens row under the lock.
+ * If another replica refreshed while we waited (the row's expiresAt is > 60 s away, OR its refresh token is no longer
+ * the one this caller read), return the row's access token without calling Procore. Otherwise POST /oauth/token with
+ * the refresh token READ UNDER THE LOCK, upsert the new pair, and only then COMMIT (which releases the lock). Any
+ * failure rolls back; the client is always released. Exported for tests; callers use getAccessToken().
+ */
+export async function refreshProcoreAccessTokenUnderLock(callerRefreshToken: string): Promise<string> {
+  const client = await pool.connect();
+  let open = false;
+  try {
+    await client.query("BEGIN");
+    open = true;
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('procore-oauth-refresh'))");
+    const { rows } = await client.query(
+      "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE provider = $1",
+      ["procore"],
+    );
+    const row = rows[0] as { access_token: string | null; refresh_token: string | null; expires_at: Date | string | null } | undefined;
+    if (!row?.access_token) {
+      throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
+    }
+    const expiresAtMs = row.expires_at ? new Date(row.expires_at).getTime() : null;
+    const refreshedMeanwhile =
+      (expiresAtMs !== null && expiresAtMs > Date.now() + 60000) || row.refresh_token !== callerRefreshToken;
+    if (refreshedMeanwhile) {
+      await client.query("COMMIT");
+      open = false;
+      return row.access_token;
+    }
+    if (!row.refresh_token) {
+      throw new Error("Procore token expired and no refresh token available. Please re-authenticate.");
+    }
+    const lockedRefreshToken = row.refresh_token;
+
     const config = await getProcoreConfig();
     const loginUrl = getLoginUrl(config.environment);
 
@@ -110,7 +156,7 @@ async function refreshAccessToken(refreshToken: string): Promise<string> {
         grant_type: 'refresh_token',
         client_id: config.clientId,
         client_secret: config.clientSecret,
-        refresh_token: refreshToken,
+        refresh_token: lockedRefreshToken,
       }),
     });
 
@@ -122,24 +168,28 @@ async function refreshAccessToken(refreshToken: string): Promise<string> {
     const data = await response.json();
     const expiresAt = new Date(Date.now() + (data.expires_in || 7200) * 1000);
 
+    // Through the pool, awaited BEFORE the COMMIT: a replica waiting on the lock re-reads only after this is visible.
     await storage.upsertOAuthToken({
       provider: "procore",
       accessToken: data.access_token,
-      refreshToken: data.refresh_token || refreshToken,
+      refreshToken: data.refresh_token || lockedRefreshToken,
       tokenType: "Bearer",
       expiresAt,
     });
 
+    await client.query("COMMIT");
+    open = false;
     console.log("Procore token refreshed successfully");
     return data.access_token;
-  };
-
-  const promise = doRefresh();
-  refreshPromise = promise;
-  try {
-    return await promise;
   } finally {
-    refreshPromise = null;
+    if (open) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // the connection is unusable; release() below still returns it
+      }
+    }
+    client.release();
   }
 }
 
