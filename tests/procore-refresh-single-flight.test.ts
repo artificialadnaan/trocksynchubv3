@@ -417,6 +417,25 @@ describe("getAccessToken goes through the locked refresh, and keeps the in-proce
     expect(h.fetchWithTimeout).not.toHaveBeenCalled();
   });
 
+  it("an unknown expiry (NULL) with a refresh token counts as 'needs refresh': one locked refresh, a fresh token returned", async () => {
+    h.state.row = { access_token: "AT-NULL", refresh_token: "RT-NULL", expires_at: null };
+    expect(await procore.getAccessToken({ minValidityMs: 5 * 60_000 })).toBe("AT-2");
+    expect(h.pool.connect).toHaveBeenCalledTimes(1);
+    expect(h.fetchWithTimeout).toHaveBeenCalledTimes(1);
+    expect(sentRefreshTokens()).toEqual(["RT-NULL"]);
+    // The stored row now has a real expiry, so the next call is served without another refresh.
+    expect(h.state.row?.expires_at).toBeInstanceOf(Date);
+    expect(await procore.getAccessToken({ minValidityMs: 5 * 60_000 })).toBe("AT-2");
+    expect(h.fetchWithTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unknown expiry with NO refresh token behaves as before: the stored token, no lock, no Procore call", async () => {
+    h.state.row = { access_token: "AT-NULL", refresh_token: null, expires_at: null };
+    expect(await procore.getAccessToken()).toBe("AT-NULL");
+    expect(h.pool.connect).not.toHaveBeenCalled();
+    expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+  });
+
   it("minValidityMs is configurable: 3 min left is fine by default, but refreshes when the caller needs >= 5 min", async () => {
     h.state.row = { access_token: "AT-3MIN", refresh_token: "RT-3MIN", expires_at: new Date(Date.now() + 3 * 60_000) };
     expect(await procore.getAccessToken()).toBe("AT-3MIN");
