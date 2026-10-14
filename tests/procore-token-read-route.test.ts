@@ -189,8 +189,8 @@ describe("POST /api/internal/procore/access-token", () => {
     expect(res.sent).not.toContain("AT-VALID");
   });
 
-  it("a stored token with <= 60 s left is never served: one more getAccessToken(), then 503 if still near expiry", async () => {
-    for (const msLeft of [10_000, 59_000]) {
+  it("a stored token with < 5 min left is never served: one more getAccessToken(), then 503 if still near expiry", async () => {
+    for (const msLeft of [10_000, 59_000, 4 * 60_000, 5 * 60_000 - 1_000]) {
       h.getAccessToken.mockClear();
       h.getOAuthToken.mockResolvedValue({ accessToken: "AT-NEAR", refreshToken: REFRESH_SECRET, expiresAt: new Date(Date.now() + msLeft) });
       const { res, body } = await call(signed("{}"));
@@ -198,7 +198,19 @@ describe("POST /api/internal/procore/access-token", () => {
       expect(body.error).toBe("procore_token_unavailable");
       expect(res.sent).not.toContain("AT-NEAR");
       expect(h.getAccessToken).toHaveBeenCalledTimes(2);
+      // Each call asks for a token valid for at least 5 minutes, so getAccessToken refreshes one that is not.
+      for (const c of h.getAccessToken.mock.calls) expect(c[0]).toEqual({ minValidityMs: 5 * 60_000 });
     }
+  });
+
+  it("a token with more than 5 min left is served on the first try", async () => {
+    const exp = new Date(Date.now() + 6 * 60_000);
+    h.getOAuthToken.mockResolvedValue({ accessToken: "AT-6MIN", refreshToken: REFRESH_SECRET, expiresAt: exp });
+    const { res, body } = await call(signed("{}"));
+    expect(res.statusCode).toBe(200);
+    expect(body.accessToken).toBe("AT-6MIN");
+    expect(h.getAccessToken).toHaveBeenCalledTimes(1);
+    expect(h.getAccessToken).toHaveBeenCalledWith({ minValidityMs: 5 * 60_000 });
   });
 
   it("a near-expiry row is served only after the second getAccessToken() refreshed it", async () => {

@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Procore refresh tokens are SINGLE-USE. The in-process promise mutex only serialises refreshes inside one
 // Node process; two replicas (or a deploy overlap) could each read the same refresh token and both spend it,
 // and the loser's refresh fails, logging SyncHub out of Procore. The refresh now runs inside a Postgres
-// transaction that holds pg_advisory_xact_lock(hashtext('procore-oauth-refresh')) and RE-READS the token row
-// once the lock is held, so a waiter that finds the row already refreshed returns it without calling Procore.
-// Everything here is mocked: no database, no network.
+// transaction on ONE dedicated client that holds pg_advisory_xact_lock(hashtext('procore-oauth-refresh')),
+// RE-READS the token row once the lock is held, and writes the new pair on that SAME client before COMMIT (a
+// second pool connection could lose the write after Procore has spent the old token). Everything here is
+// mocked: no database, no network.
 
 const LOCK_KEY = "procore-oauth-refresh";
 
@@ -15,13 +16,24 @@ const h = vi.hoisted(() => {
   const state: {
     row: Row | null;
     events: string[];
-    queries: Array<{ sql: string; params: unknown[] }>;
+    trace: string[];
+    queries: Array<{ sql: string; params: unknown[]; queryTimeout?: number }>;
     lockTail: Promise<void>;
     released: number;
     connects: number;
     releaseArgs: unknown[];
-    failOn: { BEGIN?: boolean; ROLLBACK?: boolean };
-  } = { row: null, events: [], queries: [], lockTail: Promise.resolve(), released: 0, connects: 0, releaseArgs: [], failOn: {} };
+    failOn: { BEGIN?: boolean; ROLLBACK?: boolean; LOCK?: boolean };
+  } = {
+    row: null,
+    events: [],
+    trace: [],
+    queries: [],
+    lockTail: Promise.resolve(),
+    released: 0,
+    connects: 0,
+    releaseArgs: [],
+    failOn: {},
+  };
 
   /** A fake pg client: an advisory xact lock that really serialises, released on COMMIT/ROLLBACK. */
   function makeClient() {
@@ -32,36 +44,57 @@ const h = vi.hoisted(() => {
         releaseLock = null;
       }
     };
+    const ev = (e: string) => {
+      state.events.push(e);
+      state.trace.push(`client:${e}`);
+    };
     return {
-      query: vi.fn(async (sql: string, params: unknown[] = []) => {
-        state.queries.push({ sql, params });
+      query: vi.fn(async (sqlOrConfig: string | { text: string; values?: unknown[]; query_timeout?: number }, maybeParams: unknown[] = []) => {
+        const sql = typeof sqlOrConfig === "string" ? sqlOrConfig : sqlOrConfig.text;
+        const params = typeof sqlOrConfig === "string" ? maybeParams : (sqlOrConfig.values ?? maybeParams);
+        const queryTimeout = typeof sqlOrConfig === "string" ? undefined : sqlOrConfig.query_timeout;
+        state.queries.push({ sql, params, queryTimeout });
         const s = sql.trim().toUpperCase();
         if (s.startsWith("BEGIN")) {
           if (state.failOn.BEGIN) throw new Error("connection terminated during BEGIN");
-          state.events.push("BEGIN");
+          ev("BEGIN");
+          return { rows: [] };
+        }
+        if (s.startsWith("SET LOCAL")) {
+          ev("SET");
           return { rows: [] };
         }
         if (/pg_advisory_xact_lock/i.test(sql)) {
+          if (state.failOn.LOCK) {
+            throw Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
+          }
           const prev = state.lockTail;
           let mine!: () => void;
           state.lockTail = new Promise<void>((r) => (mine = r));
           await prev;
           releaseLock = mine;
-          state.events.push("LOCK");
+          ev("LOCK");
           return { rows: [{}] };
         }
+        if (/^INSERT\s+INTO\s+oauth_tokens/i.test(sql.trim())) {
+          ev("UPSERT");
+          const [provider, accessToken, refreshToken, , expiresAt] = params as [string, string, string, string, Date];
+          expect(provider).toBe("procore");
+          state.row = { access_token: accessToken, refresh_token: refreshToken, expires_at: expiresAt };
+          return { rows: [] };
+        }
         if (/from\s+oauth_tokens/i.test(sql)) {
-          state.events.push("READ");
+          ev("READ");
           return { rows: state.row ? [{ ...state.row }] : [] };
         }
         if (s.startsWith("COMMIT")) {
-          state.events.push("COMMIT");
+          ev("COMMIT");
           endTx();
           return { rows: [] };
         }
         if (s.startsWith("ROLLBACK")) {
           if (state.failOn.ROLLBACK) throw new Error("connection terminated during ROLLBACK");
-          state.events.push("ROLLBACK");
+          ev("ROLLBACK");
           endTx();
           return { rows: [] };
         }
@@ -76,17 +109,19 @@ const h = vi.hoisted(() => {
 
   const storage = {
     getOAuthToken: vi.fn(async (_p: string) => {
+      state.trace.push("pool:getOAuthToken");
       const r = state.row;
       return r ? { accessToken: r.access_token, refreshToken: r.refresh_token, expiresAt: r.expires_at } : undefined;
     }),
     upsertOAuthToken: vi.fn(async (data: any) => {
-      state.events.push("UPSERT");
+      state.trace.push("pool:upsertOAuthToken");
       state.row = { access_token: data.accessToken, refresh_token: data.refreshToken, expires_at: data.expiresAt };
       return data;
     }),
-    getAutomationConfig: vi.fn(async (_key: string) => ({
-      value: { clientId: "client-id", clientSecret: "client-secret", companyId: "4280", environment: "production" },
-    })),
+    getAutomationConfig: vi.fn(async (_key: string) => {
+      state.trace.push("pool:getAutomationConfig");
+      return { value: { clientId: "client-id", clientSecret: "client-secret", companyId: "4280", environment: "production" } };
+    }),
   };
 
   const fetchWithTimeout = vi.fn();
@@ -94,6 +129,10 @@ const h = vi.hoisted(() => {
     connect: vi.fn(async () => {
       state.connects++;
       return makeClient();
+    }),
+    query: vi.fn(async () => {
+      state.trace.push("pool:query");
+      return { rows: [] };
     }),
   };
   return { state, storage, fetchWithTimeout, pool };
@@ -116,14 +155,20 @@ function okRefreshResponse(n: number) {
     text: async () => "",
   };
 }
+const failedRefresh = async () => {
+  h.state.trace.push("fetch");
+  return { ok: false, status: 400, text: async () => "invalid_grant", json: async () => ({}) };
+};
 
 function sentRefreshTokens(): unknown[] {
   return h.fetchWithTimeout.mock.calls.map((c: any[]) => JSON.parse(c[1].body).refresh_token);
 }
+const upserts = () => h.state.events.filter((e) => e === "UPSERT").length;
 
 beforeEach(() => {
   h.state.row = null;
   h.state.events = [];
+  h.state.trace = [];
   h.state.queries = [];
   h.state.lockTail = Promise.resolve();
   h.state.released = 0;
@@ -132,9 +177,11 @@ beforeEach(() => {
   h.state.failOn = {};
   h.fetchWithTimeout.mockReset();
   h.storage.upsertOAuthToken.mockClear();
+  h.storage.getOAuthToken.mockClear();
   h.pool.connect.mockClear();
   let n = 1;
   h.fetchWithTimeout.mockImplementation(async () => {
+    h.state.trace.push("fetch");
     await new Promise((r) => setTimeout(r, 5)); // Procore takes a moment, so a second caller is really waiting
     n++;
     return okRefreshResponse(n);
@@ -150,8 +197,8 @@ describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () 
     expect(lock, "the advisory lock SQL is issued").toBeTruthy();
     expect(lock!.sql).toMatch(/pg_advisory_xact_lock\s*\(\s*hashtext\s*\(/i);
     expect(`${lock!.sql} ${JSON.stringify(lock!.params)}`).toContain(LOCK_KEY);
-    // BEGIN, then the lock, then the re-read, then Procore + upsert, and only then COMMIT.
-    expect(h.state.events).toEqual(["BEGIN", "LOCK", "READ", "UPSERT", "COMMIT"]);
+    // BEGIN, the two SET LOCAL timeouts, the lock, the re-read, the new pair written on THIS client, then COMMIT.
+    expect(h.state.events).toEqual(["BEGIN", "SET", "SET", "LOCK", "READ", "UPSERT", "COMMIT"]);
     expect(h.state.released).toBe(1);
   });
 
@@ -165,7 +212,7 @@ describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () 
     expect(sentRefreshTokens()).toEqual(["RT-1"]);
     expect(a).toBe("AT-2");
     expect(b).toBe("AT-2");
-    expect(h.storage.upsertOAuthToken).toHaveBeenCalledTimes(1);
+    expect(upserts()).toBe(1);
     expect(h.state.released).toBe(2);
   });
 
@@ -174,7 +221,7 @@ describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () 
     const token = await procore.refreshProcoreAccessTokenUnderLock("RT-FRESH");
     expect(token).toBe("AT-FRESH");
     expect(h.fetchWithTimeout).not.toHaveBeenCalled();
-    expect(h.storage.upsertOAuthToken).not.toHaveBeenCalled();
+    expect(upserts()).toBe(0);
     expect(h.state.released).toBe(1);
   });
 
@@ -195,10 +242,10 @@ describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () 
 
   it("a failed Procore refresh ROLLs BACK and releases the client (no upsert, no COMMIT)", async () => {
     h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
-    h.fetchWithTimeout.mockImplementation(async () => ({ ok: false, status: 400, text: async () => "invalid_grant", json: async () => ({}) }));
+    h.fetchWithTimeout.mockImplementation(failedRefresh);
     await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/Failed to refresh Procore token/);
-    expect(h.state.events).toEqual(["BEGIN", "LOCK", "READ", "ROLLBACK"]);
-    expect(h.storage.upsertOAuthToken).not.toHaveBeenCalled();
+    expect(h.state.events).toEqual(["BEGIN", "SET", "SET", "LOCK", "READ", "ROLLBACK"]);
+    expect(upserts()).toBe(0);
     expect(h.state.released).toBe(1);
   });
 
@@ -206,6 +253,82 @@ describe("refreshProcoreAccessTokenUnderLock (cross-replica single flight)", () 
     h.state.row = null;
     await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/No Procore OAuth token/);
     expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+    expect(h.state.released).toBe(1);
+  });
+});
+
+describe("v9 P1: the new pair is written on the SAME locked client, inside the transaction", () => {
+  it("the upsert SQL runs on the tx client before COMMIT; no pool query between the Procore call and COMMIT", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    await procore.refreshProcoreAccessTokenUnderLock("RT-1");
+    expect(h.storage.upsertOAuthToken).not.toHaveBeenCalled();
+    const t = h.state.trace;
+    const iFetch = t.indexOf("fetch");
+    const iUpsert = t.indexOf("client:UPSERT");
+    const iCommit = t.indexOf("client:COMMIT");
+    expect(iFetch).toBeGreaterThan(-1);
+    expect(iUpsert).toBeGreaterThan(iFetch);
+    expect(iCommit).toBeGreaterThan(iUpsert);
+    expect(t.slice(iFetch, iCommit).filter((e) => e.startsWith("pool:"))).toEqual([]);
+    expect(h.state.row).toEqual({ access_token: "AT-2", refresh_token: "RT-2", expires_at: expect.any(Date) });
+  });
+
+  it("a Procore response without a new refresh token keeps the one read under the lock", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    h.fetchWithTimeout.mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: "AT-X", expires_in: 7200 }),
+      text: async () => "",
+    }));
+    await procore.refreshProcoreAccessTokenUnderLock("RT-1");
+    expect(h.state.row?.refresh_token).toBe("RT-1");
+    expect(h.state.row?.access_token).toBe("AT-X");
+  });
+});
+
+describe("v9 P2: lock waits get their own timeouts; a timed-out wait falls back to a fresh row or fails cleanly", () => {
+  const ms = (sql: string, name: string): number | null => {
+    const m = new RegExp(`SET\\s+LOCAL\\s+${name}\\s*=\\s*'?(\\d+)`, "i").exec(sql);
+    return m ? Number(m[1]) : null;
+  };
+
+  it("SET LOCAL statement_timeout / lock_timeout right after BEGIN, both above the 30 s Procore fetch timeout", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    await procore.refreshProcoreAccessTokenUnderLock("RT-1");
+    const sqls = h.state.queries.map((q) => q.sql);
+    expect(sqls[0]).toMatch(/^BEGIN/i);
+    const statement = sqls.map((s) => ms(s, "statement_timeout")).find((v) => v !== null);
+    const lockT = sqls.map((s) => ms(s, "lock_timeout")).find((v) => v !== null);
+    expect(statement).toBeGreaterThan(30_000);
+    expect(lockT).toBeGreaterThan(30_000);
+    expect(statement!).toBeGreaterThan(lockT!);
+    // Both SET LOCALs come before the lock is requested.
+    const iLock = sqls.findIndex((s) => /pg_advisory_xact_lock/i.test(s));
+    expect(sqls.slice(1, iLock).every((s) => /^SET LOCAL/i.test(s))).toBe(true);
+    expect(iLock).toBe(3);
+    // The pool's client-side 30 s query_timeout would cut the lock wait short: the lock query carries a longer one.
+    const lockQ = h.state.queries[iLock];
+    expect(lockQ.queryTimeout).toBeGreaterThan(lockT!);
+    // The refresh fetch itself is bounded by an explicit 30 s timeout.
+    expect(h.fetchWithTimeout.mock.calls[0][2]).toBe(30_000);
+  });
+
+  it("a lock wait that times out re-reads the row and returns it when it is fresh (no Procore call)", async () => {
+    h.state.row = { access_token: "AT-FRESH", refresh_token: "RT-FRESH", expires_at: later() };
+    h.state.failOn.LOCK = true;
+    await expect(procore.refreshProcoreAccessTokenUnderLock("RT-OLD")).resolves.toBe("AT-FRESH");
+    expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+    expect(h.state.releaseArgs).toHaveLength(1);
+    expect(h.state.releaseArgs[0]).toBeTruthy(); // not a clean COMMIT -> destroyed
+  });
+
+  it("a lock wait that times out on a still-near-expiry row fails cleanly, without calling Procore", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    h.state.failOn.LOCK = true;
+    await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/timed out waiting/i);
+    expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+    expect(upserts()).toBe(0);
     expect(h.state.released).toBe(1);
   });
 });
@@ -226,7 +349,7 @@ describe("the pool client is destroyed, never reused, unless the transaction end
   it("ROLLBACK rejecting -> release is called with a truthy argument (destroy), and the original error surfaces", async () => {
     h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
     h.state.failOn.ROLLBACK = true;
-    h.fetchWithTimeout.mockImplementation(async () => ({ ok: false, status: 400, text: async () => "invalid_grant", json: async () => ({}) }));
+    h.fetchWithTimeout.mockImplementation(failedRefresh);
     await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow(/Failed to refresh Procore token/);
     expect(h.state.releaseArgs).toHaveLength(1);
     expect(h.state.releaseArgs[0]).toBeTruthy();
@@ -244,7 +367,7 @@ describe("the pool client is destroyed, never reused, unless the transaction end
 
   it("a failure rolled back cleanly still destroys the client (plain release only after COMMIT)", async () => {
     h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
-    h.fetchWithTimeout.mockImplementation(async () => ({ ok: false, status: 400, text: async () => "invalid_grant", json: async () => ({}) }));
+    h.fetchWithTimeout.mockImplementation(failedRefresh);
     await expect(procore.refreshProcoreAccessTokenUnderLock("RT-1")).rejects.toThrow();
     expect(h.state.events).toContain("ROLLBACK");
     expect(h.state.releaseArgs[0]).toBeTruthy();
@@ -266,5 +389,49 @@ describe("getAccessToken goes through the locked refresh, and keeps the in-proce
     expect(await procore.getAccessToken()).toBe("AT-OK");
     expect(h.pool.connect).not.toHaveBeenCalled();
     expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+  });
+
+  it("minValidityMs is configurable: 3 min left is fine by default, but refreshes when the caller needs >= 5 min", async () => {
+    h.state.row = { access_token: "AT-3MIN", refresh_token: "RT-3MIN", expires_at: new Date(Date.now() + 3 * 60_000) };
+    expect(await procore.getAccessToken()).toBe("AT-3MIN");
+    expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+
+    // Under the lock the same threshold applies: a row with 3 min left is NOT "refreshed meanwhile" for this caller.
+    expect(await procore.getAccessToken({ minValidityMs: 5 * 60_000 })).toBe("AT-2");
+    expect(sentRefreshTokens()).toEqual(["RT-3MIN"]);
+  });
+});
+
+describe("v9 P3: the OAuth callback's write takes the same advisory lock", () => {
+  it("storeProcoreTokenPairUnderLock writes the pair on the locked client inside one transaction", async () => {
+    const expiresAt = later();
+    await procore.storeProcoreTokenPairUnderLock({ accessToken: "AT-CB", refreshToken: "RT-CB", expiresAt });
+    expect(h.state.events).toEqual(["BEGIN", "SET", "SET", "LOCK", "UPSERT", "COMMIT"]);
+    const lock = h.state.queries.find((q) => /pg_advisory_xact_lock/i.test(q.sql));
+    expect(`${lock!.sql} ${JSON.stringify(lock!.params)}`).toContain(LOCK_KEY);
+    expect(h.state.row).toEqual({ access_token: "AT-CB", refresh_token: "RT-CB", expires_at: expiresAt });
+    expect(h.storage.upsertOAuthToken).not.toHaveBeenCalled();
+    expect(h.state.releaseArgs).toEqual([undefined]);
+    expect(h.fetchWithTimeout).not.toHaveBeenCalled();
+  });
+
+  it("a callback write waits for an in-flight refresh to COMMIT (no interleaving)", async () => {
+    h.state.row = { access_token: "AT-1", refresh_token: "RT-1", expires_at: soon() };
+    const refresh = procore.refreshProcoreAccessTokenUnderLock("RT-1");
+    await new Promise((r) => setTimeout(r, 1)); // the refresh holds the lock and is talking to Procore
+    const store = procore.storeProcoreTokenPairUnderLock({ accessToken: "AT-CB", refreshToken: "RT-CB", expiresAt: later() });
+    await Promise.all([refresh, store]);
+    const commits = h.state.events.map((e, i) => [e, i] as const).filter(([e]) => e === "COMMIT" || e === "UPSERT");
+    // refresh UPSERT, refresh COMMIT, then the callback's UPSERT, COMMIT
+    expect(commits.map(([e]) => e)).toEqual(["UPSERT", "COMMIT", "UPSERT", "COMMIT"]);
+    expect(h.state.row?.refresh_token).toBe("RT-CB");
+  });
+
+  it("a failed callback write destroys the client and rethrows", async () => {
+    h.state.failOn.BEGIN = true;
+    await expect(
+      procore.storeProcoreTokenPairUnderLock({ accessToken: "AT-CB", refreshToken: "RT-CB", expiresAt: later() }),
+    ).rejects.toThrow();
+    expect(h.state.releaseArgs[0]).toBeTruthy();
   });
 });
