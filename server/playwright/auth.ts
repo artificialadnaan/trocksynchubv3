@@ -618,7 +618,9 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
         : `Successfully logged into Procore (session confirmed: ${signedIn.evidence})`,
       "playwright"
     );
-    return { success: true };
+    // Fail closed: an app route proves the password was accepted, not that a session exists, so it stays unverified
+    // and records nothing; a real session element or a delivered export records the success (CodeRabbit on #112).
+    return signedIn.byRoute ? { success: true, verified: false } : { success: true };
   }
 
   // No authenticated marker, but we did submit credentials, saw no rejection, and are off the
@@ -733,7 +735,7 @@ export async function ensureLoggedIn(
     // (and a recovery recorded) here, not only by the export's downstream page check (Codex on #112).
     try {
       await page.waitForTimeout(3000);
-      const settled = await detectPageAuthState(page, { allowRoute: true });
+      const settled = await detectPageAuthState(page);
       if (settled.authenticated) {
         log(`Procore sign-in verified on re-check — ${settled.evidence}`, "playwright");
         unverified = false;

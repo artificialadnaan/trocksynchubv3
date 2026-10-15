@@ -146,19 +146,23 @@ export async function runBidBoardStageSync(
       const numbered = rows.filter((r) => projectNumber(r) !== null).length;
       const service = rows.filter((r) => SERVICE_PROJECT_NUMBER_RE.test(projectNumber(r) ?? "")).length;
       const rowsPath = `${exportPath}.rows.json`;
-      await fs.writeFile(
-        rowsPath,
-        JSON.stringify(rows.map((r) => ({ projectNumber: projectNumber(r), name: r.Name ?? null, status: r.Status ?? null })))
-      );
-      log(
-        `[BidBoardStageSync] EXPORT-ONLY: ${path.basename(exportPath)}: ${rows.length} rows ` +
-          `(${numbered} with a project #, ${service} service (-4-)); statuses ` +
-          `${Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${k}: ${n}`).join(", ")}; ` +
-          `rows saved to ${rowsPath}; NOTHING pushed (CRM, Core, HubSpot)`,
-        "sync"
-      );
-      result.exportPath = exportPath;
-      await cleanupOldExports();
+      try {
+        await fs.writeFile(
+          rowsPath,
+          JSON.stringify(rows.map((r) => ({ projectNumber: projectNumber(r), name: r.Name ?? null, status: r.Status ?? null })))
+        );
+        log(
+          `[BidBoardStageSync] EXPORT-ONLY: ${path.basename(exportPath)}: ${rows.length} rows ` +
+            `(${numbered} with a project #, ${service} service (-4-)); statuses ` +
+            `${Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${k}: ${n}`).join(", ")}; ` +
+            `rows saved to ${rowsPath}; NOTHING pushed (CRM, Core, HubSpot)`,
+          "sync"
+        );
+        result.exportPath = exportPath;
+      } finally {
+        // Retention runs even if the snapshot write failed (a full disk must be able to recover; Codex on #112).
+        await cleanupOldExports();
+      }
       return result;
     }
     // ONE extraction instant for both targets: Core keys newest-wins on it, and the two copies are the same snapshot.
