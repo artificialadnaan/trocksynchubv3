@@ -147,4 +147,42 @@ describe("BidBoard stage sync OFF switch", () => {
     await vi.advanceTimersByTimeAsync(3 * 19 * 60_000);
     expect(mocks.runBidBoardStageSync).toHaveBeenCalledTimes(1);
   });
+
+  it("an explicit Sync Now still runs while the schedule is OFF (only the timer obeys the switch; Codex on #112)", async () => {
+    stageSync = { enabled: false, intervalMinutes: 19, dryRun: true };
+    const app = createFakeApp();
+    const { registerBidboardRoutes } = await import("../server/routes/bidboard.ts");
+    registerBidboardRoutes(app as any, (_req: any, _res: any, next: any) => next());
+    const res = await invokeRoute(app.routes["POST /api/bidboard/stage-sync/trigger"], {});
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: "Stage sync triggered" }));
+    expect(mocks.runBidBoardStageSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("an export-only run is recorded as 'export_only', never as a 'success' baseline (Codex P1 on #112)", async () => {
+    stageSync = { enabled: false, intervalMinutes: 19, dryRun: false };
+    mocks.runBidBoardStageSync.mockResolvedValue({ total: 0, changed: 0, failed: 0, changes: [], errors: [], exportOnly: true });
+    const app = createFakeApp();
+    const { registerBidboardRoutes } = await import("../server/routes/bidboard.ts");
+    registerBidboardRoutes(app as any, (_req: any, _res: any, next: any) => next());
+    await invokeRoute(app.routes["POST /api/bidboard/stage-sync/trigger"], {});
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(mocks.storage.createBidboardStageSyncRun).toHaveBeenCalledWith(expect.objectContaining({ status: "export_only" }));
+  });
+});
+
+describe("stageSyncRunStatus — the one status every run-recording path writes", () => {
+  it("export-only is never a baseline status; the others are unchanged", async () => {
+    const { stageSyncRunStatus } = await import("../server/sync/index.ts");
+    const base = { total: 0, changed: 0, failed: 0, changes: [], errors: [] };
+    expect(stageSyncRunStatus({ ...base, exportOnly: true }, false)).toBe("export_only");
+    expect(stageSyncRunStatus({ ...base, exportOnly: true, initialized: true }, true)).toBe("export_only");
+    expect(stageSyncRunStatus({ ...base, initialized: true }, false)).toBe("initialized");
+    expect(stageSyncRunStatus(base, true)).toBe("dry_run");
+    expect(stageSyncRunStatus({ ...base, failed: 1, changed: 1 }, false)).toBe("partial");
+    expect(stageSyncRunStatus({ ...base, failed: 1 }, false)).toBe("failed");
+    expect(stageSyncRunStatus(base, false)).toBe("success");
+  });
 });

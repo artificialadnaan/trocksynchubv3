@@ -17,6 +17,8 @@ const m = vi.hoisted(() => ({
   pushCore: vi.fn(async () => {}),
   recordPush: vi.fn(async () => {}),
   writeFile: vi.fn(async () => {}),
+  readdir: vi.fn(async () => [] as string[]),
+  unlink: vi.fn(async () => {}),
 }));
 
 vi.mock("../server/index", () => ({ log: m.log }));
@@ -33,9 +35,9 @@ vi.mock("../server/sync/bidboard-crm-alert", () => ({ recordPushOutcomeAndMaybeA
 vi.mock("fs/promises", () => ({
   writeFile: m.writeFile,
   mkdir: vi.fn(async () => {}),
-  readdir: vi.fn(async () => []),
+  readdir: m.readdir,
   stat: vi.fn(async () => ({ mtime: new Date() })),
-  unlink: vi.fn(async () => {}),
+  unlink: m.unlink,
   access: vi.fn(async () => {}),
 }));
 
@@ -73,6 +75,17 @@ describe("BIDBOARD_STAGE_SYNC_EXPORT_ONLY", () => {
       { projectNumber: "DFW-4-14126-ai", name: "Roof repair", status: "Estimating" },
       { projectNumber: null, name: "No number yet", status: "Estimating" },
     ]);
+  });
+
+  it("keeps only the newest exports AND their .rows.json snapshots, so a left-on switch can't fill the disk (Codex on #112)", async () => {
+    process.env.BIDBOARD_STAGE_SYNC_EXPORT_ONLY = "true";
+    const names = Array.from({ length: 8 }, (_, i) => `bidboard-export-2026-10-0${i + 1}T00-00-00-000Z.xlsx`);
+    m.readdir.mockResolvedValue([...names, ...names.map((n) => `${n}.rows.json`)]);
+    const { runBidBoardStageSync } = await import("../server/sync/index");
+    await runBidBoardStageSync({ dryRun: false });
+    const removed = m.unlink.mock.calls.map((c) => String(c[0]));
+    expect(removed.filter((f) => f.endsWith(".xlsx"))).toHaveLength(3);
+    expect(removed.filter((f) => f.endsWith(".rows.json"))).toHaveLength(3);
   });
 
   it("without the switch the pipeline pushes as before (the control)", async () => {
