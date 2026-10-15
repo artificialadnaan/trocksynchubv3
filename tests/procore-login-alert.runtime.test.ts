@@ -362,4 +362,14 @@ describe("the login alert's transport and wording (Codex + CodeRabbit on #112)",
     const recovered = renderLoginAlertEmail({ kind: "recovered", reason: "page_unrecognized" as any, now: NOW });
     expect(recovered.subject).toMatch(/export/i);
   });
+
+  it("'page or session not confirmed' says both causes are possible and tells him to Test the sign-in first", () => {
+    const { subject, htmlBody } = renderLoginAlertEmail({ kind: "login_failed", reason: "page_unconfirmed" as any, now: NOW });
+    expect(subject).toMatch(/Bid Board export BLOCKED/i);
+    expect(subject).toMatch(/not confirmed/i);
+    expect(htmlBody).not.toMatch(/nothing on the password/i);
+    expect(htmlBody).toMatch(/Test/);
+    expect(htmlBody).toMatch(/Successfully logged into Procore/);
+    expect(renderLoginAlertEmail({ kind: "recovered", reason: "page_unconfirmed" as any, now: NOW }).subject).toMatch(/export/i);
+  });
 });

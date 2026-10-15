@@ -152,23 +152,34 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
 // ── 1b. Reading a page's sign-in state on Procore's new webclients shell ─────
 
 describe("detectPageAuthState — the new webclients shell", () => {
-  it("an app route off the sign-in host, with no sign-in form, is authenticated (no old marker needed)", async () => {
+  it("after a credential submit, an app route off the sign-in host with no sign-in form is authenticated (byRoute)", async () => {
     for (const url of [COMPANY_HUB_URL, BID_BOARD_URL, "https://us02.procore.com/598134326678930/project/home"]) {
-      const state = await detectPageAuthState(fakePage(url, []));
-      expect(state, url).toMatchObject({ authenticated: true, loginPage: false });
+      const state = await detectPageAuthState(fakePage(url, []), { allowRoute: true });
+      expect(state, url).toMatchObject({ authenticated: true, loginPage: false, byRoute: true });
       expect(state.evidence).toMatch(/app route/i);
     }
   });
 
+  it("WITHOUT a credential submit the URL proves nothing: an app route alone is not a session (CodeRabbit on #112)", async () => {
+    // An expired-session interstitial or SSO shell can sit on the Bid Board URL with no form on it.
+    expect(await detectPageAuthState(fakePage(BID_BOARD_URL, []))).toMatchObject({ authenticated: false, loginPage: false });
+  });
+
+  it("a real page element still wins over the route, and is not 'byRoute'", async () => {
+    const state = await detectPageAuthState(fakePage(BID_BOARD_URL, [/nav/]), { allowRoute: true });
+    expect(state).toMatchObject({ authenticated: true });
+    expect(state.byRoute).toBeFalsy();
+  });
+
   it("a sign-in form or password field still wins on an app route, and a sign-in host is never authenticated", async () => {
-    expect(await detectPageAuthState(fakePage(COMPANY_HUB_URL, [/password/i]))).toMatchObject({ authenticated: false, loginPage: true });
-    expect(await detectPageAuthState(fakePage(COMPANY_HUB_URL, [/form\[action/]))).toMatchObject({ authenticated: false, loginPage: true });
-    expect(await detectPageAuthState(fakePage(LOGIN_URL, []))).toMatchObject({ authenticated: false, loginPage: true });
+    expect(await detectPageAuthState(fakePage(COMPANY_HUB_URL, [/password/i]), { allowRoute: true })).toMatchObject({ authenticated: false, loginPage: true });
+    expect(await detectPageAuthState(fakePage(COMPANY_HUB_URL, [/form\[action/]), { allowRoute: true })).toMatchObject({ authenticated: false, loginPage: true });
+    expect(await detectPageAuthState(fakePage(LOGIN_URL, []), { allowRoute: true })).toMatchObject({ authenticated: false, loginPage: true });
   });
 
   it("a Procore page that is not an app route proves nothing (support site, interstitials, other hosts)", async () => {
     for (const url of [INTERSTITIAL_URL, "https://support.procore.com/products/online/user-guide/company-level/bid-board", "https://example.com/webclients/host/companies/1234/tools/bid-board"]) {
-      expect(await detectPageAuthState(fakePage(url, [])), url).toMatchObject({ authenticated: false, loginPage: false });
+      expect(await detectPageAuthState(fakePage(url, []), { allowRoute: true }), url).toMatchObject({ authenticated: false, loginPage: false });
     }
   });
 
@@ -210,21 +221,29 @@ describe("describeSelectorMiss — reports a confirmed sign-in failure", () => {
     expect(recorded().at(-1)).toMatchObject({ outcome: { ok: false, reason: "session_not_established" } });
   });
 
-  it("an AUTHENTICATED page is not a sign-in failure, but the blocked export still alerts, on its own page-change scope", async () => {
-    // The production case, re-read 2026-10-15: SyncHub was on the Bid Board app route the whole time.
-    for (const present of [[], [/spaContent/, /nav/]]) {
-      recordLoginOutcomeMock.mockClear();
-      const err = await describeSelectorMiss(fakePage(BID_BOARD_URL, present), "Export menu button", { blocking: EXPORT_BLOCKING });
+  it("a page with a real session element is a page change, alerted on its own scope, not a sign-in failure", async () => {
+    const err = await describeSelectorMiss(fakePage(BID_BOARD_URL, [/spaContent/, /nav/]), "Export menu button", { blocking: EXPORT_BLOCKING });
 
-      expect(err.message).toMatch(/Export menu button not found on a signed-in Procore page/);
-      expect(recorded()).toHaveLength(1);
-      expect(recorded()[0]).toMatchObject({
-        scope: PROCORE_PAGE_ALERT_SCOPE,
-        outcome: { ok: false, reason: "page_unrecognized", blocking: EXPORT_BLOCKING },
-      });
-      // Never on the sign-in scope: a page change must not flap with the sign-in alert's recovery email.
-      expect(recorded().some((r: any) => (r.scope ?? PROCORE_LOGIN_ALERT_SCOPE) === PROCORE_LOGIN_ALERT_SCOPE)).toBe(false);
-    }
+    expect(err.message).toMatch(/Export menu button not found on a signed-in Procore page/);
+    expect(recorded()).toHaveLength(1);
+    expect(recorded()[0]).toMatchObject({
+      scope: PROCORE_PAGE_ALERT_SCOPE,
+      outcome: { ok: false, reason: "page_unrecognized", blocking: EXPORT_BLOCKING },
+    });
+    // Never on the sign-in scope: a page change must not flap with the sign-in alert's recovery email.
+    expect(recorded().some((r: any) => (r.scope ?? PROCORE_LOGIN_ALERT_SCOPE) === PROCORE_LOGIN_ALERT_SCOPE)).toBe(false);
+  });
+
+  it("an app route with NO session element is 'page or session not confirmed', never a confident page change (CodeRabbit on #112)", async () => {
+    const err = await describeSelectorMiss(fakePage(BID_BOARD_URL, []), "Export menu button", { blocking: EXPORT_BLOCKING });
+
+    expect(err.message).toMatch(/can't confirm the session/i);
+    expect(err.message).toMatch(/Test on \/testing/);
+    expect(recorded()).toHaveLength(1);
+    expect(recorded()[0]).toMatchObject({
+      scope: PROCORE_PAGE_ALERT_SCOPE,
+      outcome: { ok: false, reason: "page_unconfirmed", blocking: EXPORT_BLOCKING },
+    });
   });
 
   it("records nothing when the probe itself crashed (a dead page proves nothing either way)", async () => {
@@ -319,12 +338,12 @@ describe("exportBidBoardProjectList — alerting and the stale-export fallback",
     });
   });
 
-  it("a signed-in Bid Board page without the export menu alerts as a page change, not a sign-in failure", async () => {
-    await expect(runExportWith(pageWithNoMenu(BID_BOARD_URL, []))).rejects.toThrow(/signed-in Procore page/i);
+  it("a Bid Board app page with no session element and no export menu alerts as 'page or session not confirmed'", async () => {
+    await expect(runExportWith(pageWithNoMenu(BID_BOARD_URL, []))).rejects.toThrow(/can't confirm the session/i);
 
     expect(recorded().at(-1)).toMatchObject({
       scope: PROCORE_PAGE_ALERT_SCOPE,
-      outcome: { ok: false, reason: "page_unrecognized", blocking: EXPORT_BLOCKING },
+      outcome: { ok: false, reason: "page_unconfirmed", blocking: EXPORT_BLOCKING },
     });
   });
 

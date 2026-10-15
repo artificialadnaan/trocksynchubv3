@@ -184,5 +184,8 @@ describe("stageSyncRunStatus — the one status every run-recording path writes"
     expect(stageSyncRunStatus({ ...base, failed: 1, changed: 1 }, false)).toBe("partial");
     expect(stageSyncRunStatus({ ...base, failed: 1 }, false)).toBe("failed");
     expect(stageSyncRunStatus(base, false)).toBe("success");
+    // A run that ERRORED before changing anything (export failed, snapshot unwritable) is never a baseline (Codex P1).
+    expect(stageSyncRunStatus({ ...base, errors: ["Failed to export Bid Board project list from Procore"] }, false)).toBe("failed");
+    expect(stageSyncRunStatus({ ...base, errors: ["ENOSPC"], exportOnly: true }, false)).toBe("export_only");
   });
 });

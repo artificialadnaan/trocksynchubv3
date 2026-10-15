@@ -77,6 +77,16 @@ describe("BIDBOARD_STAGE_SYNC_EXPORT_ONLY", () => {
     ]);
   });
 
+  it("a failed snapshot write still leaves the run marked export-only, so it can never be recorded as a baseline (Codex P1)", async () => {
+    process.env.BIDBOARD_STAGE_SYNC_EXPORT_ONLY = "true";
+    m.writeFile.mockRejectedValueOnce(new Error("ENOSPC: no space left on device"));
+    const { runBidBoardStageSync } = await import("../server/sync/index");
+    const res = await runBidBoardStageSync({ dryRun: false });
+    expect(res.exportOnly).toBe(true);
+    expect(res.errors.join(" ")).toMatch(/ENOSPC/);
+    expect(m.pushCrm).not.toHaveBeenCalled();
+  });
+
   it("keeps only the newest exports AND their .rows.json snapshots, so a left-on switch can't fill the disk (Codex on #112)", async () => {
     process.env.BIDBOARD_STAGE_SYNC_EXPORT_ONLY = "true";
     const names = Array.from({ length: 8 }, (_, i) => `bidboard-export-2026-10-0${i + 1}T00-00-00-000Z.xlsx`);
