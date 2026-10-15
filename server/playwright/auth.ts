@@ -65,6 +65,9 @@ interface LoginResult {
   /** Structured cause, set at each failure site. Never parsed back out of `error` — a re-worded
    *  message must not be able to reclassify an outage. */
   reason?: LoginFailureReason;
+  /** false when the login was accepted WITHOUT any authenticated marker on the page. Such a login is
+   *  not proof of a session and must never be reported to the alert module as a success. */
+  verified?: boolean;
   screenshotPath?: string;
 }
 
@@ -254,6 +257,8 @@ export interface PageAuthState {
   /** Short, log-safe description of what decided the verdict. Contains no credential material. */
   evidence: string;
   url: string;
+  /** True when the probe itself could not run (closed page, unreadable URL). Proves nothing either way. */
+  probeFailed?: boolean;
 }
 
 /**
@@ -273,7 +278,7 @@ export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuth
   try {
     url = page.url();
   } catch {
-    return { authenticated: false, loginPage: false, evidence: "page url unavailable", url: "" };
+    return { authenticated: false, loginPage: false, evidence: "page url unavailable", url: "", probeFailed: true };
   }
 
   try {
@@ -313,6 +318,7 @@ export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuth
       loginPage: false,
       evidence: `auth probe failed: ${err instanceof Error ? err.message : String(err)}`,
       url,
+      probeFailed: true,
     };
   }
 }
@@ -321,13 +327,28 @@ export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuth
  * Build the honest error for "we looked for a selector and found nothing". Only an AUTHENTICATED
  * page may blame a Procore UI change; an unauthenticated one names the sign-in failure and the
  * remediation. Getting this backwards is what cost 73 minutes on 2026-08-03.
+ *
+ * An unauthenticated verdict here is a CONFIRMED sign-in failure, so it is also reported to the
+ * Procore login alert. Until 2026-10 it was only thrown and logged: an "UNVERIFIED" login followed by
+ * this miss, every 19 minutes for weeks, left procore_login_alert_state at 'ok' and sent nothing.
  */
-export async function describeSelectorMiss(page: AuthProbePage, subject: string): Promise<Error> {
+export async function describeSelectorMiss(
+  page: AuthProbePage,
+  subject: string,
+  options?: { blocking?: string }
+): Promise<Error> {
   const state = await detectPageAuthState(page);
   if (state.authenticated) {
     return new Error(`${subject} not found. Procore UI may have changed.`);
   }
   const what = state.loginPage ? "SyncHub is signed OUT of Procore" : "SyncHub cannot confirm a Procore session";
+  if (!state.probeFailed) {
+    // The evidence string is fixed text (no URL, no credential material).
+    await recordProcoreSignInOutcome(
+      { ok: false, reason: "session_not_established", error: `${subject} not found: ${what} (${state.evidence})` },
+      options?.blocking
+    );
+  }
   return new Error(
     `${subject} not found because ${what} (${state.evidence}) — this is a Procore sign-in failure, ` +
       `NOT a Procore UI change. ${PROCORE_CREDENTIAL_REMEDIATION}`
@@ -493,10 +514,12 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
   // No authenticated marker, but we did submit credentials, saw no rejection, and are off the
   // sign-in host — accept it, while logging that the session is UNVERIFIED so a later selector miss
   // can be read in context. Both tests parse the URL rather than search it for a substring.
+  // It is NOT a verified success, though: `verified: false` keeps ensureLoggedIn from reporting it to
+  // the alert module as one. The caller's own page check (describeSelectorMiss) confirms either way.
   if (!isProcoreLoginUrl(currentUrl) && isProcoreHostUrl(currentUrl)) {
     await saveSession();
     log(`Login accepted but UNVERIFIED (no authenticated marker) - on URL: ${currentUrl}`, "playwright");
-    return { success: true };
+    return { success: true, verified: false };
   }
 
   const screenshotPath = await takeScreenshot(page, "login-unknown-state");
@@ -510,7 +533,7 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
 
 export async function ensureLoggedIn(
   options?: { targetUrl?: string; blocking?: string }
-): Promise<{ page: Page; success: boolean; error?: string; reason?: LoginFailureReason }> {
+): Promise<{ page: Page; success: boolean; error?: string; reason?: LoginFailureReason; verified?: boolean }> {
   let page = await getPage();
 
   // If targetUrl provided, try navigating there first — we may already be logged in.
@@ -526,7 +549,7 @@ export async function ensureLoggedIn(
         log(`Already authenticated on the target page — ${state.evidence}, skipping login`, "playwright");
         // Record the success here too: this is the path a healthy Bid Board sync takes every cycle,
         // so without it a resolved outage would never send its recovery email.
-        await recordLoginOutcome({ ok: true }, options?.blocking);
+        await recordProcoreSignInOutcome({ ok: true }, options?.blocking);
         return { page, success: true };
       }
       log(`Target page is NOT authenticated — ${state.evidence} (${state.url})`, "playwright");
@@ -544,7 +567,7 @@ export async function ensureLoggedIn(
   // Check if already logged in
   if (await isLoggedIn(page)) {
     log("Already logged into Procore", "playwright");
-    await recordLoginOutcome({ ok: true }, options?.blocking);
+    await recordProcoreSignInOutcome({ ok: true }, options?.blocking);
     return { page, success: true };
   }
 
@@ -560,7 +583,7 @@ export async function ensureLoggedIn(
   const credentials = await getProcoreCredentials();
   if (!credentials) {
     const error = "Procore browser credentials not configured. Please save credentials in Settings.";
-    await recordLoginOutcome({ ok: false, reason: "not_configured", attempts: 0, error }, options?.blocking);
+    await recordProcoreSignInOutcome({ ok: false, reason: "not_configured", attempts: 0, error }, options?.blocking);
     return { page, success: false, error, reason: "not_configured" };
   }
 
@@ -591,29 +614,43 @@ export async function ensureLoggedIn(
 
   // Alert on the rejection itself rather than waiting an hour for the CRM-side absence-of-success
   // check. Debounced per failure signature, so a 19-minute cycle does not send 3 emails an hour.
-  await recordLoginOutcome(
-    result.success
-      ? { ok: true }
-      : { ok: false, reason: result.reason ?? "unknown", attempts, error: result.error },
-    options?.blocking
-  );
+  // An UNVERIFIED login records NOTHING: it is not proof of a session (so it must not flip a failing
+  // state back to 'ok' or keep an 'ok' one there), and not yet proof of a failure — the caller's page
+  // check (describeSelectorMiss) or a delivered export settles it.
+  const unverified = result.success && result.verified === false;
+  if (unverified) {
+    log("Procore sign-in UNVERIFIED — not recorded as a success; the next page check decides", "playwright");
+  } else {
+    await recordProcoreSignInOutcome(
+      result.success
+        ? { ok: true }
+        : { ok: false, reason: result.reason ?? "unknown", attempts, error: result.error },
+      options?.blocking,
+      // Never let the stored password (or the account email) reach the alert row or the email.
+      [credentials.password, credentials.email]
+    );
+  }
 
   return {
     page,
     success: result.success,
     error: result.error,
     reason: result.success ? undefined : (result.reason ?? "unknown"),
+    ...(result.success ? { verified: !unverified } : {}),
   };
 }
 
-/** Alerting must never break an automation run: recordLoginOutcomeAndMaybeAlert already swallows its
- *  own errors, this is the belt-and-braces guard for anything it cannot (e.g. an import-time throw). */
-async function recordLoginOutcome(
+/** Report a Procore browser sign-in outcome to the login alert. Alerting must never break an
+ *  automation run: recordLoginOutcomeAndMaybeAlert already swallows its own errors, this is the
+ *  belt-and-braces guard for anything it cannot (e.g. an import-time throw). Exported so a flow that
+ *  PROVES a session (a delivered Bid Board export) can record the success too. */
+export async function recordProcoreSignInOutcome(
   outcome: { ok: boolean; reason?: LoginFailureReason; attempts?: number; error?: string },
-  blocking?: string
+  blocking?: string,
+  redact?: (string | undefined | null)[]
 ): Promise<void> {
   try {
-    await recordLoginOutcomeAndMaybeAlert({ outcome: { ...outcome, blocking } });
+    await recordLoginOutcomeAndMaybeAlert({ outcome: { ...outcome, blocking }, redact });
   } catch {
     /* no-op */
   }

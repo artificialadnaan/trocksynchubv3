@@ -30,6 +30,9 @@ export type LoginFailureReason =
   | "timeout"
   | "login_form_unrecognized"
   | "not_configured"
+  /** Sign-in "went through" (or a saved session was reused) but the page then showed no signed-in
+   *  Procore session — confirmed by a selector miss on a non-authenticated page (describeSelectorMiss). */
+  | "session_not_established"
   | "unknown";
 
 /** The single scope key for the one Procore browser account SyncHub automates with. Kept as a
@@ -53,6 +56,8 @@ const REASON_LABELS: Record<LoginFailureReason, string> = {
   timeout: "the login never completed (timed out after submitting credentials)",
   login_form_unrecognized: "the login form did not look the way SyncHub expects",
   not_configured: "no Procore browser credentials are stored in SyncHub",
+  session_not_established:
+    "the sign-in did not leave SyncHub with a usable Procore session (the Procore page shows no signed-in session)",
   unknown: "the login ended in an unrecognised state",
 };
 
@@ -203,16 +208,39 @@ export interface RecordLoginDeps {
   send?: typeof sendEmail;
 }
 
+/**
+ * The ONLY address this alert may reach. Pinned in code on purpose: the alert used to read the shared
+ * BIDBOARD_CRM_ALERT_RECIPIENT ops variable, which (a) made it a silent no-op whenever that variable
+ * was unset, and (b) would send a credential-failure alert to whoever that variable is later pointed
+ * at. Owner rule: system alerts go to the owner alone — never clients, never staff.
+ */
+export const PROCORE_LOGIN_ALERT_RECIPIENT = "aiqbal@trockgc.com";
+
+/** Exactly one bare address — no lists, no display names. Anything else is refused, never widened. */
+const SINGLE_ADDRESS_RE = /^[^\s,;<>@]+@[^\s,;<>@]+\.[^\s,;<>@]+$/;
+
+const LAST_ERROR_MAX = 500;
+
+/**
+ * Make a sign-in error safe to store (procore_login_alert_state.last_error) and to email:
+ *  - every caller-supplied secret (the stored password, the account email) is replaced by [redacted];
+ *  - URL query strings and fragments are dropped (a sign-in URL can carry the email or a token);
+ *  - whitespace is collapsed and the result capped, so a Playwright call log can't bloat the row.
+ */
+export function sanitizeLoginError(error: string | undefined | null, redact: (string | undefined | null)[] = []): string | null {
+  if (!error) return null;
+  let out = String(error);
+  for (const secret of redact) {
+    if (secret && secret.length >= 3) out = out.split(secret).join("[redacted]");
+  }
+  out = out.replace(/(https?:\/\/[^\s?#"'<>]*)[?#][^\s"'<>]*/gi, "$1");
+  out = out.replace(/\s+/g, " ").trim();
+  return out.length > LAST_ERROR_MAX ? `${out.slice(0, LAST_ERROR_MAX - 1)}…` : out;
+}
+
 function realertMinutesFromEnv(): number {
   const n = Number(process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES);
   return Number.isFinite(n) && n > 0 ? n : 60;
-}
-
-/** Reuses the Bid Board alert recipient — same ops inbox, same "ships inert until configured"
- *  posture, so a deploy never emails a surprise address. */
-function recipientFromEnv(): string | null {
-  const v = (process.env.BIDBOARD_CRM_ALERT_RECIPIENT ?? "").trim();
-  return v || null;
 }
 
 /**
@@ -229,22 +257,21 @@ export async function recordLoginOutcomeAndMaybeAlert(
     scope?: string;
     now?: Date;
     realertMinutes?: number;
+    /** Test seam only — production callers never pass it, so the pinned owner address is used. */
     recipient?: string;
+    /** Secrets to scrub from the error before it is stored or emailed (the stored password/email). */
+    redact?: (string | undefined | null)[];
   },
   deps: RecordLoginDeps = {}
 ): Promise<{ action: PushAlertAction }> {
   try {
-    const recipient = args.recipient ?? recipientFromEnv();
-    // Inert until configured (parity with the CRM push alert): no recipient → no send, no state write.
-    if (!recipient) {
-      if (!args.outcome.ok) {
-        log(
-          "[ProcoreLogin] sign-in failed but BIDBOARD_CRM_ALERT_RECIPIENT is empty — alert is a no-op",
-          "playwright"
-        );
-      }
+    const recipient = (args.recipient ?? PROCORE_LOGIN_ALERT_RECIPIENT).trim();
+    // One bare address or nothing: a list would widen the audience of a credential alert.
+    if (!SINGLE_ADDRESS_RE.test(recipient)) {
+      log("[ProcoreLogin] refusing to alert: recipient is not a single address", "playwright");
       return { action: "none" };
     }
+    const safeError = args.outcome.ok ? null : sanitizeLoginError(args.outcome.error, args.redact);
 
     const db = deps.db ?? pool;
     const send = deps.send ?? sendEmail;
@@ -283,7 +310,7 @@ export async function recordLoginOutcomeAndMaybeAlert(
         kind: decision.action === "alert_recovered" ? "recovered" : "login_failed",
         reason: reason ?? undefined,
         attempts: args.outcome.attempts,
-        error: args.outcome.error,
+        error: safeError ?? undefined,
         blocking: args.outcome.blocking,
         now,
       });
@@ -336,7 +363,7 @@ export async function recordLoginOutcomeAndMaybeAlert(
         lastReason: persistedReason,
         lastAlertedAt,
         lastSuccessAt: args.outcome.ok ? now : (prior?.last_success_at ?? null),
-        lastError: args.outcome.ok ? null : (args.outcome.error ?? null),
+        lastError: safeError,
         now,
       },
       db
