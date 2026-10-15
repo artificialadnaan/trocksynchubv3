@@ -34,6 +34,7 @@ import { registerReportsRoutes } from "./reports";
 import { registerTestingRoutes } from "./testing";
 import { registerRfpApprovalRoutes } from "./rfp-approval";
 import { registerRfpRequestRoutes } from "./rfp-requests";
+import { registerProcoreTokenReadRoutes } from "./procore-token-read";
 import { registerSettingsRoutes, initPolling } from "./settings";
 import { registerCloseoutRoutes } from "./closeout";
 
@@ -111,6 +112,8 @@ export async function registerRoutes(
   registerTestingRoutes(app, requireAuth);
   registerRfpRequestRoutes(app);
   registerRfpApprovalRoutes(app);
+  // Core's HMAC-signed read of the Procore access token (own secret, fails closed); no session auth.
+  registerProcoreTokenReadRoutes(app);
   registerSettingsRoutes(app, requireAuth);
   registerCloseoutRoutes(app, requireAuth);
 
