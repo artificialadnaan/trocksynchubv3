@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
     getAutomationConfig: vi.fn(),
     getAutomationConfigs: vi.fn(),
     upsertAutomationConfig: vi.fn(),
+    // enable-all writes the HubSpot/Procore polling rows through this since 1a5d39e (#84); without it the route 500s first.
+    upsertAutomationConfigUnlessAuthDisabled: vi.fn(),
     patchAutomationConfig: vi.fn(),
   },
   syncProcoreRoleAssignments: vi.fn(),
@@ -120,6 +122,12 @@ function backedStore(initial: Record<string, any> = {}) {
     rows[data.key] = data.value;
     return data;
   });
+  // Like the real conditional upsert: an auth_expired row is left alone and the write reports null.
+  mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockImplementation(async (data: any) => {
+    if (rows[data.key]?.disabledReason === "auth_expired") return null;
+    rows[data.key] = data.value;
+    return data;
+  });
   return rows;
 }
 
@@ -137,6 +145,7 @@ describe("role polling — the enabled-key clobber", () => {
     vi.unstubAllEnvs();
     mocks.storage.getAutomationConfig.mockResolvedValue(undefined);
     mocks.storage.upsertAutomationConfig.mockResolvedValue({});
+    mocks.storage.upsertAutomationConfigUnlessAuthDisabled.mockImplementation(async (data: any) => data);
     mocks.storage.patchAutomationConfig.mockImplementation(async (key: string, patch: any) => ({ key, value: patch }));
   });
 
@@ -444,6 +453,9 @@ describe("role polling — the enabled-key clobber", () => {
     });
     expect(res.status).not.toHaveBeenCalledWith(401);
     expect(res.status).not.toHaveBeenCalledWith(503);
+    // A 500 here means the route threw before reaching role polling, which made the batch-size assertion fail opaquely.
+    expect(res.status).not.toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
     await vi.advanceTimersByTimeAsync(150_000);
 
     // 175 from the database, not the 50 default this process booted with.
