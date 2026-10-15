@@ -136,18 +136,17 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
     expect(res.verified).toBe(false);
   });
 
-  it("a login that lands on Procore's signed-in app shell (Company Hub) IS verified and recorded, whoever called it", async () => {
-    // 2026-10-15: the new webclients shell has none of the old markers, so this exact landing was logged
-    // UNVERIFIED and recorded nothing — and a non-export flow could never send the recovery email (Codex on #112).
+  it("a login that lands on Procore's app shell with NO session element stays unverified and records nothing (fail closed; CodeRabbit on #112)", async () => {
+    // 2026-10-15: the new webclients shell carries none of the old markers. Reaching its app route proves the
+    // password was accepted, not that a session exists, so it is logged honestly and recorded as nothing: a
+    // delivered export (or a real session element) is what records the success.
     const res = await runUnverifiedLogin(COMPANY_HUB_URL);
 
     const lines = logMock.mock.calls.map((c) => String(c[0]));
-    // Only the route said so: the success line must not claim a confirmed session (CodeRabbit on #112).
     expect(lines.some((l) => /Successfully logged into Procore \(app page reached; session not confirmed\)/.test(l))).toBe(true);
     expect(lines.some((l) => /session confirmed:/.test(l))).toBe(false);
-    expect(lines.some((l) => /UNVERIFIED/.test(l))).toBe(false);
-    expect(res).toMatchObject({ success: true, verified: true });
-    expect(recorded().at(-1)).toMatchObject({ outcome: { ok: true, blocking: EXPORT_BLOCKING } });
+    expect(res).toMatchObject({ success: true, verified: false });
+    expect(recorded().some((r: any) => r.outcome?.ok === true)).toBe(false);
   });
 });
 
