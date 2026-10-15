@@ -188,11 +188,12 @@ describe("describeSelectorMiss", () => {
 
   it("STILL reports a possible UI change when an authenticated page's selectors genuinely miss", async () => {
     const err = await describeSelectorMiss(authenticatedBidBoardPage(), "Export menu button");
-    expect(err.message).toBe("Export menu button not found. Procore UI may have changed.");
+    expect(err.message).toMatch(/^Export menu button not found on a signed-in Procore page .*Procore probably changed the page; this is NOT a sign-in failure\.$/);
   });
 
   it("does not claim a UI change when the session simply cannot be confirmed", async () => {
-    const bare = fakePage("https://us02.procore.com/webclients/host/companies/1234/tools/bid-board", []);
+    // Not an app route (on one, Procore's new shell counts as signed in since 2026-10-15) and no session element.
+    const bare = fakePage("https://us02.procore.com/interstitial", []);
     const err = await describeSelectorMiss(bare, "Export menu button");
     expect(err.message).not.toContain("Procore UI may have changed");
     expect(err.message).toMatch(/cannot confirm a Procore session/i);
@@ -407,7 +408,7 @@ describe("exportBidBoardProjectList — error attribution", () => {
 
   it("keeps the UI-change error for an authenticated page whose menu selectors genuinely miss", async () => {
     await expect(runExportWith(pageWithNoMenu(BID_BOARD_URL, [/spaContent/, /nav/]))).rejects.toThrow(
-      "Export menu button not found. Procore UI may have changed."
+      /Export menu button not found on a signed-in Procore page/
     );
   });
 });
