@@ -40,7 +40,20 @@ export interface BidBoardStageSyncResult {
   exportPath?: string;
   errors: string[];
   initialized?: boolean;
+  /** BIDBOARD_STAGE_SYNC_EXPORT_ONLY: the export was downloaded and summarised, and nothing was pushed. */
+  exportOnly?: boolean;
 }
+
+/**
+ * BIDBOARD_STAGE_SYNC_EXPORT_ONLY=true: download + parse + summarise the Bid Board export and save its rows
+ * next to it as <export>.rows.json, then STOP: no CRM push (so no push alert), no Core push, no HubSpot diff.
+ * For a first run that must be looked at before it writes anything (the 2026-09-11 stale-export incident).
+ */
+export function isBidBoardExportOnly(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes|on)$/i.test((env.BIDBOARD_STAGE_SYNC_EXPORT_ONLY ?? "").trim());
+}
+
+const SERVICE_PROJECT_NUMBER_RE = /-4-/;
 
 export interface RunOptions {
   dryRun?: boolean;
@@ -108,6 +121,34 @@ export async function runBidBoardStageSync(
 
   try {
     const rows = parseActiveProjectsSheet(exportPath);
+    if (isBidBoardExportOnly()) {
+      const projectNumber = (r: (typeof rows)[number]) => {
+        const v = r["Project #"];
+        return typeof v === "string" && v.trim() ? v.trim() : null;
+      };
+      const statuses: Record<string, number> = {};
+      for (const r of rows) {
+        const k = String(r.Status ?? "").trim() || "(blank)";
+        statuses[k] = (statuses[k] ?? 0) + 1;
+      }
+      const numbered = rows.filter((r) => projectNumber(r) !== null).length;
+      const service = rows.filter((r) => SERVICE_PROJECT_NUMBER_RE.test(projectNumber(r) ?? "")).length;
+      const rowsPath = `${exportPath}.rows.json`;
+      await fs.writeFile(
+        rowsPath,
+        JSON.stringify(rows.map((r) => ({ projectNumber: projectNumber(r), name: r.Name ?? null, status: r.Status ?? null })))
+      );
+      log(
+        `[BidBoardStageSync] EXPORT-ONLY: ${path.basename(exportPath)}: ${rows.length} rows ` +
+          `(${numbered} with a project #, ${service} service (-4-)); statuses ` +
+          `${Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${k}: ${n}`).join(", ")}; ` +
+          `rows saved to ${rowsPath}; NOTHING pushed (CRM, Core, HubSpot)`,
+        "sync"
+      );
+      result.exportPath = exportPath;
+      result.exportOnly = true;
+      return result;
+    }
     // ONE extraction instant for both targets: Core keys newest-wins on it, and the two copies are the same snapshot.
     const extractedAt = new Date().toISOString();
     const pushResult = await pushBidBoardRowsToCrm({
