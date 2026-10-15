@@ -432,7 +432,7 @@ export async function describeSelectorMiss(
     await recordProcorePageOutcome({ ok: false, reason: "page_unconfirmed", error: detail }, options?.blocking);
     return new Error(
       `${detail}. Either Procore changed the page or the session was lost: run Test on /testing (Procore Browser Login) — ` +
-        `"Successfully logged into Procore" means the page changed.`
+        `"Successfully logged into Procore (session confirmed …)" or a delivered export means the page changed.`
     );
   }
   if (state.authenticated) {
@@ -607,9 +607,17 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
 
   // Verify we're logged in. Credentials were just submitted, so landing on a Procore app route counts: Procore's new
   // webclients shell (2026-10) carries none of the old session markers.
-  if (await isLoggedIn(page, { allowRoute: true })) {
+  const signedIn = await detectPageAuthState(page, { allowRoute: true });
+  log(`${signedIn.authenticated ? "Logged in" : "NOT logged in"} — ${signedIn.evidence} (${signedIn.url})`, "playwright");
+  if (signedIn.authenticated) {
     await saveSession();
-    log("Successfully logged into Procore", "playwright");
+    // Say which proof it was: only a session element confirms the session; an app route alone does not (CodeRabbit).
+    log(
+      signedIn.byRoute
+        ? "Successfully logged into Procore (app page reached; session not confirmed)"
+        : `Successfully logged into Procore (session confirmed: ${signedIn.evidence})`,
+      "playwright"
+    );
     return { success: true };
   }
 

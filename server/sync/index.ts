@@ -70,17 +70,21 @@ async function cleanupOldExports(): Promise<void> {
   try {
     await fs.mkdir(EXPORTS_DIR, { recursive: true });
     const entries = await fs.readdir(EXPORTS_DIR);
-    // The workbooks and the export-only .rows.json snapshots next to them, each kept to the newest KEEP_LAST_N.
-    for (const suffix of [".xlsx", ".xlsx.rows.json"]) {
-      const files = entries
-        .filter((e) => e.endsWith(suffix))
-        .map((e) => path.join(EXPORTS_DIR, e));
-      const stats = await Promise.all(
-        files.map(async (p) => ({ path: p, mtime: (await fs.stat(p)).mtime.getTime() }))
-      );
-      stats.sort((a, b) => b.mtime - a.mtime);
-      for (let i = KEEP_LAST_N; i < stats.length; i++) {
-        await fs.unlink(stats[i].path).catch(() => {});
+    // Keep the newest KEEP_LAST_N workbooks; an export-only .rows.json snapshot lives and dies WITH its workbook
+    // (never sorted on its own), and a snapshot whose workbook is gone is removed.
+    const SNAPSHOT = ".rows.json";
+    const workbooks = entries.filter((e) => e.endsWith(".xlsx"));
+    const stats = await Promise.all(
+      workbooks.map(async (name) => ({ name, mtime: (await fs.stat(path.join(EXPORTS_DIR, name))).mtime.getTime() }))
+    );
+    stats.sort((a, b) => b.mtime - a.mtime);
+    const kept = new Set(stats.slice(0, KEEP_LAST_N).map((s) => s.name));
+    for (const { name } of stats.slice(KEEP_LAST_N)) {
+      await fs.unlink(path.join(EXPORTS_DIR, name)).catch(() => {});
+    }
+    for (const e of entries) {
+      if (e.endsWith(`.xlsx${SNAPSHOT}`) && !kept.has(e.slice(0, -SNAPSHOT.length))) {
+        await fs.unlink(path.join(EXPORTS_DIR, e)).catch(() => {});
       }
     }
   } catch {

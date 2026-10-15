@@ -122,8 +122,10 @@ export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: strin
       <p><strong>What it could not find:</strong> ${escapeHtml(e.error ?? "(none captured)")}</p>
       <p><strong>Blocked right now:</strong> ${escapeHtml(e.blocking ?? "the Bid Board export")}</p>
       <p><strong>What to do:</strong> first click Test on SyncHub /testing → Procore Browser Login. If the SyncHub log then
-      says "Successfully logged into Procore", the sign-in is fine and Procore changed the page: SyncHub's selectors need
-      updating from the "page fingerprint" log line. If it does not, update the stored password there.</p>
+      says "Successfully logged into Procore (session confirmed …)", or a Bid Board export is delivered, the sign-in is fine
+      and Procore changed the page: SyncHub's selectors need updating from the "page fingerprint" log line. If it says
+      "(app page reached; session not confirmed)", the page alone can't tell a lost session from a changed page; send the
+      "page fingerprint" line to have the session check updated. If the Test fails, update the stored password there.</p>
       <p>At most one alert like this is sent a day while it continues; one email is sent when the export works again.</p>
     `,
     };
