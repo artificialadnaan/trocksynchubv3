@@ -33,11 +33,18 @@ export type LoginFailureReason =
   /** Sign-in "went through" (or a saved session was reused) but the page then showed no signed-in
    *  Procore session — confirmed by a selector miss on a non-authenticated page (describeSelectorMiss). */
   | "session_not_established"
+  /** SIGNED IN (an app route or session element is on the page), but a control the flow needs is not there:
+   *  Procore changed the page. Recorded on PROCORE_PAGE_ALERT_SCOPE, never on the sign-in scope. */
+  | "page_unrecognized"
   | "unknown";
 
 /** The single scope key for the one Procore browser account SyncHub automates with. Kept as a
  *  column (not a hardcoded WHERE) so a second account/region can be tracked without a migration. */
 export const PROCORE_LOGIN_ALERT_SCOPE = "procore-browser-login";
+
+/** A separate state row for "signed in, but the Bid Board page no longer has the export controls". Kept off
+ *  the sign-in scope so a page change and a working sign-in can't alternate failure and recovery emails. */
+export const PROCORE_PAGE_ALERT_SCOPE = "procore-bidboard-export-page";
 
 /**
  * The remediation nobody guesses on their own: rotating the password in Procore does NOT reach
@@ -58,6 +65,8 @@ const REASON_LABELS: Record<LoginFailureReason, string> = {
   not_configured: "no Procore browser credentials are stored in SyncHub",
   session_not_established:
     "the sign-in did not leave SyncHub with a usable Procore session (the Procore page shows no signed-in session)",
+  page_unrecognized:
+    "SyncHub is signed in to Procore, but the page no longer shows the control the automation needs (Procore probably changed the page)",
   unknown: "the login ended in an unrecognised state",
 };
 
@@ -76,6 +85,16 @@ export interface LoginAlertEmailInput {
 /** Pure renderer — separate from sending so it is unit-testable without a transport.
  *  Deliberately carries NO account identifier and NO credential material. */
 export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: string; htmlBody: string } {
+  if (e.kind === "recovered" && e.reason === "page_unrecognized") {
+    return {
+      subject: "✅ Procore Bid Board export WORKING again — SyncHub",
+      htmlBody: `
+    <h2>The Procore Bid Board export is working again</h2>
+    <p><strong>When:</strong> ${e.now.toISOString()}</p>
+    <p>Procore delivered a Bid Board export; the earlier page problem has cleared.</p>
+  `,
+    };
+  }
   if (e.kind === "recovered") {
     return {
       subject: "✅ Procore browser sign-in RECOVERED — SyncHub automation resumed",
@@ -88,6 +107,21 @@ export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: strin
   }
 
   const reason = e.reason ?? "unknown";
+  if (reason === "page_unrecognized") {
+    return {
+      subject: "⚠️ Procore Bid Board export BLOCKED (page not recognised) — SyncHub is signed in",
+      htmlBody: `
+      <h2>SyncHub is signed in to Procore, but cannot run the Bid Board export</h2>
+      <p><strong>When:</strong> ${e.now.toISOString()}</p>
+      <p><strong>Cause:</strong> ${escapeHtml(REASON_LABELS.page_unrecognized)}</p>
+      <p><strong>What it could not find:</strong> ${escapeHtml(e.error ?? "(none captured)")}</p>
+      <p><strong>Blocked right now:</strong> ${escapeHtml(e.blocking ?? "the Bid Board export")}</p>
+      <p><strong>What to do:</strong> nothing on the password. SyncHub's page selectors need updating; the SyncHub
+      log has a "page fingerprint" line for this page to work from.</p>
+      <p>At most one alert like this is sent a day while it continues; one email is sent when the export works again.</p>
+    `,
+    };
+  }
   const subject = `⚠️ Procore browser sign-in FAILED (${reason.replace(/_/g, " ")}) — SyncHub automation blocked`;
   const htmlBody = `
       <h2>SyncHub cannot sign into Procore</h2>
@@ -98,9 +132,8 @@ export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: strin
       <p><strong>Blocked right now:</strong> ${escapeHtml(e.blocking ?? "all Playwright automation")}</p>
       <p><strong>What to do:</strong> ${escapeHtml(PROCORE_CREDENTIAL_REMEDIATION)}</p>
       <p>Every browser-driven flow — Bid Board stage sync, Bid Board project creation, portfolio
-      transitions, document sync — is blocked until sign-in succeeds. Further alerts are throttled
-      until the failure changes or the re-alert window elapses; one recovery email is sent when
-      sign-in works again.</p>
+      transitions, document sync — is blocked until sign-in succeeds.</p>
+      <p>While it stays failed, at most one alert is sent a day (even if the cause changes); one recovery email is sent when sign-in works again.</p>
     `;
   return { subject, htmlBody };
 }
@@ -312,7 +345,8 @@ export async function recordLoginOutcomeAndMaybeAlert(
     if (decision.action !== "none") {
       const { subject, htmlBody } = renderLoginAlertEmail({
         kind: decision.action === "alert_recovered" ? "recovered" : "login_failed",
-        reason: reason ?? undefined,
+        // A recovery names the failure it recovers from, so a page-change recovery is worded as one.
+        reason: (reason ?? prior?.last_reason) ?? undefined,
         attempts: args.outcome.attempts,
         error: safeError ?? undefined,
         blocking: args.outcome.blocking,
@@ -320,7 +354,8 @@ export async function recordLoginOutcomeAndMaybeAlert(
       });
       try {
         // Ops alert → only the configured recipient; skip the customer-facing GLOBAL_CC.
-        const res = await send({ to: recipient, subject, htmlBody, bypassGlobalCc: true });
+        // Owner-pinned: past testing-mode redirection too, or a configured test address would get it instead.
+        const res = await send({ to: recipient, subject, htmlBody, bypassGlobalCc: true, bypassTestingMode: true });
         sent = Boolean(res?.success);
         // Log the action, not the recipient address (PII stays out of routine logs).
         log(`[ProcoreLogin] alert ${decision.action} email sent=${sent} reason=${reason ?? "n/a"}`, "playwright");

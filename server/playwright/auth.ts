@@ -46,6 +46,7 @@ import { log } from "../index";
 import { storage } from "../storage";
 import {
   PROCORE_CREDENTIAL_REMEDIATION,
+  PROCORE_PAGE_ALERT_SCOPE,
   recordLoginOutcomeAndMaybeAlert,
   type LoginFailureReason,
 } from "../sync/procore-login-alert";
@@ -195,6 +196,9 @@ export async function saveProcoreCredentials(
 export interface AuthProbePage {
   url(): string;
   $(selector: string): Promise<unknown>;
+  /** Optional, for the page fingerprint only (a real Playwright Page has both). */
+  evaluate?: (fn: () => string[]) => Promise<unknown>;
+  frames?: () => unknown[];
 }
 
 const PROCORE_HOST_RE = /(^|\.)procore\.com$/i;
@@ -225,6 +229,75 @@ export function isProcoreHostUrl(rawUrl: string): boolean {
     return PROCORE_HOST_RE.test(new URL(rawUrl).hostname);
   } catch {
     return false;
+  }
+}
+
+/**
+ * Procore's signed-in application routes, on its app hosts. Procore sends a signed-out browser to
+ * login.procore.com for these, so — once every sign-in sign (password field, sign-in URL, sign-in form)
+ * has been ruled out — being on one IS evidence of a session. Needed since Procore's new webclients
+ * shell (2026-10: the Company Hub at /webclients/host/companies/<id>/tools/hubs/...) carries none of
+ * the old session markers, which made every good login read as UNVERIFIED.
+ */
+const PROCORE_APP_HOST_RE = /^(app|us\d+|sandbox)\.procore\.com$/i;
+const PROCORE_APP_ROUTE_RE = /^\/(webclients\/host\/companies\/\d+|companies\/\d+|\d+\/(company|project))(\/|$)/i;
+
+export function isProcoreAppRouteUrl(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    return PROCORE_APP_HOST_RE.test(u.hostname) && !isProcoreLoginUrl(rawUrl) && PROCORE_APP_ROUTE_RE.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Fingerprints already logged this process, by route shape, so a 19-minute cycle logs each page once. */
+const fingerprintedRoutes = new Set<string>();
+
+/**
+ * Log a TEXT-FREE structural fingerprint of a page SyncHub could not confirm by a session element: the
+ * frame count and up to 40 element ids / data-qa / data-testid values (long digit runs collapsed, nothing
+ * with an @). It is what picking a stable signed-in marker for Procore's new shell needs, without a
+ * screenshot or any page text. Never throws.
+ */
+async function logPageFingerprint(page: AuthProbePage, url: string): Promise<void> {
+  if (typeof page.evaluate !== "function") return;
+  let route = "";
+  try {
+    route = new URL(url).pathname.replace(/\d{3,}/g, "#");
+  } catch {
+    return;
+  }
+  if (fingerprintedRoutes.has(route)) return;
+  try {
+    const raw = await page.evaluate(() => {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      const push = (v: string) => {
+        if (out.length < 40 && !seen.has(v)) {
+          seen.add(v);
+          out.push(v);
+        }
+      };
+      const nodes = Array.from(document.querySelectorAll("[data-qa],[data-testid],[data-test-id],[id],header,nav,main,iframe"));
+      for (const el of nodes) {
+        for (const a of ["data-qa", "data-testid", "data-test-id", "id"]) {
+          const v = el.getAttribute(a);
+          if (v) push(`${a}=${v}`);
+        }
+        if (["HEADER", "NAV", "MAIN", "IFRAME"].includes(el.tagName)) push(`<${el.tagName.toLowerCase()}>`);
+        if (out.length >= 40) break;
+      }
+      return out;
+    });
+    const items = (Array.isArray(raw) ? raw : [])
+      .filter((v): v is string => typeof v === "string" && !v.includes("@"))
+      .map((v) => v.replace(/\d{3,}/g, "#").slice(0, 80));
+    const frames = typeof page.frames === "function" ? page.frames().length : "?";
+    fingerprintedRoutes.add(route);
+    log(`Procore page fingerprint (${route}): frames=${frames}; ${items.join(" ") || "(no ids)"}`, "playwright");
+  } catch {
+    /* a fingerprint is diagnostics only */
   }
 }
 
@@ -299,12 +372,18 @@ export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuth
       return { authenticated: false, loginPage: true, evidence: "a sign-in form is present", url };
     }
 
+    if (isProcoreAppRouteUrl(url)) {
+      await logPageFingerprint(page, url);
+      return { authenticated: true, loginPage: false, evidence: "on a signed-in Procore app route with no sign-in form", url };
+    }
+
     for (const marker of WEAK_AUTHENTICATED_MARKERS) {
       if (await page.$(marker.selector)) {
         return { authenticated: true, loginPage: false, evidence: `application chrome '${marker.name}' found`, url };
       }
     }
 
+    await logPageFingerprint(page, url);
     return {
       authenticated: false,
       loginPage: false,
@@ -339,7 +418,11 @@ export async function describeSelectorMiss(
 ): Promise<Error> {
   const state = await detectPageAuthState(page);
   if (state.authenticated) {
-    return new Error(`${subject} not found. Procore UI may have changed.`);
+    // Signed in, so not a sign-in failure, but the flow is still blocked and the owner must hear about it:
+    // on its OWN scope, so a working sign-in's recovery email can't alternate with this one every cycle.
+    const detail = `${subject} not found on a signed-in Procore page (${state.evidence})`;
+    await recordProcorePageOutcome({ ok: false, reason: "page_unrecognized", error: detail }, options?.blocking);
+    return new Error(`${detail}. Procore probably changed the page; this is NOT a sign-in failure.`);
   }
   const what = state.loginPage ? "SyncHub is signed OUT of Procore" : "SyncHub cannot confirm a Procore session";
   if (!state.probeFailed) {
@@ -617,7 +700,21 @@ export async function ensureLoggedIn(
   // An UNVERIFIED login records NOTHING: it is not proof of a session (so it must not flip a failing
   // state back to 'ok' or keep an 'ok' one there), and not yet proof of a failure — the caller's page
   // check (describeSelectorMiss) or a delivered export settles it.
-  const unverified = result.success && result.verified === false;
+  let unverified = result.success && result.verified === false;
+  if (unverified) {
+    // One central re-check after the app has had a moment to render, so any caller's login can be proven
+    // (and a recovery recorded) here, not only by the export's downstream page check (Codex on #112).
+    try {
+      await page.waitForTimeout(3000);
+      const settled = await detectPageAuthState(page);
+      if (settled.authenticated) {
+        log(`Procore sign-in verified on re-check — ${settled.evidence}`, "playwright");
+        unverified = false;
+      }
+    } catch {
+      /* stays unverified */
+    }
+  }
   if (unverified) {
     log("Procore sign-in UNVERIFIED — not recorded as a success; the next page check decides", "playwright");
   } else {
@@ -638,6 +735,18 @@ export async function ensureLoggedIn(
     reason: result.success ? undefined : (result.reason ?? "unknown"),
     ...(result.success ? { verified: !unverified } : {}),
   };
+}
+
+/** Report whether the Bid Board page the export needs was usable, on PROCORE_PAGE_ALERT_SCOPE. Never throws. */
+export async function recordProcorePageOutcome(
+  outcome: { ok: boolean; reason?: LoginFailureReason; error?: string },
+  blocking?: string
+): Promise<void> {
+  try {
+    await recordLoginOutcomeAndMaybeAlert({ outcome: { ...outcome, blocking }, scope: PROCORE_PAGE_ALERT_SCOPE });
+  } catch {
+    /* no-op */
+  }
 }
 
 /** Report a Procore browser sign-in outcome to the login alert. Alerting must never break an

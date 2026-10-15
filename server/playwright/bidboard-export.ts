@@ -17,7 +17,7 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
-import { describeSelectorMiss, ensureLoggedIn, PROCORE_CREDENTIAL_REMEDIATION, recordProcoreSignInOutcome } from "./auth";
+import { describeSelectorMiss, ensureLoggedIn, PROCORE_CREDENTIAL_REMEDIATION, recordProcorePageOutcome, recordProcoreSignInOutcome } from "./auth";
 import { randomDelay, takeScreenshot } from "./browser";
 import { PROCORE_SELECTORS } from "./selectors";
 import { log } from "../index";
@@ -217,6 +217,8 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       // A delivered export is the strongest proof of a live Procore session there is — record it, so
       // an outage that began with an UNVERIFIED login still gets its recovery email.
       await recordProcoreSignInOutcome({ ok: true }, EXPORT_BLOCKING);
+      // And the page the export needs is usable again (clears a page-change alert, with its recovery email).
+      await recordProcorePageOutcome({ ok: true }, EXPORT_BLOCKING);
       return destPath;
     }
 
