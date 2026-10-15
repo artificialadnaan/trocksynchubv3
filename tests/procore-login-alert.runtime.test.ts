@@ -167,10 +167,12 @@ describe("login-alert debounce durability across calls (runtime)", () => {
     for (const mins of [19, 38, 57]) await run(fail, new Date(NOW.getTime() + mins * MIN), afterRestart);
     expect(afterRestart).not.toHaveBeenCalled();
 
-    // A different failure is a new incident even inside the window.
+    // A different failure inside the window is NOT a fresh email (owner, 2026-10-15: at most one sign-in
+    // email a day while it stays failed). The unverified-login and export sign-in checks can report
+    // different reasons on alternate cycles, and each flip used to email.
     const changed = vi.fn(async () => ({ success: true, provider: "gmail" }));
-    await run({ ok: false, reason: "mfa_required", attempts: 3 }, new Date(NOW.getTime() + 60 * MIN), changed);
-    expect(changed).toHaveBeenCalledTimes(1);
+    await run({ ok: false, reason: "mfa_required", attempts: 3 }, new Date(NOW.getTime() + 45 * MIN), changed);
+    expect(changed).not.toHaveBeenCalled();
 
     // And recovery reports once, then goes quiet.
     const recovery = vi.fn(async () => ({ success: true, provider: "gmail" }));
@@ -281,5 +283,53 @@ describe("session_not_established failures (runtime)", () => {
     expect(rows[0].state).toBe("ok");
     expect(rows[0].last_error).toBeNull();
     expect(new Date(rows[0].last_success_at).toISOString()).toBe(new Date(NOW.getTime() + 200 * MIN).toISOString());
+  });
+});
+
+describe("the default re-alert window: at most one sign-in email a day while it stays failed (owner, 2026-10-15)", () => {
+  const prev = process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+  beforeEach(async () => {
+    await ensureLoginAlertStateTable(db);
+    await db.query(`DELETE FROM procore_login_alert_state`);
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+    else process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES = prev;
+  });
+
+  const reasons = ["credentials_rejected", "session_not_established", "unknown"] as const;
+  const day = async (send: any, startMin: number, cycles: number) => {
+    for (let i = 0; i < cycles; i++) {
+      await recordLoginOutcomeAndMaybeAlert(
+        { outcome: { ok: false, reason: reasons[i % reasons.length], attempts: 3 } as any, now: new Date(NOW.getTime() + (startMin + i * 19) * MIN), recipient: "ops@trock.test" },
+        { db, send }
+      );
+    }
+  };
+
+  it("sends one email for a whole day of 19-minute failures, even as the reason changes, and the next a day later", async () => {
+    delete process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await day(send, 0, 75); // 75 cycles x 19 min = 23 h 45 min
+    expect(send).toHaveBeenCalledTimes(1);
+    await day(send, 24 * 60, 1);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("an env value can lengthen the window but never shorten it below a day", async () => {
+    process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES = "60";
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await day(send, 0, 75);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovery still emails at once, and a later failure is a new incident", async () => {
+    delete process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await day(send, 0, 3);
+    const rec = await recordLoginOutcomeAndMaybeAlert({ outcome: { ok: true }, now: new Date(NOW.getTime() + 60 * MIN), recipient: "ops@trock.test" }, { db, send });
+    expect(rec.action).toBe("alert_recovered");
+    await day(send, 120, 1);
+    expect(send).toHaveBeenCalledTimes(3);
   });
 });
