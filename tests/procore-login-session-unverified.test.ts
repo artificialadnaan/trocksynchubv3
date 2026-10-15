@@ -142,7 +142,9 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
     const res = await runUnverifiedLogin(COMPANY_HUB_URL);
 
     const lines = logMock.mock.calls.map((c) => String(c[0]));
-    expect(lines.some((l) => /Successfully logged into Procore/.test(l))).toBe(true);
+    // Only the route said so: the success line must not claim a confirmed session (CodeRabbit on #112).
+    expect(lines.some((l) => /Successfully logged into Procore \(app page reached; session not confirmed\)/.test(l))).toBe(true);
+    expect(lines.some((l) => /session confirmed:/.test(l))).toBe(false);
     expect(lines.some((l) => /UNVERIFIED/.test(l))).toBe(false);
     expect(res).toMatchObject({ success: true, verified: true });
     expect(recorded().at(-1)).toMatchObject({ outcome: { ok: true, blocking: EXPORT_BLOCKING } });

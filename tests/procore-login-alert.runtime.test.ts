@@ -369,7 +369,10 @@ describe("the login alert's transport and wording (Codex + CodeRabbit on #112)",
     expect(subject).toMatch(/not confirmed/i);
     expect(htmlBody).not.toMatch(/nothing on the password/i);
     expect(htmlBody).toMatch(/Test/);
-    expect(htmlBody).toMatch(/Successfully logged into Procore/);
+    // Only a CONFIRMED session (or a delivered export) proves a page change; a route-only success line doesn't.
+    expect(htmlBody).toMatch(/session confirmed/);
+    expect(htmlBody).toMatch(/delivered export/i);
+    expect(htmlBody).toMatch(/app page reached/);
     expect(renderLoginAlertEmail({ kind: "recovered", reason: "page_unconfirmed" as any, now: NOW }).subject).toMatch(/export/i);
   });
 });
