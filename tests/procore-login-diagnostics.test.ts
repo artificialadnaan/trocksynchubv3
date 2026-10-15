@@ -547,15 +547,18 @@ describe("recordLoginOutcomeAndMaybeAlert — dedupe", () => {
     expect(email.bypassGlobalCc).toBe(true);
   });
 
-  it("is inert when no recipient is configured, and never throws into the automation", async () => {
+  it("is NOT inert when the shared ops variable is unset — it emails the owner alone (2026-10 silent outage)", async () => {
+    // It used to be a silent no-op without BIDBOARD_CRM_ALERT_RECIPIENT, which is one way a dead
+    // Procore session can run for weeks with nobody told. The recipient is now pinned to the owner.
     const db = fakeDb();
     const prev = process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
     delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
     try {
       const res = await record({ outcome: { ok: false, reason: "credentials_rejected" }, now: NOW }, { db, send });
-      expect(send).not.toHaveBeenCalled();
-      expect(db.store.size).toBe(0);
-      expect(res.action).toBe("none");
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0][0]).toMatchObject({ to: "aiqbal@trockgc.com", bypassGlobalCc: true });
+      expect(db.store.size).toBe(1);
+      expect(res.action).toBe("alert_failure");
     } finally {
       if (prev !== undefined) process.env.BIDBOARD_CRM_ALERT_RECIPIENT = prev;
     }
