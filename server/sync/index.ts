@@ -55,6 +55,19 @@ export function isBidBoardExportOnly(env: NodeJS.ProcessEnv = process.env): bool
 
 const SERVICE_PROJECT_NUMBER_RE = /-4-/;
 
+/**
+ * The bidboard_stage_sync_runs status for a finished run: the ONE mapping every recording path uses.
+ * "export_only" is never a baseline status (hasSuccessfulBidboardStageSyncRun counts only success/initialized),
+ * so a later real run still initialises its baseline instead of pushing every stale difference (Codex P1 on #112).
+ */
+export function stageSyncRunStatus(result: BidBoardStageSyncResult, dryRun: boolean): string {
+  if (result.exportOnly) return "export_only";
+  if (result.initialized) return "initialized";
+  if (dryRun) return "dry_run";
+  if (result.failed > 0) return result.changed > 0 ? "partial" : "failed";
+  return "success";
+}
+
 export interface RunOptions {
   dryRun?: boolean;
   forceExport?: string;
@@ -68,15 +81,18 @@ async function cleanupOldExports(): Promise<void> {
   try {
     await fs.mkdir(EXPORTS_DIR, { recursive: true });
     const entries = await fs.readdir(EXPORTS_DIR);
-    const xlsx = entries
-      .filter((e) => e.endsWith(".xlsx"))
-      .map((e) => path.join(EXPORTS_DIR, e));
-    const stats = await Promise.all(
-      xlsx.map(async (p) => ({ path: p, mtime: (await fs.stat(p)).mtime.getTime() }))
-    );
-    stats.sort((a, b) => b.mtime - a.mtime);
-    for (let i = KEEP_LAST_N; i < stats.length; i++) {
-      await fs.unlink(stats[i].path).catch(() => {});
+    // The workbooks and the export-only .rows.json snapshots next to them, each kept to the newest KEEP_LAST_N.
+    for (const suffix of [".xlsx", ".xlsx.rows.json"]) {
+      const files = entries
+        .filter((e) => e.endsWith(suffix))
+        .map((e) => path.join(EXPORTS_DIR, e));
+      const stats = await Promise.all(
+        files.map(async (p) => ({ path: p, mtime: (await fs.stat(p)).mtime.getTime() }))
+      );
+      stats.sort((a, b) => b.mtime - a.mtime);
+      for (let i = KEEP_LAST_N; i < stats.length; i++) {
+        await fs.unlink(stats[i].path).catch(() => {});
+      }
     }
   } catch {
     /* ignore */
@@ -147,6 +163,7 @@ export async function runBidBoardStageSync(
       );
       result.exportPath = exportPath;
       result.exportOnly = true;
+      await cleanupOldExports();
       return result;
     }
     // ONE extraction instant for both targets: Core keys newest-wins on it, and the two copies are the same snapshot.

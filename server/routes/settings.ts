@@ -7,7 +7,7 @@ import { runFullHubSpotSync } from "../hubspot";
 import { triggerPostSyncProcoreUpdates } from "../hubspot-procore-sync";
 import { processNewDealWebhook } from "../deal-project-number";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation } from "../bidboard-automation";
-import { runBidBoardStageSync } from "../sync";
+import { runBidBoardStageSync, stageSyncRunStatus } from "../sync";
 import { recordPollingAuthExpiry, POLLING_JOBS } from "../polling-auth-alert";
 import { DATA_RETENTION_CONFIG_KEY } from "../data-retention";
 
@@ -508,7 +508,7 @@ async function safeCreateBidboardStageSyncRun(data: Parameters<typeof storage.cr
   }
 }
 
-async function runBidBoardStageSyncCycle() {
+async function runBidBoardStageSyncCycle(opts: { manual?: boolean } = {}) {
   if (bidboardStageSyncRunning) {
     console.log("[BidBoardStageSync] Already running, skipping");
     return;
@@ -521,7 +521,8 @@ async function runBidBoardStageSyncCycle() {
     const val = (config?.value as any) || {};
     // The saved switch decides every run. The boot timer is started by routes/settings.ts, but the Settings
     // switch POSTs to routes/bidboard.ts's duplicate route, which can only clear its own timer variable.
-    if (!val.enabled) {
+    // Only the timer obeys the switch: an explicit Sync Now runs while the schedule is off (Codex on #112).
+    if (!val.enabled && !opts.manual) {
       if (bidboardStageSyncTimer) {
         clearInterval(bidboardStageSyncTimer);
         bidboardStageSyncTimer = null;
@@ -532,11 +533,7 @@ async function runBidBoardStageSyncCycle() {
     const dryRun = val.dryRun !== false;
     const result = await withBrowserLock("bidboard-stage-sync", () => runBidBoardStageSync({ dryRun }));
     lastBidboardStageSyncAt = new Date();
-    const runStatus = result.initialized
-      ? "initialized"
-      : dryRun
-        ? "dry_run"
-        : (result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success");
+    const runStatus = stageSyncRunStatus(result, dryRun);
     await safeCreateBidboardStageSyncRun({
       status: runStatus,
       totalChanges: result.total,
@@ -1332,7 +1329,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       if (bidboardStageSyncRunning) {
         return res.json({ message: "Stage sync already in progress", running: true });
       }
-      runBidBoardStageSyncCycle();
+      runBidBoardStageSyncCycle({ manual: true });
       res.json({ message: "Stage sync triggered", running: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -1359,7 +1356,7 @@ export function registerSettingsRoutes(app: Express, requireAuth: any) {
       });
       const usedDryRun = dryRun === undefined ? true : !!dryRun;
       if (!initialize) {
-        const runStatus = usedDryRun ? "dry_run" : (result.failed > 0 ? (result.changed > 0 ? "partial" : "failed") : "success");
+        const runStatus = stageSyncRunStatus(result, usedDryRun);
         await safeCreateBidboardStageSyncRun({
           status: runStatus,
           totalChanges: result.total,
