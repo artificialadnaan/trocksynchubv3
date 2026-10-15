@@ -10,6 +10,7 @@ const {
   ensureLoginAlertStateTable,
   readLoginAlertState,
   recordLoginOutcomeAndMaybeAlert,
+  renderLoginAlertEmail,
   upsertLoginAlertState,
   PROCORE_LOGIN_ALERT_SCOPE,
 } = await import("../server/sync/procore-login-alert.ts");
@@ -331,5 +332,34 @@ describe("the default re-alert window: at most one sign-in email a day while it 
     expect(rec.action).toBe("alert_recovered");
     await day(send, 120, 1);
     expect(send).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("the login alert's transport and wording (Codex + CodeRabbit on #112)", () => {
+  beforeEach(async () => {
+    await ensureLoginAlertStateTable(db);
+    await db.query(`DELETE FROM procore_login_alert_state`);
+  });
+
+  it("is sent past testing-mode redirection, to the owner only", async () => {
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await recordLoginOutcomeAndMaybeAlert({ outcome: { ok: false, reason: "credentials_rejected", attempts: 3 } as any, now: NOW }, { db, send });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toMatchObject({ to: "aiqbal@trockgc.com", bypassTestingMode: true, bypassGlobalCc: true });
+  });
+
+  it("the failure email describes the once-a-day throttle, not a re-alert on every changed failure", () => {
+    const { htmlBody } = renderLoginAlertEmail({ kind: "login_failed", reason: "credentials_rejected", now: NOW });
+    expect(htmlBody).not.toMatch(/until the failure changes/i);
+    expect(htmlBody).toMatch(/at most one .*a day/i);
+  });
+
+  it("a page change is worded as a blocked export on a signed-in page, not a sign-in failure", () => {
+    const { subject, htmlBody } = renderLoginAlertEmail({ kind: "login_failed", reason: "page_unrecognized" as any, blocking: "Bid Board stage sync (Excel export)", now: NOW });
+    expect(subject).not.toMatch(/sign-in FAILED/i);
+    expect(subject).toMatch(/Bid Board export BLOCKED/i);
+    expect(htmlBody).toMatch(/signed in/i);
+    const recovered = renderLoginAlertEmail({ kind: "recovered", reason: "page_unrecognized" as any, now: NOW });
+    expect(recovered.subject).toMatch(/export/i);
   });
 });

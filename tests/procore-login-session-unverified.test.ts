@@ -45,10 +45,16 @@ vi.mock("../server/sync/procore-login-alert.ts", async (importOriginal) => ({
   recordLoginOutcomeAndMaybeAlert: recordLoginOutcomeMock,
 }));
 
-const { describeSelectorMiss, encryptPassword, ensureLoggedIn } = await import("../server/playwright/auth.ts");
+const { describeSelectorMiss, detectPageAuthState, encryptPassword, ensureLoggedIn } = await import("../server/playwright/auth.ts");
+const { PROCORE_LOGIN_ALERT_SCOPE, PROCORE_PAGE_ALERT_SCOPE } = await import("../server/sync/procore-login-alert.ts");
 
 const BID_BOARD_URL = "https://us02.procore.com/webclients/host/companies/1234/tools/bid-board";
 const LOGIN_URL = "https://login.procore.com/?redirect=/webclients/host/companies/1234/tools/bid-board";
+/** Where the owner's 2026-10-15 Test click landed (SyncHub log 14:47:08Z): Procore's signed-in Company Hub
+ *  on the new webclients shell, which carries none of SyncHub's old session markers. */
+const COMPANY_HUB_URL = "https://us02.procore.com/webclients/host/companies/1234/tools/hubs/company-hub/views/portfolio";
+/** A Procore page that is neither a sign-in screen nor an app route. */
+const INTERSTITIAL_URL = "https://us02.procore.com/interstitial";
 const EXPORT_BLOCKING = "Bid Board stage sync (Excel export)";
 /** A throwaway value purely so decryptPassword() succeeds; not a credential. */
 const FAKE_PASSWORD = "unit-test-not-a-password-9f3a";
@@ -75,7 +81,7 @@ beforeEach(() => {
 describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
   /** Walks Procore's login form; after Sign In it lands on an app URL that shows NO session element
    *  at all — exactly the production page: off the sign-in host, nothing signed-in on it. */
-  function unverifiedLoginPage() {
+  function unverifiedLoginPage(landing: string = INTERSTITIAL_URL) {
     let url = "https://login.procore.com/";
     let submitted = false;
     const handle = (selector: string) => ({
@@ -83,7 +89,7 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
       click: vi.fn(async () => {
         if (/Sign In/i.test(selector)) {
           submitted = true;
-          url = BID_BOARD_URL;
+          url = landing;
         }
       }),
     });
@@ -103,11 +109,11 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
     };
   }
 
-  async function runUnverifiedLogin() {
+  async function runUnverifiedLogin(landing?: string) {
     const prevKey = process.env.ENCRYPTION_KEY;
     process.env.ENCRYPTION_KEY = "unit-test-key-not-a-secret";
     try {
-      getPageMock.mockResolvedValue(unverifiedLoginPage());
+      getPageMock.mockResolvedValue(unverifiedLoginPage(landing));
       getAutomationConfigMock.mockResolvedValue({
         value: { email: "automation@example.invalid", encryptedPassword: encryptPassword(FAKE_PASSWORD), sandbox: false },
       });
@@ -129,13 +135,64 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
     expect(res.success).toBe(true);
     expect(res.verified).toBe(false);
   });
+
+  it("a login that lands on Procore's signed-in app shell (Company Hub) IS verified and recorded, whoever called it", async () => {
+    // 2026-10-15: the new webclients shell has none of the old markers, so this exact landing was logged
+    // UNVERIFIED and recorded nothing — and a non-export flow could never send the recovery email (Codex on #112).
+    const res = await runUnverifiedLogin(COMPANY_HUB_URL);
+
+    const lines = logMock.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => /Successfully logged into Procore/.test(l))).toBe(true);
+    expect(lines.some((l) => /UNVERIFIED/.test(l))).toBe(false);
+    expect(res).toMatchObject({ success: true, verified: true });
+    expect(recorded().at(-1)).toMatchObject({ outcome: { ok: true, blocking: EXPORT_BLOCKING } });
+  });
+});
+
+// ── 1b. Reading a page's sign-in state on Procore's new webclients shell ─────
+
+describe("detectPageAuthState — the new webclients shell", () => {
+  it("an app route off the sign-in host, with no sign-in form, is authenticated (no old marker needed)", async () => {
+    for (const url of [COMPANY_HUB_URL, BID_BOARD_URL, "https://us02.procore.com/598134326678930/project/home"]) {
+      const state = await detectPageAuthState(fakePage(url, []));
+      expect(state, url).toMatchObject({ authenticated: true, loginPage: false });
+      expect(state.evidence).toMatch(/app route/i);
+    }
+  });
+
+  it("a sign-in form or password field still wins on an app route, and a sign-in host is never authenticated", async () => {
+    expect(await detectPageAuthState(fakePage(COMPANY_HUB_URL, [/password/i]))).toMatchObject({ authenticated: false, loginPage: true });
+    expect(await detectPageAuthState(fakePage(COMPANY_HUB_URL, [/form\[action/]))).toMatchObject({ authenticated: false, loginPage: true });
+    expect(await detectPageAuthState(fakePage(LOGIN_URL, []))).toMatchObject({ authenticated: false, loginPage: true });
+  });
+
+  it("a Procore page that is not an app route proves nothing (support site, interstitials, other hosts)", async () => {
+    for (const url of [INTERSTITIAL_URL, "https://support.procore.com/products/online/user-guide/company-level/bid-board", "https://example.com/webclients/host/companies/1234/tools/bid-board"]) {
+      expect(await detectPageAuthState(fakePage(url, [])), url).toMatchObject({ authenticated: false, loginPage: false });
+    }
+  });
+
+  it("logs a text-free page fingerprint (element ids / data-qa, digits collapsed, frame count) so a stable marker can be chosen", async () => {
+    const page = {
+      ...fakePage(COMPANY_HUB_URL, []),
+      frames: () => [{}, {}, {}],
+      evaluate: vi.fn(async () => ["data-qa=global-header", "id=project-598134326678930", "data-testid=company-hub-portfolio"]),
+    };
+    await detectPageAuthState(page);
+    const line = logMock.mock.calls.map((c) => String(c[0])).find((l) => /page fingerprint/i.test(l));
+    expect(line).toBeDefined();
+    expect(line).toMatch(/frames=3/);
+    expect(line).toMatch(/data-qa=global-header/);
+    expect(line).toMatch(/id=project-#/);
+    expect(line).not.toMatch(/598134326678930/);
+  });
 });
 
 // ── 2. A confirmed selector-miss sign-in failure reaches the alert module ────
 
 describe("describeSelectorMiss — reports a confirmed sign-in failure", () => {
-  it("records a failure when the page shows no signed-in session (the production case)", async () => {
-    const err = await describeSelectorMiss(fakePage(BID_BOARD_URL, []), "Export menu button", {
+  it("records a failure when the page shows no signed-in session", async () => {
+    const err = await describeSelectorMiss(fakePage(INTERSTITIAL_URL, []), "Export menu button", {
       blocking: EXPORT_BLOCKING,
     });
 
@@ -153,11 +210,21 @@ describe("describeSelectorMiss — reports a confirmed sign-in failure", () => {
     expect(recorded().at(-1)).toMatchObject({ outcome: { ok: false, reason: "session_not_established" } });
   });
 
-  it("records nothing for an AUTHENTICATED page (a real UI change is not a sign-in failure)", async () => {
-    const err = await describeSelectorMiss(fakePage(BID_BOARD_URL, [/spaContent/, /nav/]), "Export menu button");
+  it("an AUTHENTICATED page is not a sign-in failure, but the blocked export still alerts, on its own page-change scope", async () => {
+    // The production case, re-read 2026-10-15: SyncHub was on the Bid Board app route the whole time.
+    for (const present of [[], [/spaContent/, /nav/]]) {
+      recordLoginOutcomeMock.mockClear();
+      const err = await describeSelectorMiss(fakePage(BID_BOARD_URL, present), "Export menu button", { blocking: EXPORT_BLOCKING });
 
-    expect(err.message).toBe("Export menu button not found. Procore UI may have changed.");
-    expect(recordLoginOutcomeMock).not.toHaveBeenCalled();
+      expect(err.message).toMatch(/Export menu button not found on a signed-in Procore page/);
+      expect(recorded()).toHaveLength(1);
+      expect(recorded()[0]).toMatchObject({
+        scope: PROCORE_PAGE_ALERT_SCOPE,
+        outcome: { ok: false, reason: "page_unrecognized", blocking: EXPORT_BLOCKING },
+      });
+      // Never on the sign-in scope: a page change must not flap with the sign-in alert's recovery email.
+      expect(recorded().some((r: any) => (r.scope ?? PROCORE_LOGIN_ALERT_SCOPE) === PROCORE_LOGIN_ALERT_SCOPE)).toBe(false);
+    }
   });
 
   it("records nothing when the probe itself crashed (a dead page proves nothing either way)", async () => {
@@ -244,11 +311,20 @@ describe("exportBidBoardProjectList — alerting and the stale-export fallback",
     };
   }
 
-  it("records the export's sign-in failure (no session on the Bid Board page) with what it blocks", async () => {
-    await expect(runExportWith(pageWithNoMenu(BID_BOARD_URL, []))).rejects.toThrow(/sign-in failure/i);
+  it("records the export's sign-in failure (a sign-in screen where the Bid Board should be) with what it blocks", async () => {
+    await expect(runExportWith(pageWithNoMenu(LOGIN_URL, [/password/i]))).rejects.toThrow(/sign-in failure/i);
 
     expect(recorded().at(-1)).toMatchObject({
       outcome: { ok: false, reason: "session_not_established", blocking: EXPORT_BLOCKING },
+    });
+  });
+
+  it("a signed-in Bid Board page without the export menu alerts as a page change, not a sign-in failure", async () => {
+    await expect(runExportWith(pageWithNoMenu(BID_BOARD_URL, []))).rejects.toThrow(/signed-in Procore page/i);
+
+    expect(recorded().at(-1)).toMatchObject({
+      scope: PROCORE_PAGE_ALERT_SCOPE,
+      outcome: { ok: false, reason: "page_unrecognized", blocking: EXPORT_BLOCKING },
     });
   });
 
@@ -258,7 +334,9 @@ describe("exportBidBoardProjectList — alerting and the stale-export fallback",
 
     expect(out).toMatch(/bidboard-export-.*\.xlsx$/);
     expect(saveAs).toHaveBeenCalledTimes(1);
-    expect(recorded().at(-1)).toMatchObject({ outcome: { ok: true, blocking: EXPORT_BLOCKING } });
+    // Both scopes recover: the sign-in, and the page the export needs.
+    expect(recorded().some((r: any) => (r.scope ?? PROCORE_LOGIN_ALERT_SCOPE) === PROCORE_LOGIN_ALERT_SCOPE && r.outcome.ok === true)).toBe(true);
+    expect(recorded().some((r: any) => r.scope === PROCORE_PAGE_ALERT_SCOPE && r.outcome.ok === true)).toBe(true);
   });
 
   it("refuses to re-use an OLDER export file when Procore delivered nothing — fails visibly instead", async () => {
