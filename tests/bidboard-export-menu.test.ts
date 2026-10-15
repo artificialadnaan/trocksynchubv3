@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// bidboard-export.ts (and auth/browser under it) import `log` from server/index.ts, which BOOTS the app on import:
+// registerRoutes then rejects with "SESSION_SECRET environment variable is required", an unhandled rejection that
+// fails the run though the test passes. Stub it, and the db the storage import pulls, as the other playwright tests do.
+vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
+vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
+
 describe("openBidBoardExportMenu", () => {
   beforeEach(() => {
     vi.resetAllMocks();
