@@ -55,18 +55,7 @@ export function isBidBoardExportOnly(env: NodeJS.ProcessEnv = process.env): bool
 
 const SERVICE_PROJECT_NUMBER_RE = /-4-/;
 
-/**
- * The bidboard_stage_sync_runs status for a finished run: the ONE mapping every recording path uses.
- * "export_only" is never a baseline status (hasSuccessfulBidboardStageSyncRun counts only success/initialized),
- * so a later real run still initialises its baseline instead of pushing every stale difference (Codex P1 on #112).
- */
-export function stageSyncRunStatus(result: BidBoardStageSyncResult, dryRun: boolean): string {
-  if (result.exportOnly) return "export_only";
-  if (result.initialized) return "initialized";
-  if (dryRun) return "dry_run";
-  if (result.failed > 0) return result.changed > 0 ? "partial" : "failed";
-  return "success";
-}
+export { stageSyncRunStatus } from "./run-status";
 
 export interface RunOptions {
   dryRun?: boolean;

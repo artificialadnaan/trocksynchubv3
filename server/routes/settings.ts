@@ -7,7 +7,8 @@ import { runFullHubSpotSync } from "../hubspot";
 import { triggerPostSyncProcoreUpdates } from "../hubspot-procore-sync";
 import { processNewDealWebhook } from "../deal-project-number";
 import { runBidBoardPolling, getAutomationStatus, enableBidBoardAutomation } from "../bidboard-automation";
-import { runBidBoardStageSync, stageSyncRunStatus } from "../sync";
+import { runBidBoardStageSync } from "../sync";
+import { stageSyncRunStatus } from "../sync/run-status";
 import { recordPollingAuthExpiry, POLLING_JOBS } from "../polling-auth-alert";
 import { DATA_RETENTION_CONFIG_KEY } from "../data-retention";
 

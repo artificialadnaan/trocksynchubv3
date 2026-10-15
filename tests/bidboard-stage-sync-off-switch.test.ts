@@ -175,7 +175,7 @@ describe("BidBoard stage sync OFF switch", () => {
 
 describe("stageSyncRunStatus — the one status every run-recording path writes", () => {
   it("export-only is never a baseline status; the others are unchanged", async () => {
-    const { stageSyncRunStatus } = await import("../server/sync/index.ts");
+    const { stageSyncRunStatus } = await import("../server/sync/run-status.ts");
     const base = { total: 0, changed: 0, failed: 0, changes: [], errors: [] };
     expect(stageSyncRunStatus({ ...base, exportOnly: true }, false)).toBe("export_only");
     expect(stageSyncRunStatus({ ...base, exportOnly: true, initialized: true }, true)).toBe("export_only");
