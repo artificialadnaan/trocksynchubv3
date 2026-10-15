@@ -332,6 +332,8 @@ export interface PageAuthState {
   url: string;
   /** True when the probe itself could not run (closed page, unreadable URL). Proves nothing either way. */
   probeFailed?: boolean;
+  /** Authenticated ONLY because the URL is a Procore app route (allowRoute), with no session element on the page. */
+  byRoute?: boolean;
 }
 
 /**
@@ -346,7 +348,12 @@ export interface PageAuthState {
  * page can carry an email field. Rungs 4-5 preserve the pre-existing behaviour for pages that show
  * neither kind of proof.
  */
-export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuthState> {
+export async function detectPageAuthState(
+  page: AuthProbePage,
+  /** allowRoute: count a Procore app route as a session. ONLY right after SyncHub submitted credentials (or to word
+   *  a selector miss honestly): on its own, a URL can be an expired-session interstitial or SSO shell (CodeRabbit). */
+  opts: { allowRoute?: boolean } = {}
+): Promise<PageAuthState> {
   let url = "";
   try {
     url = page.url();
@@ -372,15 +379,16 @@ export async function detectPageAuthState(page: AuthProbePage): Promise<PageAuth
       return { authenticated: false, loginPage: true, evidence: "a sign-in form is present", url };
     }
 
-    if (isProcoreAppRouteUrl(url)) {
-      await logPageFingerprint(page, url);
-      return { authenticated: true, loginPage: false, evidence: "on a signed-in Procore app route with no sign-in form", url };
-    }
 
     for (const marker of WEAK_AUTHENTICATED_MARKERS) {
       if (await page.$(marker.selector)) {
         return { authenticated: true, loginPage: false, evidence: `application chrome '${marker.name}' found`, url };
       }
+    }
+
+    if (opts.allowRoute && isProcoreAppRouteUrl(url)) {
+      await logPageFingerprint(page, url);
+      return { authenticated: true, loginPage: false, byRoute: true, evidence: "on a Procore app route with no sign-in form", url };
     }
 
     await logPageFingerprint(page, url);
@@ -416,10 +424,20 @@ export async function describeSelectorMiss(
   subject: string,
   options?: { blocking?: string }
 ): Promise<Error> {
-  const state = await detectPageAuthState(page);
+  const state = await detectPageAuthState(page, { allowRoute: true });
+  if (state.authenticated && state.byRoute) {
+    // Only the URL says "app page": the session is NOT confirmed, so say both causes are possible. Kept on the page
+    // scope so it cannot flap with the sign-in alert's recovery email (CodeRabbit on #112).
+    const detail = `${subject} not found on a Procore app page where SyncHub can't confirm the session (${state.evidence})`;
+    await recordProcorePageOutcome({ ok: false, reason: "page_unconfirmed", error: detail }, options?.blocking);
+    return new Error(
+      `${detail}. Either Procore changed the page or the session was lost: run Test on /testing (Procore Browser Login) — ` +
+        `"Successfully logged into Procore" means the page changed.`
+    );
+  }
   if (state.authenticated) {
-    // Signed in, so not a sign-in failure, but the flow is still blocked and the owner must hear about it:
-    // on its OWN scope, so a working sign-in's recovery email can't alternate with this one every cycle.
+    // A real session element is on the page, so not a sign-in failure, but the flow is still blocked and the owner must
+    // hear about it: on its OWN scope, so a working sign-in's recovery email can't alternate with this one every cycle.
     const detail = `${subject} not found on a signed-in Procore page (${state.evidence})`;
     await recordProcorePageOutcome({ ok: false, reason: "page_unrecognized", error: detail }, options?.blocking);
     return new Error(`${detail}. Procore probably changed the page; this is NOT a sign-in failure.`);
@@ -438,8 +456,8 @@ export async function describeSelectorMiss(
   );
 }
 
-async function isLoggedIn(page: Page): Promise<boolean> {
-  const state = await detectPageAuthState(page);
+async function isLoggedIn(page: Page, opts: { allowRoute?: boolean } = {}): Promise<boolean> {
+  const state = await detectPageAuthState(page, opts);
   // Log BOTH verdicts with their evidence. The negative is the one that matters during an outage —
   // an unauthenticated verdict that leaves no trace is how 2026-08-03 stayed invisible for 73
   // minutes, and this is the call site that has no target URL to explain itself.
@@ -587,8 +605,9 @@ async function performLogin(page: Page, credentials: ProcoreCredentials): Promis
     }
   }
 
-  // Verify we're logged in
-  if (await isLoggedIn(page)) {
+  // Verify we're logged in. Credentials were just submitted, so landing on a Procore app route counts: Procore's new
+  // webclients shell (2026-10) carries none of the old session markers.
+  if (await isLoggedIn(page, { allowRoute: true })) {
     await saveSession();
     log("Successfully logged into Procore", "playwright");
     return { success: true };
@@ -706,7 +725,7 @@ export async function ensureLoggedIn(
     // (and a recovery recorded) here, not only by the export's downstream page check (Codex on #112).
     try {
       await page.waitForTimeout(3000);
-      const settled = await detectPageAuthState(page);
+      const settled = await detectPageAuthState(page, { allowRoute: true });
       if (settled.authenticated) {
         log(`Procore sign-in verified on re-check — ${settled.evidence}`, "playwright");
         unverified = false;

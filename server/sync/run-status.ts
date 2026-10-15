@@ -5,6 +5,7 @@ export interface StageSyncRunOutcome {
   changed: number;
   initialized?: boolean;
   exportOnly?: boolean;
+  errors?: string[];
 }
 
 /**
@@ -17,5 +18,7 @@ export function stageSyncRunStatus(result: StageSyncRunOutcome, dryRun: boolean)
   if (result.initialized) return "initialized";
   if (dryRun) return "dry_run";
   if (result.failed > 0) return result.changed > 0 ? "partial" : "failed";
+  // Errored before changing anything (the export failed, the file was unreadable): never a 'success' baseline (Codex P1).
+  if ((result.errors?.length ?? 0) > 0) return result.changed > 0 ? "partial" : "failed";
   return "success";
 }

@@ -104,6 +104,9 @@ export async function runBidBoardStageSync(
   };
 
   let exportPath: string | null = null;
+  // Marked FIRST, before anything fallible: an export-only run that fails part-way must still never be recorded as a
+  // baseline (Codex P1 on #112).
+  if (isBidBoardExportOnly()) result.exportOnly = true;
 
   if (forceExport) {
     try {
@@ -151,7 +154,6 @@ export async function runBidBoardStageSync(
         "sync"
       );
       result.exportPath = exportPath;
-      result.exportOnly = true;
       await cleanupOldExports();
       return result;
     }

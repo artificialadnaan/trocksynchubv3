@@ -36,6 +36,9 @@ export type LoginFailureReason =
   /** SIGNED IN (an app route or session element is on the page), but a control the flow needs is not there:
    *  Procore changed the page. Recorded on PROCORE_PAGE_ALERT_SCOPE, never on the sign-in scope. */
   | "page_unrecognized"
+  /** On a Procore app ROUTE (no sign-in form) but with no session element, and the control is missing: either the page
+   *  changed or the session was lost. Recorded on PROCORE_PAGE_ALERT_SCOPE. */
+  | "page_unconfirmed"
   | "unknown";
 
 /** The single scope key for the one Procore browser account SyncHub automates with. Kept as a
@@ -67,6 +70,8 @@ const REASON_LABELS: Record<LoginFailureReason, string> = {
     "the sign-in did not leave SyncHub with a usable Procore session (the Procore page shows no signed-in session)",
   page_unrecognized:
     "SyncHub is signed in to Procore, but the page no longer shows the control the automation needs (Procore probably changed the page)",
+  page_unconfirmed:
+    "SyncHub reached a Procore app page with no sign-in form, but the control the automation needs is not there and the session cannot be confirmed: either Procore changed the page or the session was lost",
   unknown: "the login ended in an unrecognised state",
 };
 
@@ -85,7 +90,7 @@ export interface LoginAlertEmailInput {
 /** Pure renderer — separate from sending so it is unit-testable without a transport.
  *  Deliberately carries NO account identifier and NO credential material. */
 export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: string; htmlBody: string } {
-  if (e.kind === "recovered" && e.reason === "page_unrecognized") {
+  if (e.kind === "recovered" && (e.reason === "page_unrecognized" || e.reason === "page_unconfirmed")) {
     return {
       subject: "✅ Procore Bid Board export WORKING again — SyncHub",
       htmlBody: `
@@ -107,6 +112,22 @@ export function renderLoginAlertEmail(e: LoginAlertEmailInput): { subject: strin
   }
 
   const reason = e.reason ?? "unknown";
+  if (reason === "page_unconfirmed") {
+    return {
+      subject: "⚠️ Procore Bid Board export BLOCKED (page or session not confirmed) — SyncHub",
+      htmlBody: `
+      <h2>SyncHub cannot run the Bid Board export, and cannot tell whether it is still signed in</h2>
+      <p><strong>When:</strong> ${e.now.toISOString()}</p>
+      <p><strong>Cause:</strong> ${escapeHtml(REASON_LABELS.page_unconfirmed)}</p>
+      <p><strong>What it could not find:</strong> ${escapeHtml(e.error ?? "(none captured)")}</p>
+      <p><strong>Blocked right now:</strong> ${escapeHtml(e.blocking ?? "the Bid Board export")}</p>
+      <p><strong>What to do:</strong> first click Test on SyncHub /testing → Procore Browser Login. If the SyncHub log then
+      says "Successfully logged into Procore", the sign-in is fine and Procore changed the page: SyncHub's selectors need
+      updating from the "page fingerprint" log line. If it does not, update the stored password there.</p>
+      <p>At most one alert like this is sent a day while it continues; one email is sent when the export works again.</p>
+    `,
+    };
+  }
   if (reason === "page_unrecognized") {
     return {
       subject: "⚠️ Procore Bid Board export BLOCKED (page not recognised) — SyncHub is signed in",
