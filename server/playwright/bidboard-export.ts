@@ -181,8 +181,10 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const destPath = path.join(EXPORTS_DIR, `bidboard-export-${timestamp}.xlsx`);
 
-    // Procore may trigger a download event or navigation-based download.
-    const downloadPromise = page.waitForEvent("download", { timeout: EXPORT_TIMEOUT_MS });
+    // Procore may trigger a download event or navigation-based download. The rejection is handled here, where the
+    // promise is made: the export-link-miss path below throws before awaiting it, and an unhandled timeout rejection
+    // would take the whole process down.
+    const downloadPromise = page.waitForEvent("download", { timeout: EXPORT_TIMEOUT_MS }).catch(() => null);
     let exportClicked = false;
     for (const { name, loc } of exportSelectors) {
       try {
@@ -208,7 +210,7 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       throw await describeSelectorMiss(page, "Export Project List To Excel link", { blocking: EXPORT_BLOCKING });
     }
 
-    const download = await downloadPromise.catch(() => null);
+    const download = await downloadPromise;
     if (download) {
       await download.saveAs(destPath);
       log(`BidBoard export saved: ${destPath}`, "playwright");
