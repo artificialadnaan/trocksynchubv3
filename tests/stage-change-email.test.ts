@@ -7,6 +7,9 @@ const mockStorage = {
   createEmailSendLog: vi.fn(),
   getSyncMappingByProcoreProjectId: vi.fn(),
   getProcoreProjectByProcoreId: vi.fn(),
+  // sendStageChangeEmail reads the HubSpot deal's project_number as a last-resort fallback since b07b988.
+  getHubspotDealByHubspotId: vi.fn(),
+  getSyncMappingByHubspotDealId: vi.fn(),
 };
 
 const mockSendEmail = vi.fn();
@@ -43,6 +46,10 @@ describe("stage change notification rendering", () => {
     mockStorage.getProcoreProjectByProcoreId.mockResolvedValue({
       projectNumber: "DFW-1-02226-ac",
     });
+    // A different HubSpot number, so the test also proves the Procore number wins over the fallback.
+    mockStorage.getHubspotDealByHubspotId.mockResolvedValue({
+      properties: { project_number: "HS-FALLBACK-999" },
+    });
     mockGetDealOwnerInfo.mockResolvedValue({
       ownerEmail: "owner@trockgc.com",
       ownerName: "Owner",
@@ -69,5 +76,6 @@ describe("stage change notification rendering", () => {
     expect(payload.htmlBody).toContain("562949955705473");
     expect(payload.htmlBody).toContain("318905030374");
     expect(payload.htmlBody).toContain("/projects/562949955705473/tools/projecthome");
+    expect(payload.htmlBody).not.toContain("HS-FALLBACK-999");
   });
 });
