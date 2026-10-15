@@ -453,10 +453,12 @@ describe("role polling — the enabled-key clobber", () => {
     });
     expect(res.status).not.toHaveBeenCalledWith(401);
     expect(res.status).not.toHaveBeenCalledWith(503);
-    // A 500 here means the route threw before reaching role polling, which made the batch-size assertion fail opaquely.
+    await vi.advanceTimersByTimeAsync(150_000);
+
+    // requireInternalSecret calls next() without returning it, so invokeRoute returns before the route body ends;
+    // the advance above lets it settle. A 500 means it threw before role polling, which made the line below fail opaquely.
     expect(res.status).not.toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
-    await vi.advanceTimersByTimeAsync(150_000);
 
     // 175 from the database, not the 50 default this process booted with.
     expect(mocks.syncProcoreRoleAssignmentsBatch).toHaveBeenCalledWith(175, expect.any(Number));
