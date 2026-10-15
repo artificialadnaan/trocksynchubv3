@@ -238,9 +238,12 @@ export function sanitizeLoginError(error: string | undefined | null, redact: (st
   return out.length > LAST_ERROR_MAX ? `${out.slice(0, LAST_ERROR_MAX - 1)}…` : out;
 }
 
+/** Owner, 2026-10-15: at most one sign-in email a day while it stays failed. The env value can lengthen the window, never shorten it. */
+export const PROCORE_LOGIN_ALERT_MIN_REALERT_MINUTES = 24 * 60;
+
 function realertMinutesFromEnv(): number {
   const n = Number(process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES);
-  return Number.isFinite(n) && n > 0 ? n : 60;
+  return Number.isFinite(n) && n > PROCORE_LOGIN_ALERT_MIN_REALERT_MINUTES ? n : PROCORE_LOGIN_ALERT_MIN_REALERT_MINUTES;
 }
 
 /**
@@ -291,9 +294,10 @@ export async function recordLoginOutcomeAndMaybeAlert(
       lastAlertedAt: prior?.last_alerted_at ?? null,
       now,
       realertMinutes,
-      // A DIFFERENT failure is a new incident, not a repeat — the throttle only suppresses the
-      // identical failure recurring every cycle.
-      signatureChanged: !args.outcome.ok && prior?.last_reason != null && prior.last_reason !== reason,
+      // A changed reason is NOT a fresh email: the unverified-login and export sign-in checks can report
+      // different reasons on alternate cycles, and each flip used to email (75 a day). The email names the
+      // current reason; the window alone throttles while the state stays failed.
+      signatureChanged: false,
     });
 
     // Nothing to say and nothing changed: skip the write entirely so the steady-state healthy path

@@ -519,6 +519,16 @@ async function runBidBoardStageSyncCycle() {
     const { withBrowserLock } = await import("../playwright/browser");
     const config = await storage.getAutomationConfig("bidboard_stage_sync");
     const val = (config?.value as any) || {};
+    // The saved switch decides every run. The boot timer is started by routes/settings.ts, but the Settings
+    // switch POSTs to routes/bidboard.ts's duplicate route, which can only clear its own timer variable.
+    if (!val.enabled) {
+      if (bidboardStageSyncTimer) {
+        clearInterval(bidboardStageSyncTimer);
+        bidboardStageSyncTimer = null;
+      }
+      console.log("[BidBoardStageSync] Switched off in Settings; not running");
+      return;
+    }
     const dryRun = val.dryRun !== false;
     const result = await withBrowserLock("bidboard-stage-sync", () => runBidBoardStageSync({ dryRun }));
     lastBidboardStageSyncAt = new Date();
