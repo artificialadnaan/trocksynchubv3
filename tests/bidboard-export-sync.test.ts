@@ -30,8 +30,14 @@ vi.mock("../server/playwright/browser.ts", () => ({
 }));
 
 describe("runBidBoardExportSync", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
+    // resetAllMocks also wipes the factory's implementations: put back the two the flow needs, or
+    // ensureLoggedIn resolves undefined and the sync stops before it ever navigates (red on main 805311716).
+    const auth = await import("../server/playwright/auth.ts");
+    vi.mocked(auth.ensureLoggedIn).mockResolvedValue({ page: { stub: true }, success: true, error: undefined } as any);
+    const browser = await import("../server/playwright/browser.ts");
+    vi.mocked(browser.withBrowserLock).mockImplementation(async (_name: string, fn: () => Promise<unknown>) => fn() as any);
   });
 
   it("runs under the shared browser lock so concurrent flows cannot close its page", async () => {
