@@ -73,3 +73,16 @@ describe("writeRfpCleanupSnapshot: owner-only, never overwrites (Codex P2 on #11
     expect(() => writeRfpCleanupSnapshot(dir, [], () => "fixed")).toThrow(/EEXIST/);
   });
 });
+
+describe("the cleanup apply re-checks for an approval attempt INSIDE its transaction (Codex round 4 on #114)", () => {
+  it("apply() reads rfp_approval_attempt audit rows and consults rfpCleanupBlock before the update", () => {
+    const src = readFileSync(resolve(ROOT, "scripts/rfp-stale-pending-cleanup.ts"), "utf8");
+    const tx = src.slice(src.indexOf("db.transaction"));
+    const attempt = tx.indexOf("rfp_approval_attempt");
+    const block = tx.indexOf("rfpCleanupBlock(");
+    const update = tx.indexOf(".update(rfpApprovalRequests)");
+    expect(attempt).toBeGreaterThan(-1);
+    expect(block).toBeGreaterThan(attempt);
+    expect(update).toBeGreaterThan(block);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyPendingRfp, parseRfpCleanupIds, selectOpenPendingRfps } from "../server/pendingRfpOpen.ts";
+import { classifyPendingRfp, parseRfpCleanupIds, rfpCleanupBlock, selectOpenPendingRfps } from "../server/pendingRfpOpen.ts";
 
 // THE OWNER (10-15, via 68): SyncHub's daily digest emailed every 'pending' rfp_approval_requests row forever. 107 were
 // pending; about three quarters were already won, lost, inactive or no longer an RFP in the CRM. "Open" is the SAME rule
@@ -73,5 +73,27 @@ describe("parseRfpCleanupIds: all or nothing (CodeRabbit on #114)", () => {
   });
   it("--apply without --ids is an error", () => {
     expect(parseRfpCleanupIds(["--apply"]).ok).toBe(false);
+  });
+});
+
+describe("an UNRESOLVED HubSpot stage keeps the row (Codex round 4 on #114)", () => {
+  it("selectOpenPendingRfps keeps a row whose stage could not be resolved", async () => {
+    const kept = await selectOpenPendingRfps([{ id: 1 }], async () => ({ eligible: false, stageUnresolved: true, reason: "x" }));
+    expect(kept).toEqual([{ id: 1 }]);
+  });
+  it("classifyPendingRfp files it as open (never offered for cleanup)", () => {
+    const c = classifyPendingRfp({ createdAt: new Date() }, { eligible: false, stageUnresolved: true, reason: "x" }, new Date(), 30);
+    expect(c.open).toBe(true);
+    expect(c.group).toBe("open");
+    expect(c.reason).toMatch(/unresolved/i);
+  });
+});
+
+describe("rfpCleanupBlock: never cancel a request an approver already started (Codex round 4 on #114)", () => {
+  it("no approval attempt -> not blocked", () => {
+    expect(rfpCleanupBlock(0)).toBeNull();
+  });
+  it("any approval attempt -> blocked, left for a human", () => {
+    expect(rfpCleanupBlock(1)).toMatch(/approval/i);
   });
 });

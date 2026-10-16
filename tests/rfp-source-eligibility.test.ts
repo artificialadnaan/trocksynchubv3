@@ -354,4 +354,31 @@ describe("RFP source eligibility check", () => {
     const result = await checkRfpApprovalSourceEligibility(makeRequest());
     expect(result).toMatchObject({ eligible: true, checkFailed: true });
   }, 2_000);
+
+  // Codex round 4 on SyncHub #114: a HubSpot stage the cache cannot resolve (or no dealstage at all) proves nothing.
+  // The approve gate's answer is unchanged (pinned above), but the result says UNRESOLVED so the digest and the
+  // cleanup preview keep the row instead of treating it as having left RFP.
+  it("an unknown HubSpot stage id is flagged stageUnresolved", async () => {
+    hubspotFetchMode.stage = "custom-stage-99";
+    hubspotPipelinesMock.mockResolvedValue([{ hubspotId: "default", stages: [] }]);
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: false, stageUnresolved: true });
+  });
+
+  it("a HubSpot deal with NO dealstage is flagged stageUnresolved", async () => {
+    hubspotFetchMode.stage = "";
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: false, stageUnresolved: true });
+  });
+
+  it("a RESOLVED non-RFP HubSpot stage is NOT flagged unresolved (a real ineligibility)", async () => {
+    hubspotFetchMode.stage = "closedwon";
+    hubspotPipelinesMock.mockResolvedValue([{ hubspotId: "default", stages: [{ stageId: "closedwon", label: "Closed Won" }] }]);
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result.eligible).toBe(false);
+    expect(result.stageUnresolved).toBeFalsy();
+  });
 });
