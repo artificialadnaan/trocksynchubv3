@@ -211,6 +211,8 @@ describe("buildPendingRfpDigest", () => {
     expect(digestFor(digest, TIM)!.htmlBody).toContain(
       `${SIDNEY}, ${JAMES}, ${TIM}`
     );
+    // ONE approval decides an RFP, so the column says who CAN act, not that everyone must (owner 10-15, via 68).
+    expect(digestFor(digest, TIM)!.htmlBody).toContain(`Any one of: ${SIDNEY}, ${JAMES}, ${TIM}`);
   });
 
   it("prefers reviewer-edited values over original dealData", async () => {
@@ -286,5 +288,58 @@ describe("buildPendingRfpDigest", () => {
     expect(digest.skip).toBe(true);
     expect(digest.pendingCount).toBe(0);
     expect(digest.perRecipient).toEqual([]);
+  });
+});
+
+// THE OWNER (10-15, via 68): the daily email listed 47 RFPs, 41 from March and long decided in the CRM. With
+// `olderThanDays` (behind PENDING_RFP_DIGEST_OPEN_ONLY in the scheduler) an RFP pending longer than that is not a table
+// row: each recipient gets ONE "Older (n)" line instead, so the table holds only current RFPs.
+describe("buildPendingRfpDigest — olderThanDays", () => {
+  const NOW = new Date("2026-10-15T22:00:00Z");
+  const row = (token: string, createdAt: string, name: string): PendingRfpRow => ({
+    token,
+    createdAt: new Date(createdAt),
+    dealData: { dealname: name, project_number: "DFW-2-9", project_types: "2" },
+    sourceSystem: "trock_crm",
+  });
+  it("keeps current RFPs in the table and folds older ones into one Older (n) line per recipient", async () => {
+    const digest = await buildPendingRfpDigest(
+      [row("old-1", "2026-03-04T15:00:00Z", "March One"), row("old-2", "2026-03-30T15:00:00Z", "March Two"), row("new", "2026-10-14T15:00:00Z", "October Job")],
+      fakeResolver,
+      APP_URL,
+      isExpired,
+      { olderThanDays: 30, now: NOW },
+    );
+    const tim = digestFor(digest, TIM)!;
+    expect(tim.htmlBody).toContain("October Job");
+    // Not TABLE rows: the older ones are listed below the table, compactly.
+    expect(tim.htmlBody.indexOf("March One")).toBeGreaterThan(tim.htmlBody.indexOf("Older (2)"));
+    expect(tim.htmlBody).toContain("Older (2)");
+    // Still ACTIONABLE (Codex P1 on SyncHub #114): each older RFP keeps its name and its own review link; no "queue".
+    expect(tim.htmlBody).toContain("March One");
+    expect(tim.htmlBody).toContain(`${APP_URL}/rfp-review/old-1`);
+    expect(tim.htmlBody).toContain(`${APP_URL}/rfp-review/old-2`);
+    expect(tim.htmlBody).not.toMatch(/RFP queue/i);
+    expect(tim.count).toBe(1);
+    expect(tim.subject).toBe("RFPs Awaiting Your Approval — 1 pending (+2 older)");
+  });
+  it("a recipient with ONLY older RFPs still gets the one-line summary (nothing silently dropped)", async () => {
+    const digest = await buildPendingRfpDigest([row("old-1", "2026-03-04T15:00:00Z", "March One")], fakeResolver, APP_URL, isExpired, {
+      olderThanDays: 30,
+      now: NOW,
+    });
+    expect(digest.skip).toBe(false);
+    const tim = digestFor(digest, TIM)!;
+    expect(tim.count).toBe(0);
+    expect(tim.htmlBody).toContain("Older (1)");
+    // The introduction counts the older one too (CodeRabbit on #114): never "0 RFPs are awaiting".
+    expect(tim.htmlBody).not.toMatch(/\b0 RFPs/);
+    expect(tim.htmlBody).toContain("1 RFP is awaiting your approval");
+    expect(tim.subject).toBe("RFPs Awaiting Your Approval — 0 pending (+1 older)");
+  });
+  it("without the option, every pending RFP stays a table row (today's behaviour)", async () => {
+    const digest = await buildPendingRfpDigest([row("old-1", "2026-03-04T15:00:00Z", "March One")], fakeResolver, APP_URL, isExpired);
+    expect(digestFor(digest, TIM)!.htmlBody).toContain("March One");
+    expect(digestFor(digest, TIM)!.htmlBody).not.toContain("Older (");
   });
 });
