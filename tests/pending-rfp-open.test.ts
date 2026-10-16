@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyPendingRfp, selectOpenPendingRfps } from "../server/pendingRfpOpen.ts";
+import { classifyPendingRfp, parseRfpCleanupIds, selectOpenPendingRfps } from "../server/pendingRfpOpen.ts";
 
 // THE OWNER (10-15, via 68): SyncHub's daily digest emailed every 'pending' rfp_approval_requests row forever. 107 were
 // pending; about three quarters were already won, lost, inactive or no longer an RFP in the CRM. "Open" is the SAME rule
@@ -40,5 +40,38 @@ describe("selectOpenPendingRfps", () => {
     });
     expect(kept.map((r) => r.id)).toEqual([1, 3]);
     expect(seen).toEqual([1, 2, 3]);
+  });
+});
+
+describe("the older boundary matches the digest's (CodeRabbit on #114)", () => {
+  it("30 days and one hour is OLDER with a 30-day window (elapsed time, not truncated days)", () => {
+    const created = new Date(NOW.getTime() - (30 * 86_400_000 + 3_600_000)).toISOString();
+    expect(classifyPendingRfp(req(5, created), { eligible: true }, NOW, 30).group).toBe("older");
+  });
+});
+
+describe("selectOpenPendingRfps skips EXPIRED rows before any source check (Codex P2 on #114)", () => {
+  it("an expired request is never checked against the CRM or HubSpot", async () => {
+    const seen: number[] = [];
+    const rows = [req(1, "2026-10-10T00:00:00Z"), req(2, "2026-10-11T00:00:00Z")];
+    const kept = await selectOpenPendingRfps(
+      rows,
+      async (r) => { seen.push(r.id); return { eligible: true }; },
+      (r) => r.id === 1,
+    );
+    expect(seen).toEqual([2]);
+    expect(kept.map((r) => r.id)).toEqual([2]);
+  });
+});
+
+describe("parseRfpCleanupIds: all or nothing (CodeRabbit on #114)", () => {
+  it("accepts a clean, distinct list", () => {
+    expect(parseRfpCleanupIds(["--apply", "--ids=12,40"])).toEqual({ ok: true, ids: [12, 40] });
+  });
+  it.each([["--ids=12,invalid"], ["--ids="], ["--ids=12,12"], ["--ids=12,,40"], ["--ids=0"]])("rejects %s entirely, never a partial list", (arg) => {
+    expect(parseRfpCleanupIds(["--apply", arg]).ok).toBe(false);
+  });
+  it("--apply without --ids is an error", () => {
+    expect(parseRfpCleanupIds(["--apply"]).ok).toBe(false);
   });
 });

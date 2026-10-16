@@ -292,6 +292,13 @@ describe("RFP source eligibility check", () => {
     expect(createBidBoardMock).not.toHaveBeenCalled();
   });
 
+  it.each([401, 429])("a CRM %i is a FAILED check (fail-open), never \"deal no longer exists\" (Codex P1 on SyncHub #114)", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status })));
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null }));
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  });
+
   it("proceeds on CRM network errors because eligibility is a fail-open safety guard", async () => {
     requestRow.current = makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null });
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));

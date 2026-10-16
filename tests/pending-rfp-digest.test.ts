@@ -312,9 +312,14 @@ describe("buildPendingRfpDigest — olderThanDays", () => {
     );
     const tim = digestFor(digest, TIM)!;
     expect(tim.htmlBody).toContain("October Job");
-    expect(tim.htmlBody).not.toContain("March One");
-    expect(tim.htmlBody).not.toContain("March Two");
+    // Not TABLE rows: the older ones are listed below the table, compactly.
+    expect(tim.htmlBody.indexOf("March One")).toBeGreaterThan(tim.htmlBody.indexOf("Older (2)"));
     expect(tim.htmlBody).toContain("Older (2)");
+    // Still ACTIONABLE (Codex P1 on SyncHub #114): each older RFP keeps its name and its own review link; no "queue".
+    expect(tim.htmlBody).toContain("March One");
+    expect(tim.htmlBody).toContain(`${APP_URL}/rfp-review/old-1`);
+    expect(tim.htmlBody).toContain(`${APP_URL}/rfp-review/old-2`);
+    expect(tim.htmlBody).not.toMatch(/RFP queue/i);
     expect(tim.count).toBe(1);
     expect(tim.subject).toBe("RFPs Awaiting Your Approval — 1 pending (+2 older)");
   });
@@ -327,6 +332,9 @@ describe("buildPendingRfpDigest — olderThanDays", () => {
     const tim = digestFor(digest, TIM)!;
     expect(tim.count).toBe(0);
     expect(tim.htmlBody).toContain("Older (1)");
+    // The introduction counts the older one too (CodeRabbit on #114): never "0 RFPs are awaiting".
+    expect(tim.htmlBody).not.toMatch(/\b0 RFPs/);
+    expect(tim.htmlBody).toContain("1 RFP is awaiting your approval");
     expect(tim.subject).toBe("RFPs Awaiting Your Approval — 0 pending (+1 older)");
   });
   it("without the option, every pending RFP stays a table row (today's behaviour)", async () => {
