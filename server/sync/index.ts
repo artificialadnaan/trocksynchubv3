@@ -108,6 +108,7 @@ export async function runBidBoardStageSync(
   };
 
   let exportPath: string | null = null;
+  let exportsCleaned = false;
   // Marked FIRST, before anything fallible: an export-only run that fails part-way must still never be recorded as a
   // baseline (Codex P1 on #112).
   if (isBidBoardExportOnly()) result.exportOnly = true;
@@ -162,6 +163,7 @@ export async function runBidBoardStageSync(
       } finally {
         // Retention runs even if the snapshot write failed (a full disk must be able to recover; Codex on #112).
         await cleanupOldExports();
+        exportsCleaned = true;
       }
       return result;
     }
@@ -239,7 +241,7 @@ export async function runBidBoardStageSync(
       // An export-only run that could not parse or snapshot its workbook FAILED: count it, so the cron exits non-zero
       // (it still records as export_only, never a baseline), and keep retention running so retries can't fill the disk.
       result.failed += 1;
-      if (exportPath) await cleanupOldExports();
+      if (exportPath && !exportsCleaned) await cleanupOldExports();
     }
   }
 
