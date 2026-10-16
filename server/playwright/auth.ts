@@ -313,6 +313,9 @@ const LOGIN_DOM_HINTS = 'form[action*="login"], form[action*="session"], form[ac
 const STRONG_AUTHENTICATED_MARKERS: { name: string; selector: string }[] = [
   { name: "user-menu", selector: PROCORE_SELECTORS.nav.userMenu },
   { name: "bid-board-app-shell", selector: PROCORE_SELECTORS.bidboard.newUi.app },
+  // Procore's webclients shell (2026-10): the signed-in user's avatar in the global header. From the production
+  // page fingerprint of 2026-10-16 (data-qa=core-avatar, id=header-avatar); a sign-in page has no avatar.
+  { name: "header-avatar", selector: '[data-qa="core-avatar"], #header-avatar' },
 ];
 
 /** Generic application chrome. Suggestive, not conclusive — a sign-in page can have a nav bar, which

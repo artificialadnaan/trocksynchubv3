@@ -28,6 +28,49 @@ const EXPORT_TIMEOUT_MS = 60000;
 /** What a Procore sign-in failure blocks when it happens here — named in the login alert email. */
 const EXPORT_BLOCKING = "Bid Board stage sync (Excel export)";
 
+/** Procore's webclients shell shows this in <main> until the tool has loaded (production fingerprint, 2026-10-16). */
+const BID_BOARD_LOADING_SELECTOR = '[data-testid="entry-routes-spinner"]';
+/** Any of the three-dot menu triggers openBidBoardExportMenu tries: its presence means the Bid Board has rendered. */
+const BID_BOARD_MENU_READY_SELECTOR = [
+  '[data-qa="ci-EllipsisVertical"]',
+  'svg[name="EllipsisVertical"]',
+  PROCORE_SELECTORS.bidboard.moreOptionsMenu,
+].join(", ");
+
+/**
+ * Wait for Procore's Bid Board to finish loading: no loading spinner AND a menu trigger on the page. On 2026-10-16 the
+ * body was still the spinner 13 s after sign-in and the menu search ran once on the half-loaded page. Polls (counted,
+ * not timed, so it is deterministic), reloads once halfway if still not ready, and returns false at the limit; the
+ * caller's selector-miss path then reports honestly.
+ */
+export async function waitForBidBoardReady(
+  page: any,
+  opts: { timeoutMs?: number; pollMs?: number } = {}
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const pollMs = opts.pollMs ?? 1_000;
+  const maxPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  let reloaded = false;
+  for (let i = 0; i <= maxPolls; i++) {
+    const spinners = await page.locator(BID_BOARD_LOADING_SELECTOR).count().catch(() => 0);
+    const menus = await page.locator(BID_BOARD_MENU_READY_SELECTOR).count().catch(() => 0);
+    if (spinners === 0 && menus > 0) {
+      log(`Bid Board ready after ${Math.round((i * pollMs) / 1000)}s`, "playwright");
+      return true;
+    }
+    if (i === maxPolls) break;
+    if (!reloaded && i >= Math.floor(maxPolls / 2) && typeof page.reload === "function") {
+      reloaded = true;
+      log(`Bid Board still loading after ${Math.round((i * pollMs) / 1000)}s (spinner=${spinners}, menu=${menus}); reloading once`, "playwright");
+      await page.reload({ waitUntil: "load", timeout: 60_000 }).catch(() => {});
+    }
+    if (typeof page.waitForTimeout !== "function") break; // a real Playwright page always has it
+    await page.waitForTimeout(pollMs);
+  }
+  log(`Bid Board not ready after ${Math.round(timeoutMs / 1000)}s`, "playwright");
+  return false;
+}
+
 export async function openBidBoardExportMenu(page: any): Promise<boolean> {
   const menuSelectors: { name: string; selector: string }[] = [
     { name: '[data-qa="ci-EllipsisVertical"]', selector: '[data-qa="ci-EllipsisVertical"]' },
@@ -146,7 +189,9 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       log("Navigating to Bid Board for export...", "playwright");
       await page.goto(bidBoardUrl, { waitUntil: "load", timeout: 60000 });
     }
-    await randomDelay(3000, 5000);
+    // Procore's shell renders the Bid Board after "load": wait for the spinner to clear and the menu to exist.
+    await waitForBidBoardReady(page);
+    await randomDelay(500, 1000);
 
     // Close any open modals (Company Settings, etc.) before interacting with the page
     for (let i = 0; i < 3; i++) {
