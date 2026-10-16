@@ -6,6 +6,7 @@ const updateRows = vi.hoisted(() => [] as any[]);
 const sendEmailMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "BB-1" })));
 const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false }));
+const getByIdCalls = vi.hoisted(() => [] as unknown[][]);
 const hubspotPipelinesMock = vi.hoisted(() => vi.fn(async () => [
   {
     hubspotId: "default",
@@ -37,7 +38,8 @@ vi.mock("../server/hubspot.ts", () => ({
     crm: {
       deals: {
         basicApi: {
-          getById: vi.fn(async () => {
+          getById: vi.fn(async (...args: unknown[]) => {
+            getByIdCalls.push(args);
             if (hubspotFetchMode.missing) {
               const error: any = new Error("not found");
               error.code = 404;
@@ -127,10 +129,21 @@ describe("RFP source eligibility check", () => {
     ]);
     hubspotFetchMode.stage = "RFP";
     hubspotFetchMode.missing = false;
+    getByIdCalls.length = 0;
     requestRow.current = makeRequest();
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
     process.env.RFP_REQUEST_SYNC_SECRET = "secret";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ stage: "opportunity" }), { status: 200, headers: { "content-type": "application/json" } })));
+  });
+
+  it("the HubSpot eligibility check reads ONLY dealstage and pipeline: no associations, no company/contact/attachment calls (Codex P1 on SyncHub #114)", async () => {
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+
+    expect(result.eligible).toBe(true);
+    expect(getByIdCalls).toHaveLength(1);
+    expect(getByIdCalls[0]).toEqual(["hs-1", ["dealstage", "pipeline"]]);
   });
 
   it("proceeds when the HubSpot deal exists and remains RFP eligible", async () => {
