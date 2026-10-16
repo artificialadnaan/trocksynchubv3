@@ -11,7 +11,7 @@
  * PURE (no DB, no network): callers pass the eligibility result, so this is unit-testable.
  */
 
-export type RfpEligibility = { eligible: boolean; reason?: string; checkFailed?: boolean };
+export type RfpEligibility = { eligible: boolean; reason?: string; checkFailed?: boolean; stageUnresolved?: boolean };
 
 export type PendingRfpClassification = {
   open: boolean;
@@ -36,10 +36,13 @@ export function classifyPendingRfp(
   olderThanDays: number,
 ): PendingRfpClassification {
   const ageDays = rfpAgeDays(row.createdAt, now);
-  if (!eligibility.eligible) {
+  // An unresolved HubSpot stage proves nothing: the row stays (Codex round 4 on #114).
+  if (!eligibility.eligible && !eligibility.stageUnresolved) {
     return { open: false, group: "source_ineligible", reason: eligibility.reason ?? "source deal is no longer RFP-eligible", ageDays };
   }
-  const reason = eligibility.checkFailed ? "eligibility check failed (kept, fail-open)" : "source deal still RFP-eligible";
+  const reason = eligibility.stageUnresolved
+    ? "HubSpot stage unresolved (kept, fail-open)"
+    : eligibility.checkFailed ? "eligibility check failed (kept, fail-open)" : "source deal still RFP-eligible";
   return { open: true, group: isOlderThan(row.createdAt, now, olderThanDays) ? "older" : "open", reason, ageDays };
 }
 
@@ -82,7 +85,8 @@ export async function selectOpenPendingRfps<T>(
   const kept: T[] = [];
   for (const row of rows) {
     if (isExpired(row)) continue;
-    if ((await check(row)).eligible) kept.push(row);
+    const e = await check(row);
+    if (e.eligible || e.stageUnresolved) kept.push(row);
   }
   return kept;
 }
@@ -104,4 +108,13 @@ export function rfpDisplayName(r: { dealData?: unknown; editedFields?: unknown }
     if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
   }
   return "—";
+}
+
+/**
+ * The cleanup never cancels a request an approver has already started: processRfpApproval writes an
+ * 'rfp_approval_attempt' audit row first and keeps the request 'pending' through minutes of BidBoard work, with its
+ * in-flight marker only in the server's memory (Codex round 4 on #114). Any attempt at all leaves the row for a human.
+ */
+export function rfpCleanupBlock(approvalAttempts: number): string | null {
+  return approvalAttempts > 0 ? `an approval was already attempted (${approvalAttempts}x); it may be in flight, left for a human` : null;
 }

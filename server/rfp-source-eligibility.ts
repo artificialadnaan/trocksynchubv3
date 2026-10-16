@@ -13,7 +13,10 @@ import { getHubSpotClient } from './hubspot';
 import { log } from './log';
 
 export type SourceEligibilityResult = { exists: boolean; stage: string | null; checkFailed?: boolean };
-export type SourceEligibility = { eligible: boolean; reason?: string; exists?: boolean; stage?: string | null; checkFailed?: boolean };
+// stageUnresolved: the gate said "not eligible" only because the HubSpot stage could not be resolved (no dealstage, or
+// a stage id the cached pipelines do not know). The approve gate keeps its answer; the digest and the cleanup preview
+// keep the row, since an unresolved stage does not prove the deal left RFP (Codex round 4 on SyncHub #114).
+export type SourceEligibility = { eligible: boolean; reason?: string; exists?: boolean; stage?: string | null; checkFailed?: boolean; stageUnresolved?: boolean };
 
 // ONE deadline for every eligibility check, CRM or HubSpot (Codex round 3 on SyncHub #114). The digest checks rows
 // one after another, so a source that accepts a request and then stalls would otherwise hold the email forever. At
@@ -166,7 +169,13 @@ async function checkSourceEligibilityUnbounded(request: any): Promise<SourceElig
     const { eligible, resolvedLabel } = await isHubSpotRfpEligibleStageId(stage, pipeline);
     if (!eligible) {
       const stageDisplay = resolvedLabel ? `${resolvedLabel} (${stage})` : `${stage || 'unknown'}`;
-      return { eligible: false, reason: `Source HubSpot deal is no longer RFP/Estimating eligible (current stage: ${stageDisplay})`, exists: true, stage };
+      return {
+        eligible: false,
+        reason: `Source HubSpot deal is no longer RFP/Estimating eligible (current stage: ${stageDisplay})`,
+        exists: true,
+        stage,
+        ...(!stage || resolvedLabel === null ? { stageUnresolved: true } : {}),
+      };
     }
     return { eligible: true, exists: true, stage };
   } catch (error: any) {

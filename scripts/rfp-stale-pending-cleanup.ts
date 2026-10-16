@@ -9,7 +9,12 @@
  * (checkRfpApprovalSourceEligibility, fail-open), grouped by reason, with name, number, age and a test-name flag. The
  * flag matches "test" anywhere in the name; "demo" means DEMOLITION here and is never flagged (owner rule). The JSON
  * snapshot goes to the OS temp directory, never the repository: it holds customer names and ids (Codex P2 on #114).
- * Run in the SyncHub environment (it needs the CRM / HubSpot credentials the gate uses).
+ * RUN FROM A CHECKOUT, not inside the deployed container: the production image ships the bundle, not server/
+ * (Codex round 4 on #114). Use SyncHub's production env (CRM / HubSpot credentials the gate uses), with DATABASE_URL
+ * set to the database's PUBLIC url, e.g. `railway run --service <synchub> -- env DATABASE_URL=$DATABASE_PUBLIC_URL npx tsx ...`.
+ *
+ * An id with ANY rfp_approval_attempt audit row is never cancelled (an approval may be in flight; re-checked inside
+ * the apply transaction) and the preview lists it as approval_attempted.
  *
  *   npx tsx scripts/rfp-stale-pending-cleanup.ts                       # preview
  *   npx tsx scripts/rfp-stale-pending-cleanup.ts --apply --ids=12,40   # ONLY the ids the owner approved by name
@@ -20,16 +25,26 @@
  * skipped and reported.
  */
 import { tmpdir } from "os";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../server/db";
 import { auditLogs, rfpApprovalRequests } from "@shared/schema";
 // The side-effect-free eligibility module, NOT rfp-approval: that one's import graph boots the SyncHub server
 // (Express, schedulers, workers) via ./index (Codex P1 on #114). A test pins the closure.
 import { checkRfpApprovalSourceEligibility } from "../server/rfp-source-eligibility";
-import { classifyPendingRfp, parseOlderThanDays, parseRfpCleanupIds, rfpDisplayName as name } from "../server/pendingRfpOpen";
+import { classifyPendingRfp, parseOlderThanDays, parseRfpCleanupIds, rfpCleanupBlock, rfpDisplayName as name } from "../server/pendingRfpOpen";
 import { writeRfpCleanupSnapshot } from "../server/rfpCleanupSnapshot";
 
 const OLDER_THAN_DAYS = parseOlderThanDays(process.env.PENDING_RFP_DIGEST_OLDER_DAYS);
+
+// How many approval attempts the audit log holds for one request (processRfpApproval writes one before any work).
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+async function approvalAttempts(q: typeof db | Tx, requestId: number): Promise<number> {
+  const rows = await q
+    .select({ n: sql<number>`count(*)::int` })
+    .from(auditLogs)
+    .where(and(eq(auditLogs.action, "rfp_approval_attempt"), sql`${auditLogs.details}->>'requestId' = ${String(requestId)}`));
+  return rows[0]?.n ?? 0;
+}
 
 async function preview() {
   const now = new Date();
@@ -37,13 +52,14 @@ async function preview() {
   const out = [];
   for (const r of rows) {
     const c = classifyPendingRfp(r, await checkRfpApprovalSourceEligibility(r), now, OLDER_THAN_DAYS);
+    const blocked = rfpCleanupBlock(await approvalAttempts(db, r.id));
     const n = name(r);
     out.push({
-      id: r.id, group: c.group, reason: c.reason, ageDays: c.ageDays, name: n, projectNumber: r.projectNumber ?? null,
+      id: r.id, group: blocked ? "approval_attempted" : c.group, reason: blocked ?? c.reason, ageDays: c.ageDays, name: n, projectNumber: r.projectNumber ?? null,
       source: `${r.sourceSystem}:${r.sourceDealId}`, sentAt: r.createdAt, testLooking: /test/i.test(n),
     });
   }
-  for (const group of ["source_ineligible", "older", "open"] as const) {
+  for (const group of ["source_ineligible", "approval_attempted", "older", "open"] as const) {
     const list = out.filter((o) => o.group === group);
     console.log(`\n== ${group} (${list.length})`);
     for (const o of list) {
@@ -61,12 +77,15 @@ async function apply(ids: number[]) {
     if (!r) { console.log(`#${id}: not found — skipped`); continue; }
     // The status change and its audit row commit TOGETHER: an audit failure rolls the cancellation back.
     const done = await db.transaction(async (tx) => {
+      // Re-checked HERE, in the same transaction as the update: never cancel a request an approver already started.
+      const blocked = rfpCleanupBlock(await approvalAttempts(tx, id));
+      if (blocked) return blocked;
       const updated = await tx
         .update(rfpApprovalRequests)
         .set({ status: "cancelled_source_ineligible" })
         .where(and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, "pending")))
         .returning({ id: rfpApprovalRequests.id });
-      if (updated.length === 0) return false;
+      if (updated.length === 0) return "no longer pending";
       await tx.insert(auditLogs).values({
         action: "rfp_stale_pending_cleanup",
         entityType: "deal",
@@ -76,9 +95,9 @@ async function apply(ids: number[]) {
         category: "system",
         details: { requestId: id, from: "pending", to: "cancelled_source_ineligible", name: name(r), projectNumber: r.projectNumber, ownerGo: "ids approved by the owner by name" },
       });
-      return true;
+      return null;
     });
-    if (!done) { console.log(`#${id}: no longer pending (${r.status}) — skipped`); continue; }
+    if (done) { console.log(`#${id}: ${done} — skipped`); continue; }
     console.log(`#${id}: ${name(r)} -> cancelled_source_ineligible`);
   }
 }
