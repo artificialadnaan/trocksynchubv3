@@ -235,6 +235,12 @@ export async function runBidBoardStageSync(
   } catch (err: any) {
     result.errors.push(err.message || String(err));
     log(`BidBoard stage sync error: ${err.message}`, "sync");
+    if (result.exportOnly) {
+      // An export-only run that could not parse or snapshot its workbook FAILED: count it, so the cron exits non-zero
+      // (it still records as export_only, never a baseline), and keep retention running so retries can't fill the disk.
+      result.failed += 1;
+      if (exportPath) await cleanupOldExports();
+    }
   }
 
   return result;
