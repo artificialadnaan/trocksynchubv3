@@ -61,7 +61,6 @@ const renderEmail = (rfps: RfpReportRow[], pending = 0) =>
     ],
     approvalSummary: { pending, approved: 1, rejected: 0 },
     includeRfpLog: true,
-    includeChangeHistory: true,
     includeApprovalSummary: true,
     dashboardUrl: "https://synchub.example.com/settings",
   });
