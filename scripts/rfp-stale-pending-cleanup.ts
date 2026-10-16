@@ -19,21 +19,17 @@
  * The --ids list is all or nothing. NO email is sent, nothing is deleted, and an id that is no longer pending is
  * skipped and reported.
  */
-import { writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { db } from "../server/db";
 import { auditLogs, rfpApprovalRequests } from "@shared/schema";
-import { checkRfpApprovalSourceEligibility } from "../server/rfp-approval";
-import { classifyPendingRfp, parseRfpCleanupIds } from "../server/pendingRfpOpen";
+// The side-effect-free eligibility module, NOT rfp-approval: that one's import graph boots the SyncHub server
+// (Express, schedulers, workers) via ./index (Codex P1 on #114). A test pins the closure.
+import { checkRfpApprovalSourceEligibility } from "../server/rfp-source-eligibility";
+import { classifyPendingRfp, parseOlderThanDays, parseRfpCleanupIds, rfpDisplayName as name } from "../server/pendingRfpOpen";
+import { writeRfpCleanupSnapshot } from "../server/rfpCleanupSnapshot";
 
-const OLDER_THAN_DAYS = Number(process.env.PENDING_RFP_DIGEST_OLDER_DAYS ?? "30") || 30;
-const name = (r: { dealData: unknown; editedFields: unknown }) => {
-  const e = (r.editedFields ?? {}) as Record<string, unknown>;
-  const d = (r.dealData ?? {}) as Record<string, unknown>;
-  return String(e.dealname ?? e.project_name ?? d.dealname ?? d.project_name ?? "—");
-};
+const OLDER_THAN_DAYS = parseOlderThanDays(process.env.PENDING_RFP_DIGEST_OLDER_DAYS);
 
 async function preview() {
   const now = new Date();
@@ -54,8 +50,7 @@ async function preview() {
       console.log(`  #${o.id}  ${o.name}  ${o.projectNumber ?? "(no number)"}  ${o.ageDays ?? "?"}d  ${o.testLooking ? "[TEST?] " : ""}— ${o.reason}`);
     }
   }
-  const file = join(tmpdir(), `rfp-stale-pending-preview-${now.toISOString().replace(/[:.]/g, "-")}.json`);
-  writeFileSync(file, JSON.stringify(out, null, 2));
+  const file = writeRfpCleanupSnapshot(tmpdir(), out);
   console.log(`\npreview only: nothing written to the database. Snapshot: ${file}`);
 }
 

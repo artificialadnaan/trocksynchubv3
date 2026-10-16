@@ -86,3 +86,22 @@ export async function selectOpenPendingRfps<T>(
   }
   return kept;
 }
+
+/** The older-than window in days: finite and positive, else 30. ONE rule for the scheduler and the cleanup script. */
+export function parseOlderThanDays(raw: string | undefined): number {
+  const days = Number(raw ?? "30");
+  return Number.isFinite(days) && days > 0 ? days : 30;
+}
+
+/**
+ * The name a reviewer knows the RFP by: the edited name, else the source deal's. A BLANK edited field (empty or
+ * whitespace, e.g. a reviewer cleared it) falls back instead of hiding the real name (Codex P2 on #114).
+ */
+export function rfpDisplayName(r: { dealData?: unknown; editedFields?: unknown }): string {
+  const e = (r.editedFields ?? {}) as Record<string, unknown>;
+  const d = (r.dealData ?? {}) as Record<string, unknown>;
+  for (const v of [e.dealname, e.project_name, d.dealname, d.project_name]) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
+  }
+  return "—";
+}

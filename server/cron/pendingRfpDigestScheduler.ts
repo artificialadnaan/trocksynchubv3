@@ -15,7 +15,7 @@ import { db } from "../db";
 import { rfpApprovalRequests } from "@shared/schema";
 import { checkRfpApprovalSourceEligibility, getRfpReviewRecipients, isRfpApprovalRequestExpired } from "../rfp-approval";
 import { buildPendingRfpDigest } from "../pendingRfpDigest";
-import { selectOpenPendingRfps } from "../pendingRfpOpen";
+import { parseOlderThanDays, selectOpenPendingRfps } from "../pendingRfpOpen";
 
 /**
  * PENDING_RFP_DIGEST_OPEN_ONLY (exactly "true"; default OFF; owner 2026-10-15 via 68): list only RFPs whose source
@@ -24,8 +24,7 @@ import { selectOpenPendingRfps } from "../pendingRfpOpen";
  */
 export function pendingRfpDigestOptions(env: NodeJS.ProcessEnv = process.env): { openOnly: boolean; olderThanDays: number | undefined } {
   if (env.PENDING_RFP_DIGEST_OPEN_ONLY !== "true") return { openOnly: false, olderThanDays: undefined };
-  const days = Number(env.PENDING_RFP_DIGEST_OLDER_DAYS ?? "30");
-  return { openOnly: true, olderThanDays: Number.isFinite(days) && days > 0 ? days : 30 };
+  return { openOnly: true, olderThanDays: parseOlderThanDays(env.PENDING_RFP_DIGEST_OLDER_DAYS) };
 }
 import { sendEmail } from "../email-service";
 

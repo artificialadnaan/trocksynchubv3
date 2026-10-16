@@ -15,7 +15,14 @@ import { sendEmail, renderTemplate } from './email-service';
 // partial email-service mock in a test that omits it then resolves to undefined (handled by `|| []`)
 // instead of every such mock having to re-export it.
 import * as emailService from './email-service';
-import { log } from './index';
+import { log } from './log';
+import {
+  checkCrmDealEligibility,
+  checkRfpApprovalSourceEligibility,
+  sourceIdentityForRequest,
+} from './rfp-source-eligibility';
+// Re-exported: the approve/decline routes, the digest scheduler and tests import them from here.
+export { checkCrmDealEligibility, checkRfpApprovalSourceEligibility };
 import {
   buildBidBoardCreatedCallbackTargetUrl,
   buildRfpDeclinedCallbackTargetUrl,
@@ -115,7 +122,6 @@ export type CreateRfpApprovalRequestResult =
     }
   | { success: false; statusCode?: number; error: string };
 
-type SourceEligibilityResult = { exists: boolean; stage: string | null; checkFailed?: boolean };
 
 export async function buildSourceDealUrl(sourceSystem: SourceSystem, sourceDealId: string): Promise<string | null> {
   if (sourceSystem === 'hubspot') {
@@ -132,57 +138,6 @@ export async function buildSourceDealUrl(sourceSystem: SourceSystem, sourceDealI
   return null;
 }
 
-function normalizeStageForEligibility(stage: string | null | undefined): string {
-  return String(stage || '').trim().toLowerCase().replace(/[–—−]/g, '-');
-}
-
-function isHubSpotRfpEligibleStageLabel(stage: string | null | undefined): boolean {
-  const normalized = normalizeStageForEligibility(stage);
-  return normalized.includes('rfp') || normalized.includes('estimating') || normalized.includes('estimate in progress');
-}
-
-async function isHubSpotRfpEligibleStageId(
-  stageId: string | null | undefined,
-  pipelineId: string | null | undefined
-): Promise<{ eligible: boolean; resolvedLabel: string | null }> {
-  if (!stageId) return { eligible: false, resolvedLabel: null };
-
-  const pipelines = await storage.getHubspotPipelines();
-  for (const pipeline of pipelines) {
-    const currentPipelineId = (pipeline as any).hubspotId ?? (pipeline as any).hubspot_id ?? null;
-    if (pipelineId && currentPipelineId !== pipelineId) continue;
-
-    const stage = (((pipeline as any).stages || []) as any[]).find((candidate) => candidate?.stageId === stageId);
-    if (stage) {
-      const label = stage.label || null;
-      return {
-        eligible: isHubSpotRfpEligibleStageLabel(label),
-        resolvedLabel: label,
-      };
-    }
-  }
-
-  return {
-    eligible: isHubSpotRfpEligibleStageLabel(stageId),
-    resolvedLabel: null,
-  };
-}
-
-function isCrmOpportunityStage(stage: string | null | undefined): boolean {
-  return normalizeStageForEligibility(stage) === 'opportunity';
-}
-
-function sourceIdentityForRequest(request: any): { sourceSystem: SourceSystem; sourceDealId: string; projectNumber: string } {
-  const dealData = (request.dealData || {}) as Record<string, any>;
-  const sourceSystem = (request.sourceSystem || 'hubspot') as SourceSystem;
-  return {
-    sourceSystem,
-    sourceDealId: sourceSystem === 'hubspot'
-      ? (request.hubspotDealId || request.sourceDealId)
-      : request.sourceDealId,
-    projectNumber: request.projectNumber || dealData.project_number || '',
-  };
-}
 
 function buildRfpAuditDetails(request: any, outcome: string, approverEmail?: string, failureReason?: string) {
   const identity = sourceIdentityForRequest(request);
@@ -374,86 +329,7 @@ export function buildExpiredRfpMessage(request: { createdAt?: Date | string | nu
   return `This RFP review link has expired. The deal was sent on ${sentAt} and the link expired on ${expiredAt}. Contact the sender if you still need to review this request.`;
 }
 
-export async function checkCrmDealEligibility(sourceDealId: string): Promise<SourceEligibilityResult> {
-  const baseUrl = process.env.TROCK_CRM_BASE_URL?.replace(/\/+$/, '');
-  const secret = process.env.RFP_REQUEST_SYNC_SECRET;
-  if (!baseUrl || !secret) {
-    log('[rfp-approval] CRM eligibility check not configured; proceeding fail-open', 'rfp');
-    return { exists: true, stage: null, checkFailed: true };
-  }
 
-  const pathPart = '/api/internal/deals/eligibility-check';
-  const rawBody = JSON.stringify({ sourceDealId });
-  const signature = `sha256=${crypto.createHmac('sha256', secret).update(rawBody).digest('hex')}`;
-
-  try {
-    // Phase 5 CRM endpoint: POST /api/internal/deals/eligibility-check.
-    const response = await fetch(`${baseUrl}${pathPart}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-rfp-request-signature': signature,
-      },
-      body: rawBody,
-    });
-    if (response.status === 404) return { exists: false, stage: null };
-    if (response.status >= 500) {
-      log(`[rfp-approval] CRM eligibility check returned ${response.status}; proceeding fail-open`, 'rfp');
-      return { exists: true, stage: null, checkFailed: true };
-    }
-    // Only a definitive 404 means "gone". Any other unsuccessful answer (401, 429, ...) is a FAILED check, fail-open
-    // like the 5xx above (Codex P1 on SyncHub #114): a misconfigured secret or a rate limit must never cancel, or hide
-    // from the digest, an RFP whose deal is still open.
-    if (!response.ok) {
-      log(`[rfp-approval] CRM eligibility check returned ${response.status}; proceeding fail-open`, 'rfp');
-      return { exists: true, stage: null, checkFailed: true };
-    }
-    const body = await response.json().catch(() => ({}));
-    return { exists: true, stage: body?.stage ? String(body.stage) : null };
-  } catch (error: any) {
-    log(`[rfp-approval] CRM eligibility check failed (${error?.message || error}); proceeding fail-open`, 'rfp');
-    return { exists: true, stage: null, checkFailed: true };
-  }
-}
-
-export async function checkRfpApprovalSourceEligibility(request: any): Promise<{
-  eligible: boolean;
-  reason?: string;
-  exists?: boolean;
-  stage?: string | null;
-  checkFailed?: boolean;
-}> {
-  const identity = sourceIdentityForRequest(request);
-
-  if (identity.sourceSystem === 'trock_crm') {
-    const crm = await checkCrmDealEligibility(identity.sourceDealId);
-    if (crm.checkFailed) return { eligible: true, exists: crm.exists, stage: crm.stage, checkFailed: true };
-    if (!crm.exists) return { eligible: false, reason: 'Source CRM deal no longer exists', exists: false, stage: crm.stage };
-    if (!isCrmOpportunityStage(crm.stage)) {
-      return { eligible: false, reason: `Source CRM deal is no longer in Opportunity stage (current stage: ${crm.stage || 'unknown'})`, exists: true, stage: crm.stage };
-    }
-    return { eligible: true, exists: true, stage: crm.stage };
-  }
-
-  try {
-    const fresh = await fetchFullDealFromHubSpot(identity.sourceDealId);
-    const stage = fresh.dealstage || fresh.dealStage || null;
-    const pipeline = fresh.pipeline || null;
-    const { eligible, resolvedLabel } = await isHubSpotRfpEligibleStageId(stage, pipeline);
-    if (!eligible) {
-      const stageDisplay = resolvedLabel ? `${resolvedLabel} (${stage})` : `${stage || 'unknown'}`;
-      return { eligible: false, reason: `Source HubSpot deal is no longer RFP/Estimating eligible (current stage: ${stageDisplay})`, exists: true, stage };
-    }
-    return { eligible: true, exists: true, stage };
-  } catch (error: any) {
-    const status = error?.statusCode || error?.status || error?.code;
-    if (status === 404 || String(error?.message || '').includes('404')) {
-      return { eligible: false, reason: 'Source HubSpot deal no longer exists', exists: false, stage: null };
-    }
-    log(`[rfp-approval] HubSpot eligibility check failed (${error?.message || error}); proceeding fail-open`, 'rfp');
-    return { eligible: true, exists: true, stage: null, checkFailed: true };
-  }
-}
 
 export async function cancelIneligibleRfpApproval(request: any, approverEmail: string, reason: string): Promise<{ success: false; error: string; statusCode: 409; message: string }> {
   const identity = sourceIdentityForRequest(request);
