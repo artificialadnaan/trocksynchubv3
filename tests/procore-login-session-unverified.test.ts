@@ -153,8 +153,15 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
 // ── 1b. Reading a page's sign-in state on Procore's new webclients shell ─────
 
 describe("detectPageAuthState — the new webclients shell", () => {
+  it("the avatar marker is scoped to the signed-in header: no bare core-avatar that could match elsewhere (Codex on #115)", async () => {
+    const { PROCORE_SESSION_AVATAR_SELECTOR } = await import("../server/playwright/auth.ts");
+    const parts = PROCORE_SESSION_AVATAR_SELECTOR.split(",").map((p: string) => p.trim());
+    expect(parts.length).toBeGreaterThan(0);
+    for (const part of parts) expect(part).toMatch(/^(#header-avatar$|header |#remote-header-container )/);
+  });
+
   it("the new shell's header avatar is a real session element (fingerprint 2026-10-16: data-qa=core-avatar, id=header-avatar)", async () => {
-    const state = await detectPageAuthState(fakePage(BID_BOARD_URL, [/core-avatar/]));
+    const state = await detectPageAuthState(fakePage(BID_BOARD_URL, [/header-avatar/]));
     expect(state).toMatchObject({ authenticated: true, loginPage: false });
     expect(state.byRoute).toBeFalsy();
     expect(state.evidence).toMatch(/header-avatar/);
