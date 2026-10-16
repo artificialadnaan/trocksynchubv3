@@ -55,3 +55,83 @@ describe("openBidBoardExportMenu", () => {
     expect(click).toHaveBeenCalled();
   });
 });
+
+describe("waitForBidBoardReady", () => {
+  const spinnerThen = (spinnerPolls: number, menuAfter: number) => {
+    let polls = 0;
+    const page: any = {
+      reload: vi.fn(async () => {}),
+      waitForTimeout: vi.fn(async () => {
+        polls += 1;
+      }),
+      locator: vi.fn((selector: string) => {
+        const loc: any = {
+          count: vi.fn(async () => {
+            if (/entry-routes-spinner/.test(selector)) return polls < spinnerPolls ? 1 : 0;
+            return polls >= menuAfter ? 1 : 0;
+          }),
+          isVisible: vi.fn(async () => true),
+        };
+        loc.first = () => loc;
+        return loc;
+      }),
+    };
+    return page;
+  };
+
+  it("returns once the spinner is gone AND the menu is on the page", async () => {
+    const { waitForBidBoardReady } = await import("../server/playwright/bidboard-export.ts");
+    const page = spinnerThen(5, 6);
+    expect(await waitForBidBoardReady(page, { timeoutMs: 30_000, pollMs: 1_000 })).toBe(true);
+    expect(page.waitForTimeout.mock.calls.length).toBeGreaterThanOrEqual(6);
+    expect(page.reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once halfway if the page is still spinning, and gives up (false) at the timeout", async () => {
+    const { waitForBidBoardReady } = await import("../server/playwright/bidboard-export.ts");
+    const page = spinnerThen(1_000, 1_000);
+    expect(await waitForBidBoardReady(page, { timeoutMs: 10_000, pollMs: 1_000 })).toBe(false);
+    expect(page.reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("waitForBidBoardReady — CodeRabbit on #115", () => {
+  it("a spinner that is attached but HIDDEN does not count as loading", async () => {
+    const { waitForBidBoardReady } = await import("../server/playwright/bidboard-export.ts");
+    const page: any = {
+      waitForTimeout: vi.fn(async () => {}),
+      locator: vi.fn((selector: string) => {
+        const loc: any = {
+          count: vi.fn(async () => 1),
+          isVisible: vi.fn(async () => !/entry-routes-spinner/.test(selector)),
+        };
+        loc.first = () => loc;
+        return loc;
+      }),
+    };
+    expect(await waitForBidBoardReady(page, { timeoutMs: 5_000, pollMs: 1_000 })).toBe(true);
+    expect(page.waitForTimeout).not.toHaveBeenCalled();
+  });
+
+  it("keeps to its time budget: the halfway reload may only use what's left of it", async () => {
+    const { waitForBidBoardReady } = await import("../server/playwright/bidboard-export.ts");
+    let clock = 0;
+    const page: any = {
+      reload: vi.fn(async () => {}),
+      waitForTimeout: vi.fn(async (ms: number) => {
+        clock += ms;
+      }),
+      locator: vi.fn(() => {
+        const loc: any = { count: vi.fn(async () => (1)), isVisible: vi.fn(async () => true) };
+        loc.first = () => loc;
+        return loc;
+      }),
+    };
+    const ready = await waitForBidBoardReady(page, { timeoutMs: 10_000, pollMs: 1_000, now: () => clock });
+    expect(ready).toBe(false);
+    expect(page.reload).toHaveBeenCalledTimes(1);
+    const reloadTimeout = page.reload.mock.calls[0][0].timeout;
+    expect(reloadTimeout).toBeLessThanOrEqual(10_000 - 5_000);
+    expect(clock).toBeLessThanOrEqual(10_000);
+  });
+});
