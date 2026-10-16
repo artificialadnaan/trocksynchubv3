@@ -30,6 +30,9 @@ export const rfpRequestBodySchema = z.object({
     // display field must never block RFP ingestion. The CRM resolves it from assigned_rep → owner.
     ownerName: z.string().trim().nullable().optional().catch(undefined),
     ownerEmail: z.string().trim().nullable().optional().catch(undefined),
+    // Which CRM field ownerEmail came from (owner 2026-10-14). TROCK Core seats the service card's owner only from the
+    // assigned rep, never the HubSpot-owner / creator fallback. Non-rejecting like ownerEmail: anything else is dropped.
+    ownerSource: z.enum(["assigned_rep", "hubspot", "creator"]).nullable().optional().catch(undefined),
     // The CRM's customer / job-site uuids. zod STRIPS unknown keys, so without these two lines the
     // CRM's identity fields would be accepted by the endpoint and then silently dropped before ever
     // reaching deal_data — the Core handoff would then take its terminal-skip path on every RFP.

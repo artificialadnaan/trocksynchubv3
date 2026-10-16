@@ -290,6 +290,25 @@ describe("POST /api/rfp-requests", () => {
     });
   });
 
+  // Owner 2026-10-14: the owner's source rides with it, so TROCK Core can seat only the CRM's assigned rep.
+  it("stores the CRM-sent owner source in deal_data, and drops an unknown one without refusing", async () => {
+    await withServer(async (baseUrl) => {
+      const ok = await postRfpRequest(baseUrl, requestBody({
+        deal: { ...requestBody().deal, projectNumber: "OWNSRC-1", ownerEmail: "maria@trockgc.com", ownerSource: "assigned_rep" },
+      }));
+      expect(ok.status).toBe(201);
+      expect(rfpRows[0].dealData).toMatchObject({ ownerEmail: "maria@trockgc.com", ownerSource: "assigned_rep" });
+      // Its own event and deal: the endpoint replays a repeated sourceEventId instead of storing a second request.
+      const odd = await postRfpRequest(baseUrl, requestBody({
+        sourceEventId: "crm-event-ownsrc-2",
+        sourceDealId: "crm-deal-ownsrc-2",
+        deal: { ...requestBody().deal, projectNumber: "OWNSRC-2", ownerEmail: "maria@trockgc.com", ownerSource: "boss" as any },
+      }));
+      expect(odd.status).toBe(201);
+      expect(rfpRows[1].dealData).toMatchObject({ ownerSource: null });
+    });
+  });
+
   it("still accepts a request with no owner fields and stores empty owner (backward compatible)", async () => {
     await withServer(async (baseUrl) => {
       const body = requestBody({ deal: { ...requestBody().deal, projectNumber: "NOOWNER-1" } });
