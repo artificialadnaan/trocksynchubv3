@@ -13,8 +13,19 @@ import cron from "node-cron";
 import { eq, asc } from "drizzle-orm";
 import { db } from "../db";
 import { rfpApprovalRequests } from "@shared/schema";
-import { getRfpReviewRecipients, isRfpApprovalRequestExpired } from "../rfp-approval";
+import { checkRfpApprovalSourceEligibility, getRfpReviewRecipients, isRfpApprovalRequestExpired } from "../rfp-approval";
 import { buildPendingRfpDigest } from "../pendingRfpDigest";
+import { parseOlderThanDays, selectOpenPendingRfps } from "../pendingRfpOpen";
+
+/**
+ * PENDING_RFP_DIGEST_OPEN_ONLY (exactly "true"; default OFF; owner 2026-10-15 via 68): list only RFPs whose source
+ * deal is still open (the approve gate's own eligibility rule, fail-open on a failed check), and fold any pending
+ * longer than PENDING_RFP_DIGEST_OLDER_DAYS (default 30) into one "Older (n)" line per approver. Off: today's digest.
+ */
+export function pendingRfpDigestOptions(env: NodeJS.ProcessEnv = process.env): { openOnly: boolean; olderThanDays: number | undefined } {
+  if (env.PENDING_RFP_DIGEST_OPEN_ONLY !== "true") return { openOnly: false, olderThanDays: undefined };
+  return { openOnly: true, olderThanDays: parseOlderThanDays(env.PENDING_RFP_DIGEST_OLDER_DAYS) };
+}
 import { sendEmail } from "../email-service";
 
 let cronTask: ReturnType<typeof cron.schedule> | null = null;
@@ -31,11 +42,16 @@ async function runPendingRfpDigest(): Promise<void> {
       return;
     }
 
-    const rows = await db
+    const pending = await db
       .select()
       .from(rfpApprovalRequests)
       .where(eq(rfpApprovalRequests.status, "pending"))
       .orderBy(asc(rfpApprovalRequests.createdAt));
+    const options = pendingRfpDigestOptions();
+    // Only the RFPs still open in their source (flag on): won, lost, deactivated or no-longer-RFP deals drop out.
+    const rows = options.openOnly
+      ? await selectOpenPendingRfps(pending, checkRfpApprovalSourceEligibility, isRfpApprovalRequestExpired)
+      : pending;
 
     // jsonb columns infer as `unknown`; cast at the boundary (same as rfp-reports.ts) so the
     // pure builder keeps its strict, documented row shape.
@@ -50,11 +66,12 @@ async function runPendingRfpDigest(): Promise<void> {
       })),
       getRfpReviewRecipients,
       appUrl,
-      isRfpApprovalRequestExpired
+      isRfpApprovalRequestExpired,
+      options.olderThanDays === undefined ? {} : { olderThanDays: options.olderThanDays }
     );
     if (digest.skip || digest.perRecipient.length === 0) {
       console.log(
-        `[pending-rfp-digest] No email sent (fetched=${rows.length}, actionable=${digest.pendingCount}, recipients=${digest.perRecipient.length})`
+        `[pending-rfp-digest] No email sent (fetched=${pending.length}, open=${rows.length}, actionable=${digest.pendingCount}, recipients=${digest.perRecipient.length})`
       );
       return;
     }

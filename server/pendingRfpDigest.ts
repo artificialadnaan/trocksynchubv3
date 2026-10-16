@@ -23,6 +23,7 @@
 // this builder stays PURE/unit-testable without a DB. Same single source the approve/decline gates
 // and the review-email routing use, so the digest buckets each RFP under the approvers who can act.
 import { resolveEffectiveRfpProjectType } from "./constants";
+import { isOlderThan } from "./pendingRfpOpen";
 
 /** Minimal shape of a pending rfp_approval_requests row this builder needs. */
 export interface PendingRfpRow {
@@ -105,9 +106,10 @@ type DigestCell = {
   reviewUrl: string;
 };
 
-/** Render one approver's scoped digest table (only the RFPs awaiting them). */
-function renderRecipientDigestHtml(cells: DigestCell[]): string {
-  const count = cells.length;
+/** Render one approver's scoped digest table (only the RFPs awaiting them), plus the "Older (n)" line when set. */
+function renderRecipientDigestHtml(cells: DigestCell[], older: { cells: DigestCell[]; days: number } | null = null): string {
+  // The introduction counts every RFP awaiting the recipient, the older ones too (CodeRabbit on #114).
+  const count = cells.length + (older?.cells.length ?? 0);
   const tableRows = cells
     .map(
       (c) => `
@@ -115,7 +117,7 @@ function renderRecipientDigestHtml(cells: DigestCell[]): string {
           <td style="${CELL_STYLE}">${esc(c.projectName)}</td>
           <td style="${CELL_STYLE}">${esc(c.projectNumber)}</td>
           <td style="${CELL_STYLE}">${esc(c.dateSent)}</td>
-          <td style="${CELL_STYLE}">${c.awaiting.length ? esc(c.awaiting.join(", ")) : "—"}</td>
+          <td style="${CELL_STYLE}">${c.awaiting.length ? `Any one of: ${esc(c.awaiting.join(", "))}` : "—"}</td>
           <td style="${CELL_STYLE}"><a href="${esc(c.reviewUrl)}" style="color:#d11921;text-decoration:underline;">Review</a></td>
         </tr>`
     )
@@ -139,7 +141,21 @@ function renderRecipientDigestHtml(cells: DigestCell[]): string {
           <th style="${HEAD_STYLE}">Link</th>
         </tr>
         ${tableRows}
-      </table>
+      </table>${
+        older && older.cells.length > 0
+          ? `
+      <p style="font-family:Arial,Helvetica,sans-serif;color:#475569;font-size:13px;margin:16px 0 4px 0;">
+        Older (${older.cells.length}): pending longer than ${older.days} days.
+      </p>
+      <ul style="font-family:Arial,Helvetica,sans-serif;color:#475569;font-size:13px;margin:0;padding-left:18px;">${older.cells
+        .map(
+          // STILL ACTIONABLE (Codex P1 on #114): each older RFP keeps its own review link, just without the table row.
+          (c) =>
+            `<li><a href="${esc(c.reviewUrl)}" style="color:#d11921;">${esc(c.projectName)}</a> · ${esc(c.projectNumber)} · sent ${esc(c.dateSent)}</li>`,
+        )
+        .join("")}</ul>`
+          : ""
+      }
     </td></tr>
   </table>
 </body>
@@ -158,7 +174,10 @@ export async function buildPendingRfpDigest(
   // the SAME check the public review route uses to 410 the link). Expired-but-still-'pending'
   // rows are dropped: re-sending a /rfp-review/<token> link that can no longer be approved only
   // frustrates approvers. Rows with null tokenExpiresAt are legacy never-expiring links → kept.
-  isExpired: (row: { tokenExpiresAt?: Date | string | null }) => boolean
+  isExpired: (row: { tokenExpiresAt?: Date | string | null }) => boolean,
+  // Optional (PENDING_RFP_DIGEST_OPEN_ONLY in the scheduler; owner 10-15): an RFP pending longer than `olderThanDays`
+  // is not a table row; each recipient gets ONE "Older (n)" line for theirs instead. Absent: every row is listed.
+  options: { olderThanDays?: number; now?: Date } = {}
 ): Promise<PendingRfpDigest> {
   // Only actionable (non-expired) pending RFPs belong in the reminder.
   const actionable = rows.filter((row) => !isExpired(row));
@@ -176,6 +195,11 @@ export async function buildPendingRfpDigest(
   // contains just the RFPs they may approve, so a non-service approver never receives an
   // actionable link for a service-only RFP.
   const buckets = new Map<string, DigestCell[]>();
+  const olderBuckets = new Map<string, DigestCell[]>();
+  const now = options.now ?? new Date();
+  // THE shared boundary (pendingRfpOpen.isOlderThan), so the email and the cleanup preview agree on every row.
+  const isOlder = (createdAt: Date | string | null | undefined) =>
+    options.olderThanDays !== undefined && isOlderThan(createdAt, now, options.olderThanDays);
 
   for (const row of actionable) {
     const dealData = (row.dealData as Record<string, unknown>) || {};
@@ -219,6 +243,11 @@ export async function buildPendingRfpDigest(
     const awaiting = Array.from(baselineRecipients).filter((r) => createdRecipients.has(r));
 
     const cell: DigestCell = { projectName, projectNumber, dateSent, awaiting, reviewUrl };
+    // Older than the window: counted on each of its approvers' "Older (n)" line, not listed.
+    if (isOlder(row.createdAt)) {
+      for (const approver of awaiting) olderBuckets.set(approver, [...(olderBuckets.get(approver) ?? []), cell]);
+      continue;
+    }
     // Scope: this RFP only goes to its own authorized approvers.
     for (const approver of awaiting) {
       const list = buckets.get(approver);
@@ -228,18 +257,26 @@ export async function buildPendingRfpDigest(
   }
 
   // Actionable rows existed but none resolved to any approver (e.g. empty config) — nothing to send.
+  for (const approver of olderBuckets.keys()) if (!buckets.has(approver)) buckets.set(approver, []);
   if (buckets.size === 0) {
     return { skip: true, pendingCount, perRecipient: [] };
   }
 
   const perRecipient: PendingRfpRecipientDigest[] = Array.from(buckets.entries())
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([recipient, cells]) => ({
-      recipient,
-      count: cells.length,
-      subject: `RFPs Awaiting Your Approval — ${cells.length} pending`,
-      htmlBody: renderRecipientDigestHtml(cells),
-    }));
+    .map(([recipient, cells]) => {
+      const olderCells = olderBuckets.get(recipient) ?? [];
+      const olderCount = olderCells.length;
+      return {
+        recipient,
+        count: cells.length,
+        subject: `RFPs Awaiting Your Approval — ${cells.length} pending${olderCount > 0 ? ` (+${olderCount} older)` : ""}`,
+        htmlBody: renderRecipientDigestHtml(
+          cells,
+          options.olderThanDays === undefined ? null : { cells: olderCells, days: options.olderThanDays },
+        ),
+      };
+    });
 
   return { skip: false, pendingCount, perRecipient };
 }

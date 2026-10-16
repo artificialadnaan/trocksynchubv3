@@ -5,7 +5,8 @@ const auditRows = vi.hoisted(() => [] as any[]);
 const updateRows = vi.hoisted(() => [] as any[]);
 const sendEmailMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "BB-1" })));
-const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false }));
+const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false, stall: false, throw502With404Text: false }));
+const getByIdCalls = vi.hoisted(() => [] as unknown[][]);
 const hubspotPipelinesMock = vi.hoisted(() => vi.fn(async () => [
   {
     hubspotId: "default",
@@ -37,7 +38,15 @@ vi.mock("../server/hubspot.ts", () => ({
     crm: {
       deals: {
         basicApi: {
-          getById: vi.fn(async () => {
+          getById: vi.fn(async (...args: unknown[]) => {
+            getByIdCalls.push(args);
+            if (hubspotFetchMode.stall) return new Promise(() => {});
+            if (hubspotFetchMode.throw502With404Text) {
+              const error: any = new Error("Bad gateway (upstream said 404 at /crm/v3/objects/deals; request id 4041)");
+              error.code = 502;
+              error.statusCode = 502;
+              throw error;
+            }
             if (hubspotFetchMode.missing) {
               const error: any = new Error("not found");
               error.code = 404;
@@ -127,10 +136,24 @@ describe("RFP source eligibility check", () => {
     ]);
     hubspotFetchMode.stage = "RFP";
     hubspotFetchMode.missing = false;
+    hubspotFetchMode.stall = false;
+    hubspotFetchMode.throw502With404Text = false;
+    delete process.env.RFP_ELIGIBILITY_TIMEOUT_MS;
+    getByIdCalls.length = 0;
     requestRow.current = makeRequest();
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
     process.env.RFP_REQUEST_SYNC_SECRET = "secret";
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ stage: "opportunity" }), { status: 200, headers: { "content-type": "application/json" } })));
+  });
+
+  it("the HubSpot eligibility check reads ONLY dealstage and pipeline: no associations, no company/contact/attachment calls (Codex P1 on SyncHub #114)", async () => {
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+
+    expect(result.eligible).toBe(true);
+    expect(getByIdCalls).toHaveLength(1);
+    expect(getByIdCalls[0]).toEqual(["hs-1", ["dealstage", "pipeline"]]);
   });
 
   it("proceeds when the HubSpot deal exists and remains RFP eligible", async () => {
@@ -292,6 +315,13 @@ describe("RFP source eligibility check", () => {
     expect(createBidBoardMock).not.toHaveBeenCalled();
   });
 
+  it.each([401, 429])("a CRM %i is a FAILED check (fail-open), never \"deal no longer exists\" (Codex P1 on SyncHub #114)", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status })));
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null }));
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  });
+
   it("proceeds on CRM network errors because eligibility is a fail-open safety guard", async () => {
     requestRow.current = makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null });
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));
@@ -301,5 +331,68 @@ describe("RFP source eligibility check", () => {
 
     expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
     expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex round 3 on SyncHub #114, simplified per the churn rule: EVERY eligibility check has one fail-open deadline,
+  // and a CRM answer without a usable stage is a FAILED check, never "out of Opportunity".
+  it.each([
+    ["an empty body", ""],
+    ["malformed JSON", "{not json"],
+    ["no stage", JSON.stringify({ ok: true })],
+  ])("a CRM 200 with %s is a FAILED check (fail-open), never ineligible", async (_label, body) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null }));
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  });
+
+  it("a STALLED CRM request fails open at the deadline instead of hanging the digest", async () => {
+    process.env.RFP_ELIGIBILITY_TIMEOUT_MS = "50";
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null }));
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  }, 2_000);
+
+  it("a STALLED HubSpot lookup fails open at the deadline instead of hanging the digest", async () => {
+    process.env.RFP_ELIGIBILITY_TIMEOUT_MS = "50";
+    hubspotFetchMode.stall = true;
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  }, 2_000);
+
+  // Codex round 4 on SyncHub #114: a HubSpot stage the cache cannot resolve (or no dealstage at all) proves nothing.
+  // The approve gate's answer is unchanged (pinned above), but the result says UNRESOLVED so the digest and the
+  // cleanup preview keep the row instead of treating it as having left RFP.
+  it("an unknown HubSpot stage id is flagged stageUnresolved", async () => {
+    hubspotFetchMode.stage = "custom-stage-99";
+    hubspotPipelinesMock.mockResolvedValue([{ hubspotId: "default", stages: [] }]);
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: false, stageUnresolved: true });
+  });
+
+  it("a HubSpot deal with NO dealstage is flagged stageUnresolved", async () => {
+    hubspotFetchMode.stage = "";
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: false, stageUnresolved: true });
+  });
+
+  it("a RESOLVED non-RFP HubSpot stage is NOT flagged unresolved (a real ineligibility)", async () => {
+    hubspotFetchMode.stage = "closedwon";
+    hubspotPipelinesMock.mockResolvedValue([{ hubspotId: "default", stages: [{ stageId: "closedwon", label: "Closed Won" }] }]);
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result.eligible).toBe(false);
+    expect(result.stageUnresolved).toBeFalsy();
+  });
+
+  it("a HubSpot 502 whose MESSAGE mentions 404 is a failed check, never 'deal no longer exists' (CodeRabbit on #114)", async () => {
+    hubspotFetchMode.throw502With404Text = true;
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: true, exists: true, checkFailed: true });
   });
 });
