@@ -310,12 +310,17 @@ const LOGIN_DOM_PROOF = PROCORE_SELECTORS.login.passwordInput;
 const LOGIN_DOM_HINTS = 'form[action*="login"], form[action*="session"], form[action*="sign_in"], #user_email';
 
 /** Elements that exist ONLY once a session is established. */
+/** The signed-in user's avatar, ONLY inside the global header: a bare core-avatar could be any person's avatar in
+ *  page content (Codex on #115). */
+export const PROCORE_SESSION_AVATAR_SELECTOR =
+  '#header-avatar, header [data-qa="core-avatar"], #remote-header-container [data-qa="core-avatar"]';
+
 const STRONG_AUTHENTICATED_MARKERS: { name: string; selector: string }[] = [
   { name: "user-menu", selector: PROCORE_SELECTORS.nav.userMenu },
   { name: "bid-board-app-shell", selector: PROCORE_SELECTORS.bidboard.newUi.app },
   // Procore's webclients shell (2026-10): the signed-in user's avatar in the global header. From the production
   // page fingerprint of 2026-10-16 (data-qa=core-avatar, id=header-avatar); a sign-in page has no avatar.
-  { name: "header-avatar", selector: '[data-qa="core-avatar"], #header-avatar' },
+  { name: "header-avatar", selector: PROCORE_SESSION_AVATAR_SELECTOR },
 ];
 
 /** Generic application chrome. Suggestive, not conclusive — a sign-in page can have a nav bar, which
