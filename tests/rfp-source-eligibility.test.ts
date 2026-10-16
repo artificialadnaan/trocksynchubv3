@@ -5,7 +5,7 @@ const auditRows = vi.hoisted(() => [] as any[]);
 const updateRows = vi.hoisted(() => [] as any[]);
 const sendEmailMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "BB-1" })));
-const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false, stall: false }));
+const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false, stall: false, throw502With404Text: false }));
 const getByIdCalls = vi.hoisted(() => [] as unknown[][]);
 const hubspotPipelinesMock = vi.hoisted(() => vi.fn(async () => [
   {
@@ -41,6 +41,12 @@ vi.mock("../server/hubspot.ts", () => ({
           getById: vi.fn(async (...args: unknown[]) => {
             getByIdCalls.push(args);
             if (hubspotFetchMode.stall) return new Promise(() => {});
+            if (hubspotFetchMode.throw502With404Text) {
+              const error: any = new Error("Bad gateway (upstream said 404 at /crm/v3/objects/deals; request id 4041)");
+              error.code = 502;
+              error.statusCode = 502;
+              throw error;
+            }
             if (hubspotFetchMode.missing) {
               const error: any = new Error("not found");
               error.code = 404;
@@ -131,6 +137,7 @@ describe("RFP source eligibility check", () => {
     hubspotFetchMode.stage = "RFP";
     hubspotFetchMode.missing = false;
     hubspotFetchMode.stall = false;
+    hubspotFetchMode.throw502With404Text = false;
     delete process.env.RFP_ELIGIBILITY_TIMEOUT_MS;
     getByIdCalls.length = 0;
     requestRow.current = makeRequest();
@@ -380,5 +387,12 @@ describe("RFP source eligibility check", () => {
     const result = await checkRfpApprovalSourceEligibility(makeRequest());
     expect(result.eligible).toBe(false);
     expect(result.stageUnresolved).toBeFalsy();
+  });
+
+  it("a HubSpot 502 whose MESSAGE mentions 404 is a failed check, never 'deal no longer exists' (CodeRabbit on #114)", async () => {
+    hubspotFetchMode.throw502With404Text = true;
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: true, exists: true, checkFailed: true });
   });
 });

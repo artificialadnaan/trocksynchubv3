@@ -89,3 +89,12 @@ describe("the cleanup apply re-checks for an approval attempt INSIDE its transac
     expect(attempts).toBeLessThan(update);
   });
 });
+
+describe("the cancel is ONE conditional statement (CodeRabbit on #114)", () => {
+  it("the UPDATE itself requires NOT EXISTS an rfp_approval_attempt row, so no check-then-write gap remains", () => {
+    const src = readFileSync(resolve(ROOT, "scripts/rfp-stale-pending-cleanup.ts"), "utf8");
+    const update = src.slice(src.indexOf(".update(rfpApprovalRequests)"), src.indexOf(".returning("));
+    expect(update).toMatch(/not exists/i);
+    expect(update).toContain("rfp_approval_attempt");
+  });
+});
