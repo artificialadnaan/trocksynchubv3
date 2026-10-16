@@ -85,6 +85,23 @@ describe("BIDBOARD_STAGE_SYNC_EXPORT_ONLY", () => {
     const res = await runBidBoardStageSync({ dryRun: false });
     expect(res.exportOnly).toBe(true);
     expect(res.errors.join(" ")).toMatch(/ENOSPC/);
+    // A cron/CI invocation must exit non-zero: run-bidboard-stage-sync.ts exits on failed > 0 (Codex on #112).
+    expect(res.failed).toBeGreaterThan(0);
+    expect(m.pushCrm).not.toHaveBeenCalled();
+  });
+
+  it("a workbook that can't be parsed still gets retention, and the run fails (Codex on #112)", async () => {
+    process.env.BIDBOARD_STAGE_SYNC_EXPORT_ONLY = "true";
+    const names = Array.from({ length: 8 }, (_, i) => `bidboard-export-2026-10-0${i + 1}T00-00-00-000Z.xlsx`);
+    m.readdir.mockResolvedValue(names);
+    m.parse.mockImplementationOnce(() => {
+      throw new Error("Active Projects sheet not found");
+    });
+    const { runBidBoardStageSync } = await import("../server/sync/index");
+    const res = await runBidBoardStageSync({ dryRun: false });
+    expect(res.exportOnly).toBe(true);
+    expect(res.failed).toBeGreaterThan(0);
+    expect(m.unlink.mock.calls.map((c) => String(c[0])).filter((f) => f.endsWith(".xlsx"))).toHaveLength(3);
     expect(m.pushCrm).not.toHaveBeenCalled();
   });
 
