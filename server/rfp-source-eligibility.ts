@@ -180,7 +180,9 @@ async function checkSourceEligibilityUnbounded(request: any): Promise<SourceElig
     return { eligible: true, exists: true, stage };
   } catch (error: any) {
     const status = error?.statusCode || error?.status || error?.code;
-    if (status === 404 || String(error?.message || '').includes('404')) {
+    // By STATUS only (CodeRabbit on #114): a proxy / 5xx / timeout message that merely contains "404" is a failed
+    // check, fail-open, never proof that the deal is gone.
+    if (status === 404) {
       return { eligible: false, reason: 'Source HubSpot deal no longer exists', exists: false, stage: null };
     }
     log(`[rfp-approval] HubSpot eligibility check failed (${error?.message || error}); proceeding fail-open`, 'rfp');

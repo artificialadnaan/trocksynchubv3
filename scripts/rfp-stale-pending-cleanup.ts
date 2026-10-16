@@ -83,9 +83,15 @@ async function apply(ids: number[]) {
       const updated = await tx
         .update(rfpApprovalRequests)
         .set({ status: "cancelled_source_ineligible" })
-        .where(and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, "pending")))
+        // ONE conditional statement (CodeRabbit on #114): the attempt test lives in the UPDATE itself, so there is no
+        // gap between "no attempt yet" and the write. The count above only names the reason for the report.
+        .where(and(
+          eq(rfpApprovalRequests.id, id),
+          eq(rfpApprovalRequests.status, "pending"),
+          sql`NOT EXISTS (SELECT 1 FROM ${auditLogs} WHERE ${auditLogs.action} = 'rfp_approval_attempt' AND ${auditLogs.details}->>'requestId' = ${String(id)})`,
+        ))
         .returning({ id: rfpApprovalRequests.id });
-      if (updated.length === 0) return "no longer pending";
+      if (updated.length === 0) return "no longer pending, or an approval attempt just appeared";
       await tx.insert(auditLogs).values({
         action: "rfp_stale_pending_cleanup",
         entityType: "deal",
