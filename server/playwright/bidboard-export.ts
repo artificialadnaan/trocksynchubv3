@@ -8,7 +8,7 @@
  *
  * Key behaviors:
  * - Uses text-based selectors (most reliable) over CSS (Procore's styled-component classes change)
- * - Handles both download event and navigation-based download (Procore may redirect to download URL)
+ * - Accepts only a file Procore actually delivers (download event); never re-uses an older export
  * - Presses Escape before interacting if overlay is blocking (StyledPortal)
  * - Generous timeouts for 375+ projects (Excel generation can take 30+ seconds)
  *
@@ -17,7 +17,7 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
-import { describeSelectorMiss, ensureLoggedIn, PROCORE_CREDENTIAL_REMEDIATION } from "./auth";
+import { describeSelectorMiss, ensureLoggedIn, PROCORE_CREDENTIAL_REMEDIATION, recordProcorePageOutcome, recordProcoreSignInOutcome } from "./auth";
 import { randomDelay, takeScreenshot } from "./browser";
 import { PROCORE_SELECTORS } from "./selectors";
 import { log } from "../index";
@@ -25,6 +25,8 @@ import { storage } from "../storage";
 
 const EXPORTS_DIR = path.join(process.cwd(), "data", "exports");
 const EXPORT_TIMEOUT_MS = 60000;
+/** What a Procore sign-in failure blocks when it happens here — named in the login alert email. */
+const EXPORT_BLOCKING = "Bid Board stage sync (Excel export)";
 
 export async function openBidBoardExportMenu(page: any): Promise<boolean> {
   const menuSelectors: { name: string; selector: string }[] = [
@@ -116,7 +118,7 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
 
   const { page, success, error, reason } = await ensureLoggedIn({
     targetUrl: bidBoardUrl,
-    blocking: "Bid Board stage sync (Excel export)",
+    blocking: EXPORT_BLOCKING,
   });
   if (!success || !page) {
     // Name the sign-in failure explicitly. This branch used to log a generic "export failed", which
@@ -163,7 +165,7 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       // "Procore UI may have changed" is only true of an AUTHENTICATED page. On 2026-08-03 this
       // message was emitted every 19 minutes against a login form; the same selector found 10
       // elements the moment the password was fixed.
-      throw await describeSelectorMiss(page, "Export menu button");
+      throw await describeSelectorMiss(page, "Export menu button", { blocking: EXPORT_BLOCKING });
     }
     await randomDelay(1000, 2000);
 
@@ -179,8 +181,10 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const destPath = path.join(EXPORTS_DIR, `bidboard-export-${timestamp}.xlsx`);
 
-    // Procore may trigger a download event or navigation-based download.
-    const downloadPromise = page.waitForEvent("download", { timeout: EXPORT_TIMEOUT_MS });
+    // Procore may trigger a download event or navigation-based download. The rejection is handled here, where the
+    // promise is made: the export-link-miss path below throws before awaiting it, and an unhandled timeout rejection
+    // would take the whole process down.
+    const downloadPromise = page.waitForEvent("download", { timeout: EXPORT_TIMEOUT_MS }).catch(() => null);
     let exportClicked = false;
     for (const { name, loc } of exportSelectors) {
       try {
@@ -203,38 +207,32 @@ export async function exportBidBoardProjectList(): Promise<string | null> {
       await takeScreenshot(page, "bidboard-export-link-not-found").catch((screenshotErr) => {
         log(`Could not capture export-link-not-found screenshot: ${screenshotErr}`, "playwright");
       });
-      throw await describeSelectorMiss(page, "Export Project List To Excel link");
+      throw await describeSelectorMiss(page, "Export Project List To Excel link", { blocking: EXPORT_BLOCKING });
     }
 
-    const download = await downloadPromise.catch(() => null);
+    const download = await downloadPromise;
     if (download) {
       await download.saveAs(destPath);
       log(`BidBoard export saved: ${destPath}`, "playwright");
+      // A delivered export is the strongest proof of a live Procore session there is — record it, so
+      // an outage that began with an UNVERIFIED login still gets its recovery email.
+      await recordProcoreSignInOutcome({ ok: true }, EXPORT_BLOCKING);
+      // And the page the export needs is usable again (clears a page-change alert, with its recovery email).
+      await recordProcorePageOutcome({ ok: true }, EXPORT_BLOCKING);
       return destPath;
     }
 
-    // Fallback: if download didn't fire (navigation-based or slow Excel generation), wait and look
-    log("Download event did not fire; checking for navigation-based download...", "playwright");
-    await randomDelay(5000, 8000);
-    const entries = await fs.readdir(EXPORTS_DIR).catch(() => []);
-    const xlsx = entries.filter((e) => e.endsWith(".xlsx")).sort().reverse()[0];
-    if (xlsx) {
-      const full = path.join(EXPORTS_DIR, xlsx);
-      if (full !== destPath) {
-        try {
-          await fs.rename(full, destPath);
-        } catch {
-          return full;
-        }
-      }
-      return destPath;
-    }
-
-    log("No Excel file received after export click", "playwright");
+    // No download event. There used to be a "navigation-based download" fallback here that took the
+    // newest .xlsx in data/exports and renamed it to a fresh timestamp. Playwright never writes
+    // downloads into that directory (no downloadsPath is configured), so the only file it could ever
+    // find was an OLDER export — silently re-processed as today's Bid Board. Fail visibly instead.
     await takeScreenshot(page, "bidboard-export-no-file").catch((screenshotErr) => {
       log(`Could not capture export-no-file screenshot: ${screenshotErr}`, "playwright");
     });
-    return null;
+    throw new Error(
+      `Bid Board export produced no export file (Procore's download did not arrive within ${EXPORT_TIMEOUT_MS / 1000}s); ` +
+        "refusing to re-use an older export from data/exports"
+    );
   } catch (err: any) {
     log(`BidBoard export RPA failed: ${err.message}`, "playwright");
     await takeScreenshot(page, "bidboard-export-error").catch((screenshotErr) => {

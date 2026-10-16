@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
 const logMock = vi.hoisted(() => vi.fn());
@@ -10,6 +10,7 @@ const {
   ensureLoginAlertStateTable,
   readLoginAlertState,
   recordLoginOutcomeAndMaybeAlert,
+  renderLoginAlertEmail,
   upsertLoginAlertState,
   PROCORE_LOGIN_ALERT_SCOPE,
 } = await import("../server/sync/procore-login-alert.ts");
@@ -167,10 +168,12 @@ describe("login-alert debounce durability across calls (runtime)", () => {
     for (const mins of [19, 38, 57]) await run(fail, new Date(NOW.getTime() + mins * MIN), afterRestart);
     expect(afterRestart).not.toHaveBeenCalled();
 
-    // A different failure is a new incident even inside the window.
+    // A different failure inside the window is NOT a fresh email (owner, 2026-10-15: at most one sign-in
+    // email a day while it stays failed). The unverified-login and export sign-in checks can report
+    // different reasons on alternate cycles, and each flip used to email.
     const changed = vi.fn(async () => ({ success: true, provider: "gmail" }));
-    await run({ ok: false, reason: "mfa_required", attempts: 3 }, new Date(NOW.getTime() + 60 * MIN), changed);
-    expect(changed).toHaveBeenCalledTimes(1);
+    await run({ ok: false, reason: "mfa_required", attempts: 3 }, new Date(NOW.getTime() + 45 * MIN), changed);
+    expect(changed).not.toHaveBeenCalled();
 
     // And recovery reports once, then goes quiet.
     const recovery = vi.fn(async () => ({ success: true, provider: "gmail" }));
@@ -178,5 +181,198 @@ describe("login-alert debounce durability across calls (runtime)", () => {
     await run({ ok: true }, new Date(NOW.getTime() + 89 * MIN), recovery);
     expect(recovery).toHaveBeenCalledTimes(1);
     expect((await readLoginAlertState(PROCORE_LOGIN_ALERT_SCOPE, db))!.state).toBe("ok");
+  });
+});
+
+// ── 2026-10: the session-not-established failure, the pinned recipient, and secret hygiene ──────────
+
+describe("session_not_established failures (runtime)", () => {
+  const OWNER = "aiqbal@trockgc.com";
+  const SECRET = "unit-test-not-a-password-9f3a";
+  const prevEnv = process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+
+  const fail = {
+    ok: false,
+    reason: "session_not_established" as const,
+    error:
+      "Export menu button not found because SyncHub cannot confirm a Procore session (no authenticated-session " +
+      `element found on the page) at https://us02.procore.com/tools/bid-board?email=automation%40example.invalid&pw=${SECRET}`,
+    blocking: "Bid Board stage sync (Excel export)",
+  };
+
+  beforeEach(async () => {
+    // The ensure-once memo outlives the per-test DROP, so create the table explicitly.
+    await ensureLoginAlertStateTable(db);
+  });
+
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    else process.env.BIDBOARD_CRM_ALERT_RECIPIENT = prevEnv;
+  });
+
+  it("flips the state to failing, stores a secret-free last_error, and emails ONLY the owner", async () => {
+    // Whatever the shared ops variable says — staff, clients, a comma list — this alert goes to the owner alone.
+    process.env.BIDBOARD_CRM_ALERT_RECIPIENT = "staff@trockgc.com, client@example.com";
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+
+    const res = await recordLoginOutcomeAndMaybeAlert(
+      { outcome: fail, now: NOW, realertMinutes: 60, redact: [SECRET] },
+      { db, send }
+    );
+
+    expect(res.action).toBe("alert_failure");
+    expect(send).toHaveBeenCalledTimes(1);
+    const msg = send.mock.calls[0][0];
+    expect(msg.to).toBe(OWNER);
+    expect(msg.cc ?? []).toEqual([]);
+    expect(msg.bypassGlobalCc).toBe(true);
+    expect(JSON.stringify(msg)).not.toContain(SECRET);
+    expect(JSON.stringify(msg)).not.toMatch(/staff@|client@/);
+
+    const { rows } = await db.query(`SELECT state, last_reason, last_error FROM procore_login_alert_state WHERE scope = $1`, [
+      PROCORE_LOGIN_ALERT_SCOPE,
+    ]);
+    expect(rows[0].state).toBe("failing");
+    expect(rows[0].last_reason).toBe("session_not_established");
+    expect(rows[0].last_error).toMatch(/cannot confirm a Procore session/);
+    expect(rows[0].last_error).not.toContain(SECRET);
+    expect(rows[0].last_error).not.toContain("automation%40example.invalid"); // query strings are dropped
+  });
+
+  it("is live even when the shared ops variable is empty (an unset env var used to make it a silent no-op)", async () => {
+    delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+
+    const res = await recordLoginOutcomeAndMaybeAlert({ outcome: fail, now: NOW, realertMinutes: 60 }, { db, send });
+
+    expect(res.action).toBe("alert_failure");
+    expect(send.mock.calls[0][0].to).toBe(OWNER);
+  });
+
+  it("refuses a multi-address recipient outright rather than widening the audience", async () => {
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+
+    const res = await recordLoginOutcomeAndMaybeAlert(
+      { outcome: fail, now: NOW, realertMinutes: 60, recipient: `${OWNER}, staff@trockgc.com` },
+      { db, send }
+    );
+
+    expect(res.action).toBe("none");
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("emails once per re-alert window across 19-minute cycles, then flips back to ok on a real success", async () => {
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    // Ten cycles = three hours of a dead session.
+    for (let i = 0; i < 10; i++) {
+      await recordLoginOutcomeAndMaybeAlert(
+        { outcome: fail, now: new Date(NOW.getTime() + i * 19 * MIN), realertMinutes: 60 },
+        { db, send }
+      );
+    }
+    // t=0, t=76, t=152 — not ten.
+    expect(send).toHaveBeenCalledTimes(3);
+
+    const recovered = await recordLoginOutcomeAndMaybeAlert(
+      { outcome: { ok: true }, now: new Date(NOW.getTime() + 200 * MIN), realertMinutes: 60 },
+      { db, send }
+    );
+    expect(recovered.action).toBe("alert_recovered");
+    const { rows } = await db.query(`SELECT state, last_error, last_success_at FROM procore_login_alert_state WHERE scope = $1`, [
+      PROCORE_LOGIN_ALERT_SCOPE,
+    ]);
+    expect(rows[0].state).toBe("ok");
+    expect(rows[0].last_error).toBeNull();
+    expect(new Date(rows[0].last_success_at).toISOString()).toBe(new Date(NOW.getTime() + 200 * MIN).toISOString());
+  });
+});
+
+describe("the default re-alert window: at most one sign-in email a day while it stays failed (owner, 2026-10-15)", () => {
+  const prev = process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+  beforeEach(async () => {
+    await ensureLoginAlertStateTable(db);
+    await db.query(`DELETE FROM procore_login_alert_state`);
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+    else process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES = prev;
+  });
+
+  const reasons = ["credentials_rejected", "session_not_established", "unknown"] as const;
+  const day = async (send: any, startMin: number, cycles: number) => {
+    for (let i = 0; i < cycles; i++) {
+      await recordLoginOutcomeAndMaybeAlert(
+        { outcome: { ok: false, reason: reasons[i % reasons.length], attempts: 3 } as any, now: new Date(NOW.getTime() + (startMin + i * 19) * MIN), recipient: "ops@trock.test" },
+        { db, send }
+      );
+    }
+  };
+
+  it("sends one email for a whole day of 19-minute failures, even as the reason changes, and the next a day later", async () => {
+    delete process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await day(send, 0, 75); // 75 cycles x 19 min = 23 h 45 min
+    expect(send).toHaveBeenCalledTimes(1);
+    await day(send, 24 * 60, 1);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("an env value can lengthen the window but never shorten it below a day", async () => {
+    process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES = "60";
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await day(send, 0, 75);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovery still emails at once, and a later failure is a new incident", async () => {
+    delete process.env.PROCORE_LOGIN_ALERT_REALERT_MINUTES;
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await day(send, 0, 3);
+    const rec = await recordLoginOutcomeAndMaybeAlert({ outcome: { ok: true }, now: new Date(NOW.getTime() + 60 * MIN), recipient: "ops@trock.test" }, { db, send });
+    expect(rec.action).toBe("alert_recovered");
+    await day(send, 120, 1);
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("the login alert's transport and wording (Codex + CodeRabbit on #112)", () => {
+  beforeEach(async () => {
+    await ensureLoginAlertStateTable(db);
+    await db.query(`DELETE FROM procore_login_alert_state`);
+  });
+
+  it("is sent past testing-mode redirection, to the owner only", async () => {
+    const send = vi.fn(async (_m: any) => ({ success: true, provider: "gmail" }));
+    await recordLoginOutcomeAndMaybeAlert({ outcome: { ok: false, reason: "credentials_rejected", attempts: 3 } as any, now: NOW }, { db, send });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toMatchObject({ to: "aiqbal@trockgc.com", bypassTestingMode: true, bypassGlobalCc: true });
+  });
+
+  it("the failure email describes the once-a-day throttle, not a re-alert on every changed failure", () => {
+    const { htmlBody } = renderLoginAlertEmail({ kind: "login_failed", reason: "credentials_rejected", now: NOW });
+    expect(htmlBody).not.toMatch(/until the failure changes/i);
+    expect(htmlBody).toMatch(/at most one .*a day/i);
+  });
+
+  it("a page change is worded as a blocked export on a signed-in page, not a sign-in failure", () => {
+    const { subject, htmlBody } = renderLoginAlertEmail({ kind: "login_failed", reason: "page_unrecognized" as any, blocking: "Bid Board stage sync (Excel export)", now: NOW });
+    expect(subject).not.toMatch(/sign-in FAILED/i);
+    expect(subject).toMatch(/Bid Board export BLOCKED/i);
+    expect(htmlBody).toMatch(/signed in/i);
+    const recovered = renderLoginAlertEmail({ kind: "recovered", reason: "page_unrecognized" as any, now: NOW });
+    expect(recovered.subject).toMatch(/export/i);
+  });
+
+  it("'page or session not confirmed' says both causes are possible and tells him to Test the sign-in first", () => {
+    const { subject, htmlBody } = renderLoginAlertEmail({ kind: "login_failed", reason: "page_unconfirmed" as any, now: NOW });
+    expect(subject).toMatch(/Bid Board export BLOCKED/i);
+    expect(subject).toMatch(/not confirmed/i);
+    expect(htmlBody).not.toMatch(/nothing on the password/i);
+    expect(htmlBody).toMatch(/Test/);
+    // Only a CONFIRMED session (or a delivered export) proves a page change; a route-only success line doesn't.
+    expect(htmlBody).toMatch(/session confirmed/);
+    expect(htmlBody).toMatch(/delivered export/i);
+    expect(htmlBody).toMatch(/app page reached/);
+    expect(renderLoginAlertEmail({ kind: "recovered", reason: "page_unconfirmed" as any, now: NOW }).subject).toMatch(/export/i);
   });
 });

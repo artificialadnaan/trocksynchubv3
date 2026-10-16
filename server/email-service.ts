@@ -148,6 +148,9 @@ export async function sendEmail(params: {
   /** Skip the hardcoded GLOBAL_CC recipients (for ops/system alerts that must go only to `to`+`cc`).
    *  Defaults false → unchanged behavior for all existing callers. */
   bypassGlobalCc?: boolean;
+  /** Deliver to `to` even in global testing mode: for owner-pinned ops alerts (the Procore credential alert),
+   *  which must never be redirected to whatever test address someone configured. Defaults false. */
+  bypassTestingMode?: boolean;
   /** Files to attach. Carried through BOTH providers, so a fallback send keeps them. */
   attachments?: EmailAttachment[];
 }): Promise<{ success: boolean; messageId?: string; error?: string; provider: string; to?: string; cc?: string[] }> {
@@ -155,7 +158,8 @@ export async function sendEmail(params: {
   const provider = params.provider || config.activeProvider;
 
   // Check for testing mode - redirect all emails to test address
-  const testingMode = await storage.getTestingMode();
+  const configuredTestingMode = await storage.getTestingMode();
+  const testingMode = params.bypassTestingMode ? { ...configuredTestingMode, enabled: false } : configuredTestingMode;
   let finalTo = params.to;
   let finalSubject = params.subject;
   let finalBody = normalizeOutgoingEmailHtml(params.htmlBody);

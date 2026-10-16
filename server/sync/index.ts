@@ -40,7 +40,22 @@ export interface BidBoardStageSyncResult {
   exportPath?: string;
   errors: string[];
   initialized?: boolean;
+  /** BIDBOARD_STAGE_SYNC_EXPORT_ONLY: the export was downloaded and summarised, and nothing was pushed. */
+  exportOnly?: boolean;
 }
+
+/**
+ * BIDBOARD_STAGE_SYNC_EXPORT_ONLY=true: download + parse + summarise the Bid Board export and save its rows
+ * next to it as <export>.rows.json, then STOP: no CRM push (so no push alert), no Core push, no HubSpot diff.
+ * For a first run that must be looked at before it writes anything (the 2026-09-11 stale-export incident).
+ */
+export function isBidBoardExportOnly(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes|on)$/i.test((env.BIDBOARD_STAGE_SYNC_EXPORT_ONLY ?? "").trim());
+}
+
+const SERVICE_PROJECT_NUMBER_RE = /-4-/;
+
+export { stageSyncRunStatus } from "./run-status";
 
 export interface RunOptions {
   dryRun?: boolean;
@@ -55,15 +70,22 @@ async function cleanupOldExports(): Promise<void> {
   try {
     await fs.mkdir(EXPORTS_DIR, { recursive: true });
     const entries = await fs.readdir(EXPORTS_DIR);
-    const xlsx = entries
-      .filter((e) => e.endsWith(".xlsx"))
-      .map((e) => path.join(EXPORTS_DIR, e));
+    // Keep the newest KEEP_LAST_N workbooks; an export-only .rows.json snapshot lives and dies WITH its workbook
+    // (never sorted on its own), and a snapshot whose workbook is gone is removed.
+    const SNAPSHOT = ".rows.json";
+    const workbooks = entries.filter((e) => e.endsWith(".xlsx"));
     const stats = await Promise.all(
-      xlsx.map(async (p) => ({ path: p, mtime: (await fs.stat(p)).mtime.getTime() }))
+      workbooks.map(async (name) => ({ name, mtime: (await fs.stat(path.join(EXPORTS_DIR, name))).mtime.getTime() }))
     );
     stats.sort((a, b) => b.mtime - a.mtime);
-    for (let i = KEEP_LAST_N; i < stats.length; i++) {
-      await fs.unlink(stats[i].path).catch(() => {});
+    const kept = new Set(stats.slice(0, KEEP_LAST_N).map((s) => s.name));
+    for (const { name } of stats.slice(KEEP_LAST_N)) {
+      await fs.unlink(path.join(EXPORTS_DIR, name)).catch(() => {});
+    }
+    for (const e of entries) {
+      if (e.endsWith(`.xlsx${SNAPSHOT}`) && !kept.has(e.slice(0, -SNAPSHOT.length))) {
+        await fs.unlink(path.join(EXPORTS_DIR, e)).catch(() => {});
+      }
     }
   } catch {
     /* ignore */
@@ -86,6 +108,10 @@ export async function runBidBoardStageSync(
   };
 
   let exportPath: string | null = null;
+  let exportsCleaned = false;
+  // Marked FIRST, before anything fallible: an export-only run that fails part-way must still never be recorded as a
+  // baseline (Codex P1 on #112).
+  if (isBidBoardExportOnly()) result.exportOnly = true;
 
   if (forceExport) {
     try {
@@ -108,6 +134,39 @@ export async function runBidBoardStageSync(
 
   try {
     const rows = parseActiveProjectsSheet(exportPath);
+    if (isBidBoardExportOnly()) {
+      const projectNumber = (r: (typeof rows)[number]) => {
+        const v = r["Project #"];
+        return typeof v === "string" && v.trim() ? v.trim() : null;
+      };
+      const statuses: Record<string, number> = {};
+      for (const r of rows) {
+        const k = String(r.Status ?? "").trim() || "(blank)";
+        statuses[k] = (statuses[k] ?? 0) + 1;
+      }
+      const numbered = rows.filter((r) => projectNumber(r) !== null).length;
+      const service = rows.filter((r) => SERVICE_PROJECT_NUMBER_RE.test(projectNumber(r) ?? "")).length;
+      const rowsPath = `${exportPath}.rows.json`;
+      try {
+        await fs.writeFile(
+          rowsPath,
+          JSON.stringify(rows.map((r) => ({ projectNumber: projectNumber(r), name: r.Name ?? null, status: r.Status ?? null })))
+        );
+        log(
+          `[BidBoardStageSync] EXPORT-ONLY: ${path.basename(exportPath)}: ${rows.length} rows ` +
+            `(${numbered} with a project #, ${service} service (-4-)); statuses ` +
+            `${Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${k}: ${n}`).join(", ")}; ` +
+            `rows saved to ${rowsPath}; NOTHING pushed (CRM, Core, HubSpot)`,
+          "sync"
+        );
+        result.exportPath = exportPath;
+      } finally {
+        // Retention runs even if the snapshot write failed (a full disk must be able to recover; Codex on #112).
+        await cleanupOldExports();
+        exportsCleaned = true;
+      }
+      return result;
+    }
     // ONE extraction instant for both targets: Core keys newest-wins on it, and the two copies are the same snapshot.
     const extractedAt = new Date().toISOString();
     const pushResult = await pushBidBoardRowsToCrm({
@@ -178,6 +237,12 @@ export async function runBidBoardStageSync(
   } catch (err: any) {
     result.errors.push(err.message || String(err));
     log(`BidBoard stage sync error: ${err.message}`, "sync");
+    if (result.exportOnly) {
+      // An export-only run that could not parse or snapshot its workbook FAILED: count it, so the cron exits non-zero
+      // (it still records as export_only, never a baseline), and keep retention running so retries can't fill the disk.
+      result.failed += 1;
+      if (exportPath && !exportsCleaned) await cleanupOldExports();
+    }
   }
 
   return result;

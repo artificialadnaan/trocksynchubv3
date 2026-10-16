@@ -30,26 +30,42 @@ vi.mock("../server/playwright/browser.ts", () => ({
 }));
 
 describe("runBidBoardExportSync", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
+    // resetAllMocks also wipes the factory's implementations: put back the two the flow needs, or
+    // ensureLoggedIn resolves undefined and the sync stops before it ever navigates (red on main 805311716).
+    const auth = await import("../server/playwright/auth.ts");
+    vi.mocked(auth.ensureLoggedIn).mockResolvedValue({ page: { stub: true }, success: true, error: undefined } as any);
+    const browser = await import("../server/playwright/browser.ts");
+    vi.mocked(browser.withBrowserLock).mockImplementation(async (_name: string, fn: () => Promise<unknown>) => fn() as any);
   });
 
   it("runs under the shared browser lock so concurrent flows cannot close its page", async () => {
-    const { withBrowserLock } = await import("../server/playwright/browser.ts");
+    // navigateToBidBoard & co. are called from inside bidboard.ts, where a spy on the module's exports
+    // never sees them (ESM), so this test used to fail on main. What it is for is the lock: the flow's
+    // first browser step (signing in) must happen INSIDE withBrowserLock("bidboard-export-sync").
+    const browser = await import("../server/playwright/browser.ts");
+    const auth = await import("../server/playwright/auth.ts");
+    let held = false;
+    let signedInUnderLock: boolean | null = null;
+    vi.mocked(browser.withBrowserLock).mockImplementation(async (_name: string, fn: () => Promise<unknown>) => {
+      held = true;
+      try {
+        return (await fn()) as any;
+      } finally {
+        held = false;
+      }
+    });
+    vi.mocked(auth.ensureLoggedIn).mockImplementation(async () => {
+      signedInUnderLock = held;
+      return { page: { stub: true }, success: false, error: "stop here" } as any;
+    });
     const bidboard = await import("../server/playwright/bidboard.ts");
-
-    const navigateSpy = vi.spyOn(bidboard, "navigateToBidBoard").mockResolvedValue(true);
-    const exportSpy = vi.spyOn(bidboard, "exportBidBoardCsv").mockResolvedValue("/tmp/bidboard-export.xlsx");
-    const detectSpy = vi.spyOn(bidboard, "detectStageChanges").mockResolvedValue([]);
-    const saveSpy = vi.spyOn(bidboard, "saveBidBoardState").mockResolvedValue();
 
     const result = await bidboard.runBidBoardExportSync();
 
-    expect(withBrowserLock).toHaveBeenCalledWith("bidboard-export-sync", expect.any(Function));
-    expect(navigateSpy).toHaveBeenCalled();
-    expect(exportSpy).toHaveBeenCalled();
-    expect(detectSpy).toHaveBeenCalled();
-    expect(saveSpy).toHaveBeenCalled();
-    expect(result.errors).toEqual([]);
+    expect(browser.withBrowserLock).toHaveBeenCalledWith("bidboard-export-sync", expect.any(Function));
+    expect(signedInUnderLock).toBe(true);
+    expect(result.errors).toEqual(["stop here"]);
   });
 });
