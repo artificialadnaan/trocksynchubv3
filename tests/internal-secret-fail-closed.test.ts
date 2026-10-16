@@ -325,3 +325,25 @@ describe("no hard-coded fallback", () => {
     expect(hits).toEqual([]);
   });
 });
+
+// #86: the test stage email needs an explicit recipient; there is no fallback address any more.
+describe("POST /api/internal/test-stage-notification without `to`", () => {
+  it.each([[{}], [{ to: "" }], [{ to: "   " }], [{ to: "not-an-email" }], [{ to: 42 }]])(
+    "body %j is a 400 and sends nothing",
+    async (body) => {
+      vi.stubEnv("INTERNAL_API_SECRET", SECRET);
+      const routes = await registerAll();
+      const res = await invokeRoute(routes["POST /api/internal/test-stage-notification"], { headers: { "x-internal-secret": SECRET }, body });
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(mocks.sendEmail).not.toHaveBeenCalled();
+    },
+  );
+
+  it("the source carries no literal fallback address", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../server/routes/settings.ts", import.meta.url), "utf8");
+    const start = src.indexOf('"/api/internal/test-stage-notification"');
+    const block = src.slice(start, src.indexOf("app.post(", start + 10));
+    expect(block).not.toMatch(/['"][^'"\s@]+@[^'"\s@]+\.[a-z]{2,}['"]/i);
+  });
+});
