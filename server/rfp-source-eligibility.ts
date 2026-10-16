@@ -13,6 +13,16 @@ import { getHubSpotClient } from './hubspot';
 import { log } from './log';
 
 export type SourceEligibilityResult = { exists: boolean; stage: string | null; checkFailed?: boolean };
+export type SourceEligibility = { eligible: boolean; reason?: string; exists?: boolean; stage?: string | null; checkFailed?: boolean };
+
+// ONE deadline for every eligibility check, CRM or HubSpot (Codex round 3 on SyncHub #114). The digest checks rows
+// one after another, so a source that accepts a request and then stalls would otherwise hold the email forever. At
+// the deadline the check FAILS OPEN, like every other failed check: the RFP stays listed / approvable.
+const DEFAULT_ELIGIBILITY_TIMEOUT_MS = 10_000;
+function eligibilityTimeoutMs(): number {
+  const ms = Number(process.env.RFP_ELIGIBILITY_TIMEOUT_MS);
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_ELIGIBILITY_TIMEOUT_MS;
+}
 
 function normalizeStageForEligibility(stage: string | null | undefined): string {
   return String(stage || '').trim().toLowerCase().replace(/[–—−]/g, '-');
@@ -87,6 +97,8 @@ export async function checkCrmDealEligibility(sourceDealId: string): Promise<Sou
         'x-rfp-request-signature': signature,
       },
       body: rawBody,
+      // Closes the socket at the deadline; the outer deadline in checkRfpApprovalSourceEligibility covers the rest.
+      signal: AbortSignal.timeout(eligibilityTimeoutMs()),
     });
     if (response.status === 404) return { exists: false, stage: null };
     if (response.status >= 500) {
@@ -100,21 +112,38 @@ export async function checkCrmDealEligibility(sourceDealId: string): Promise<Sou
       log(`[rfp-approval] CRM eligibility check returned ${response.status}; proceeding fail-open`, 'rfp');
       return { exists: true, stage: null, checkFailed: true };
     }
-    const body = await response.json().catch(() => ({}));
-    return { exists: true, stage: body?.stage ? String(body.stage) : null };
+    // A 2xx with no usable stage (empty body, malformed JSON, no stage field) answers nothing: a FAILED check,
+    // fail-open, never "no longer in Opportunity" (Codex round 3 on SyncHub #114).
+    const body = await response.json().catch(() => null);
+    const stage = typeof body?.stage === 'string' && body.stage.trim() !== '' ? body.stage : null;
+    if (stage === null) {
+      log('[rfp-approval] CRM eligibility check answered without a stage; proceeding fail-open', 'rfp');
+      return { exists: true, stage: null, checkFailed: true };
+    }
+    return { exists: true, stage };
   } catch (error: any) {
     log(`[rfp-approval] CRM eligibility check failed (${error?.message || error}); proceeding fail-open`, 'rfp');
     return { exists: true, stage: null, checkFailed: true };
   }
 }
 
-export async function checkRfpApprovalSourceEligibility(request: any): Promise<{
-  eligible: boolean;
-  reason?: string;
-  exists?: boolean;
-  stage?: string | null;
-  checkFailed?: boolean;
-}> {
+export async function checkRfpApprovalSourceEligibility(request: any): Promise<SourceEligibility> {
+  const ms = eligibilityTimeoutMs();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<SourceEligibility>((resolve) => {
+    timer = setTimeout(() => {
+      log(`[rfp-approval] source eligibility check timed out after ${ms} ms; proceeding fail-open`, 'rfp');
+      resolve({ eligible: true, exists: true, stage: null, checkFailed: true });
+    }, ms);
+  });
+  try {
+    return await Promise.race([checkSourceEligibilityUnbounded(request), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function checkSourceEligibilityUnbounded(request: any): Promise<SourceEligibility> {
   const identity = sourceIdentityForRequest(request);
 
   if (identity.sourceSystem === 'trock_crm') {
