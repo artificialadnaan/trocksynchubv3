@@ -153,6 +153,13 @@ describe("ensureLoggedIn — 'Login accepted but UNVERIFIED'", () => {
 // ── 1b. Reading a page's sign-in state on Procore's new webclients shell ─────
 
 describe("detectPageAuthState — the new webclients shell", () => {
+  it("the new shell's header avatar is a real session element (fingerprint 2026-10-16: data-qa=core-avatar, id=header-avatar)", async () => {
+    const state = await detectPageAuthState(fakePage(BID_BOARD_URL, [/core-avatar/]));
+    expect(state).toMatchObject({ authenticated: true, loginPage: false });
+    expect(state.byRoute).toBeFalsy();
+    expect(state.evidence).toMatch(/header-avatar/);
+  });
+
   it("after a credential submit, an app route off the sign-in host with no sign-in form is authenticated (byRoute)", async () => {
     for (const url of [COMPANY_HUB_URL, BID_BOARD_URL, "https://us02.procore.com/598134326678930/project/home"]) {
       const state = await detectPageAuthState(fakePage(url, []), { allowRoute: true });
@@ -324,7 +331,8 @@ describe("exportBidBoardProjectList — alerting and the stale-export fallback",
     };
     return {
       ...fakePage(BID_BOARD_URL, [/spaContent/, /nav/]),
-      locator: vi.fn(() => found),
+      // The Bid Board has rendered: no loading spinner, and the menu is there.
+      locator: vi.fn((selector: string) => (/entry-routes-spinner/.test(selector) ? { ...found, count: vi.fn(async () => 0) } : found)),
       getByRole: vi.fn(() => found),
       keyboard: { press: vi.fn(async () => {}) },
       waitForEvent: vi.fn(() => Promise.resolve(download)),
@@ -357,6 +365,28 @@ describe("exportBidBoardProjectList — alerting and the stale-export fallback",
     // Both scopes recover: the sign-in, and the page the export needs.
     expect(recorded().some((r: any) => (r.scope ?? PROCORE_LOGIN_ALERT_SCOPE) === PROCORE_LOGIN_ALERT_SCOPE && r.outcome.ok === true)).toBe(true);
     expect(recorded().some((r: any) => r.scope === PROCORE_PAGE_ALERT_SCOPE && r.outcome.ok === true)).toBe(true);
+  });
+
+  it("waits for Procore's Bid Board to finish loading (the 2026-10-16 spinner) before looking for the menu", async () => {
+    // Production 13:43:11Z: signed in, header drawn, body still data-testid=entry-routes-spinner 13 s after login,
+    // and the menu search ran once on the half-loaded page. Here the spinner shows for 4 polls, then the menu appears.
+    let polls = 0;
+    const saveAs = vi.fn(async () => {});
+    const page: any = pageWithExport({ saveAs });
+    const found = page.locator("x");
+    page.waitForTimeout = vi.fn(async () => {
+      polls += 1;
+    });
+    page.locator = vi.fn((selector: string) => {
+      const loaded = polls >= 4;
+      if (/entry-routes-spinner/.test(selector)) return { ...found, count: vi.fn(async () => (loaded ? 0 : 1)) };
+      if (!loaded) return { ...found, count: vi.fn(async () => 0), isVisible: vi.fn(async () => false) };
+      return found;
+    });
+    const out = await runExportWith(page);
+    expect(out).toMatch(/bidboard-export-.*\.xlsx$/);
+    expect(polls).toBeGreaterThanOrEqual(4);
+    expect(logMock.mock.calls.map((c) => String(c[0])).some((l) => /Bid Board ready after/.test(l))).toBe(true);
   });
 
   it("refuses to re-use an OLDER export file when Procore delivered nothing — fails visibly instead", async () => {

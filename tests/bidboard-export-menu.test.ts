@@ -55,3 +55,37 @@ describe("openBidBoardExportMenu", () => {
     expect(click).toHaveBeenCalled();
   });
 });
+
+describe("waitForBidBoardReady", () => {
+  const spinnerThen = (spinnerPolls: number, menuAfter: number) => {
+    let polls = 0;
+    const page: any = {
+      reload: vi.fn(async () => {}),
+      waitForTimeout: vi.fn(async () => {
+        polls += 1;
+      }),
+      locator: vi.fn((selector: string) => ({
+        count: vi.fn(async () => {
+          if (/entry-routes-spinner/.test(selector)) return polls < spinnerPolls ? 1 : 0;
+          return polls >= menuAfter ? 1 : 0;
+        }),
+      })),
+    };
+    return page;
+  };
+
+  it("returns once the spinner is gone AND the menu is on the page", async () => {
+    const { waitForBidBoardReady } = await import("../server/playwright/bidboard-export.ts");
+    const page = spinnerThen(5, 6);
+    expect(await waitForBidBoardReady(page, { timeoutMs: 30_000, pollMs: 1_000 })).toBe(true);
+    expect(page.waitForTimeout.mock.calls.length).toBeGreaterThanOrEqual(6);
+    expect(page.reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once halfway if the page is still spinning, and gives up (false) at the timeout", async () => {
+    const { waitForBidBoardReady } = await import("../server/playwright/bidboard-export.ts");
+    const page = spinnerThen(1_000, 1_000);
+    expect(await waitForBidBoardReady(page, { timeoutMs: 10_000, pollMs: 1_000 })).toBe(false);
+    expect(page.reload).toHaveBeenCalledTimes(1);
+  });
+});
