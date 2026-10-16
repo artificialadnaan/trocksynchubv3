@@ -5,7 +5,7 @@ const auditRows = vi.hoisted(() => [] as any[]);
 const updateRows = vi.hoisted(() => [] as any[]);
 const sendEmailMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
 const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, projectId: "BB-1" })));
-const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false }));
+const hubspotFetchMode = vi.hoisted(() => ({ stage: "RFP", missing: false, stall: false }));
 const getByIdCalls = vi.hoisted(() => [] as unknown[][]);
 const hubspotPipelinesMock = vi.hoisted(() => vi.fn(async () => [
   {
@@ -40,6 +40,7 @@ vi.mock("../server/hubspot.ts", () => ({
         basicApi: {
           getById: vi.fn(async (...args: unknown[]) => {
             getByIdCalls.push(args);
+            if (hubspotFetchMode.stall) return new Promise(() => {});
             if (hubspotFetchMode.missing) {
               const error: any = new Error("not found");
               error.code = 404;
@@ -129,6 +130,8 @@ describe("RFP source eligibility check", () => {
     ]);
     hubspotFetchMode.stage = "RFP";
     hubspotFetchMode.missing = false;
+    hubspotFetchMode.stall = false;
+    delete process.env.RFP_ELIGIBILITY_TIMEOUT_MS;
     getByIdCalls.length = 0;
     requestRow.current = makeRequest();
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
@@ -322,4 +325,33 @@ describe("RFP source eligibility check", () => {
     expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
     expect(createBidBoardMock).toHaveBeenCalledTimes(1);
   });
+
+  // Codex round 3 on SyncHub #114, simplified per the churn rule: EVERY eligibility check has one fail-open deadline,
+  // and a CRM answer without a usable stage is a FAILED check, never "out of Opportunity".
+  it.each([
+    ["an empty body", ""],
+    ["malformed JSON", "{not json"],
+    ["no stage", JSON.stringify({ ok: true })],
+  ])("a CRM 200 with %s is a FAILED check (fail-open), never ineligible", async (_label, body) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null }));
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  });
+
+  it("a STALLED CRM request fails open at the deadline instead of hanging the digest", async () => {
+    process.env.RFP_ELIGIBILITY_TIMEOUT_MS = "50";
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest({ sourceSystem: "trock_crm", sourceDealId: "crm-1", hubspotDealId: null }));
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  }, 2_000);
+
+  it("a STALLED HubSpot lookup fails open at the deadline instead of hanging the digest", async () => {
+    process.env.RFP_ELIGIBILITY_TIMEOUT_MS = "50";
+    hubspotFetchMode.stall = true;
+    const { checkRfpApprovalSourceEligibility } = await import("../server/rfp-approval.ts");
+    const result = await checkRfpApprovalSourceEligibility(makeRequest());
+    expect(result).toMatchObject({ eligible: true, checkFailed: true });
+  }, 2_000);
 });
