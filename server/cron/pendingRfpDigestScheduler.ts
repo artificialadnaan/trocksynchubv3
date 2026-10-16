@@ -50,7 +50,9 @@ async function runPendingRfpDigest(): Promise<void> {
       .orderBy(asc(rfpApprovalRequests.createdAt));
     const options = pendingRfpDigestOptions();
     // Only the RFPs still open in their source (flag on): won, lost, deactivated or no-longer-RFP deals drop out.
-    const rows = options.openOnly ? await selectOpenPendingRfps(pending, checkRfpApprovalSourceEligibility) : pending;
+    const rows = options.openOnly
+      ? await selectOpenPendingRfps(pending, checkRfpApprovalSourceEligibility, isRfpApprovalRequestExpired)
+      : pending;
 
     // jsonb columns infer as `unknown`; cast at the boundary (same as rfp-reports.ts) so the
     // pure builder keeps its strict, documented row shape.

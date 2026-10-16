@@ -401,7 +401,13 @@ export async function checkCrmDealEligibility(sourceDealId: string): Promise<Sou
       log(`[rfp-approval] CRM eligibility check returned ${response.status}; proceeding fail-open`, 'rfp');
       return { exists: true, stage: null, checkFailed: true };
     }
-    if (!response.ok) return { exists: false, stage: null };
+    // Only a definitive 404 means "gone". Any other unsuccessful answer (401, 429, ...) is a FAILED check, fail-open
+    // like the 5xx above (Codex P1 on SyncHub #114): a misconfigured secret or a rate limit must never cancel, or hide
+    // from the digest, an RFP whose deal is still open.
+    if (!response.ok) {
+      log(`[rfp-approval] CRM eligibility check returned ${response.status}; proceeding fail-open`, 'rfp');
+      return { exists: true, stage: null, checkFailed: true };
+    }
     const body = await response.json().catch(() => ({}));
     return { exists: true, stage: body?.stage ? String(body.stage) : null };
   } catch (error: any) {

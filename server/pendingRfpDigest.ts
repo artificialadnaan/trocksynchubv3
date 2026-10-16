@@ -23,6 +23,7 @@
 // this builder stays PURE/unit-testable without a DB. Same single source the approve/decline gates
 // and the review-email routing use, so the digest buckets each RFP under the approvers who can act.
 import { resolveEffectiveRfpProjectType } from "./constants";
+import { isOlderThan } from "./pendingRfpOpen";
 
 /** Minimal shape of a pending rfp_approval_requests row this builder needs. */
 export interface PendingRfpRow {
@@ -106,8 +107,9 @@ type DigestCell = {
 };
 
 /** Render one approver's scoped digest table (only the RFPs awaiting them), plus the "Older (n)" line when set. */
-function renderRecipientDigestHtml(cells: DigestCell[], older: { count: number; days: number } | null = null): string {
-  const count = cells.length;
+function renderRecipientDigestHtml(cells: DigestCell[], older: { cells: DigestCell[]; days: number } | null = null): string {
+  // The introduction counts every RFP awaiting the recipient, the older ones too (CodeRabbit on #114).
+  const count = cells.length + (older?.cells.length ?? 0);
   const tableRows = cells
     .map(
       (c) => `
@@ -140,11 +142,18 @@ function renderRecipientDigestHtml(cells: DigestCell[], older: { count: number; 
         </tr>
         ${tableRows}
       </table>${
-        older && older.count > 0
+        older && older.cells.length > 0
           ? `
-      <p style="font-family:Arial,Helvetica,sans-serif;color:#475569;font-size:13px;margin:16px 0 0 0;">
-        Older (${older.count}): ${older.count === 1 ? "one more RFP has" : `${older.count} more RFPs have`} been pending longer than ${older.days} days and ${older.count === 1 ? "is" : "are"} not listed here. Open the RFP queue in Sync Hub to review ${older.count === 1 ? "it" : "them"}.
-      </p>`
+      <p style="font-family:Arial,Helvetica,sans-serif;color:#475569;font-size:13px;margin:16px 0 4px 0;">
+        Older (${older.cells.length}): pending longer than ${older.days} days.
+      </p>
+      <ul style="font-family:Arial,Helvetica,sans-serif;color:#475569;font-size:13px;margin:0;padding-left:18px;">${older.cells
+        .map(
+          // STILL ACTIONABLE (Codex P1 on #114): each older RFP keeps its own review link, just without the table row.
+          (c) =>
+            `<li><a href="${esc(c.reviewUrl)}" style="color:#d11921;">${esc(c.projectName)}</a> · ${esc(c.projectNumber)} · sent ${esc(c.dateSent)}</li>`,
+        )
+        .join("")}</ul>`
           : ""
       }
     </td></tr>
@@ -186,13 +195,11 @@ export async function buildPendingRfpDigest(
   // contains just the RFPs they may approve, so a non-service approver never receives an
   // actionable link for a service-only RFP.
   const buckets = new Map<string, DigestCell[]>();
-  const olderBuckets = new Map<string, number>();
+  const olderBuckets = new Map<string, DigestCell[]>();
   const now = options.now ?? new Date();
-  const isOlder = (createdAt: Date | string | null | undefined) => {
-    if (options.olderThanDays === undefined || !createdAt) return false;
-    const t = new Date(createdAt).getTime();
-    return !Number.isNaN(t) && now.getTime() - t > options.olderThanDays * 86_400_000;
-  };
+  // THE shared boundary (pendingRfpOpen.isOlderThan), so the email and the cleanup preview agree on every row.
+  const isOlder = (createdAt: Date | string | null | undefined) =>
+    options.olderThanDays !== undefined && isOlderThan(createdAt, now, options.olderThanDays);
 
   for (const row of actionable) {
     const dealData = (row.dealData as Record<string, unknown>) || {};
@@ -238,7 +245,7 @@ export async function buildPendingRfpDigest(
     const cell: DigestCell = { projectName, projectNumber, dateSent, awaiting, reviewUrl };
     // Older than the window: counted on each of its approvers' "Older (n)" line, not listed.
     if (isOlder(row.createdAt)) {
-      for (const approver of awaiting) olderBuckets.set(approver, (olderBuckets.get(approver) ?? 0) + 1);
+      for (const approver of awaiting) olderBuckets.set(approver, [...(olderBuckets.get(approver) ?? []), cell]);
       continue;
     }
     // Scope: this RFP only goes to its own authorized approvers.
@@ -258,14 +265,15 @@ export async function buildPendingRfpDigest(
   const perRecipient: PendingRfpRecipientDigest[] = Array.from(buckets.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([recipient, cells]) => {
-      const olderCount = olderBuckets.get(recipient) ?? 0;
+      const olderCells = olderBuckets.get(recipient) ?? [];
+      const olderCount = olderCells.length;
       return {
         recipient,
         count: cells.length,
         subject: `RFPs Awaiting Your Approval — ${cells.length} pending${olderCount > 0 ? ` (+${olderCount} older)` : ""}`,
         htmlBody: renderRecipientDigestHtml(
           cells,
-          options.olderThanDays === undefined ? null : { count: olderCount, days: options.olderThanDays },
+          options.olderThanDays === undefined ? null : { cells: olderCells, days: options.olderThanDays },
         ),
       };
     });
