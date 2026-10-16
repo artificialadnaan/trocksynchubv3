@@ -9,12 +9,13 @@ import { ArrowRight, Shield, Zap, BarChart3 } from "lucide-react";
 export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [isRegistering, setIsRegistering] = useState(false);
   const { toast } = useToast();
 
   const loginMutation = useMutation({
     mutationFn: async (data: { username: string; password: string }) => {
-      const res = await apiRequest("POST", isRegistering ? "/api/auth/register" : "/api/auth/login", data);
+      // Sign-in only. Accounts are created by an admin (POST /api/auth/register is admin-only), so the page
+      // offers no self-registration.
+      const res = await apiRequest("POST", "/api/auth/login", data);
       return res.json();
     },
     onSuccess: () => {
@@ -106,14 +107,9 @@ export default function LoginPage() {
 
           <div className="space-y-2 mb-8">
             <h2 className="font-display text-2xl font-bold tracking-tight text-foreground" data-testid="text-login-title">
-              {isRegistering ? "Create account" : "Welcome back"}
+              Welcome back
             </h2>
-            <p className="text-sm text-muted-foreground">
-              {isRegistering
-                ? "Set up your credentials to get started."
-                : "Sign in to access your sync dashboard."
-              }
-            </p>
+            <p className="text-sm text-muted-foreground">Sign in to access your sync dashboard.</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -144,22 +140,9 @@ export default function LoginPage() {
               disabled={loginMutation.isPending}
               data-testid="button-login"
             >
-              {loginMutation.isPending
-                ? "Please wait..."
-                : isRegistering
-                  ? "Create Account"
-                  : "Sign In"
-              }
+              {loginMutation.isPending ? "Please wait..." : "Sign In"}
               {!loginMutation.isPending && <ArrowRight className="w-4 h-4" />}
             </Button>
-            <button
-              type="button"
-              onClick={() => setIsRegistering(!isRegistering)}
-              className="w-full py-2 text-sm text-muted-foreground hover:text-foreground transition-colors active:scale-[0.98]"
-              data-testid="button-toggle-register"
-            >
-              {isRegistering ? "Already have an account? Sign in" : "Need an account? Register"}
-            </button>
           </form>
         </div>
       </div>
