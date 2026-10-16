@@ -45,29 +45,40 @@ const BID_BOARD_MENU_READY_SELECTOR = [
  */
 export async function waitForBidBoardReady(
   page: any,
-  opts: { timeoutMs?: number; pollMs?: number } = {}
+  opts: { timeoutMs?: number; pollMs?: number; now?: () => number } = {}
 ): Promise<boolean> {
   const timeoutMs = opts.timeoutMs ?? 90_000;
   const pollMs = opts.pollMs ?? 1_000;
+  const now = opts.now ?? Date.now;
+  // Two bounds: a real deadline (a reload or a slow poll can't run past the budget; CodeRabbit on #115) and a poll
+  // count (deterministic in tests, whose waits return at once).
+  const started = now();
+  const deadline = started + timeoutMs;
   const maxPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  const elapsedS = () => Math.round((now() - started) / 1000);
   let reloaded = false;
   for (let i = 0; i <= maxPolls; i++) {
-    const spinners = await page.locator(BID_BOARD_LOADING_SELECTOR).count().catch(() => 0);
+    // Only a VISIBLE spinner means loading: one left attached but hidden is not (CodeRabbit on #115).
+    const spinnerLoc = page.locator(BID_BOARD_LOADING_SELECTOR);
+    const spinnerCount = await spinnerLoc.count().catch(() => 0);
+    const loading = spinnerCount > 0 && (await spinnerLoc.first().isVisible().catch(() => true));
     const menus = await page.locator(BID_BOARD_MENU_READY_SELECTOR).count().catch(() => 0);
-    if (spinners === 0 && menus > 0) {
-      log(`Bid Board ready after ${Math.round((i * pollMs) / 1000)}s`, "playwright");
+    if (!loading && menus > 0) {
+      log(`Bid Board ready after ${elapsedS()}s`, "playwright");
       return true;
     }
-    if (i === maxPolls) break;
+    const remaining = deadline - now();
+    if (i === maxPolls || remaining <= 0) break;
     if (!reloaded && i >= Math.floor(maxPolls / 2) && typeof page.reload === "function") {
       reloaded = true;
-      log(`Bid Board still loading after ${Math.round((i * pollMs) / 1000)}s (spinner=${spinners}, menu=${menus}); reloading once`, "playwright");
-      await page.reload({ waitUntil: "load", timeout: 60_000 }).catch(() => {});
+      log(`Bid Board still loading after ${elapsedS()}s (spinner=${loading ? "visible" : "none"}, menu=${menus}); reloading once`, "playwright");
+      await page.reload({ waitUntil: "load", timeout: Math.max(1_000, Math.min(60_000, remaining)) }).catch(() => {});
+      if (deadline - now() <= 0) break;
     }
     if (typeof page.waitForTimeout !== "function") break; // a real Playwright page always has it
-    await page.waitForTimeout(pollMs);
+    await page.waitForTimeout(Math.min(pollMs, Math.max(0, deadline - now())));
   }
-  log(`Bid Board not ready after ${Math.round(timeoutMs / 1000)}s`, "playwright");
+  log(`Bid Board not ready after ${elapsedS()}s`, "playwright");
   return false;
 }
 
