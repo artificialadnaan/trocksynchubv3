@@ -11,6 +11,7 @@ import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMi
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
+import { projectEventsAuthGuard } from "../webhooks/shared-secret";
 import { db } from "../db";
 import { webhookLogs } from "@shared/schema";
 import { eq, and, lt, desc } from "drizzle-orm";
@@ -310,7 +311,8 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
   // ── Procore project-events webhook ──────────────────────────────────────────
   // Procore Projects webhook (Add to Portfolio → Phase 2)
-  app.post("/webhooks/procore/project-events", handleProcoreProjectWebhook);
+  // H6: a shared secret in the Authorization header. OBSERVE mode (default) allows and logs; PROCORE_PROJECT_EVENTS_ENFORCE=true fails closed.
+  app.post("/webhooks/procore/project-events", projectEventsAuthGuard(), handleProcoreProjectWebhook);
 
   // ── Procore main webhook ────────────────────────────────────────────────────
   app.post("/webhooks/procore", async (req, res) => {
