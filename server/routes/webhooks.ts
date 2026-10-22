@@ -11,6 +11,7 @@ import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMi
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
+import { rawBodyOf, verifyHubspotWebhook, verifyProcoreWebhook } from "../webhooks/signature";
 import { db } from "../db";
 import { webhookLogs } from "@shared/schema";
 import { eq, and, lt, desc } from "drizzle-orm";
@@ -20,32 +21,28 @@ const recentRoleCheckTimestamps = new Map<string, number>();
 const ROLE_CHECK_DEBOUNCE_MS = 60_000;
 
 export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
-  // Log signature verification status once on startup, not per request
+  // Log signature configuration once on startup, not per request. A blank secret makes the endpoint REFUSE (503), never skip (H5).
   if (!process.env.HUBSPOT_CLIENT_SECRET) {
-    console.warn('[webhook] HUBSPOT_CLIENT_SECRET not set — HubSpot signature verification disabled');
+    console.error('[webhook] HUBSPOT_CLIENT_SECRET not set — POST /webhooks/hubspot answers 503 until it is configured (fails closed)');
   }
   if (!process.env.PROCORE_WEBHOOK_SECRET) {
-    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — Procore signature verification disabled');
+    console.error('[webhook] PROCORE_WEBHOOK_SECRET not set — POST /webhooks/procore answers 503 until it is configured (fails closed)');
   }
 
   // ── HubSpot webhook ─────────────────────────────────────────────────────────
   app.post("/webhooks/hubspot", async (req, res) => {
     try {
-      // C-1: HubSpot signature verification (optional — skipped if secret not configured)
-      const hubspotSecret = process.env.HUBSPOT_CLIENT_SECRET;
-      if (hubspotSecret) {
-        const signature = req.headers['x-hubspot-signature-v3'] || req.headers['x-hubspot-signature'];
-        if (signature) {
-          const crypto = await import('crypto');
-          const requestBody = JSON.stringify(req.body);
-          const hash = crypto.createHmac('sha256', hubspotSecret)
-            .update(requestBody)
-            .digest('hex');
-          if (hash !== signature) {
-            console.warn('[webhook] HubSpot signature verification FAILED');
-            return res.status(401).json({ error: 'Invalid signature' });
-          }
-        }
+      // C-1 / H5: HubSpot signature verification, FAIL CLOSED: a blank secret refuses (503); a missing or invalid signature refuses (401).
+      const hubspotVerdict = verifyHubspotWebhook({
+        secret: process.env.HUBSPOT_CLIENT_SECRET,
+        method: req.method,
+        url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+        rawBody: rawBodyOf(req),
+        headers: req.headers,
+      });
+      if (!hubspotVerdict.ok) {
+        console.warn(`[webhook] HubSpot webhook refused: ${hubspotVerdict.reason}`);
+        return res.status(hubspotVerdict.status).json({ error: hubspotVerdict.reason === 'secret_not_configured' ? 'Webhook secret not configured' : 'Invalid signature' });
       }
 
       // H-4: HubSpot payload validation
@@ -316,21 +313,11 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
   app.post("/webhooks/procore", async (req, res) => {
     let webhookLog: any = null;
     try {
-      // C-1: Procore signature verification (optional — skipped if secret not configured)
-      const procoreSecret = process.env.PROCORE_WEBHOOK_SECRET;
-      if (procoreSecret) {
-        const signature = req.headers['x-procore-signature'] || req.headers['x-webhook-signature'];
-        if (signature) {
-          const crypto = await import('crypto');
-          const requestBody = JSON.stringify(req.body);
-          const hash = crypto.createHmac('sha256', procoreSecret)
-            .update(requestBody)
-            .digest('hex');
-          if (hash !== signature) {
-            console.warn('[webhook] Procore signature verification FAILED');
-            return res.status(401).json({ error: 'Invalid signature' });
-          }
-        }
+      // C-1 / H5: Procore signature verification, FAIL CLOSED (blank secret → 503; missing or invalid signature → 401).
+      const procoreVerdict = verifyProcoreWebhook({ secret: process.env.PROCORE_WEBHOOK_SECRET, rawBody: rawBodyOf(req), headers: req.headers });
+      if (!procoreVerdict.ok) {
+        console.warn(`[webhook] Procore webhook refused: ${procoreVerdict.reason}`);
+        return res.status(procoreVerdict.status).json({ error: procoreVerdict.reason === 'secret_not_configured' ? 'Webhook secret not configured' : 'Invalid signature' });
       }
 
       // H-4: Procore payload validation
