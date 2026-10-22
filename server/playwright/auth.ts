@@ -83,6 +83,21 @@ function getEncryptionSecret(): string {
   return key;
 }
 
+/**
+ * H3 (security rotation, 2026-10-22): the secrets a stored Procore web password may have been sealed under, newest first. New passwords are
+ * sealed with ENCRYPTION_KEY once it is set (SESSION_SECRET until then); DECRYPTING tries ENCRYPTION_KEY and then SESSION_SECRET, so the key can be
+ * split from the session secret (set ENCRYPTION_KEY to the current SESSION_SECRET value first, then rotate either one) without a moment where the
+ * saved password cannot be read. Values are never logged.
+ */
+function getDecryptionSecrets(): string[] {
+  const candidates = [process.env.ENCRYPTION_KEY, process.env.SESSION_SECRET].filter((v): v is string => typeof v === "string" && v.length > 0);
+  const unique = Array.from(new Set(candidates));
+  if (unique.length === 0) {
+    throw new Error("ENCRYPTION_KEY or SESSION_SECRET environment variable is required for credential encryption");
+  }
+  return unique;
+}
+
 // Backwards-compatible alias
 function getSessionSecret(): string {
   return getEncryptionSecret();
@@ -109,7 +124,6 @@ export function encryptPassword(password: string): string {
 
 export function decryptPassword(encryptedData: string): string {
   const parts = encryptedData.split(":");
-  const secret = getEncryptionSecret();
 
   // Support both old format (iv:authTag:encrypted) and new format (salt:iv:authTag:encrypted)
   let salt: Buffer, iv: Buffer, authTag: Buffer, encrypted: string;
@@ -129,14 +143,20 @@ export function decryptPassword(encryptedData: string): string {
     throw new Error("Invalid encrypted data format");
   }
 
-  const key = deriveKey(secret, salt);
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
-  decipher.setAuthTag(authTag);
-
-  let decrypted = decipher.update(encrypted, "hex", "utf8");
-  decrypted += decipher.final("utf8");
-
-  return decrypted;
+  let lastError: unknown;
+  for (const secret of getDecryptionSecrets()) {
+    try {
+      const key = deriveKey(secret, salt);
+      const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+      decipher.setAuthTag(authTag);
+      let decrypted = decipher.update(encrypted, "hex", "utf8");
+      decrypted += decipher.final("utf8");
+      return decrypted;
+    } catch (err) {
+      lastError = err; // wrong key: GCM's tag check fails; try the next candidate
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Unable to decrypt the stored credential with ENCRYPTION_KEY or SESSION_SECRET");
 }
 
 export async function getProcoreCredentials(): Promise<ProcoreCredentials | null> {
