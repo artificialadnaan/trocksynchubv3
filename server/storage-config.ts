@@ -118,15 +118,18 @@ export async function saveStorageConfig(partial: Partial<StorageProviderConfig>)
 
   // Don't overwrite Google Drive secrets with redacted placeholders from GET
   const gd = partial.googleDrive;
-  let mergedGd: StorageProviderConfig['googleDrive'] = gd
+  // H1: the Drive client secret is GOOGLE_DRIVE_CLIENT_SECRET (env); a value typed here is not persisted. The retention rule applies to the FINAL
+  // googleDrive value, so a partial save that omits googleDrive also scrubs a stored legacy copy once the env var is set.
+  const base = gd
     ? {
         clientId: !isRedactedPlaceholder(gd.clientId) ? gd.clientId : (current.googleDrive?.clientId ?? gd.clientId),
-        // H1: the Drive client secret is GOOGLE_DRIVE_CLIENT_SECRET (env); a value typed here is not persisted.
-        clientSecret: legacySecretToKeep('GOOGLE_DRIVE_CLIENT_SECRET', current.googleDrive?.clientSecret) ?? '',
         refreshToken: !isRedactedPlaceholder(gd.refreshToken) ? gd.refreshToken : (current.googleDrive?.refreshToken ?? gd.refreshToken),
         rootFolderId: gd.rootFolderId ?? current.googleDrive?.rootFolderId,
       }
     : current.googleDrive;
+  let mergedGd: StorageProviderConfig['googleDrive'] = base
+    ? { ...base, clientSecret: legacySecretToKeep('GOOGLE_DRIVE_CLIENT_SECRET', current.googleDrive?.clientSecret) ?? '' }
+    : base;
 
   const merged: StorageProviderConfig = {
     ...current,
