@@ -75,4 +75,19 @@ describe("one-shot OAuth state across replicas (shared store)", () => {
     const state = a.issueOAuthState(sess, "hubspot");
     expect(await a.consumeOAuthState(sess, "hubspot", state)).toBe(false);
   });
+
+  it("recovers: a later valid state is accepted after the store was swapped/recreated or errored once (the table-ensure memo is not poisoned)", async () => {
+    const a = await replica();
+    const s1: Record<string, any> = {};
+    expect(await a.consumeOAuthState(s1, "hubspot", a.issueOAuthState(s1, "hubspot"))).toBe(true);
+    dbHolder.pool = new PGlite(); // a database without the table (fresh store); same process memory
+    const s2: Record<string, any> = {};
+    expect(await a.consumeOAuthState(s2, "hubspot", a.issueOAuthState(s2, "hubspot"))).toBe(true);
+    dbHolder.pool = { query: vi.fn().mockRejectedValue(new Error("down")) };
+    const s3: Record<string, any> = {};
+    expect(await a.consumeOAuthState(s3, "hubspot", a.issueOAuthState(s3, "hubspot"))).toBe(false);
+    dbHolder.pool = new PGlite();
+    const s4: Record<string, any> = {};
+    expect(await a.consumeOAuthState(s4, "hubspot", a.issueOAuthState(s4, "hubspot"))).toBe(true);
+  });
 });
