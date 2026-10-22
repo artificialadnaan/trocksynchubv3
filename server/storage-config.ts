@@ -171,7 +171,7 @@ export async function getStorageProvider(): Promise<StorageProvider> {
     const gd = stored ? { ...stored, clientSecret: resolveClientSecret({ label: 'Google Drive', envName: 'GOOGLE_DRIVE_CLIENT_SECRET', dbValue: stored.clientSecret }) } : stored;
     if (!gd?.clientId || !gd.clientSecret || !gd.refreshToken) {
       throw new Error(
-        'Google Drive not configured. Set storage config in Settings or env vars GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET, GOOGLE_DRIVE_REFRESH_TOKEN.'
+        'Google Drive not configured. Set the client ID and refresh token in Settings or env (GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_REFRESH_TOKEN), and the client secret ONLY in the GOOGLE_DRIVE_CLIENT_SECRET environment variable (it is no longer stored in Settings).'
       );
     }
     cachedProvider = new GoogleDriveProvider(gd);

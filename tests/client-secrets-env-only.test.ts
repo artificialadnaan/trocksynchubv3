@@ -42,6 +42,13 @@ describe("resolveClientSecret", () => {
     process.env.CLIENT_SECRETS_ENV_ONLY = "true";
     expect(resolveClientSecret({ label: "Microsoft", envName: "MICROSOFT_CLIENT_SECRET", dbValue: "db-value" })).toBe("");
   });
+  it("trims the env value (a pasted trailing newline is the same secret) and treats a whitespace-only value as unset", () => {
+    process.env.MICROSOFT_CLIENT_SECRET = "  env-value\n";
+    expect(resolveClientSecret({ label: "Microsoft", envName: "MICROSOFT_CLIENT_SECRET", dbValue: "db-value" })).toBe("env-value");
+    process.env.MICROSOFT_CLIENT_SECRET = "  \n";
+    expect(resolveClientSecret({ label: "Microsoft", envName: "MICROSOFT_CLIENT_SECRET", dbValue: "db-value" })).toBe("db-value"); // does not shadow the legacy copy
+    expect(legacySecretToKeep("MICROSOFT_CLIENT_SECRET", "stored")).toBe("stored");
+  });
   it("never logs a secret value", () => {
     process.env.PROCORE_CLIENT_SECRET = "env-secret-xyz";
     resolveClientSecret({ label: "Procore", envName: "PROCORE_CLIENT_SECRET", dbValue: "db-secret-abc" });

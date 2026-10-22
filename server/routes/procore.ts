@@ -39,6 +39,7 @@ export function registerProcoreRoutes(app: Express, requireAuth: RequestHandler)
     // the Client ID / company / environment needs the env var to be set (or, until it is, the legacy stored secret to still exist).
     if (!trimmedClientId) return res.status(400).json({ message: "Client ID is required" });
     const existing = await storage.getAutomationConfig("procore_config");
+    const keptSecret = legacySecretToKeep("PROCORE_CLIENT_SECRET", (existing?.value as any)?.clientSecret);
     if (!hasUsableClientSecret("PROCORE_CLIENT_SECRET", (existing?.value as any)?.clientSecret)) {
       return res.status(400).json({ message: "Set the PROCORE_CLIENT_SECRET environment variable; the client secret is no longer stored in Settings." });
     }
@@ -47,7 +48,7 @@ export function registerProcoreRoutes(app: Express, requireAuth: RequestHandler)
       key: "procore_config",
       value: {
         clientId: trimmedClientId,
-        ...(legacySecretToKeep("PROCORE_CLIENT_SECRET", (existing?.value as any)?.clientSecret) ? { clientSecret: legacySecretToKeep("PROCORE_CLIENT_SECRET", (existing?.value as any)?.clientSecret) } : {}),
+        ...(keptSecret ? { clientSecret: keptSecret } : {}),
         companyId: trimmedCompanyId,
         environment: environment || "production",
         configuredAt: new Date().toISOString(),

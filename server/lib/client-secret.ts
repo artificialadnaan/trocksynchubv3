@@ -13,8 +13,9 @@
 const warned = new Set<string>();
 
 export function resolveClientSecret(opts: { label: string; envName: string; dbValue: unknown }): string {
-  const fromEnv = process.env[opts.envName];
-  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
+  // Trimmed: a pasted value with a trailing newline or space is the same secret, and a whitespace-only value is "unset" (it must not shadow a good legacy copy).
+  const fromEnv = process.env[opts.envName]?.trim();
+  if (fromEnv) return fromEnv;
   const legacy = typeof opts.dbValue === "string" ? opts.dbValue : "";
   if (process.env.CLIENT_SECRETS_ENV_ONLY === "true") {
     if (legacy && !warned.has(`only:${opts.envName}`)) {
@@ -47,7 +48,7 @@ export function stripClientSecret<T extends Record<string, unknown>>(value: T): 
  * typed into a form is never what this returns.
  */
 export function legacySecretToKeep(envName: string, existingDbValue: unknown): string | undefined {
-  if (typeof process.env[envName] === "string" && process.env[envName]!.length > 0) return undefined;
+  if (process.env[envName]?.trim()) return undefined;
   return typeof existingDbValue === "string" && existingDbValue.length > 0 ? existingDbValue : undefined;
 }
 
