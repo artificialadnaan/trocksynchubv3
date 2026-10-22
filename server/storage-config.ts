@@ -8,6 +8,7 @@
  * @module storage-config
  */
 
+import { legacySecretToKeep, resolveClientSecret } from './lib/client-secret';
 import { storage } from './storage';
 import {
   StorageProvider,
@@ -117,14 +118,18 @@ export async function saveStorageConfig(partial: Partial<StorageProviderConfig>)
 
   // Don't overwrite Google Drive secrets with redacted placeholders from GET
   const gd = partial.googleDrive;
-  let mergedGd: StorageProviderConfig['googleDrive'] = gd
+  // H1: the Drive client secret is GOOGLE_DRIVE_CLIENT_SECRET (env); a value typed here is not persisted. The retention rule applies to the FINAL
+  // googleDrive value, so a partial save that omits googleDrive also scrubs a stored legacy copy once the env var is set.
+  const base = gd
     ? {
         clientId: !isRedactedPlaceholder(gd.clientId) ? gd.clientId : (current.googleDrive?.clientId ?? gd.clientId),
-        clientSecret: !isRedactedPlaceholder(gd.clientSecret) ? gd.clientSecret : (current.googleDrive?.clientSecret ?? gd.clientSecret),
         refreshToken: !isRedactedPlaceholder(gd.refreshToken) ? gd.refreshToken : (current.googleDrive?.refreshToken ?? gd.refreshToken),
         rootFolderId: gd.rootFolderId ?? current.googleDrive?.rootFolderId,
       }
     : current.googleDrive;
+  let mergedGd: StorageProviderConfig['googleDrive'] = base
+    ? { ...base, clientSecret: legacySecretToKeep('GOOGLE_DRIVE_CLIENT_SECRET', current.googleDrive?.clientSecret) ?? '' }
+    : base;
 
   const merged: StorageProviderConfig = {
     ...current,
@@ -164,10 +169,12 @@ export async function getStorageProvider(): Promise<StorageProvider> {
   const config = await getStorageConfig();
 
   if (config.activeProvider === 'google-drive') {
-    const gd = config.googleDrive ?? getGoogleDriveConfigFromEnv();
+    const stored = config.googleDrive ?? getGoogleDriveConfigFromEnv();
+    // H1: the env secret wins over any stored copy; a stored legacy secret is only a fallback (CLIENT_SECRETS_ENV_ONLY removes it).
+    const gd = stored ? { ...stored, clientSecret: resolveClientSecret({ label: 'Google Drive', envName: 'GOOGLE_DRIVE_CLIENT_SECRET', dbValue: stored.clientSecret }) } : stored;
     if (!gd?.clientId || !gd.clientSecret || !gd.refreshToken) {
       throw new Error(
-        'Google Drive not configured. Set storage config in Settings or env vars GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET, GOOGLE_DRIVE_REFRESH_TOKEN.'
+        'Google Drive not configured. Set the client ID and refresh token in Settings or env (GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_REFRESH_TOKEN), and the client secret ONLY in the GOOGLE_DRIVE_CLIENT_SECRET environment variable (it is no longer stored in Settings).'
       );
     }
     cachedProvider = new GoogleDriveProvider(gd);

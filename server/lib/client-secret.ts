@@ -1,0 +1,99 @@
+/**
+ * Provider CLIENT SECRETS come from the environment (security hardening H1, 2026-10-22).
+ *
+ * Before: Microsoft's and Procore's client secrets were read DB-first from the plaintext `automation_config` JSON (microsoft_config /
+ * procore_config) and the Drive secret from storage_provider_config, so every rotated secret landed in a database whose password may be exposed.
+ *
+ * Now: the ENVIRONMENT variable is the one copy. Resolution order:
+ *   1. the env var, when set (a DB copy is IGNORED, never preferred);
+ *   2. otherwise the legacy DB copy, with a one-time warning, so a deploy that precedes the env var being set does not take the integration down.
+ *      CLIENT_SECRETS_ENV_ONLY=true removes this step (use it once the env values are live and the DB copies are cleared).
+ * New secrets are never WRITTEN to the database (see stripClientSecret). Names only are logged, never values.
+ */
+const warned = new Set<string>();
+
+export function resolveClientSecret(opts: { label: string; envName: string; dbValue: unknown }): string {
+  // Trimmed: a pasted value with a trailing newline or space is the same secret, and a whitespace-only value is "unset" (it must not shadow a good legacy copy).
+  const fromEnv = process.env[opts.envName]?.trim();
+  if (fromEnv) return fromEnv;
+  // A whitespace-only legacy copy is "unset" too (older rows allowed one); it must not count as usable.
+  const legacy = typeof opts.dbValue === "string" ? opts.dbValue.trim() : "";
+  if (process.env.CLIENT_SECRETS_ENV_ONLY === "true") {
+    if (legacy && !warned.has(`only:${opts.envName}`)) {
+      warned.add(`only:${opts.envName}`);
+      console.error(`[client-secret] ${opts.label}: ${opts.envName} is not set and CLIENT_SECRETS_ENV_ONLY=true, so the legacy database copy is NOT used`);
+    }
+    return "";
+  }
+  if (legacy && !warned.has(opts.envName)) {
+    warned.add(opts.envName);
+    console.warn(`[client-secret] ${opts.label}: ${opts.envName} is not set; using the legacy database copy. Set ${opts.envName} and clear the database copy.`);
+  }
+  return legacy;
+}
+
+/** True when a secret is actually usable under the same rules the OAuth paths apply (env first, then the legacy copy unless CLIENT_SECRETS_ENV_ONLY). A save that would leave this false is refused. */
+export function hasUsableClientSecret(envName: string, dbValue: unknown): boolean {
+  return resolveClientSecret({ label: envName, envName, dbValue }) !== "";
+}
+
+/** A config object without its `clientSecret` (what is persisted from now on). */
+export function stripClientSecret<T extends Record<string, unknown>>(value: T): Omit<T, "clientSecret"> {
+  const { clientSecret: _dropped, ...rest } = value;
+  return rest;
+}
+
+/**
+ * What a settings save may keep of an EXISTING stored secret: the legacy copy is carried over only while the env var is still unset (so saving
+ * other fields does not take the integration down before the env value exists); once the env var is set the stored copy is dropped. A value
+ * typed into a form is never what this returns.
+ */
+export function legacySecretToKeep(envName: string, existingDbValue: unknown): string | undefined {
+  if (process.env[envName]?.trim()) return undefined;
+  return typeof existingDbValue === "string" && existingDbValue.trim().length > 0 ? existingDbValue : undefined;
+}
+
+/** Automation-config rows that hold a provider client secret, with the env var that owns it and where the secret sits in the row's value. */
+const PROTECTED_CONFIGS: Record<string, { envName: string; nested?: string }> = {
+  procore_config: { envName: "PROCORE_CLIENT_SECRET" },
+  microsoft_config: { envName: "MICROSOFT_CLIENT_SECRET" },
+  storage_provider_config: { envName: "GOOGLE_DRIVE_CLIENT_SECRET", nested: "googleDrive" },
+};
+
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * The generic automation-config WRITER's guard (storage layer, so PUT /api/automation-config cannot bypass the dedicated routes): for a protected
+ * row, whatever `clientSecret` the incoming value carries is dropped, and the only secret that can be persisted is the already-stored legacy copy
+ * while its env var is still unset (legacySecretToKeep). Any other key, or a non-object value, passes through unchanged.
+ */
+export function sanitizeProtectedConfigValue(key: string, incoming: unknown, existing: unknown): unknown {
+  const rule = PROTECTED_CONFIGS[key];
+  if (!rule || !isObject(incoming)) return incoming;
+  const pick = (v: unknown) => (rule.nested ? (isObject(v) ? v[rule.nested] : undefined) : v);
+  const fix = (holder: Record<string, unknown>, existingHolder: unknown): Record<string, unknown> => {
+    const keep = legacySecretToKeep(rule.envName, isObject(existingHolder) ? existingHolder.clientSecret : undefined);
+    return { ...stripClientSecret(holder), ...(keep ? { clientSecret: keep } : {}) };
+  };
+  const target = pick(incoming);
+  if (rule.nested) return isObject(target) ? { ...incoming, [rule.nested]: fix(target, pick(existing)) } : incoming;
+  return fix(incoming, existing);
+}
+
+/** A merge patch for a protected row may never carry a client secret (it has no stored value to compare with, so it is only stripped). */
+export function sanitizeProtectedConfigPatch(key: string, patch: Record<string, unknown>): Record<string, unknown> {
+  const rule = PROTECTED_CONFIGS[key];
+  if (!rule) return patch;
+  if (!rule.nested) return stripClientSecret(patch);
+  const nested = patch[rule.nested];
+  return isObject(nested) ? { ...patch, [rule.nested]: stripClientSecret(nested) } : patch;
+}
+
+export function isProtectedConfigKey(key: string): boolean {
+  return key in PROTECTED_CONFIGS;
+}
+
+/** Test seam: forget which warnings were already printed. */
+export function resetClientSecretWarnings(): void {
+  warned.clear();
+}

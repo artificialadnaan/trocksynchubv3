@@ -843,7 +843,7 @@ function ProcoreConfigDialog({ open, onOpenChange, existingConfig }: {
               onChange={(e) => setClientSecret(e.target.value)}
               data-testid="input-procore-client-secret"
             />
-            <p className="text-xs text-muted-foreground">Found in your Procore Developer Portal under App Management.</p>
+            <p className="text-xs text-muted-foreground">The client secret is read from the PROCORE_CLIENT_SECRET environment variable on the server and is not stored here; a value typed above is ignored. Find it in your Procore Developer Portal under App Management.</p>
           </div>
 
           <div className="space-y-2">
@@ -886,7 +886,7 @@ function ProcoreConfigDialog({ open, onOpenChange, existingConfig }: {
             </div>
             <Button
               onClick={() => saveMutation.mutate()}
-              disabled={!clientId || !clientSecret || saveMutation.isPending}
+              disabled={!clientId || saveMutation.isPending}
               data-testid="button-save-procore"
             >
               {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : null}
