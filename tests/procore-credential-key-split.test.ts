@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // H3 (security rotation, 2026-10-22): ENCRYPTION_KEY can be split from SESSION_SECRET without ever making the saved Procore web password unreadable.
-vi.mock("../server/storage.ts", () => ({ storage: {} }));
-vi.mock("../server/log.ts", () => ({ log: vi.fn() }));
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
+vi.mock("../server/db.ts", () => ({ db: {}, pool: { query: vi.fn(async () => ({ rows: [] })) } }));
+vi.mock("../server/email-service.ts", () => ({ sendEmail: vi.fn(async () => ({ success: true, provider: "gmail" })) }));
+vi.mock("../server/storage.ts", () => ({ storage: { getAutomationConfig: vi.fn(async () => null) } }));
+vi.mock("../server/playwright/browser.ts", () => ({
+  getPage: vi.fn(), saveSession: vi.fn(), clearSession: vi.fn(), closeBrowser: vi.fn(), withRetry: vi.fn(), randomDelay: vi.fn(),
+  takeScreenshot: vi.fn(), waitForNavigation: vi.fn(), withBrowserLock: vi.fn(async (_n: string, fn: () => Promise<unknown>) => fn()),
+}));
 
 const { encryptPassword, decryptPassword } = await import("../server/playwright/auth.ts");
 
