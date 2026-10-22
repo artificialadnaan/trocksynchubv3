@@ -94,3 +94,46 @@ describe("scripts/reseal-oauth-secrets.ts argument guards", () => {
     expect(plaintextConfigFields(null)).toEqual([]);
   });
 });
+
+describe("scripts/reseal-oauth-secrets.ts on real Postgres", () => {
+  const K1 = randomBytes(32).toString("base64");
+  const K2 = randomBytes(32).toString("base64");
+  const envK1 = { SECRETS_ENCRYPTION_KEY: K1, SECRETS_ENCRYPTION_KEY_ID: "k1", RESEAL_OWNER_GO: "owner" } as NodeJS.ProcessEnv;
+  const envK2 = { SECRETS_ENCRYPTION_KEY: K2, SECRETS_ENCRYPTION_KEY_ID: "k2", SECRETS_PREVIOUS_KEYS: `k1:${K1}`, RESEAL_OWNER_GO: "owner" } as NodeJS.ProcessEnv;
+
+  it("dry run reports plaintext AND retired-key rows and writes nothing; apply re-seals both under the CURRENT key id, locks first, and every value still opens", async () => {
+    const { resealWith } = await import("../scripts/reseal-oauth-secrets.ts");
+    const { sealSecret, openSecret } = await import("../server/lib/secret-seal.ts");
+    await pg.query(`INSERT INTO oauth_tokens (provider, access_token, refresh_token) VALUES ('hubspot', 'PLAIN-A', 'PLAIN-R')`);
+    await pg.query(`INSERT INTO oauth_tokens (provider, access_token, refresh_token) VALUES ('companycam', $1, NULL)`, [sealSecret("CC-TOKEN", envK1)]);
+    await pg.query(`INSERT INTO oauth_tokens (provider, access_token, refresh_token) VALUES ('procore', $1, $2)`, [sealSecret("PC-A", envK2), sealSecret("PC-R", envK2)]); // already current
+    await pg.query(`INSERT INTO automation_config (key, value) VALUES ('gmail_oauth', $1::jsonb)`, [JSON.stringify({ accessToken: sealSecret("G-A", envK1), refreshToken: "G-PLAIN-R", expiresAt: 1 })]);
+    const before = JSON.stringify((await pg.query<any>(`SELECT * FROM oauth_tokens ORDER BY provider`)).rows);
+
+    const lines: string[] = [];
+    await resealWith(pg as any, false, envK2, (l) => lines.push(l));
+    expect(lines[0]).toContain("2 to re-seal (providers: companycam, hubspot)");
+    expect(lines[1]).toContain("1 to re-seal (keys: gmail_oauth)");
+    expect(JSON.stringify((await pg.query<any>(`SELECT * FROM oauth_tokens ORDER BY provider`)).rows)).toBe(before);
+
+    const sqls: string[] = [];
+    const spy = { query: (sql: string, params?: unknown[]) => { sqls.push(sql.replace(/\s+/g, " ").slice(0, 60)); return (pg as any).query(sql, params); } };
+    await resealWith(spy, true, envK2, () => undefined);
+    expect(sqls[0]).toBe("BEGIN");
+    expect(sqls[1]).toContain("pg_advisory_xact_lock(hashtext('procore-oauth-refresh'))");
+    expect(sqls.slice(2, 4).every((q) => q.includes("FOR UPDATE"))).toBe(true); // re-read under the lock
+    const rows = (await pg.query<any>(`SELECT provider, access_token, refresh_token FROM oauth_tokens ORDER BY provider`)).rows;
+    for (const r of rows) expect(r.access_token.startsWith("enc:v1:k2:")).toBe(true);
+    expect(rows.map((r: any) => openSecret(r.access_token, envK2))).toEqual(["CC-TOKEN", "PLAIN-A", "PC-A"]);
+    const cfg = (await pg.query<any>(`SELECT value FROM automation_config WHERE key = 'gmail_oauth'`)).rows[0].value;
+    expect(cfg.accessToken.startsWith("enc:v1:k2:")).toBe(true);
+    expect(cfg.refreshToken.startsWith("enc:v1:k2:")).toBe(true);
+    expect(openSecret(cfg.accessToken, envK2)).toBe("G-A");
+    expect(openSecret(cfg.refreshToken, envK2)).toBe("G-PLAIN-R");
+    expect(cfg.expiresAt).toBe(1);
+    // and a second run finds nothing left to do
+    const again: string[] = [];
+    await resealWith(pg as any, false, envK2, (l) => again.push(l));
+    expect(again[0]).toContain("0 to re-seal");
+  });
+});

@@ -54,6 +54,19 @@ export function isSealed(value: unknown): value is string {
   return typeof value === "string" && value.startsWith(SEAL_PREFIX);
 }
 
+/** The key id a sealed value names (null for a plaintext value). */
+export function sealedKeyId(value: unknown): string | null {
+  if (!isSealed(value)) return null;
+  return value.slice(SEAL_PREFIX.length).split(":")[0] || null;
+}
+
+/** True when a stored value should be (re)sealed under the CURRENT key: plaintext, or sealed under a retired key id. Empty/absent values never are. */
+export function needsReseal(value: unknown, currentKeyId: string | null): boolean {
+  if (typeof value !== "string" || value === "") return false;
+  if (!isSealed(value)) return true;
+  return currentKeyId !== null && sealedKeyId(value) !== currentKeyId;
+}
+
 /** Seal a token for storage. null/undefined/empty pass through; with no key configured the plaintext is returned unchanged (dormant). An already-sealed value is not sealed twice. */
 export function sealSecret<T extends string | null | undefined>(plain: T, env: NodeJS.ProcessEnv = process.env): T {
   if (typeof plain !== "string" || plain === "" || isSealed(plain)) return plain;
