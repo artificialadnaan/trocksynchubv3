@@ -117,7 +117,7 @@ describe("scripts/reseal-oauth-secrets.ts on real Postgres", () => {
     expect(JSON.stringify((await pg.query<any>(`SELECT * FROM oauth_tokens ORDER BY provider`)).rows)).toBe(before);
 
     const sqls: string[] = [];
-    const spy = { query: (sql: string, params?: unknown[]) => { sqls.push(sql.replace(/\s+/g, " ").slice(0, 60)); return (pg as any).query(sql, params); } };
+    const spy = { query: (sql: string, params?: unknown[]) => { sqls.push(sql.replace(/\s+/g, " ").slice(0, 140)); return (pg as any).query(sql, params); } };
     await resealWith(spy, true, envK2, () => undefined);
     expect(sqls[0]).toBe("BEGIN");
     expect(sqls[1]).toContain("pg_advisory_xact_lock(hashtext('procore-oauth-refresh'))");
