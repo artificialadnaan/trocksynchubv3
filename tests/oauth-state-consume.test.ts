@@ -33,4 +33,12 @@ describe("one-shot OAuth state under concurrent callbacks", () => {
     const old = issueOAuthState(t, "gmail");
     expect(consumeOAuthState(t, "gmail", old, Date.now() + OAUTH_STATE_TTL_MS + 1)).toBe(false);
   });
+
+  it("an invalid callback and a valid one that loaded the SAME snapshot: the mismatch consumes the pending state, so the valid stale copy fails", () => {
+    const invalid: Record<string, any> = {};
+    const state = issueOAuthState(invalid, "procore");
+    const valid = structuredClone(invalid); // loaded the same session snapshot before the invalid request's delete was saved
+    expect(consumeOAuthState(invalid, "procore", "forged")).toBe(false);
+    expect(consumeOAuthState(valid, "procore", state)).toBe(false);
+  });
 });
