@@ -896,7 +896,7 @@ export class DatabaseStorage implements IStorage {
     const [result] = await db.insert(automationConfig)
       .values({
         key,
-        value: { ...(insertDefaults ?? {}), ...patch } as any,
+        value: { ...sanitizeProtectedConfigPatch(key, insertDefaults ?? {}), ...patch } as any,
         ...(description ? { description } : {}),
       } as InsertAutomationConfig)
       .onConflictDoUpdate({
