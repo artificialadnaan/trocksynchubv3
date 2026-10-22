@@ -31,7 +31,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   app.get("/api/oauth/procore/callback", requireAdmin, asyncHandler(async (req, res) => {
     const { code, state } = req.query;
     // The stored state is ONE-SHOT: consumed whether or not it matches, so it cannot be retried or replayed.
-    if (!consumeOAuthState((req as any).session, "procore", state)) {
+    if (!(await consumeOAuthState((req as any).session, "procore", state))) {
       return res.status(400).json({ message: "Invalid or missing OAuth state. Start the Procore connection again from Settings." });
     }
     if (!code) return res.status(400).json({ message: "Missing authorization code" });
@@ -89,7 +89,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
 
   app.get("/api/oauth/hubspot/callback", requireAdmin, asyncHandler(async (req, res) => {
     const { code, error, error_description, state } = req.query;
-    if (!consumeOAuthState((req as any).session, "hubspot", state)) return res.redirect(invalidStateRedirect("hubspot"));
+    if (!(await consumeOAuthState((req as any).session, "hubspot", state))) return res.redirect(invalidStateRedirect("hubspot"));
 
     if (error) {
       console.error('[hubspot-oauth] OAuth error:', error, error_description);
@@ -146,7 +146,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
 
   app.get("/api/oauth/microsoft/callback", requireAdmin, asyncHandler(async (req, res) => {
     const { code, error, error_description, state } = req.query;
-    if (!consumeOAuthState((req as any).session, "microsoft", state)) return res.redirect(invalidStateRedirect("microsoft"));
+    if (!(await consumeOAuthState((req as any).session, "microsoft", state))) return res.redirect(invalidStateRedirect("microsoft"));
     if (error) {
       return res.redirect(`/#/settings?microsoft=error&message=${encodeURIComponent(error_description as string || error as string)}`);
     }
@@ -278,7 +278,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
 
   app.get("/api/oauth/google/callback", requireAdmin, asyncHandler(async (req, res) => {
     const { code, error, error_description, state } = req.query;
-    if (!consumeOAuthState((req as any).session, "gmail", state)) return res.redirect(invalidStateRedirect("gmail"));
+    if (!(await consumeOAuthState((req as any).session, "gmail", state))) return res.redirect(invalidStateRedirect("gmail"));
     if (error) {
       return res.redirect(`/#/settings?gmail=error&message=${encodeURIComponent(error_description as string || error as string)}`);
     }

@@ -15,6 +15,11 @@ const h = vi.hoisted(() => ({
   axiosPost: vi.fn(),
 }));
 
+// The shared PostgreSQL claim is covered by oauth-state-cross-replica.pglite.test.ts; route suites use an in-memory stand-in.
+vi.mock("../server/lib/oauth-state-store.ts", () => {
+  const seen = new Set<string>();
+  return { claimOAuthStateOnce: async (hash: string) => (seen.has(hash) ? false : (seen.add(hash), true)) };
+});
 vi.mock("../server/storage.ts", () => ({ storage: h.storage }));
 vi.mock("../server/procore.ts", () => ({ storeProcoreTokenPairUnderLock: h.storeProcoreTokenPairUnderLock }));
 vi.mock("axios", () => ({ default: { post: h.axiosPost } }));

@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { claimOAuthStateOnce } from "./oauth-state-store";
 
 /**
  * One-shot OAuth `state` bound to the signed-in admin's SESSION (security hardening H4 / H4b, 2026-10-22).
@@ -18,22 +19,28 @@ export function issueOAuthState(session: SessionLike, provider: string): string 
   return state;
 }
 
-// A state value, once presented, is remembered here until it could no longer be valid. The session delete alone is not enough: two callbacks
-// that load the session before either response saves it both see the pending state. This check-and-set is synchronous, so in one process
-// exactly one of them can pass; a restart only forgets states that are at most 10 minutes old and still need the session's own match.
+// The AUTHORITY on "already used" is the shared PostgreSQL (oauth-state-store.ts: an atomic INSERT ... ON CONFLICT DO NOTHING RETURNING), because
+// deploys overlap replicas and each replica has its own memory. This in-process map is only a fast path that answers "already used" without a
+// round trip; it never grants a pass. If the shared store errors, the callback is DENIED (fail closed).
 const consumed = new Map<string, number>();
 const consumedKey = (provider: string, state: string) => crypto.createHash("sha256").update(`${provider}\n${state}`).digest("hex");
 
-export function consumeOAuthState(session: SessionLike, provider: string, provided: unknown, now: number = Date.now()): boolean {
+export async function consumeOAuthState(session: SessionLike, provider: string, provided: unknown, now: number = Date.now()): Promise<boolean> {
   const pending = session?.[keyOf(provider)] as { state: string; at: number } | undefined;
   if (session) delete session[keyOf(provider)];
   if (!pending || now - pending.at > OAUTH_STATE_TTL_MS) return false;
-  // Record the pending state as consumed BEFORE comparing the presented value, so a mismatching callback also burns it for any other
-  // callback that loaded the same session snapshot (consume-on-mismatch holds under the session-save race too).
   for (const [key, until] of consumed) if (until <= now) consumed.delete(key);
   const key = consumedKey(provider, pending.state);
+  const expiresAt = pending.at + OAUTH_STATE_TTL_MS;
   if (consumed.has(key)) return false;
-  consumed.set(key, pending.at + OAUTH_STATE_TTL_MS);
+  consumed.set(key, expiresAt); // synchronous, before any await: same-process callers cannot both pass
+  // Record the pending state as consumed in the shared store BEFORE comparing the presented value, so a mismatching callback also burns it for
+  // every other replica that loaded the same session snapshot (consume-on-mismatch holds across replicas).
+  try {
+    if (!(await claimOAuthStateOnce(key, expiresAt, now))) return false;
+  } catch {
+    return false; // shared store unavailable: deny rather than risk a double exchange
+  }
   if (typeof provided !== "string" || provided.length === 0) return false;
   const a = Buffer.from(pending.state, "utf8");
   const b = Buffer.from(provided, "utf8");
