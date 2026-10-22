@@ -1,11 +1,25 @@
 import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
+import crypto from "crypto";
+import { requireAdmin } from "./settings";
 import { hasUsableClientSecret, resolveClientSecret } from "../lib/client-secret";
+
+/** H4 (security rotation, 2026-10-22): the one-shot OAuth `state` lives this long between /authorize and /callback. */
+export const PROCORE_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function stateMatches(expected: string, provided: unknown): boolean {
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(provided, "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   // ============= Procore OAuth =============
-  app.get("/api/oauth/procore/authorize", asyncHandler(async (_req, res) => {
+  // H4: both Procore routes need an ADMIN session, and the round trip carries a one-shot `state` bound to that session, so a link or a
+  // forged callback cannot connect (or replace) the Procore grant. Authorize used to answer anyone, and the callback stored whatever code it was given.
+  app.get("/api/oauth/procore/authorize", requireAdmin, asyncHandler(async (req, res) => {
     const config = await storage.getAutomationConfig("procore_config");
     const clientId = (config?.value as any)?.clientId || process.env.PROCORE_CLIENT_ID;
     const env = (config?.value as any)?.environment || "production";
@@ -13,12 +27,20 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
     const redirectUri = `${host}/api/oauth/procore/callback`;
     const baseUrl = env === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
     if (!clientId) return res.status(400).json({ message: "Procore Client ID not configured. Set PROCORE_CLIENT_ID environment variable or save credentials in settings." });
-    const url = `${baseUrl}/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    const state = crypto.randomBytes(32).toString("hex");
+    (req as any).session.procoreOAuthState = { state, at: Date.now() };
+    const url = `${baseUrl}/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
     res.json({ url });
   }));
 
-  app.get("/api/oauth/procore/callback", asyncHandler(async (req, res) => {
-    const { code } = req.query;
+  app.get("/api/oauth/procore/callback", requireAdmin, asyncHandler(async (req, res) => {
+    const { code, state } = req.query;
+    // The stored state is ONE-SHOT: consumed whether or not it matches, so it cannot be retried or replayed.
+    const pending = (req as any).session?.procoreOAuthState as { state: string; at: number } | undefined;
+    if ((req as any).session) delete (req as any).session.procoreOAuthState;
+    if (!pending || Date.now() - pending.at > PROCORE_OAUTH_STATE_TTL_MS || !stateMatches(pending.state, state)) {
+      return res.status(400).json({ message: "Invalid or missing OAuth state. Start the Procore connection again from Settings." });
+    }
     if (!code) return res.status(400).json({ message: "Missing authorization code" });
     const config = await storage.getAutomationConfig("procore_config");
     const clientId = (config?.value as any)?.clientId || process.env.PROCORE_CLIENT_ID;
