@@ -109,6 +109,31 @@ describe("the webhook routes fail closed", () => {
     });
   });
 
+  it("HubSpot v3 verifies against the PUBLIC host (X-Forwarded-Host / -Proto, or WEBHOOK_PUBLIC_BASE_URL), not the internal Host header", async () => {
+    await withApp(async (base) => {
+      process.env.HUBSPOT_CLIENT_SECRET = SECRET;
+      const body = JSON.stringify({});
+      const ts = String(Date.now());
+      const sign = (uri: string) => hmac("base64", `POST${uri}${body}${ts}`);
+      const headers = (sig: string, extra: Record<string, string> = {}) => ({ "x-hubspot-signature-v3": sig, "x-hubspot-request-timestamp": ts, ...extra });
+      // signed for the public URL, delivered with the proxy's forwarded headers (and an internal Host): verified, then the empty payload is refused (400)
+      const viaProxy = await post(base, "/webhooks/hubspot", body, headers(sign("https://synchub.example/webhooks/hubspot"), { "x-forwarded-host": "synchub.example", "x-forwarded-proto": "https" }));
+      expect(viaProxy.status).toBe(400);
+      // signed for the public URL but no forwarded headers: the reconstructed internal URL differs, so v3 does not verify (401)
+      expect((await post(base, "/webhooks/hubspot", body, headers(sign("https://synchub.example/webhooks/hubspot")))).status).toBe(401);
+      // a fixed public base URL makes the reconstruction independent of the proxy headers
+      process.env.WEBHOOK_PUBLIC_BASE_URL = "https://synchub.example";
+      try {
+        expect((await post(base, "/webhooks/hubspot", body, headers(sign("https://synchub.example/webhooks/hubspot")))).status).toBe(400);
+      } finally {
+        delete process.env.WEBHOOK_PUBLIC_BASE_URL;
+      }
+      // a v3 URL mismatch with a valid v1 signature also present still admits
+      const v1 = crypto.createHash("sha256").update(SECRET + body, "utf8").digest("hex");
+      expect((await post(base, "/webhooks/hubspot", body, headers(sign("https://wrong.example/x"), { "x-hubspot-signature": v1 }))).status).toBe(400);
+    });
+  });
+
   it("POST /webhooks/procore: blank secret → 503, unsigned → 401, tampered → 401, valid signature → past verification (400 for the empty payload)", async () => {
     await withApp(async (base) => {
       const body = JSON.stringify({});

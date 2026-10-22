@@ -20,6 +20,18 @@ import { eq, and, lt, desc } from "drizzle-orm";
 const recentRoleCheckTimestamps = new Map<string, number>();
 const ROLE_CHECK_DEBOUNCE_MS = 60_000;
 
+/**
+ * The URL HubSpot called, which its v3 signature covers: WEBHOOK_PUBLIC_BASE_URL when set (a fixed public origin, e.g. https://host), else the
+ * proxy's forwarded host and proto (Railway sets X-Forwarded-Host / -Proto), else the Host header.
+ */
+export function publicRequestUrl(req: { protocol: string; originalUrl: string; get(name: string): string | undefined }): string {
+  const fixed = process.env.WEBHOOK_PUBLIC_BASE_URL?.replace(/\/+$/, "");
+  if (fixed) return `${fixed}${req.originalUrl}`;
+  const host = (req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  return `${proto}://${host}${req.originalUrl}`;
+}
+
 export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler) {
   // Log signature configuration once on startup, not per request. A blank secret makes the endpoint REFUSE (503), never skip (H5).
   if (!process.env.HUBSPOT_CLIENT_SECRET) {
@@ -36,7 +48,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
       const hubspotVerdict = verifyHubspotWebhook({
         secret: process.env.HUBSPOT_CLIENT_SECRET,
         method: req.method,
-        url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+        url: publicRequestUrl(req),
         rawBody: rawBodyOf(req),
         headers: req.headers,
       });

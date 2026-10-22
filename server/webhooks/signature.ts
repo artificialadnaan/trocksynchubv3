@@ -35,7 +35,7 @@ export function rawBodyOf(req: { rawBody?: unknown; body?: unknown }): string {
  *   v3: base64(HMAC-SHA256(secret, METHOD + full request URI + raw body + X-HubSpot-Request-Timestamp)) in X-HubSpot-Signature-v3,
  *       and the timestamp must be within 5 minutes;
  *   v1: hex(SHA-256(secret + raw body)) in X-HubSpot-Signature.
- * v3 is preferred when both are present.
+ * v3 is preferred when both are present; if v3 does not verify but a valid v1 signature is also present, v1 admits (a proxy can change the URL v3 covers).
  */
 export function verifyHubspotWebhook(input: {
   secret: string | undefined;
@@ -54,7 +54,9 @@ export function verifyHubspotWebhook(input: {
     const now = input.nowMs ?? Date.now();
     if (!Number.isFinite(tsMs) || Math.abs(now - tsMs) > MAX_SKEW_MS) return { ok: false, status: 401, reason: "timestamp_invalid" };
     const expected = crypto.createHmac("sha256", input.secret).update(`${input.method.toUpperCase()}${input.url}${input.rawBody}${ts}`, "utf8").digest("base64");
-    return safeEqual(expected, v3) ? { ok: true, scheme: "hubspot-v3" } : { ok: false, status: 401, reason: "signature_invalid" };
+    if (safeEqual(expected, v3)) return { ok: true, scheme: "hubspot-v3" };
+    // A v3 mismatch can be only a URL/host reconstruction difference behind a proxy; a valid v1 signature (also an HMAC proof of the secret) still admits.
+    if (!first(input.headers["x-hubspot-signature"])) return { ok: false, status: 401, reason: "signature_invalid" };
   }
   const v1 = first(input.headers["x-hubspot-signature"]);
   if (v1) {
