@@ -18,6 +18,9 @@ const h = vi.hoisted(() => ({
 vi.mock("../server/storage.ts", () => ({ storage: h.storage }));
 vi.mock("../server/procore.ts", () => ({ storeProcoreTokenPairUnderLock: h.storeProcoreTokenPairUnderLock }));
 vi.mock("axios", () => ({ default: { post: h.axiosPost } }));
+// oauth.ts imports requireAdmin from routes/settings.ts, whose import has startup side effects (DB migrations, SESSION_SECRET): this suite drives the
+// handler behind it, so the gate is a stub here (the real gate is exercised in procore-oauth-admin-state.test.ts).
+vi.mock("../server/routes/settings.ts", () => ({ requireAdmin: (_q: any, _s: any, n: any) => n() }));
 
 const { registerOAuthRoutes } = await import("../server/routes/oauth.ts");
 
