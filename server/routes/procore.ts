@@ -22,26 +22,32 @@ import {
   mapProcoreStageToHubspot,
   resolveHubspotStageId,
 } from "../procore-hubspot-sync";
+import { legacySecretToKeep } from "../lib/client-secret";
 import { assignProjectNumber, getProjectNumberRegistry } from "../deal-project-number";
 import { sendStageChangeEmail } from "../email-notifications";
 
 export function registerProcoreRoutes(app: Express, requireAuth: RequestHandler) {
   // ============= Procore Integration Config =============
   app.post("/api/integrations/procore/save", requireAuth, asyncHandler(async (req, res) => {
-    const { clientId, clientSecret, companyId, environment } = req.body;
+    const { clientId, companyId, environment } = req.body; // a submitted clientSecret is deliberately ignored (H1)
 
     // Trim whitespace from all inputs to prevent issues with copy-paste
     const trimmedClientId = clientId?.trim();
-    const trimmedClientSecret = clientSecret?.trim();
     const trimmedCompanyId = companyId?.trim();
 
-    if (!trimmedClientId || !trimmedClientSecret) return res.status(400).json({ message: "Client ID and Client Secret are required" });
+    // H1: the client secret is read from PROCORE_CLIENT_SECRET and is NEVER stored in the database. A secret typed here is not saved; saving
+    // the Client ID / company / environment needs the env var to be set (or, until it is, the legacy stored secret to still exist).
+    if (!trimmedClientId) return res.status(400).json({ message: "Client ID is required" });
+    const existing = await storage.getAutomationConfig("procore_config");
+    if (!process.env.PROCORE_CLIENT_SECRET && !(existing?.value as any)?.clientSecret) {
+      return res.status(400).json({ message: "Set the PROCORE_CLIENT_SECRET environment variable; the client secret is no longer stored in Settings." });
+    }
 
     await storage.upsertAutomationConfig({
       key: "procore_config",
       value: {
         clientId: trimmedClientId,
-        clientSecret: trimmedClientSecret,
+        ...(legacySecretToKeep("PROCORE_CLIENT_SECRET", (existing?.value as any)?.clientSecret) ? { clientSecret: legacySecretToKeep("PROCORE_CLIENT_SECRET", (existing?.value as any)?.clientSecret) } : {}),
         companyId: trimmedCompanyId,
         environment: environment || "production",
         configuredAt: new Date().toISOString(),

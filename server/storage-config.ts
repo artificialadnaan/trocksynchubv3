@@ -8,6 +8,7 @@
  * @module storage-config
  */
 
+import { legacySecretToKeep, resolveClientSecret } from './lib/client-secret';
 import { storage } from './storage';
 import {
   StorageProvider,
@@ -120,7 +121,8 @@ export async function saveStorageConfig(partial: Partial<StorageProviderConfig>)
   let mergedGd: StorageProviderConfig['googleDrive'] = gd
     ? {
         clientId: !isRedactedPlaceholder(gd.clientId) ? gd.clientId : (current.googleDrive?.clientId ?? gd.clientId),
-        clientSecret: !isRedactedPlaceholder(gd.clientSecret) ? gd.clientSecret : (current.googleDrive?.clientSecret ?? gd.clientSecret),
+        // H1: the Drive client secret is GOOGLE_DRIVE_CLIENT_SECRET (env); a value typed here is not persisted.
+        clientSecret: legacySecretToKeep('GOOGLE_DRIVE_CLIENT_SECRET', current.googleDrive?.clientSecret) ?? '',
         refreshToken: !isRedactedPlaceholder(gd.refreshToken) ? gd.refreshToken : (current.googleDrive?.refreshToken ?? gd.refreshToken),
         rootFolderId: gd.rootFolderId ?? current.googleDrive?.rootFolderId,
       }
@@ -164,7 +166,9 @@ export async function getStorageProvider(): Promise<StorageProvider> {
   const config = await getStorageConfig();
 
   if (config.activeProvider === 'google-drive') {
-    const gd = config.googleDrive ?? getGoogleDriveConfigFromEnv();
+    const stored = config.googleDrive ?? getGoogleDriveConfigFromEnv();
+    // H1: the env secret wins over any stored copy; a stored legacy secret is only a fallback (CLIENT_SECRETS_ENV_ONLY removes it).
+    const gd = stored ? { ...stored, clientSecret: resolveClientSecret({ label: 'Google Drive', envName: 'GOOGLE_DRIVE_CLIENT_SECRET', dbValue: stored.clientSecret }) } : stored;
     if (!gd?.clientId || !gd.clientSecret || !gd.refreshToken) {
       throw new Error(
         'Google Drive not configured. Set storage config in Settings or env vars GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET, GOOGLE_DRIVE_REFRESH_TOKEN.'

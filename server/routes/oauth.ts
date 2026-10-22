@@ -1,6 +1,7 @@
 import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
+import { resolveClientSecret } from "../lib/client-secret";
 
 export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   // ============= Procore OAuth =============
@@ -21,7 +22,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
     if (!code) return res.status(400).json({ message: "Missing authorization code" });
     const config = await storage.getAutomationConfig("procore_config");
     const clientId = (config?.value as any)?.clientId || process.env.PROCORE_CLIENT_ID;
-    const clientSecret = (config?.value as any)?.clientSecret || process.env.PROCORE_CLIENT_SECRET;
+    const clientSecret = resolveClientSecret({ label: "Procore", envName: "PROCORE_CLIENT_SECRET", dbValue: (config?.value as any)?.clientSecret });
     const env = (config?.value as any)?.environment || "production";
     const host = process.env.APP_URL || `http://localhost:${process.env.PORT || 5000}`;
     const redirectUri = `${host}/api/oauth/procore/callback`;
