@@ -34,6 +34,14 @@ describe("verifyHubspotWebhook", () => {
     expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: v3(now - 6 * 60_000), nowMs: now })).toMatchObject({ ok: false, reason: "timestamp_invalid" });
     expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { "x-hubspot-signature-v3": h["x-hubspot-signature-v3"] }, nowMs: now })).toMatchObject({ ok: false, reason: "timestamp_invalid" });
   });
+  it("a v3 URL mismatch is rescued ONLY by a VALID v1 signature: a wrong or absent v1 still refuses (v1 is verified, never skipped)", () => {
+    const wrongUrlV3 = v3(now, "https://other.example/webhooks/hubspot");
+    const goodV1 = crypto.createHash("sha256").update(SECRET + body, "utf8").digest("hex");
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { ...wrongUrlV3, "x-hubspot-signature": goodV1 }, nowMs: now })).toEqual({ ok: true, scheme: "hubspot-v1" });
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { ...wrongUrlV3, "x-hubspot-signature": "0".repeat(64) }, nowMs: now })).toMatchObject({ ok: false, status: 401, reason: "signature_invalid" });
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body + "x", headers: { ...wrongUrlV3, "x-hubspot-signature": goodV1 }, nowMs: now }).ok).toBe(false); // v1 over a different body
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: wrongUrlV3, nowMs: now })).toMatchObject({ ok: false, status: 401 });
+  });
   it("accepts a valid v1 signature (sha256 of secret + body) and refuses a wrong one", () => {
     const v1 = crypto.createHash("sha256").update(SECRET + body, "utf8").digest("hex");
     expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { "x-hubspot-signature": v1 } })).toEqual({ ok: true, scheme: "hubspot-v1" });
