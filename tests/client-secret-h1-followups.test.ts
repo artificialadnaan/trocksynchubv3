@@ -56,6 +56,7 @@ describe("saveStorageConfig (real)", () => {
 describe("PUT /api/settings/storage guard follows the resulting active provider", () => {
   const drive = { clientId: "drive-client-id", clientSecret: "typed", refreshToken: "rt-1234" };
   async function put(body: any, current: any) {
+    vi.resetModules(); // each call re-imports the route so it binds THIS call's mocked stored config, not the first one's
     vi.doMock("../server/storage-config.ts", () => ({
       getStorageConfig: vi.fn(async () => current),
       saveStorageConfig: vi.fn(async (p: any) => ({ ...current, ...p })),
