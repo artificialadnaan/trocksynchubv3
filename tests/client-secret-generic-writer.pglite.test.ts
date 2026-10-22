@@ -54,3 +54,10 @@ describe("generic automation-config writer never persists a typed client secret"
     expect(await read("other_row")).toEqual({ clientSecret: "kept-here" });
   });
 });
+
+describe("patchAutomationConfig insertDefaults on a protected row", () => {
+  it("a client secret in insertDefaults is not written when the patch creates the row", async () => {
+    await storage.patchAutomationConfig("procore_config", { clientId: "c" }, undefined, { clientSecret: "typed", environment: "production" });
+    expect(await read("procore_config")).toEqual({ clientId: "c", environment: "production" });
+  });
+});
