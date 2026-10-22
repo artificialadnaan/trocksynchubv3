@@ -42,6 +42,7 @@ import { pool } from './db';
 import type { PoolClient, QueryConfig } from 'pg';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
+import { resolveClientSecret } from './lib/client-secret';
 import { updateRateLimits, applyBackpressure } from './lib/rate-limit-tracker';
 import { acquireRateLimitToken, wasProjectWebhookUpdated, clearWebhookUpdatedProjects } from './procore-rate-limiter';
 
@@ -49,7 +50,7 @@ import { acquireRateLimitToken, wasProjectWebhookUpdated, clearWebhookUpdatedPro
  * Gets Procore configuration from database.
  * Falls back to default company ID if not configured.
  */
-async function getProcoreConfig(): Promise<{ companyId: string; environment: string; clientId: string; clientSecret: string }> {
+export async function getProcoreConfig(): Promise<{ companyId: string; environment: string; clientId: string; clientSecret: string }> {
   const config = await storage.getAutomationConfig("procore_config");
   if (!config?.value) {
     throw new Error("Procore not configured. Please save your Procore credentials in Settings.");
@@ -59,7 +60,8 @@ async function getProcoreConfig(): Promise<{ companyId: string; environment: str
     companyId: val.companyId || DEFAULT_PROCORE_COMPANY_ID,
     environment: val.environment || "production",
     clientId: val.clientId || "",
-    clientSecret: val.clientSecret || "",
+    // H1: PROCORE_CLIENT_SECRET is the one copy; the plaintext DB value is only a legacy fallback.
+    clientSecret: resolveClientSecret({ label: "Procore", envName: "PROCORE_CLIENT_SECRET", dbValue: val.clientSecret }),
   };
 }
 

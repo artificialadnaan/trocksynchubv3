@@ -2,6 +2,7 @@ import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
 import { requireAdmin } from "./settings";
+import { hasUsableClientSecret, resolveClientSecret } from "../lib/client-secret";
 
 import { OAUTH_STATE_TTL_MS, consumeOAuthState, issueOAuthState, withOAuthState } from "../lib/oauth-state";
 
@@ -37,7 +38,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
     if (!code) return res.status(400).json({ message: "Missing authorization code" });
     const config = await storage.getAutomationConfig("procore_config");
     const clientId = (config?.value as any)?.clientId || process.env.PROCORE_CLIENT_ID;
-    const clientSecret = (config?.value as any)?.clientSecret || process.env.PROCORE_CLIENT_SECRET;
+    const clientSecret = resolveClientSecret({ label: "Procore", envName: "PROCORE_CLIENT_SECRET", dbValue: (config?.value as any)?.clientSecret });
     const env = (config?.value as any)?.environment || "production";
     const host = process.env.APP_URL || `http://localhost:${process.env.PORT || 5000}`;
     const redirectUri = `${host}/api/oauth/procore/callback`;
@@ -129,12 +130,17 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   // ============= Microsoft OAuth (OneDrive + Outlook) =============
   // Save Microsoft client credentials to database (bypasses env var issues)
   app.post("/api/integrations/microsoft/config", requireAuth, asyncHandler(async (req, res) => {
-    const { clientId, clientSecret, tenantId } = req.body;
-    if (!clientId || !clientSecret) {
-      return res.status(400).json({ message: "Client ID and Client Secret are required" });
+    const { clientId, tenantId } = req.body; // a submitted clientSecret is deliberately ignored (H1)
+    if (!clientId) {
+      return res.status(400).json({ message: "Client ID is required" });
+    }
+    // H1: the client secret is MICROSOFT_CLIENT_SECRET (env); a submitted value is not stored. Refuse a save that leaves no usable secret.
+    const existingMs = await storage.getAutomationConfig("microsoft_config");
+    if (!hasUsableClientSecret("MICROSOFT_CLIENT_SECRET", (existingMs?.value as any)?.clientSecret)) {
+      return res.status(400).json({ message: "Set the MICROSOFT_CLIENT_SECRET environment variable; the client secret is no longer stored in Settings." });
     }
     const { saveMicrosoftConfig } = await import("../microsoft");
-    await saveMicrosoftConfig({ clientId, clientSecret, tenantId: tenantId || 'common' });
+    await saveMicrosoftConfig({ clientId, clientSecret: '', tenantId: tenantId || 'common' });
     res.json({ success: true });
   }));
 

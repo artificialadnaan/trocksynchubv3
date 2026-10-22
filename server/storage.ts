@@ -45,6 +45,7 @@
  * @module storage
  */
 
+import { isProtectedConfigKey, sanitizeProtectedConfigPatch, sanitizeProtectedConfigValue } from "./lib/client-secret";
 import { eq, desc, and, gte, lte, sql, ilike, or, isNull, isNotNull } from "drizzle-orm";
 
 /** Escape LIKE/ILIKE wildcards so user input is treated literally */
@@ -834,7 +835,15 @@ export class DatabaseStorage implements IStorage {
     return config;
   }
 
-  async upsertAutomationConfig(data: InsertAutomationConfig): Promise<AutomationConfig> {
+  /** H1: a provider client secret never enters the database through the generic writer (see sanitizeProtectedConfigValue). */
+  private async withProtectedSecrets(data: InsertAutomationConfig): Promise<InsertAutomationConfig> {
+    if (!isProtectedConfigKey(data.key)) return data;
+    const existing = await this.getAutomationConfig(data.key);
+    return { ...data, value: sanitizeProtectedConfigValue(data.key, data.value, existing?.value) as any };
+  }
+
+  async upsertAutomationConfig(raw: InsertAutomationConfig): Promise<AutomationConfig> {
+    const data = await this.withProtectedSecrets(raw);
     const [result] = await db.insert(automationConfig).values(data)
       .onConflictDoUpdate({
         target: automationConfig.key,
@@ -849,7 +858,8 @@ export class DatabaseStorage implements IStorage {
    * so a polling auth-expiry disable that lands after a caller's own read cannot be overwritten by this write.
    * (`->>` on a non-object jsonb value yields NULL, which IS DISTINCT FROM 'auth_expired', so such rows update.)
    */
-  async upsertAutomationConfigUnlessAuthDisabled(data: InsertAutomationConfig): Promise<AutomationConfig | null> {
+  async upsertAutomationConfigUnlessAuthDisabled(raw: InsertAutomationConfig): Promise<AutomationConfig | null> {
+    const data = await this.withProtectedSecrets(raw);
     const [result] = await db.insert(automationConfig).values(data)
       .onConflictDoUpdate({
         target: automationConfig.key,
@@ -872,7 +882,7 @@ export class DatabaseStorage implements IStorage {
    */
   async patchAutomationConfig(
     key: string,
-    patch: Record<string, unknown>,
+    rawPatch: Record<string, unknown>,
     description?: string,
     /**
      * Applied ONLY when this call creates the row. An upsert's INSERT payload and its DO UPDATE merge are
@@ -881,11 +891,12 @@ export class DatabaseStorage implements IStorage {
      */
     insertDefaults?: Record<string, unknown>,
   ): Promise<AutomationConfig> {
+    const patch = sanitizeProtectedConfigPatch(key, rawPatch);
     const patchJson = JSON.stringify(patch);
     const [result] = await db.insert(automationConfig)
       .values({
         key,
-        value: { ...(insertDefaults ?? {}), ...patch } as any,
+        value: { ...sanitizeProtectedConfigPatch(key, insertDefaults ?? {}), ...patch } as any,
         ...(description ? { description } : {}),
       } as InsertAutomationConfig)
       .onConflictDoUpdate({
