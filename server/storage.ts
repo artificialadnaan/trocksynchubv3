@@ -45,6 +45,7 @@
  * @module storage
  */
 
+import { isOAuthConfigKey, openOAuthConfigValue, openSecret, sealOAuthConfigValue, sealSecret } from "./lib/secret-seal";
 import { eq, desc, and, gte, lte, sql, ilike, or, isNull, isNotNull } from "drizzle-orm";
 
 /** Escape LIKE/ILIKE wildcards so user input is treated literally */
@@ -260,6 +261,17 @@ function inferAuditCategory(action: string): "sync" | "system" {
  * - External Data: Cached HubSpot, Procore, and CompanyCam data
  * - Configuration: Automation settings and feature flags
  */
+// H2 helpers: seal on write, open on read (see lib/secret-seal.ts).
+function openOAuthTokenRow(row: OAuthToken): OAuthToken {
+  return { ...row, accessToken: openSecret(row.accessToken), refreshToken: openSecret(row.refreshToken) };
+}
+function sealOAuthConfigData(data: InsertAutomationConfig): InsertAutomationConfig {
+  return isOAuthConfigKey(data.key) ? { ...data, value: sealOAuthConfigValue(data.value) as any } : data;
+}
+function openOAuthConfigRow(row: AutomationConfig): AutomationConfig {
+  return isOAuthConfigKey(row.key) ? { ...row, value: openOAuthConfigValue(row.value) as any } : row;
+}
+
 export interface IStorage {
   // ==================== USER MANAGEMENT ====================
   /** Get user by internal ID */
@@ -811,36 +823,40 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
+  // H2: tokens are sealed at rest (AES-GCM with a key id) when SECRETS_ENCRYPTION_KEY is set; callers always see plaintext. A legacy plaintext
+  // row is read as is (dual read) until the owner-go reseal script rewrites it.
   async getOAuthToken(provider: string): Promise<OAuthToken | undefined> {
     const [token] = await db.select().from(oauthTokens).where(eq(oauthTokens.provider, provider));
-    return token;
+    return token ? openOAuthTokenRow(token) : token;
   }
 
   async upsertOAuthToken(data: InsertOAuthToken): Promise<OAuthToken> {
-    const [result] = await db.insert(oauthTokens).values(data)
+    const sealed = { ...data, accessToken: sealSecret(data.accessToken), refreshToken: sealSecret(data.refreshToken) };
+    const [result] = await db.insert(oauthTokens).values(sealed)
       .onConflictDoUpdate({
         target: oauthTokens.provider,
-        set: { ...data, updatedAt: new Date() },
+        set: { ...sealed, updatedAt: new Date() },
       }).returning();
-    return result;
+    return openOAuthTokenRow(result);
   }
 
   async getAutomationConfigs(): Promise<AutomationConfig[]> {
-    return db.select().from(automationConfig);
+    return (await db.select().from(automationConfig)).map(openOAuthConfigRow);
   }
 
   async getAutomationConfig(key: string): Promise<AutomationConfig | undefined> {
     const [config] = await db.select().from(automationConfig).where(eq(automationConfig.key, key));
-    return config;
+    return config ? openOAuthConfigRow(config) : config;
   }
 
   async upsertAutomationConfig(data: InsertAutomationConfig): Promise<AutomationConfig> {
-    const [result] = await db.insert(automationConfig).values(data)
+    const sealed = sealOAuthConfigData(data);
+    const [result] = await db.insert(automationConfig).values(sealed)
       .onConflictDoUpdate({
         target: automationConfig.key,
-        set: { ...data, updatedAt: new Date() },
+        set: { ...sealed, updatedAt: new Date() },
       }).returning();
-    return result;
+    return openOAuthConfigRow(result);
   }
 
   /**
@@ -850,13 +866,14 @@ export class DatabaseStorage implements IStorage {
    * (`->>` on a non-object jsonb value yields NULL, which IS DISTINCT FROM 'auth_expired', so such rows update.)
    */
   async upsertAutomationConfigUnlessAuthDisabled(data: InsertAutomationConfig): Promise<AutomationConfig | null> {
-    const [result] = await db.insert(automationConfig).values(data)
+    const sealed = sealOAuthConfigData(data);
+    const [result] = await db.insert(automationConfig).values(sealed)
       .onConflictDoUpdate({
         target: automationConfig.key,
-        set: { ...data, updatedAt: new Date() },
+        set: { ...sealed, updatedAt: new Date() },
         setWhere: sql`(${automationConfig.value} ->> 'disabledReason') IS DISTINCT FROM 'auth_expired'`,
       }).returning();
-    return result ?? null;
+    return result ? openOAuthConfigRow(result) : null;
   }
 
   /**

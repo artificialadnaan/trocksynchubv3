@@ -42,6 +42,7 @@ import { pool } from './db';
 import type { PoolClient, QueryConfig } from 'pg';
 import { DEFAULT_PROCORE_COMPANY_ID } from './constants';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
+import { openSecret, sealSecret } from './lib/secret-seal';
 import { updateRateLimits, applyBackpressure } from './lib/rate-limit-tracker';
 import { acquireRateLimitToken, wasProjectWebhookUpdated, clearWebhookUpdatedProjects } from './procore-rate-limiter';
 
@@ -249,7 +250,8 @@ async function upsertProcoreTokenPair(
        expires_at = EXCLUDED.expires_at,
        updated_at = now()`,
     // toISOString(): stored as UTC wall-clock time in the zone-less column, exactly as drizzle stores it.
-    ["procore", pair.accessToken, pair.refreshToken, "Bearer", pair.expiresAt.toISOString()],
+    // H2: sealed at rest like storage.upsertOAuthToken (a plain pass-through until SECRETS_ENCRYPTION_KEY is set).
+    ["procore", sealSecret(pair.accessToken), sealSecret(pair.refreshToken), "Bearer", pair.expiresAt.toISOString()],
   );
 }
 
@@ -287,7 +289,9 @@ export async function refreshProcoreAccessTokenUnderLock(
         "SELECT access_token, refresh_token, expires_at::text AS expires_at FROM oauth_tokens WHERE provider = $1",
         ["procore"],
       );
-      const row = rows[0] as { access_token: string | null; refresh_token: string | null; expires_at: string | null } | undefined;
+      const rawRow = rows[0] as { access_token: string | null; refresh_token: string | null; expires_at: string | null } | undefined;
+      // H2: open the sealed values (legacy plaintext passes through).
+      const row = rawRow ? { ...rawRow, access_token: openSecret(rawRow.access_token), refresh_token: openSecret(rawRow.refresh_token) } : rawRow;
       if (!row?.access_token) {
         throw new Error("No Procore OAuth token found. Please authenticate via OAuth first.");
       }
