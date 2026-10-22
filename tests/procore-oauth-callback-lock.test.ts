@@ -31,6 +31,12 @@ function routes() {
   return r;
 }
 
+// The route is now [requireAdmin, handler] (H4): this suite is about what the handler does once admitted, so it takes the handler (the last
+// function in the chain) and gives it a request whose session holds the issued one-shot state. The admin/state gating is tested in
+// procore-oauth-admin-state.test.ts.
+const finalHandler = () => routes()["GET /api/oauth/procore/callback"].at(-1)!;
+const callbackReq = () => ({ query: { code: "auth-code", state: "issued-state" }, session: { procoreOAuthState: { state: "issued-state", at: Date.now() } } });
+
 beforeEach(() => {
   vi.clearAllMocks();
   h.storage.getAutomationConfig.mockResolvedValue({ value: { clientId: "cid", clientSecret: "csecret", environment: "production" } });
@@ -41,10 +47,10 @@ beforeEach(() => {
 
 describe("GET /api/oauth/procore/callback", () => {
   it("stores the new pair under the refresh lock, never through storage.upsertOAuthToken", async () => {
-    const [handler] = routes()["GET /api/oauth/procore/callback"];
+    const handler = finalHandler();
     const res: any = { status: vi.fn(() => res), json: vi.fn(), redirect: vi.fn() };
     const next = vi.fn();
-    handler({ query: { code: "auth-code" } }, res, next);
+    handler(callbackReq(), res, next);
     await vi.waitFor(() => expect(res.redirect).toHaveBeenCalledWith("/#/settings?procore=connected"));
     expect(next).not.toHaveBeenCalled();
     expect(h.storeProcoreTokenPairUnderLock).toHaveBeenCalledTimes(1);
@@ -55,10 +61,10 @@ describe("GET /api/oauth/procore/callback", () => {
 
   it("a failed locked write surfaces as an error and is not reported as connected", async () => {
     h.storeProcoreTokenPairUnderLock.mockRejectedValueOnce(new Error("lock timeout"));
-    const [handler] = routes()["GET /api/oauth/procore/callback"];
+    const handler = finalHandler();
     const res: any = { status: vi.fn(() => res), json: vi.fn(), redirect: vi.fn() };
     const next = vi.fn();
-    handler({ query: { code: "auth-code" } }, res, next);
+    handler(callbackReq(), res, next);
     await vi.waitFor(() => expect(next).toHaveBeenCalledWith(expect.any(Error)));
     expect(res.redirect).not.toHaveBeenCalled();
     expect(h.storage.createAuditLog).not.toHaveBeenCalled();
