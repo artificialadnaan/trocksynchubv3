@@ -18,6 +18,12 @@ export function issueOAuthState(session: SessionLike, provider: string): string 
   return state;
 }
 
+// A state value, once presented, is remembered here until it could no longer be valid. The session delete alone is not enough: two callbacks
+// that load the session before either response saves it both see the pending state. This check-and-set is synchronous, so in one process
+// exactly one of them can pass; a restart only forgets states that are at most 10 minutes old and still need the session's own match.
+const consumed = new Map<string, number>();
+const consumedKey = (provider: string, state: string) => crypto.createHash("sha256").update(`${provider}\n${state}`).digest("hex");
+
 export function consumeOAuthState(session: SessionLike, provider: string, provided: unknown, now: number = Date.now()): boolean {
   const pending = session?.[keyOf(provider)] as { state: string; at: number } | undefined;
   if (session) delete session[keyOf(provider)];
@@ -25,7 +31,12 @@ export function consumeOAuthState(session: SessionLike, provider: string, provid
   if (typeof provided !== "string" || provided.length === 0) return false;
   const a = Buffer.from(pending.state, "utf8");
   const b = Buffer.from(provided, "utf8");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  if (!(a.length === b.length && crypto.timingSafeEqual(a, b))) return false;
+  for (const [key, until] of consumed) if (until <= now) consumed.delete(key);
+  const key = consumedKey(provider, pending.state);
+  if (consumed.has(key)) return false;
+  consumed.set(key, pending.at + OAUTH_STATE_TTL_MS);
+  return true;
 }
 
 /** The provider's authorize URL with `state` added (an existing `state` parameter is replaced). */
