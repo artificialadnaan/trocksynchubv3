@@ -78,13 +78,16 @@ describe("processRfpApproval", () => {
     });
 
     expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+    // The call uses the args-OBJECT form (createBidBoardProjectFromDeal's CreateBidBoardProjectFromDealArgs).
     expect(createBidBoardProjectFromDeal).toHaveBeenCalledWith(
-      "321011207920",
-      "Estimate in Progress",
       expect.objectContaining({
-        syncDocuments: true,
-        attachmentsOverride: [],
-        proposalId: "456",
+        sourceDealId: "321011207920",
+        bidboardStage: "Estimate in Progress",
+        options: expect.objectContaining({
+          syncDocuments: true,
+          attachmentsOverride: [],
+          proposalId: "456",
+        }),
       }),
     );
     expect(withBrowserLock).not.toHaveBeenCalled();
