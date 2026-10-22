@@ -7,6 +7,11 @@ const users = vi.hoisted(() => new Map<string, any>([["admin-1", { id: "admin-1"
 const tokenPostMock = vi.hoisted(() => vi.fn(async () => ({ data: { access_token: "a", refresh_token: "r", expires_in: 3600 } })));
 const storeTokensMock = vi.hoisted(() => vi.fn(async () => undefined));
 
+// The shared PostgreSQL claim is covered by oauth-state-cross-replica.pglite.test.ts; route suites use an in-memory stand-in.
+vi.mock("../server/lib/oauth-state-store.ts", () => {
+  const seen = new Set<string>();
+  return { claimOAuthStateOnce: async (hash: string) => (seen.has(hash) ? false : (seen.add(hash), true)) };
+});
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getUser: vi.fn(async (id: string) => users.get(id)),

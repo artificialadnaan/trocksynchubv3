@@ -15,6 +15,11 @@ const h = vi.hoisted(() => ({
   axiosPost: vi.fn(),
 }));
 
+// The shared PostgreSQL claim is covered by oauth-state-cross-replica.pglite.test.ts; route suites use an in-memory stand-in.
+vi.mock("../server/lib/oauth-state-store.ts", () => {
+  const seen = new Set<string>();
+  return { claimOAuthStateOnce: async (hash: string) => (seen.has(hash) ? false : (seen.add(hash), true)) };
+});
 vi.mock("../server/storage.ts", () => ({ storage: h.storage }));
 vi.mock("../server/procore.ts", () => ({ storeProcoreTokenPairUnderLock: h.storeProcoreTokenPairUnderLock }));
 vi.mock("axios", () => ({ default: { post: h.axiosPost } }));
@@ -38,7 +43,11 @@ function routes() {
 // function in the chain) and gives it a request whose session holds the issued one-shot state. The admin/state gating is tested in
 // procore-oauth-admin-state.test.ts.
 const finalHandler = () => routes()["GET /api/oauth/procore/callback"].at(-1)!;
-const callbackReq = () => ({ query: { code: "auth-code", state: "issued-state" }, session: { procoreOAuthState: { state: "issued-state", at: Date.now() } } });
+// A fresh state per request, as production issues them: a consumed state is remembered in the process, so a fixed value cannot be reused across cases.
+const callbackReq = () => {
+  const state = `issued-state-${Math.random().toString(36).slice(2)}`;
+  return { query: { code: "auth-code", state }, session: { procoreOAuthState: { state, at: Date.now() } } };
+};
 
 beforeEach(() => {
   vi.clearAllMocks();

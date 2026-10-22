@@ -1,19 +1,16 @@
 import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
-import crypto from "crypto";
 import { requireAdmin } from "./settings";
 import { hasUsableClientSecret, resolveClientSecret } from "../lib/client-secret";
 
-/** H4 (security rotation, 2026-10-22): the one-shot OAuth `state` lives this long between /authorize and /callback. */
-export const PROCORE_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+import { OAUTH_STATE_TTL_MS, consumeOAuthState, issueOAuthState, withOAuthState } from "../lib/oauth-state";
 
-function stateMatches(expected: string, provided: unknown): boolean {
-  if (typeof provided !== "string" || provided.length === 0) return false;
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(provided, "utf8");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
+/** H4: the one-shot OAuth `state` lives this long between /authorize and /callback. */
+export const PROCORE_OAUTH_STATE_TTL_MS = OAUTH_STATE_TTL_MS;
+
+/** An OAuth callback is a browser navigation: a refused state goes back to Settings with a message, like the providers' own error redirects. */
+const invalidStateRedirect = (provider: string) => `/#/settings?${provider}=error&message=${encodeURIComponent("Invalid or missing OAuth state. Start the connection again from Settings.")}`;
 
 export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   // ============= Procore OAuth =============
@@ -27,8 +24,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
     const redirectUri = `${host}/api/oauth/procore/callback`;
     const baseUrl = env === "sandbox" ? "https://login-sandbox.procore.com" : "https://login.procore.com";
     if (!clientId) return res.status(400).json({ message: "Procore Client ID not configured. Set PROCORE_CLIENT_ID environment variable or save credentials in settings." });
-    const state = crypto.randomBytes(32).toString("hex");
-    (req as any).session.procoreOAuthState = { state, at: Date.now() };
+    const state = issueOAuthState((req as any).session, "procore");
     const url = `${baseUrl}/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
     res.json({ url });
   }));
@@ -36,9 +32,7 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   app.get("/api/oauth/procore/callback", requireAdmin, asyncHandler(async (req, res) => {
     const { code, state } = req.query;
     // The stored state is ONE-SHOT: consumed whether or not it matches, so it cannot be retried or replayed.
-    const pending = (req as any).session?.procoreOAuthState as { state: string; at: number } | undefined;
-    if ((req as any).session) delete (req as any).session.procoreOAuthState;
-    if (!pending || Date.now() - pending.at > PROCORE_OAUTH_STATE_TTL_MS || !stateMatches(pending.state, state)) {
+    if (!(await consumeOAuthState((req as any).session, "procore", state))) {
       return res.status(400).json({ message: "Invalid or missing OAuth state. Start the Procore connection again from Settings." });
     }
     if (!code) return res.status(400).json({ message: "Missing authorization code" });
@@ -78,7 +72,8 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   }));
 
   // ============= HubSpot OAuth =============
-  app.get("/api/oauth/hubspot/authorize", asyncHandler(async (_req, res) => {
+  // H4b: HubSpot, Microsoft and Google get the same admin session + one-shot state as Procore (the callbacks store the provider's tokens).
+  app.get("/api/oauth/hubspot/authorize", requireAdmin, asyncHandler(async (req, res) => {
     const { getHubSpotAuthUrl, getHubSpotOAuthConfig } = await import("../hubspot");
     const config = getHubSpotOAuthConfig();
 
@@ -88,13 +83,14 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
       });
     }
 
-    const url = getHubSpotAuthUrl();
+    const url = withOAuthState(getHubSpotAuthUrl(), issueOAuthState((req as any).session, "hubspot"));
     console.log('[hubspot-oauth] Generated auth URL, redirecting to HubSpot...');
     res.json({ url });
   }));
 
-  app.get("/api/oauth/hubspot/callback", asyncHandler(async (req, res) => {
-    const { code, error, error_description } = req.query;
+  app.get("/api/oauth/hubspot/callback", requireAdmin, asyncHandler(async (req, res) => {
+    const { code, error, error_description, state } = req.query;
+    if (!(await consumeOAuthState((req as any).session, "hubspot", state))) return res.redirect(invalidStateRedirect("hubspot"));
 
     if (error) {
       console.error('[hubspot-oauth] OAuth error:', error, error_description);
@@ -148,14 +144,15 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
     res.json({ success: true });
   }));
 
-  app.get("/api/oauth/microsoft/authorize", asyncHandler(async (_req, res) => {
+  app.get("/api/oauth/microsoft/authorize", requireAdmin, asyncHandler(async (req, res) => {
     const { getMicrosoftAuthUrl } = await import("../microsoft");
-    const url = await getMicrosoftAuthUrl();
+    const url = withOAuthState(await getMicrosoftAuthUrl(), issueOAuthState((req as any).session, "microsoft"));
     res.json({ url });
   }));
 
-  app.get("/api/oauth/microsoft/callback", asyncHandler(async (req, res) => {
-    const { code, error, error_description } = req.query;
+  app.get("/api/oauth/microsoft/callback", requireAdmin, asyncHandler(async (req, res) => {
+    const { code, error, error_description, state } = req.query;
+    if (!(await consumeOAuthState((req as any).session, "microsoft", state))) return res.redirect(invalidStateRedirect("microsoft"));
     if (error) {
       return res.redirect(`/#/settings?microsoft=error&message=${encodeURIComponent(error_description as string || error as string)}`);
     }
@@ -279,14 +276,15 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   }));
 
   // ============= Google OAuth (Gmail) =============
-  app.get("/api/oauth/google/authorize", asyncHandler(async (_req, res) => {
+  app.get("/api/oauth/google/authorize", requireAdmin, asyncHandler(async (req, res) => {
     const { getGmailAuthUrl } = await import("../gmail");
-    const url = getGmailAuthUrl();
+    const url = withOAuthState(getGmailAuthUrl(), issueOAuthState((req as any).session, "gmail"));
     res.json({ url });
   }));
 
-  app.get("/api/oauth/google/callback", asyncHandler(async (req, res) => {
-    const { code, error, error_description } = req.query;
+  app.get("/api/oauth/google/callback", requireAdmin, asyncHandler(async (req, res) => {
+    const { code, error, error_description, state } = req.query;
+    if (!(await consumeOAuthState((req as any).session, "gmail", state))) return res.redirect(invalidStateRedirect("gmail"));
     if (error) {
       return res.redirect(`/#/settings?gmail=error&message=${encodeURIComponent(error_description as string || error as string)}`);
     }
