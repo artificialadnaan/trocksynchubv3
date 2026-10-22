@@ -1,5 +1,6 @@
 import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
+import { legacySecretToKeep, resolveClientSecret, stripClientSecret } from './lib/client-secret';
 
 function getMicrosoftAuthBaseUrl(tenantId?: string): string {
   const tid = tenantId || process.env.MICROSOFT_TENANT_ID || 'common';
@@ -17,14 +18,15 @@ interface MicrosoftTokens {
 }
 
 // Read Microsoft config from DB first, fall back to env vars (same pattern as Procore)
-async function getConfigFromDb(): Promise<{ clientId: string; clientSecret: string; tenantId: string; redirectUri: string }> {
+export async function getConfigFromDb(): Promise<{ clientId: string; clientSecret: string; tenantId: string; redirectUri: string }> {
   const config = await storage.getAutomationConfig('microsoft_config');
   const dbClientId = (config?.value as any)?.clientId || '';
   const dbClientSecret = (config?.value as any)?.clientSecret || '';
   const dbTenantId = (config?.value as any)?.tenantId || '';
 
   const clientId = dbClientId || process.env.MICROSOFT_CLIENT_ID || '';
-  const clientSecret = dbClientSecret || process.env.MICROSOFT_CLIENT_SECRET || '';
+  // H1: the env var is the one copy; a DB copy is only a legacy fallback (never preferred) and is never written again.
+  const clientSecret = resolveClientSecret({ label: 'Microsoft', envName: 'MICROSOFT_CLIENT_SECRET', dbValue: dbClientSecret });
   const tenantId = dbTenantId || process.env.MICROSOFT_TENANT_ID || 'common';
 
   console.log(`[Microsoft] config resolved - CLIENT_ID present: ${!!clientId} (source: ${dbClientId ? 'db' : 'env'}), TENANT_ID: ${tenantId}`);
@@ -48,9 +50,13 @@ function getConfig() {
 
 // Save Microsoft credentials to database
 export async function saveMicrosoftConfig(config: { clientId: string; clientSecret: string; tenantId: string }): Promise<void> {
+  const existing = await storage.getAutomationConfig('microsoft_config');
+  const keep = legacySecretToKeep('MICROSOFT_CLIENT_SECRET', (existing?.value as any)?.clientSecret);
   await storage.upsertAutomationConfig({
     key: 'microsoft_config',
-    value: config,
+    // H1: the secret lives in MICROSOFT_CLIENT_SECRET, not in this row. A submitted value is NOT stored; only an already-stored legacy copy
+    // survives, and only until the env var is set.
+    value: { ...stripClientSecret(config), ...(keep ? { clientSecret: keep } : {}) },
     description: 'Microsoft OAuth client credentials',
     isActive: true,
   });

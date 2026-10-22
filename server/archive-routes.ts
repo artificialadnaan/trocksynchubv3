@@ -8,6 +8,7 @@
  */
 
 import { Router, type Request, type Response } from 'express';
+import { hasUsableClientSecret } from './lib/client-secret';
 import {
   getStorageConfig,
   saveStorageConfig,
@@ -69,6 +70,15 @@ router.get('/api/settings/storage', (req, res, next) => _requireAuth(req, res, n
 router.put('/api/settings/storage', (req, res, next) => _requireAuth(req, res, next), async (req: Request, res: Response) => {
   try {
     const partial = req.body as Partial<StorageProviderConfig>;
+    // H1: the Drive client secret is GOOGLE_DRIVE_CLIENT_SECRET (env); a submitted value is not stored. Refuse a save that leaves Google Drive the
+    // active provider (or selects it) without a usable secret; a save that switches away from Drive is never blocked by it (the UI sends its whole form).
+    const current = await getStorageConfig();
+    const resultingProvider = partial.activeProvider ?? current.activeProvider;
+    if (resultingProvider === 'google-drive' && (partial.googleDrive || partial.activeProvider === 'google-drive')) {
+      if (!hasUsableClientSecret('GOOGLE_DRIVE_CLIENT_SECRET', current.googleDrive?.clientSecret)) {
+        return res.status(400).json({ message: 'Set the GOOGLE_DRIVE_CLIENT_SECRET environment variable; the client secret is no longer stored in Settings.' });
+      }
+    }
     const config = await saveStorageConfig(partial);
     res.json(redactConfig(config));
   } catch (e: any) {

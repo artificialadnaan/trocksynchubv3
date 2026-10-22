@@ -300,9 +300,13 @@ export default function StorageSettings() {
                     id="gd-clientSecret"
                     type="password"
                     value={form.googleDrive?.clientSecret || ''}
-                    onChange={(e) => updateGoogleDrive({ clientSecret: e.target.value })}
-                    placeholder="••••••••"
+                    readOnly
+                    disabled
+                    placeholder="Set in the server environment"
                   />
+                  <p className="text-xs text-muted-foreground">
+                    The client secret is read from the GOOGLE_DRIVE_CLIENT_SECRET environment variable and is not stored here; to rotate it, change the variable.
+                  </p>
                 </div>
               </div>
 
