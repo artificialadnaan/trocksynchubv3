@@ -28,14 +28,16 @@ export function consumeOAuthState(session: SessionLike, provider: string, provid
   const pending = session?.[keyOf(provider)] as { state: string; at: number } | undefined;
   if (session) delete session[keyOf(provider)];
   if (!pending || now - pending.at > OAUTH_STATE_TTL_MS) return false;
-  if (typeof provided !== "string" || provided.length === 0) return false;
-  const a = Buffer.from(pending.state, "utf8");
-  const b = Buffer.from(provided, "utf8");
-  if (!(a.length === b.length && crypto.timingSafeEqual(a, b))) return false;
+  // Record the pending state as consumed BEFORE comparing the presented value, so a mismatching callback also burns it for any other
+  // callback that loaded the same session snapshot (consume-on-mismatch holds under the session-save race too).
   for (const [key, until] of consumed) if (until <= now) consumed.delete(key);
   const key = consumedKey(provider, pending.state);
   if (consumed.has(key)) return false;
   consumed.set(key, pending.at + OAUTH_STATE_TTL_MS);
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  const a = Buffer.from(pending.state, "utf8");
+  const b = Buffer.from(provided, "utf8");
+  if (!(a.length === b.length && crypto.timingSafeEqual(a, b))) return false;
   return true;
 }
 
