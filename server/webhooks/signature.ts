@@ -21,6 +21,14 @@ function safeEqual(a: string, b: string): boolean {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
+/**
+ * HubSpot's v3 procedure signs the URI with a defined set of percent-escapes DECODED first (%3A %2F %3F %40 %21 %24 %27 %28 %29 %2A %2C %3B).
+ * Express hands us the encoded originalUrl, so decode exactly those before hashing.
+ */
+export function decodeHubspotUri(url: string): string {
+  return url.replace(/%(3A|2F|3F|40|21|24|27|28|29|2A|2C|3B)/gi, (_m, h: string) => String.fromCharCode(parseInt(h, 16)));
+}
+
 const first = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
 /** The exact bytes the sender signed: the raw body captured by the JSON parser, never a re-serialization of req.body. */
@@ -53,7 +61,7 @@ export function verifyHubspotWebhook(input: {
     const tsMs = ts === undefined ? NaN : Number(ts);
     const now = input.nowMs ?? Date.now();
     if (!Number.isFinite(tsMs) || Math.abs(now - tsMs) > MAX_SKEW_MS) return { ok: false, status: 401, reason: "timestamp_invalid" };
-    const expected = crypto.createHmac("sha256", input.secret).update(`${input.method.toUpperCase()}${input.url}${input.rawBody}${ts}`, "utf8").digest("base64");
+    const expected = crypto.createHmac("sha256", input.secret).update(`${input.method.toUpperCase()}${decodeHubspotUri(input.url)}${input.rawBody}${ts}`, "utf8").digest("base64");
     if (safeEqual(expected, v3)) return { ok: true, scheme: "hubspot-v3" };
     // A v3 mismatch can be only a URL/host reconstruction difference behind a proxy; a valid v1 signature (also an HMAC proof of the secret) still admits.
     if (!first(input.headers["x-hubspot-signature"])) return { ok: false, status: 401, reason: "signature_invalid" };
@@ -66,15 +74,35 @@ export function verifyHubspotWebhook(input: {
   return { ok: false, status: 401, reason: "signature_missing" };
 }
 
-/** Procore webhook: hex(HMAC-SHA256(secret, raw body)) in X-Procore-Signature or X-Webhook-Signature (an optional `sha256=` prefix is accepted). */
-export function verifyProcoreWebhook(input: {
+/**
+ * Procore webhook (POST /webhooks/procore). Procore's documented delivery is a plain HTTPS JSON POST with NO signature header, so a hard
+ * requirement here could drop every real notification. Two modes, like the project-events hook (H6):
+ *   - OBSERVE (default, PROCORE_WEBHOOK_ENFORCE not "true"): the request is ALLOWED; the verdict is logged so the operator can see whether a proxy or
+ *     a hook header supplies the proof. A blank secret is reported as `unconfigured`.
+ *   - ENFORCE (PROCORE_WEBHOOK_ENFORCE=true): FAILS CLOSED. Blank secret → 503; no / wrong proof → 401. There is no bypass.
+ * The proof is hex(HMAC-SHA256(secret, raw body)) in X-Procore-Signature / X-Webhook-Signature (optional `sha256=` prefix), or the secret itself as
+ * the Authorization header (`Bearer <secret>` accepted), all compared in constant time.
+ */
+export interface ProcoreVerdict { allow: boolean; status?: 401 | 503; auth: "valid" | "missing" | "invalid" | "unconfigured"; enforced: boolean }
+export function checkProcoreWebhook(input: {
   secret: string | undefined;
   rawBody: string;
   headers: Record<string, string | string[] | undefined>;
-}): WebhookVerdict {
-  if (!input.secret) return { ok: false, status: 503, reason: "secret_not_configured" };
-  const provided = first(input.headers["x-procore-signature"]) ?? first(input.headers["x-webhook-signature"]);
-  if (!provided) return { ok: false, status: 401, reason: "signature_missing" };
-  const expected = crypto.createHmac("sha256", input.secret).update(input.rawBody, "utf8").digest("hex");
-  return safeEqual(expected, provided.replace(/^sha256=/i, "").toLowerCase()) ? { ok: true, scheme: "procore-hmac" } : { ok: false, status: 401, reason: "signature_invalid" };
+  enforce: boolean;
+}): ProcoreVerdict {
+  let auth: ProcoreVerdict["auth"];
+  if (!input.secret) auth = "unconfigured";
+  else {
+    const sig = first(input.headers["x-procore-signature"]) ?? first(input.headers["x-webhook-signature"]);
+    const authz = first(input.headers["authorization"]);
+    if (!sig && !authz) auth = "missing";
+    else {
+      const expected = crypto.createHmac("sha256", input.secret).update(input.rawBody, "utf8").digest("hex");
+      const sigOk = sig ? safeEqual(expected, sig.replace(/^sha256=/i, "").toLowerCase()) : false;
+      const authOk = authz ? safeEqual(authz.replace(/^Bearer\s+/i, ""), input.secret) : false;
+      auth = sigOk || authOk ? "valid" : "invalid";
+    }
+  }
+  if (!input.enforce || auth === "valid") return { allow: true, auth, enforced: input.enforce };
+  return { allow: false, status: auth === "unconfigured" ? 503 : 401, auth, enforced: true };
 }

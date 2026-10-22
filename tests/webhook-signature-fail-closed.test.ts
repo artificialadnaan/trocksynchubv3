@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { verifyHubspotWebhook, verifyProcoreWebhook } from "../server/webhooks/signature.ts";
+import { checkProcoreWebhook, decodeHubspotUri, verifyHubspotWebhook } from "../server/webhooks/signature.ts";
 
 // H5 (security rotation, 2026-10-22): webhook verification FAILS CLOSED. A blank secret used to skip verification and a request with no
 // signature header was processed even with a secret set; now the first answers 503 and the second 401, and only a valid signature over the
@@ -49,16 +49,38 @@ describe("verifyHubspotWebhook", () => {
   });
 });
 
-describe("verifyProcoreWebhook", () => {
+describe("checkProcoreWebhook (observe by default, fail closed when enforcing)", () => {
   const body = JSON.stringify({ resource_name: "Projects", resource_id: 7 });
-  it("a blank secret refuses with 503; no signature refuses with 401", () => {
-    expect(verifyProcoreWebhook({ secret: "", rawBody: body, headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ ok: false, status: 503 });
-    expect(verifyProcoreWebhook({ secret: SECRET, rawBody: body, headers: {} })).toMatchObject({ ok: false, status: 401, reason: "signature_missing" });
+  it("OBSERVE (default): always allows and reports what it saw", () => {
+    const base = { rawBody: body, enforce: false };
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ allow: true, auth: "valid", enforced: false });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: {} })).toMatchObject({ allow: true, auth: "missing" });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-procore-signature": "0".repeat(64) } })).toMatchObject({ allow: true, auth: "invalid" });
+    expect(checkProcoreWebhook({ ...base, secret: "", headers: {} })).toMatchObject({ allow: true, auth: "unconfigured" });
   });
-  it("accepts the HMAC over the raw body (either header, optional sha256= prefix) and refuses a tampered body", () => {
-    expect(verifyProcoreWebhook({ secret: SECRET, rawBody: body, headers: { "x-procore-signature": hmac("hex", body) } }).ok).toBe(true);
-    expect(verifyProcoreWebhook({ secret: SECRET, rawBody: body, headers: { "x-webhook-signature": `sha256=${hmac("hex", body)}` } }).ok).toBe(true);
-    expect(verifyProcoreWebhook({ secret: SECRET, rawBody: body + "x", headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ ok: false, status: 401, reason: "signature_invalid" });
+  it("ENFORCE fails closed: blank secret → 503; no or wrong proof → 401; the HMAC (either header, optional sha256=) or the Authorization secret is valid", () => {
+    const base = { rawBody: body, enforce: true };
+    expect(checkProcoreWebhook({ ...base, secret: "", headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ allow: false, status: 503 });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: {} })).toMatchObject({ allow: false, status: 401, auth: "missing" });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, rawBody: body + "x", headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ allow: false, status: 401, auth: "invalid" });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-procore-signature": hmac("hex", body) } }).allow).toBe(true);
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-webhook-signature": `sha256=${hmac("hex", body)}` } }).allow).toBe(true);
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { authorization: `Bearer ${SECRET}` } }).allow).toBe(true);
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { authorization: "wrong" } })).toMatchObject({ allow: false, status: 401, auth: "invalid" });
+  });
+});
+
+describe("decodeHubspotUri (HubSpot v3 signs the URI with these escapes decoded)", () => {
+  it("decodes exactly the documented set, case-insensitively, and leaves other escapes alone", () => {
+    expect(decodeHubspotUri("https://h/webhooks/hubspot?x=a%2Fb%3Ac%40d%21e%24f%27g%28h%29i%2Aj%2Ck%3Bl%3Fm")).toBe("https://h/webhooks/hubspot?x=a/b:c@d!e$f'g(h)i*j,k;l?m");
+    expect(decodeHubspotUri("https://h/p?x=a%2fb%20c%25")).toBe("https://h/p?x=a/b%20c%25");
+  });
+  it("a v3 signature computed over the DECODED URI verifies when the delivered URL carries the encoded form", () => {
+    const body = "[]";
+    const ts = Date.now();
+    const encoded = "https://h.example/webhooks/hubspot?cb=a%2Fb";
+    const sig = hmac("base64", `POST${"https://h.example/webhooks/hubspot?cb=a/b"}${body}${ts}`);
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: encoded, rawBody: body, headers: { "x-hubspot-signature-v3": sig, "x-hubspot-request-timestamp": String(ts) }, nowMs: ts })).toEqual({ ok: true, scheme: "hubspot-v3" });
   });
 });
 
@@ -142,15 +164,24 @@ describe("the webhook routes fail closed", () => {
     });
   });
 
-  it("POST /webhooks/procore: blank secret → 503, unsigned → 401, tampered → 401, valid signature → past verification (400 for the empty payload)", async () => {
+  it("POST /webhooks/procore: OBSERVE lets events through (Procore sends no signature); PROCORE_WEBHOOK_ENFORCE=true fails closed", async () => {
     await withApp(async (base) => {
       const body = JSON.stringify({});
       delete process.env.PROCORE_WEBHOOK_SECRET;
-      expect((await post(base, "/webhooks/procore", body)).status).toBe(503);
+      delete process.env.PROCORE_WEBHOOK_ENFORCE;
+      expect((await post(base, "/webhooks/procore", body)).status).toBe(400); // observe, no secret: past verification, the empty payload is refused by validation
       process.env.PROCORE_WEBHOOK_SECRET = SECRET;
-      expect((await post(base, "/webhooks/procore", body)).status).toBe(401);
-      expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body + "x") })).status).toBe(401);
-      expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body) })).status).toBe(400);
+      expect((await post(base, "/webhooks/procore", body)).status).toBe(400); // observe, unsigned: still allowed
+      process.env.PROCORE_WEBHOOK_ENFORCE = "true";
+      try {
+        expect((await post(base, "/webhooks/procore", body)).status).toBe(401);
+        expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body + "x") })).status).toBe(401);
+        expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body) })).status).toBe(400);
+        delete process.env.PROCORE_WEBHOOK_SECRET;
+        expect((await post(base, "/webhooks/procore", body)).status).toBe(503); // enforcing with nothing configured never fails open
+      } finally {
+        delete process.env.PROCORE_WEBHOOK_ENFORCE;
+      }
     });
   });
 });
