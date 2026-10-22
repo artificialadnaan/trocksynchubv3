@@ -22,7 +22,7 @@ import {
   mapProcoreStageToHubspot,
   resolveHubspotStageId,
 } from "../procore-hubspot-sync";
-import { legacySecretToKeep } from "../lib/client-secret";
+import { hasUsableClientSecret, legacySecretToKeep } from "../lib/client-secret";
 import { assignProjectNumber, getProjectNumberRegistry } from "../deal-project-number";
 import { sendStageChangeEmail } from "../email-notifications";
 
@@ -39,7 +39,7 @@ export function registerProcoreRoutes(app: Express, requireAuth: RequestHandler)
     // the Client ID / company / environment needs the env var to be set (or, until it is, the legacy stored secret to still exist).
     if (!trimmedClientId) return res.status(400).json({ message: "Client ID is required" });
     const existing = await storage.getAutomationConfig("procore_config");
-    if (!process.env.PROCORE_CLIENT_SECRET && !(existing?.value as any)?.clientSecret) {
+    if (!hasUsableClientSecret("PROCORE_CLIENT_SECRET", (existing?.value as any)?.clientSecret)) {
       return res.status(400).json({ message: "Set the PROCORE_CLIENT_SECRET environment variable; the client secret is no longer stored in Settings." });
     }
 

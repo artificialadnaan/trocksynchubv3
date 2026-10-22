@@ -30,6 +30,11 @@ export function resolveClientSecret(opts: { label: string; envName: string; dbVa
   return legacy;
 }
 
+/** True when a secret is actually usable under the same rules the OAuth paths apply (env first, then the legacy copy unless CLIENT_SECRETS_ENV_ONLY). A save that would leave this false is refused. */
+export function hasUsableClientSecret(envName: string, dbValue: unknown): boolean {
+  return resolveClientSecret({ label: envName, envName, dbValue }) !== "";
+}
+
 /** A config object without its `clientSecret` (what is persisted from now on). */
 export function stripClientSecret<T extends Record<string, unknown>>(value: T): Omit<T, "clientSecret"> {
   const { clientSecret: _dropped, ...rest } = value;

@@ -1,7 +1,7 @@
 import type { Express, RequestHandler } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { storage } from "../storage";
-import { resolveClientSecret } from "../lib/client-secret";
+import { hasUsableClientSecret, resolveClientSecret } from "../lib/client-secret";
 
 export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   // ============= Procore OAuth =============
@@ -113,8 +113,13 @@ export function registerOAuthRoutes(app: Express, requireAuth: RequestHandler) {
   // Save Microsoft client credentials to database (bypasses env var issues)
   app.post("/api/integrations/microsoft/config", requireAuth, asyncHandler(async (req, res) => {
     const { clientId, clientSecret, tenantId } = req.body;
-    if (!clientId || !clientSecret) {
-      return res.status(400).json({ message: "Client ID and Client Secret are required" });
+    if (!clientId) {
+      return res.status(400).json({ message: "Client ID is required" });
+    }
+    // H1: the client secret is MICROSOFT_CLIENT_SECRET (env); a submitted value is not stored. Refuse a save that leaves no usable secret.
+    const existingMs = await storage.getAutomationConfig("microsoft_config");
+    if (!hasUsableClientSecret("MICROSOFT_CLIENT_SECRET", (existingMs?.value as any)?.clientSecret)) {
+      return res.status(400).json({ message: "Set the MICROSOFT_CLIENT_SECRET environment variable; the client secret is no longer stored in Settings." });
     }
     const { saveMicrosoftConfig } = await import("../microsoft");
     await saveMicrosoftConfig({ clientId, clientSecret, tenantId: tenantId || 'common' });
