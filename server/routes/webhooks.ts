@@ -11,7 +11,7 @@ import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMi
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
-import { checkProcoreWebhook, rawBodyOf, verifyHubspotWebhook } from "../webhooks/signature";
+import { checkProcoreWebhook, procoreWebhookMode, rawBodyOf, verifyHubspotWebhook } from "../webhooks/signature";
 import { db } from "../db";
 import { webhookLogs } from "@shared/schema";
 import { eq, and, lt, desc } from "drizzle-orm";
@@ -38,7 +38,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
     console.error('[webhook] HUBSPOT_CLIENT_SECRET not set — POST /webhooks/hubspot answers 503 until it is configured (fails closed)');
   }
   if (!process.env.PROCORE_WEBHOOK_SECRET) {
-    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — POST /webhooks/procore cannot be verified (observe mode allows it; PROCORE_WEBHOOK_ENFORCE=true would answer 503)');
+    console.warn('[webhook] PROCORE_WEBHOOK_SECRET not set — POST /webhooks/procore cannot be verified (log mode allows it; WEBHOOK_PROCORE_MODE=enforce would answer 503)');
   }
 
   // ── HubSpot webhook ─────────────────────────────────────────────────────────
@@ -325,8 +325,8 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
   app.post("/webhooks/procore", async (req, res) => {
     let webhookLog: any = null;
     try {
-      // C-1 / H5: Procore proof, observe-then-enforce (Procore's documented delivery carries no signature): PROCORE_WEBHOOK_ENFORCE=true fails closed.
-      const procoreVerdict = checkProcoreWebhook({ secret: process.env.PROCORE_WEBHOOK_SECRET, rawBody: rawBodyOf(req), headers: req.headers, enforce: process.env.PROCORE_WEBHOOK_ENFORCE === 'true' });
+      // C-1 / H5: Procore proof, observe-then-enforce (Procore's documented delivery carries no signature): WEBHOOK_PROCORE_MODE=enforce (or any unrecognised value) fails closed.
+      const procoreVerdict = checkProcoreWebhook({ secret: process.env.PROCORE_WEBHOOK_SECRET, rawBody: rawBodyOf(req), headers: req.headers, enforce: procoreWebhookMode() === 'enforce' });
       console.log(`[webhook] procore auth=${procoreVerdict.auth} enforce=${procoreVerdict.enforced}${procoreVerdict.allow ? '' : ' REFUSED'}`);
       if (!procoreVerdict.allow) {
         return res.status(procoreVerdict.status!).json({ error: procoreVerdict.auth === 'unconfigured' ? 'Webhook secret not configured' : 'Invalid signature' });

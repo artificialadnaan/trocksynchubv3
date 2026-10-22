@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkProcoreWebhook, decodeHubspotUri, verifyHubspotWebhook } from "../server/webhooks/signature.ts";
+import { checkProcoreWebhook, decodeHubspotUri, procoreWebhookMode, verifyHubspotWebhook } from "../server/webhooks/signature.ts";
 
 // H5 (security rotation, 2026-10-22): webhook verification FAILS CLOSED. A blank secret used to skip verification and a request with no
 // signature header was processed even with a secret set; now the first answers 503 and the second 401, and only a valid signature over the
@@ -67,6 +67,19 @@ describe("checkProcoreWebhook (observe by default, fail closed when enforcing)",
     expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-webhook-signature": `sha256=${hmac("hex", body)}` } }).allow).toBe(true);
     expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { authorization: `Bearer ${SECRET}` } }).allow).toBe(true);
     expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { authorization: "wrong" } })).toMatchObject({ allow: false, status: 401, auth: "invalid" });
+  });
+});
+
+describe("procoreWebhookMode (WEBHOOK_PROCORE_MODE)", () => {
+  const mode = (v: string | undefined) => procoreWebhookMode((v === undefined ? {} : { WEBHOOK_PROCORE_MODE: v }) as NodeJS.ProcessEnv);
+  it("defaults to log; `log` is log; `enforce` is enforce", () => {
+    expect(mode(undefined)).toBe("log");
+    expect(mode("")).toBe("log");
+    expect(mode("log")).toBe("log");
+    expect(mode("enforce")).toBe("enforce");
+  });
+  it("ANY unrecognised value is treated as ENFORCE, so a typo can never leave the endpoint open", () => {
+    for (const typo of ["enfroce", "Enforce", "ENFORCE", "enforce ", " log", "Log", "true", "on", "off", "0", "none"]) expect(mode(typo), typo).toBe("enforce");
   });
 });
 
@@ -168,19 +181,24 @@ describe("the webhook routes fail closed", () => {
     await withApp(async (base) => {
       const body = JSON.stringify({});
       delete process.env.PROCORE_WEBHOOK_SECRET;
-      delete process.env.PROCORE_WEBHOOK_ENFORCE;
-      expect((await post(base, "/webhooks/procore", body)).status).toBe(400); // observe, no secret: past verification, the empty payload is refused by validation
+      delete process.env.WEBHOOK_PROCORE_MODE;
+      expect((await post(base, "/webhooks/procore", body)).status).toBe(400); // log, no secret: past verification, the empty payload is refused by validation
       process.env.PROCORE_WEBHOOK_SECRET = SECRET;
       expect((await post(base, "/webhooks/procore", body)).status).toBe(400); // observe, unsigned: still allowed
-      process.env.PROCORE_WEBHOOK_ENFORCE = "true";
+      process.env.WEBHOOK_PROCORE_MODE = "enforce";
       try {
         expect((await post(base, "/webhooks/procore", body)).status).toBe(401);
         expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body + "x") })).status).toBe(401);
         expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body) })).status).toBe(400);
         delete process.env.PROCORE_WEBHOOK_SECRET;
         expect((await post(base, "/webhooks/procore", body)).status).toBe(503); // enforcing with nothing configured never fails open
+        // a TYPO in the mode is enforce too: unsigned is refused, so it can never leave the endpoint open
+        process.env.PROCORE_WEBHOOK_SECRET = SECRET;
+        process.env.WEBHOOK_PROCORE_MODE = "enfroce";
+        expect((await post(base, "/webhooks/procore", body)).status).toBe(401);
+        expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body) })).status).toBe(400);
       } finally {
-        delete process.env.PROCORE_WEBHOOK_ENFORCE;
+        delete process.env.WEBHOOK_PROCORE_MODE;
       }
     });
   });

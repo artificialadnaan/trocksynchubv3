@@ -77,12 +77,22 @@ export function verifyHubspotWebhook(input: {
 /**
  * Procore webhook (POST /webhooks/procore). Procore's documented delivery is a plain HTTPS JSON POST with NO signature header, so a hard
  * requirement here could drop every real notification. Two modes, like the project-events hook (H6):
- *   - OBSERVE (default, PROCORE_WEBHOOK_ENFORCE not "true"): the request is ALLOWED; the verdict is logged so the operator can see whether a proxy or
+ *   - LOG (default, WEBHOOK_PROCORE_MODE unset or `log`): the request is ALLOWED; the verdict is logged so the operator can see whether a proxy or
  *     a hook header supplies the proof. A blank secret is reported as `unconfigured`.
- *   - ENFORCE (PROCORE_WEBHOOK_ENFORCE=true): FAILS CLOSED. Blank secret → 503; no / wrong proof → 401. There is no bypass.
+ *   - ENFORCE (WEBHOOK_PROCORE_MODE=enforce, or any unrecognised value): FAILS CLOSED. Blank secret → 503; no / wrong proof → 401. There is no bypass.
  * The proof is hex(HMAC-SHA256(secret, raw body)) in X-Procore-Signature / X-Webhook-Signature (optional `sha256=` prefix), or the secret itself as
  * the Authorization header (`Bearer <secret>` accepted), all compared in constant time.
  */
+/**
+ * WEBHOOK_PROCORE_MODE: `log` (the default when unset or empty) or `enforce`. ANY OTHER VALUE IS TREATED AS `enforce`, so a typo
+ * ("enfroce", "Enforce ", "on") can never leave the endpoint open.
+ */
+export function procoreWebhookMode(env: NodeJS.ProcessEnv = process.env): "log" | "enforce" {
+  const raw = env.WEBHOOK_PROCORE_MODE;
+  if (raw === undefined || raw === "") return "log";
+  return raw === "log" ? "log" : "enforce";
+}
+
 export interface ProcoreVerdict { allow: boolean; status?: 401 | 503; auth: "valid" | "missing" | "invalid" | "unconfigured"; enforced: boolean }
 export function checkProcoreWebhook(input: {
   secret: string | undefined;
