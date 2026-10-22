@@ -1,10 +1,22 @@
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkSharedSecretHeader, projectEventsAuthGuard } from "../server/webhooks/shared-secret.ts";
+import { checkSharedSecretHeader, projectEventsAuthGuard, projectEventsMode } from "../server/webhooks/shared-secret.ts";
 
 // H6 (security rotation, 2026-10-22): POST /webhooks/procore/project-events had NO verification. A shared secret in the Authorization header, in two
 // modes: OBSERVE (allow + log, so Procore events keep flowing while the header is rolled out) and ENFORCE (fails closed).
 const SECRET = "project-events-secret-not-real-0123";
+
+describe("projectEventsMode: only unset or \"log\" leaves the route open; everything else enforces", () => {
+  it("log / unset → log; enforce → enforce; a typo or any other value → enforce (never fail open)", () => {
+    expect(projectEventsMode({} as any)).toEqual({ enforce: false, recognised: true });
+    expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: "log" } as any)).toEqual({ enforce: false, recognised: true });
+    expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: " LOG " } as any)).toEqual({ enforce: false, recognised: true });
+    expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: "enforce" } as any)).toEqual({ enforce: true, recognised: true });
+    for (const typo of ["Enforced", "on", "true", "1", "strict", "banana"]) {
+      expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: typo } as any), typo).toEqual({ enforce: true, recognised: false });
+    }
+  });
+});
 
 describe("checkSharedSecretHeader", () => {
   it("OBSERVE: always allows, and reports what it saw (valid / missing / invalid / unconfigured)", () => {
@@ -25,7 +37,7 @@ describe("checkSharedSecretHeader", () => {
   });
   it("never logs the header or the secret", () => {
     const lines: string[] = [];
-    const guard = projectEventsAuthGuard({ PROCORE_PROJECT_EVENTS_SECRET: SECRET, PROCORE_PROJECT_EVENTS_ENFORCE: "true" } as any, (l) => lines.push(l));
+    const guard = projectEventsAuthGuard({ PROCORE_PROJECT_EVENTS_SECRET: SECRET, WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: "enforce" } as any, (l) => lines.push(l));
     guard({ headers: { authorization: "attacker-guess-123" } }, { status: () => ({ json: () => undefined }) }, () => undefined);
     guard({ headers: { authorization: SECRET } }, { status: () => ({ json: () => undefined }) }, () => undefined);
     expect(lines.join("\n")).not.toContain(SECRET);
@@ -66,11 +78,11 @@ const post = (base: string, headers: Record<string, string> = {}) =>
   fetch(`${base}/webhooks/procore/project-events`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ resource_type: "Projects", resource_id: "1" }) });
 
 describe("POST /webhooks/procore/project-events", () => {
-  const prior = { s: process.env.PROCORE_PROJECT_EVENTS_SECRET, e: process.env.PROCORE_PROJECT_EVENTS_ENFORCE };
-  beforeEach(() => { handlerMock.mockClear(); delete process.env.PROCORE_PROJECT_EVENTS_SECRET; delete process.env.PROCORE_PROJECT_EVENTS_ENFORCE; vi.spyOn(console, "log").mockImplementation(() => undefined); vi.spyOn(console, "error").mockImplementation(() => undefined); vi.spyOn(console, "warn").mockImplementation(() => undefined); });
+  const prior = { s: process.env.PROCORE_PROJECT_EVENTS_SECRET, e: process.env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE };
+  beforeEach(() => { handlerMock.mockClear(); delete process.env.PROCORE_PROJECT_EVENTS_SECRET; delete process.env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE; vi.spyOn(console, "log").mockImplementation(() => undefined); vi.spyOn(console, "error").mockImplementation(() => undefined); vi.spyOn(console, "warn").mockImplementation(() => undefined); });
   afterEach(() => {
     if (prior.s === undefined) delete process.env.PROCORE_PROJECT_EVENTS_SECRET; else process.env.PROCORE_PROJECT_EVENTS_SECRET = prior.s;
-    if (prior.e === undefined) delete process.env.PROCORE_PROJECT_EVENTS_ENFORCE; else process.env.PROCORE_PROJECT_EVENTS_ENFORCE = prior.e;
+    if (prior.e === undefined) delete process.env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE; else process.env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE = prior.e;
     vi.restoreAllMocks();
   });
 
@@ -82,9 +94,17 @@ describe("POST /webhooks/procore/project-events", () => {
       expect(handlerMock).toHaveBeenCalledTimes(2);
     });
   });
+  it("a mistyped mode (\"Enforced\") enforces: the route never silently stays open", async () => {
+    await withApp(async (base) => {
+      process.env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE = "Enforced";
+      process.env.PROCORE_PROJECT_EVENTS_SECRET = SECRET;
+      expect((await post(base)).status).toBe(401);
+      expect(handlerMock).not.toHaveBeenCalled();
+    });
+  });
   it("ENFORCE: no secret → 503; no / wrong header → 401 and the handler is never reached; the right header reaches it", async () => {
     await withApp(async (base) => {
-      process.env.PROCORE_PROJECT_EVENTS_ENFORCE = "true";
+      process.env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE = "enforce";
       expect((await post(base, { authorization: SECRET })).status).toBe(503); // enforcing with nothing configured never fails open
       process.env.PROCORE_PROJECT_EVENTS_SECRET = SECRET;
       expect((await post(base)).status).toBe(401);

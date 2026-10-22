@@ -13,10 +13,11 @@ export interface SharedSecretVerdict { allow: boolean; status?: 401 | 503; auth:
 
 /**
  * Procore's project-events hook carried NO verification at all. Procore lets a webhook send a custom Authorization header; the operator configures
- * the same value in PROCORE_PROJECT_EVENTS_SECRET. Two modes, so events keep flowing while the header is rolled out:
- *   - OBSERVE (PROCORE_PROJECT_EVENTS_ENFORCE unset or not "true"): every request is allowed, and the verdict (valid / missing / invalid / unconfigured)
+ * the same value in PROCORE_PROJECT_EVENTS_SECRET. Two modes (WEBHOOK_PROCORE_PROJECT_EVENTS_MODE), so events keep flowing while the header is rolled out:
+ *   - LOG (the mode when the variable is unset, or "log"): every request is allowed, and the verdict (valid / missing / invalid / unconfigured)
  *     is logged so the operator can see the header being sent;
- *   - ENFORCE (PROCORE_PROJECT_EVENTS_ENFORCE=true): FAILS CLOSED. No secret configured → 503; a missing or wrong header → 401. There is no bypass.
+ *   - ENFORCE ("enforce"): FAILS CLOSED. No secret configured → 503; a missing or wrong header → 401. There is no bypass.
+ * ANY OTHER VALUE IS ENFORCE (a typo such as "Enforced" or "on" must never leave the route open); the log says so.
  * Accepts the exact secret or `Bearer <secret>`; compared in constant time. The header value is never logged.
  */
 export function checkSharedSecretHeader(input: { secret: string | undefined; header: string | string[] | undefined; enforce: boolean }): SharedSecretVerdict {
@@ -34,17 +35,24 @@ export function checkSharedSecretHeader(input: { secret: string | undefined; hea
 }
 
 /** Express middleware for the project-events route: reads the env at request time, logs the verdict (no values), refuses only when enforcing. */
+export function projectEventsMode(env: NodeJS.ProcessEnv = process.env): { enforce: boolean; recognised: boolean } {
+  const raw = (env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE ?? "").trim().toLowerCase();
+  if (raw === "" || raw === "log") return { enforce: false, recognised: true };
+  return { enforce: true, recognised: raw === "enforce" };
+}
+
 export function projectEventsAuthGuard(
   env: NodeJS.ProcessEnv = process.env,
   log: (line: string) => void = (l) => console.log(l),
 ) {
   return (req: { headers: Record<string, string | string[] | undefined> }, res: { status(c: number): { json(b: unknown): unknown } }, next: () => void) => {
+    const mode = projectEventsMode(env);
     const verdict = checkSharedSecretHeader({
       secret: env.PROCORE_PROJECT_EVENTS_SECRET,
       header: req.headers["authorization"],
-      enforce: env.PROCORE_PROJECT_EVENTS_ENFORCE === "true",
+      enforce: mode.enforce,
     });
-    log(`[webhook] procore project-events auth=${verdict.auth} enforce=${verdict.enforced}${verdict.allow ? "" : " REFUSED"}`);
+    log(`[webhook] procore project-events auth=${verdict.auth} enforce=${verdict.enforced}${mode.recognised ? "" : " (unrecognised WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: enforcing)"}${verdict.allow ? "" : " REFUSED"}`);
     if (verdict.allow) return next();
     res.status(verdict.status!).json({ error: verdict.auth === "unconfigured" ? "Webhook secret not configured" : "Unauthorized" });
   };

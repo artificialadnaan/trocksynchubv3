@@ -311,7 +311,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
   // ── Procore project-events webhook ──────────────────────────────────────────
   // Procore Projects webhook (Add to Portfolio → Phase 2)
-  // H6: a shared secret in the Authorization header. OBSERVE mode (default) allows and logs; PROCORE_PROJECT_EVENTS_ENFORCE=true fails closed.
+  // H6: a shared secret in the Authorization header. LOG mode (default) allows and logs; WEBHOOK_PROCORE_PROJECT_EVENTS_MODE=enforce fails closed (any unrecognised value too).
   app.post("/webhooks/procore/project-events", projectEventsAuthGuard(), handleProcoreProjectWebhook);
 
   // ── Procore main webhook ────────────────────────────────────────────────────
