@@ -1,5 +1,6 @@
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearWebhookSecrets, hubspotSignedHeaders, procoreSignedHeaders, rawBodyCapture, setWebhookSecrets } from "./helpers/webhook-signing";
 
 const createRfpApprovalRequestMock = vi.hoisted(() => vi.fn(async () => ({ success: true, token: "token-1" })));
 
@@ -77,7 +78,7 @@ vi.mock("../server/procore-rate-limiter.ts", () => ({
 async function withWebhookServer<T>(fn: (baseUrl: string) => Promise<T>) {
   const { registerWebhookRoutes } = await import("../server/routes/webhooks.ts");
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ verify: rawBodyCapture }));
   registerWebhookRoutes(app);
   const server = app.listen(0);
   const address = server.address();
@@ -105,20 +106,23 @@ function hubspotRfpEvent() {
 describe("HubSpot RFP trigger kill switch", () => {
   beforeEach(() => {
     vi.resetModules();
+    setWebhookSecrets(); // H5: the webhook routes refuse unsigned requests, so these tests sign theirs
     createRfpApprovalRequestMock.mockClear();
     delete process.env.HUBSPOT_RFP_TRIGGER_ENABLED;
   });
 
   afterEach(() => {
+    clearWebhookSecrets();
     delete process.env.HUBSPOT_RFP_TRIGGER_ENABLED;
   });
 
   it("defaults to enabled when HUBSPOT_RFP_TRIGGER_ENABLED is missing", async () => {
     await withWebhookServer(async (baseUrl) => {
+      const payload = JSON.stringify(hubspotRfpEvent());
       const response = await fetch(`${baseUrl}/webhooks/hubspot`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(hubspotRfpEvent()),
+        headers: hubspotSignedHeaders(payload),
+        body: payload,
       });
 
       expect(response.status).toBe(200);
@@ -130,10 +134,11 @@ describe("HubSpot RFP trigger kill switch", () => {
     process.env.HUBSPOT_RFP_TRIGGER_ENABLED = "false";
 
     await withWebhookServer(async (baseUrl) => {
+      const payload = JSON.stringify(hubspotRfpEvent());
       const response = await fetch(`${baseUrl}/webhooks/hubspot`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(hubspotRfpEvent()),
+        headers: hubspotSignedHeaders(payload),
+        body: payload,
       });
 
       expect(response.status).toBe(200);

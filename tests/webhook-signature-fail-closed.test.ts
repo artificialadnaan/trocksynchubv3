@@ -1,0 +1,205 @@
+import crypto from "crypto";
+import express from "express";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { checkProcoreWebhook, decodeHubspotUri, procoreWebhookMode, verifyHubspotWebhook } from "../server/webhooks/signature.ts";
+
+// H5 (security rotation, 2026-10-22): webhook verification FAILS CLOSED. A blank secret used to skip verification and a request with no
+// signature header was processed even with a secret set; now the first answers 503 and the second 401, and only a valid signature over the
+// exact raw bytes is processed. The pure verifiers are tested with independently computed signatures; the routes through a real express app.
+
+const SECRET = "test-secret-not-real-0123456789";
+const URL_ = "https://synchub.example/webhooks/hubspot";
+const hmac = (enc: "hex" | "base64", data: string) => crypto.createHmac("sha256", SECRET).update(data, "utf8").digest(enc);
+
+describe("verifyHubspotWebhook", () => {
+  const body = JSON.stringify([{ subscriptionType: "deal.propertyChange", objectId: 1 }]);
+  const now = 1_700_000_000_000;
+  const v3 = (ts: number, uri = URL_, b = body) => ({ "x-hubspot-signature-v3": hmac("base64", `POST${uri}${b}${ts}`), "x-hubspot-request-timestamp": String(ts) });
+
+  it("a blank or missing secret refuses with 503, whatever the request carries", () => {
+    for (const secret of [undefined, ""]) {
+      expect(verifyHubspotWebhook({ secret, method: "POST", url: URL_, rawBody: body, headers: v3(now), nowMs: now })).toEqual({ ok: false, status: 503, reason: "secret_not_configured" });
+    }
+  });
+  it("no signature header at all refuses with 401 (a secret alone never admits an unsigned request)", () => {
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: {}, nowMs: now })).toEqual({ ok: false, status: 401, reason: "signature_missing" });
+  });
+  it("accepts a valid v3 signature over method + URL + raw body + timestamp", () => {
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: v3(now), nowMs: now })).toEqual({ ok: true, scheme: "hubspot-v3" });
+  });
+  it("refuses a v3 signature for another URL, another body, or a stale or missing timestamp", () => {
+    const h = v3(now);
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: "https://evil.example/webhooks/hubspot", rawBody: body, headers: h, nowMs: now }).ok).toBe(false);
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body + " ", headers: h, nowMs: now }).ok).toBe(false);
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: v3(now - 6 * 60_000), nowMs: now })).toMatchObject({ ok: false, reason: "timestamp_invalid" });
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { "x-hubspot-signature-v3": h["x-hubspot-signature-v3"] }, nowMs: now })).toMatchObject({ ok: false, reason: "timestamp_invalid" });
+  });
+  it("a v3 URL mismatch is rescued ONLY by a VALID v1 signature: a wrong or absent v1 still refuses (v1 is verified, never skipped)", () => {
+    const wrongUrlV3 = v3(now, "https://other.example/webhooks/hubspot");
+    const goodV1 = crypto.createHash("sha256").update(SECRET + body, "utf8").digest("hex");
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { ...wrongUrlV3, "x-hubspot-signature": goodV1 }, nowMs: now })).toEqual({ ok: true, scheme: "hubspot-v1" });
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { ...wrongUrlV3, "x-hubspot-signature": "0".repeat(64) }, nowMs: now })).toMatchObject({ ok: false, status: 401, reason: "signature_invalid" });
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body + "x", headers: { ...wrongUrlV3, "x-hubspot-signature": goodV1 }, nowMs: now }).ok).toBe(false); // v1 over a different body
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: wrongUrlV3, nowMs: now })).toMatchObject({ ok: false, status: 401 });
+  });
+  it("accepts a valid v1 signature (sha256 of secret + body) and refuses a wrong one", () => {
+    const v1 = crypto.createHash("sha256").update(SECRET + body, "utf8").digest("hex");
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { "x-hubspot-signature": v1 } })).toEqual({ ok: true, scheme: "hubspot-v1" });
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: URL_, rawBody: body, headers: { "x-hubspot-signature": "0".repeat(64) } })).toMatchObject({ ok: false, status: 401 });
+  });
+});
+
+describe("checkProcoreWebhook (observe by default, fail closed when enforcing)", () => {
+  const body = JSON.stringify({ resource_name: "Projects", resource_id: 7 });
+  it("OBSERVE (default): always allows and reports what it saw", () => {
+    const base = { rawBody: body, enforce: false };
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ allow: true, auth: "valid", enforced: false });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: {} })).toMatchObject({ allow: true, auth: "missing" });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-procore-signature": "0".repeat(64) } })).toMatchObject({ allow: true, auth: "invalid" });
+    expect(checkProcoreWebhook({ ...base, secret: "", headers: {} })).toMatchObject({ allow: true, auth: "unconfigured" });
+  });
+  it("ENFORCE fails closed: blank secret → 503; no or wrong proof → 401; the HMAC (either header, optional sha256=) or the Authorization secret is valid", () => {
+    const base = { rawBody: body, enforce: true };
+    expect(checkProcoreWebhook({ ...base, secret: "", headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ allow: false, status: 503 });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: {} })).toMatchObject({ allow: false, status: 401, auth: "missing" });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, rawBody: body + "x", headers: { "x-procore-signature": hmac("hex", body) } })).toMatchObject({ allow: false, status: 401, auth: "invalid" });
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-procore-signature": hmac("hex", body) } }).allow).toBe(true);
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { "x-webhook-signature": `sha256=${hmac("hex", body)}` } }).allow).toBe(true);
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { authorization: `Bearer ${SECRET}` } }).allow).toBe(true);
+    expect(checkProcoreWebhook({ ...base, secret: SECRET, headers: { authorization: "wrong" } })).toMatchObject({ allow: false, status: 401, auth: "invalid" });
+  });
+});
+
+describe("procoreWebhookMode (WEBHOOK_PROCORE_MODE)", () => {
+  const mode = (v: string | undefined) => procoreWebhookMode((v === undefined ? {} : { WEBHOOK_PROCORE_MODE: v }) as NodeJS.ProcessEnv);
+  it("defaults to log; `log` is log; `enforce` is enforce", () => {
+    expect(mode(undefined)).toBe("log");
+    expect(mode("")).toBe("log");
+    expect(mode("log")).toBe("log");
+    expect(mode("enforce")).toBe("enforce");
+  });
+  it("ANY unrecognised value is treated as ENFORCE, so a typo can never leave the endpoint open", () => {
+    for (const typo of ["enfroce", "Enforce", "ENFORCE", "enforce ", " log", "Log", "true", "on", "off", "0", "none"]) expect(mode(typo), typo).toBe("enforce");
+  });
+});
+
+describe("decodeHubspotUri (HubSpot v3 signs the URI with these escapes decoded)", () => {
+  it("decodes exactly the documented set, case-insensitively, and leaves other escapes alone", () => {
+    expect(decodeHubspotUri("https://h/webhooks/hubspot?x=a%2Fb%3Ac%40d%21e%24f%27g%28h%29i%2Aj%2Ck%3Bl%3Fm")).toBe("https://h/webhooks/hubspot?x=a/b:c@d!e$f'g(h)i*j,k;l?m");
+    expect(decodeHubspotUri("https://h/p?x=a%2fb%20c%25")).toBe("https://h/p?x=a/b%20c%25");
+  });
+  it("a v3 signature computed over the DECODED URI verifies when the delivered URL carries the encoded form", () => {
+    const body = "[]";
+    const ts = Date.now();
+    const encoded = "https://h.example/webhooks/hubspot?cb=a%2Fb";
+    const sig = hmac("base64", `POST${"https://h.example/webhooks/hubspot?cb=a/b"}${body}${ts}`);
+    expect(verifyHubspotWebhook({ secret: SECRET, method: "POST", url: encoded, rawBody: body, headers: { "x-hubspot-signature-v3": sig, "x-hubspot-request-timestamp": String(ts) }, nowMs: ts })).toEqual({ ok: true, scheme: "hubspot-v3" });
+  });
+});
+
+// ---- the routes ---------------------------------------------------------------------------------------------------------------------
+vi.mock("../server/storage.ts", () => ({ storage: {} }));
+vi.mock("../server/procore.ts", () => ({ syncProcoreRoleAssignments: vi.fn() }));
+vi.mock("../server/hubspot.ts", () => ({ updateHubSpotDealStage: vi.fn() }));
+vi.mock("../server/email-notifications.ts", () => ({ sendStageChangeEmail: vi.fn() }));
+vi.mock("../server/deal-project-number.ts", () => ({ processNewDealWebhook: vi.fn() }));
+vi.mock("../server/hubspot-procore-sync.ts", () => ({ processHubspotWebhookForProcore: vi.fn() }));
+vi.mock("../server/procore-hubspot-sync.ts", () => ({ mapProcoreStageToHubspot: vi.fn(), resolveHubspotStageId: vi.fn(), findOrCreateMappingByProjectNumber: vi.fn(), getTerminalStageGuard: vi.fn() }));
+vi.mock("../server/webhooks/procore-webhook.ts", () => ({ handleProcoreProjectWebhook: vi.fn() }));
+vi.mock("../server/webhooks/migration-mode.ts", () => ({ evaluateWebhookPortfolioPhase2Gate: vi.fn(), getWebhookMigrationModeConfig: vi.fn(), isMigrationMode: vi.fn(), logWebhookSuppressedAction: vi.fn() }));
+vi.mock("../server/routes/settings.ts", () => ({ recordWebhookRoleEvent: vi.fn() }));
+vi.mock("../server/procore-rate-limiter.ts", () => ({ markProjectWebhookUpdated: vi.fn() }));
+vi.mock("../server/lib/async-handler.ts", () => ({ asyncHandler: (fn: unknown) => fn }));
+vi.mock("../server/db.ts", () => ({ db: {} }));
+
+async function withApp(fn: (base: string) => Promise<void>) {
+  const { registerWebhookRoutes } = await import("../server/routes/webhooks.ts");
+  const app = express();
+  app.set("trust proxy", 1);
+  app.use(express.json({ verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
+  registerWebhookRoutes(app);
+  const server = app.listen(0);
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("no server");
+  try {
+    await fn(`http://127.0.0.1:${addr.port}`);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  }
+}
+const post = (base: string, path: string, body: string, headers: Record<string, string> = {}) =>
+  fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+
+describe("the webhook routes fail closed", () => {
+  const prior = { h: process.env.HUBSPOT_CLIENT_SECRET, p: process.env.PROCORE_WEBHOOK_SECRET };
+  beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => undefined); vi.spyOn(console, "warn").mockImplementation(() => undefined); });
+  afterEach(() => {
+    if (prior.h === undefined) delete process.env.HUBSPOT_CLIENT_SECRET; else process.env.HUBSPOT_CLIENT_SECRET = prior.h;
+    if (prior.p === undefined) delete process.env.PROCORE_WEBHOOK_SECRET; else process.env.PROCORE_WEBHOOK_SECRET = prior.p;
+    vi.restoreAllMocks();
+  });
+
+  it("POST /webhooks/hubspot: blank secret → 503, unsigned → 401, bad signature → 401, valid signature → past verification (400 for the empty payload)", async () => {
+    await withApp(async (base) => {
+      const body = JSON.stringify({});
+      delete process.env.HUBSPOT_CLIENT_SECRET;
+      expect((await post(base, "/webhooks/hubspot", body)).status).toBe(503);
+      process.env.HUBSPOT_CLIENT_SECRET = SECRET;
+      expect((await post(base, "/webhooks/hubspot", body)).status).toBe(401);
+      expect((await post(base, "/webhooks/hubspot", body, { "x-hubspot-signature": "0".repeat(64) })).status).toBe(401);
+      const v1 = crypto.createHash("sha256").update(SECRET + body, "utf8").digest("hex");
+      expect((await post(base, "/webhooks/hubspot", body, { "x-hubspot-signature": v1 })).status).toBe(400); // verified, then the payload validation refuses {}
+    });
+  });
+
+  it("HubSpot v3 verifies against the PUBLIC host (X-Forwarded-Host / -Proto, or WEBHOOK_PUBLIC_BASE_URL), not the internal Host header", async () => {
+    await withApp(async (base) => {
+      process.env.HUBSPOT_CLIENT_SECRET = SECRET;
+      const body = JSON.stringify({});
+      const ts = String(Date.now());
+      const sign = (uri: string) => hmac("base64", `POST${uri}${body}${ts}`);
+      const headers = (sig: string, extra: Record<string, string> = {}) => ({ "x-hubspot-signature-v3": sig, "x-hubspot-request-timestamp": ts, ...extra });
+      // signed for the public URL, delivered with the proxy's forwarded headers (and an internal Host): verified, then the empty payload is refused (400)
+      const viaProxy = await post(base, "/webhooks/hubspot", body, headers(sign("https://synchub.example/webhooks/hubspot"), { "x-forwarded-host": "synchub.example", "x-forwarded-proto": "https" }));
+      expect(viaProxy.status).toBe(400);
+      // signed for the public URL but no forwarded headers: the reconstructed internal URL differs, so v3 does not verify (401)
+      expect((await post(base, "/webhooks/hubspot", body, headers(sign("https://synchub.example/webhooks/hubspot")))).status).toBe(401);
+      // a fixed public base URL makes the reconstruction independent of the proxy headers
+      process.env.WEBHOOK_PUBLIC_BASE_URL = "https://synchub.example";
+      try {
+        expect((await post(base, "/webhooks/hubspot", body, headers(sign("https://synchub.example/webhooks/hubspot")))).status).toBe(400);
+      } finally {
+        delete process.env.WEBHOOK_PUBLIC_BASE_URL;
+      }
+      // a v3 URL mismatch with a valid v1 signature also present still admits
+      const v1 = crypto.createHash("sha256").update(SECRET + body, "utf8").digest("hex");
+      expect((await post(base, "/webhooks/hubspot", body, headers(sign("https://wrong.example/x"), { "x-hubspot-signature": v1 }))).status).toBe(400);
+    });
+  });
+
+  it("POST /webhooks/procore: OBSERVE lets events through (Procore sends no signature); PROCORE_WEBHOOK_ENFORCE=true fails closed", async () => {
+    await withApp(async (base) => {
+      const body = JSON.stringify({});
+      delete process.env.PROCORE_WEBHOOK_SECRET;
+      delete process.env.WEBHOOK_PROCORE_MODE;
+      expect((await post(base, "/webhooks/procore", body)).status).toBe(400); // log, no secret: past verification, the empty payload is refused by validation
+      process.env.PROCORE_WEBHOOK_SECRET = SECRET;
+      expect((await post(base, "/webhooks/procore", body)).status).toBe(400); // observe, unsigned: still allowed
+      process.env.WEBHOOK_PROCORE_MODE = "enforce";
+      try {
+        expect((await post(base, "/webhooks/procore", body)).status).toBe(401);
+        expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body + "x") })).status).toBe(401);
+        expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body) })).status).toBe(400);
+        delete process.env.PROCORE_WEBHOOK_SECRET;
+        expect((await post(base, "/webhooks/procore", body)).status).toBe(503); // enforcing with nothing configured never fails open
+        // a TYPO in the mode is enforce too: unsigned is refused, so it can never leave the endpoint open
+        process.env.PROCORE_WEBHOOK_SECRET = SECRET;
+        process.env.WEBHOOK_PROCORE_MODE = "enfroce";
+        expect((await post(base, "/webhooks/procore", body)).status).toBe(401);
+        expect((await post(base, "/webhooks/procore", body, { "x-procore-signature": hmac("hex", body) })).status).toBe(400);
+      } finally {
+        delete process.env.WEBHOOK_PROCORE_MODE;
+      }
+    });
+  });
+});

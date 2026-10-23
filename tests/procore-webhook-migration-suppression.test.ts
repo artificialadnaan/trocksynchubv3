@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import { createServer, type Server } from "node:http";
+import { clearWebhookSecrets, hubspotSignedHeaders, procoreSignedHeaders, rawBodyCapture, setWebhookSecrets } from "./helpers/webhook-signing";
 
 const mockStorage = {
   checkIdempotencyKey: vi.fn(),
@@ -115,7 +116,7 @@ vi.mock("../server/hubspot-bidboard-trigger.ts", () => ({
 async function postProcoreWebhook(body: Record<string, unknown>): Promise<Response> {
   const { registerWebhookRoutes } = await import("../server/routes/webhooks.ts");
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ verify: rawBodyCapture }));
   registerWebhookRoutes(app);
 
   const server: Server = createServer(app);
@@ -124,10 +125,11 @@ async function postProcoreWebhook(body: Record<string, unknown>): Promise<Respon
   if (!address || typeof address === "string") throw new Error("Expected TCP server address");
 
   try {
+    const payload = JSON.stringify(body);
     const response = await fetch(`http://127.0.0.1:${address.port}/webhooks/procore`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers: procoreSignedHeaders(payload),
+      body: payload,
     });
     await vi.waitFor(() => {
       expect(mockStorage.updateWebhookLog).toHaveBeenCalledWith(
@@ -143,6 +145,7 @@ async function postProcoreWebhook(body: Record<string, unknown>): Promise<Respon
 
 describe("Procore project-stage webhook migration-mode suppression", () => {
   beforeEach(async () => {
+    setWebhookSecrets(); // H5: the webhook routes refuse unsigned requests, so these tests sign theirs
     vi.useRealTimers();
     vi.clearAllMocks();
 
@@ -237,6 +240,7 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
   });
 
   afterEach(() => {
+    clearWebhookSecrets();
     vi.useRealTimers();
   });
 
@@ -462,7 +466,7 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
     });
 
     const app = express();
-    app.use(express.json());
+    app.use(express.json({ verify: rawBodyCapture }));
     registerWebhookRoutes(app);
     const server: Server = createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -470,18 +474,19 @@ describe("Procore project-stage webhook migration-mode suppression", () => {
     if (!address || typeof address === "string") throw new Error("Expected TCP server address");
 
     try {
+      const hubspotPayload = JSON.stringify({
+        eventId: "hs-event-1",
+        subscriptionType: "deal.propertyChange",
+        objectType: "deal",
+        objectId: "323528245957",
+        propertyName: "dealstage",
+        propertyValue: "closedwon",
+        changeSource: "CRM_UI",
+      });
       const response = await fetch(`http://127.0.0.1:${address.port}/webhooks/hubspot`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          eventId: "hs-event-1",
-          subscriptionType: "deal.propertyChange",
-          objectType: "deal",
-          objectId: "323528245957",
-          propertyName: "dealstage",
-          propertyValue: "closedwon",
-          changeSource: "CRM_UI",
-        }),
+        headers: hubspotSignedHeaders(hubspotPayload),
+        body: hubspotPayload,
       });
       await vi.waitFor(() => {
         expect(mockStorage.updateWebhookLog).toHaveBeenCalledWith(
