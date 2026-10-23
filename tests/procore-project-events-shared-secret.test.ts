@@ -12,8 +12,30 @@ describe("projectEventsMode: only unset or \"log\" leaves the route open; everyt
     expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: "log" } as any)).toEqual({ enforce: false, recognised: true });
     expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: " LOG " } as any)).toEqual({ enforce: false, recognised: true });
     expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: "enforce" } as any)).toEqual({ enforce: true, recognised: true });
+    // Set but empty is the default; set to only whitespace is a typo and enforces (Codex P1 on #122).
+    expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: "" } as any)).toEqual({ enforce: false, recognised: true });
+    for (const blank of [" ", "   ", "\t", "\n"]) {
+      expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: blank } as any), JSON.stringify(blank)).toEqual({ enforce: true, recognised: false });
+    }
     for (const typo of ["Enforced", "on", "true", "1", "strict", "banana"]) {
       expect(projectEventsMode({ WEBHOOK_PROCORE_PROJECT_EVENTS_MODE: typo } as any), typo).toEqual({ enforce: true, recognised: false });
+    }
+  });
+});
+
+describe("checkSharedSecretHeader: exact first, then without the scheme; a different length is still compared", () => {
+  it("a secret that is itself `Bearer <token>` matches the header sent as configured, and the bare token still matches too (Codex P2 on #122)", () => {
+    const secret = "Bearer abc123token";
+    const ok = (header: string) => checkSharedSecretHeader({ secret, header, enforce: true });
+    expect(ok("Bearer abc123token")).toMatchObject({ allow: true, auth: "valid" });
+    expect(ok("Bearer Bearer abc123token")).toMatchObject({ allow: true, auth: "valid" }); // scheme + the configured value
+    expect(ok("abc123token")).toMatchObject({ allow: false, auth: "invalid" });
+    expect(checkSharedSecretHeader({ secret: "abc123token", header: "Bearer abc123token", enforce: true })).toMatchObject({ allow: true, auth: "valid" });
+    expect(checkSharedSecretHeader({ secret: "abc123token", header: "abc123token", enforce: true })).toMatchObject({ allow: true, auth: "valid" });
+  });
+  it("wrong values of any length are refused (the comparison no longer short-circuits on length)", () => {
+    for (const header of ["x", "abc123toke", "abc123tokenn", "a".repeat(500)]) {
+      expect(checkSharedSecretHeader({ secret: "abc123token", header, enforce: true }), header.slice(0, 12)).toMatchObject({ allow: false, auth: "invalid" });
     }
   });
 });

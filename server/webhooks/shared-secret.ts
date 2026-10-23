@@ -1,9 +1,10 @@
 import crypto from "crypto";
 
+// Equal-length digests first, so timingSafeEqual always runs and the secret's length is not revealed by an early exit.
 function safeEqual(a: string, b: string): boolean {
-  const x = Buffer.from(a, "utf8");
-  const y = Buffer.from(b, "utf8");
-  return x.length === y.length && crypto.timingSafeEqual(x, y);
+  const x = crypto.createHash("sha256").update(a, "utf8").digest();
+  const y = crypto.createHash("sha256").update(b, "utf8").digest();
+  return crypto.timingSafeEqual(x, y);
 }
 const first = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
@@ -26,8 +27,11 @@ export function checkSharedSecretHeader(input: { secret: string | undefined; hea
   if (!input.secret) auth = "unconfigured";
   else if (!provided) auth = "missing";
   else {
-    const value = provided.replace(/^Bearer\s+/i, "");
-    auth = safeEqual(value, input.secret) ? "valid" : "invalid";
+    // The exact header first (a secret that itself starts with "Bearer " must match as configured), then the form without the scheme.
+    const stripped = provided.replace(/^Bearer\s+/i, "");
+    const exact = safeEqual(provided, input.secret);
+    const bare = safeEqual(stripped, input.secret);
+    auth = exact || bare ? "valid" : "invalid";
   }
   if (!input.enforce) return { allow: true, auth, enforced: false };
   if (auth === "valid") return { allow: true, auth, enforced: true };
@@ -36,8 +40,11 @@ export function checkSharedSecretHeader(input: { secret: string | undefined; hea
 
 /** Express middleware for the project-events route: reads the env at request time, logs the verdict (no values), refuses only when enforcing. */
 export function projectEventsMode(env: NodeJS.ProcessEnv = process.env): { enforce: boolean; recognised: boolean } {
-  const raw = (env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE ?? "").trim().toLowerCase();
-  if (raw === "" || raw === "log") return { enforce: false, recognised: true };
+  const configured = env.WEBHOOK_PROCORE_PROJECT_EVENTS_MODE;
+  // Unset (or an empty value) is the default LOG mode; a value of only whitespace is a typo and enforces like any other unrecognised value.
+  if (configured === undefined || configured === "") return { enforce: false, recognised: true };
+  const raw = configured.trim().toLowerCase();
+  if (raw === "log") return { enforce: false, recognised: true };
   return { enforce: true, recognised: raw === "enforce" };
 }
 
