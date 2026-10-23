@@ -28,6 +28,7 @@ import {
   buildEstimatesSentPdf,
   estimatesSentPdfFilename,
   formatCentsUsd,
+  countEstimatesWithoutAmount,
   estimatesTotalLabel,
   totalEstimateCents,
 } from "../server/estimates-sent-pdf";
@@ -427,5 +428,46 @@ describe("the PDF links each project to the CRM and the Bid Board", () => {
     const raw = pdf.toString("latin1");
     expect(raw).not.toContain("javascript:");
     expect(raw).not.toContain("data:text/html");
+  });
+});
+
+// A row with no amount (zero, blank, malformed) prints "—" and adds nothing to the sum: the footer must say how many rows it is silent about, and the email must
+// caption the dash, so "missing" never reads as "$0". The PDF footer and the email cards agree because they use the same test for what is missing.
+describe("estimates with no amount: the footer and the email say so", () => {
+  const mixed = [
+    deal({ dealId: "m1", amount: "1000.00" }),
+    deal({ dealId: "m2", amount: "0.00" }),
+    deal({ dealId: "m3", amount: "" }),
+    deal({ dealId: "m4", amount: "-25.00" }), // a real negative: counted and summed, NOT missing
+    deal({ dealId: "m5", amount: "not-a-number" }),
+  ];
+
+  it("the footer counts the rows that print an em dash, and only those", () => {
+    expect(countEstimatesWithoutAmount(mixed)).toBe(3);
+    expect(estimatesTotalLabel(mixed, 5)).toBe("5 estimates · $975 · 3 without an amount");
+    expect(estimatesTotalLabel(mixed, 900)).toBe("Most recent 5 of 900 estimates · $975 shown · 3 without an amount");
+    expect(estimatesTotalLabel([deal({ amount: "0" }), deal({ dealId: "x", amount: "10.00" })], 2)).toBe("2 estimates · $10 · 1 without an amount");
+  });
+
+  it("with every amount present nothing changes: no count, no caption", async () => {
+    const full = [deal({ dealId: "f1", amount: "10.00" }), deal({ dealId: "f2", amount: "-5.00" })];
+    expect(estimatesTotalLabel(full, 2)).toBe("2 estimates · $5");
+    const html = await buildRfpReportEmailHtml({
+      periodLabel: "Last 24 Hours", rfps: [], changes: [], approvalSummary: { pending: 0, approved: 0, rejected: 0 }, includeRfpLog: true, includeApprovalSummary: true,
+      estimatesPeriod: { from: new Date("2026-08-05T13:00:00Z"), to: new Date("2026-08-12T13:00:00Z") }, dashboardUrl: "https://example.test/settings",
+      estimatesSent: { ok: true, deals: full, total: 2, coveredFrom: "2026-08-05T13:00:00.000Z", coveredThrough: "2026-08-12T13:00:00.000Z" },
+    } as any);
+    expect(html).not.toContain("no amount recorded in the CRM yet");
+  });
+
+  it("the email captions the dash once, and the cards that print it are exactly the rows the footer counts", async () => {
+    const html = await buildRfpReportEmailHtml({
+      periodLabel: "Last 24 Hours", rfps: [], changes: [], approvalSummary: { pending: 0, approved: 0, rejected: 0 }, includeRfpLog: true, includeApprovalSummary: true,
+      estimatesPeriod: { from: new Date("2026-08-05T13:00:00Z"), to: new Date("2026-08-12T13:00:00Z") }, dashboardUrl: "https://example.test/settings",
+      estimatesSent: { ok: true, deals: mixed, total: 5, coveredFrom: "2026-08-05T13:00:00.000Z", coveredThrough: "2026-08-12T13:00:00.000Z" },
+    } as any);
+    expect(html.split("— = no amount recorded in the CRM yet.").length - 1).toBe(1);
+    const dashAmounts = html.match(/white-space: nowrap; padding-left: 10px; vertical-align: top;">—<\/td>/g) ?? [];
+    expect(dashAmounts.length).toBe(countEstimatesWithoutAmount(mixed));
   });
 });
