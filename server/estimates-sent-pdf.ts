@@ -146,10 +146,19 @@ export function formatCentsUsd(cents: number): string {
 export function estimatesTotalLabel(deals: CrmEstimateSent[], total?: number): string {
   const trueTotal = total ?? deals.length;
   const money = formatCentsUsd(totalEstimateCents(deals));
+  // A row with no amount (zero, blank or malformed: it prints "—") adds nothing to the sum, so the total must say how many rows it is silent about rather than
+  // let "missing" read as "$0".
+  const missing = countEstimatesWithoutAmount(deals);
+  const without = missing > 0 ? ` · ${missing} without an amount` : "";
   if (trueTotal > deals.length) {
-    return `Most recent ${deals.length} of ${trueTotal} estimates · ${money} shown`;
+    return `Most recent ${deals.length} of ${trueTotal} estimates · ${money} shown${without}`;
   }
-  return `${deals.length} estimate${deals.length === 1 ? "" : "s"} · ${money}`;
+  return `${deals.length} estimate${deals.length === 1 ? "" : "s"} · ${money}${without}`;
+}
+
+/** How many rows print "—" for their amount (the same test the rows use), so the footer and the cards can never disagree about what is missing. */
+export function countEstimatesWithoutAmount(deals: CrmEstimateSent[]): number {
+  return deals.filter((deal) => formatEstimateAmount(deal.amount) === "—").length;
 }
 
 export interface EstimatesSentPdfInput {

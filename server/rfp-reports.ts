@@ -1072,7 +1072,11 @@ export async function buildRfpReportEmailHtml(options: {
           : `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">Covering estimates sent since ${escapeHtml(
               formatRfpDateTime(estimatesSent.coveredFrom).date
             )}.</p>`;
-      body = `${shown.map(estimateCard).join("")}${overflow}${attachmentNote}${capNote}${reachNote}`;
+      // One caption, only when a card above prints "—": the total and the cards must not let "no amount yet" read as zero (the loss itself is upstream, in Core).
+      const missingNote = shown.some((deal) => formatEstimateAmount(deal.amount) === "—")
+        ? `<p style="margin: 4px 0 0 0; font-size: 12px; color: #6b7280;">— = no amount recorded in the CRM yet.</p>`
+        : "";
+      body = `${shown.map(estimateCard).join("")}${missingNote}${overflow}${attachmentNote}${capNote}${reachNote}`;
     }
 
     sections.push(`
