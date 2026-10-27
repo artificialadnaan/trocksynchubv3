@@ -146,7 +146,7 @@ export type ServiceRfpIngressOutcome =
   | { kind: "retryable"; status?: number; error: string }
   /**
    * Will never be accepted as-is. The row goes terminal and an alert is raised. `coreReason` is Core's own
-   * closed-vocabulary reason, present only on a 409 refusal (the CRM is told it: service-rfp-core-crm-refusal.ts).
+   * closed-vocabulary reason, present only on a 409 refusal (the CRM is told it: service-rfp-core-crm-notice.ts).
    */
   | { kind: "terminal"; status?: number; error: string; coreReason?: string };
 

@@ -252,3 +252,35 @@ describe("serviceRfpCoreAlertOffice", () => {
     expect(serviceRfpCoreAlertOffice(null)).toBe("service-rfp-core:unmapped");
   });
 });
+
+// D-5: a CRM notice of Core's answer that will never land is alerted under its OWN namespace, so it can neither suppress
+// nor falsely "recover" the Core delivery stream, and its copy says what is actually missing.
+describe("the CRM notice alert (D-5)", () => {
+  it("renders what the CRM is missing, naming the request, the deal and Core's answer, never the Bid Board copy", async () => {
+    const { renderServiceRfpCrmNoticeAlertEmail } = await import("../server/sync/service-rfp-core-alert.ts");
+    const { subject, htmlBody } = renderServiceRfpCrmNoticeAlertEmail(
+      { kind: "request_rejected", office: "service-rfp-crm-notice:dallas", status: 404, error: "CRM core-rfp-handoff callback returned 404", now: NOW },
+      { event: "refused", rfpRequestId: 77, sourceDealId: "deal-1" },
+    );
+    expect(subject).toContain("The CRM was NOT told TROCK Core refused an RFP");
+    expect(subject).toContain("office dallas");
+    expect(subject).toContain("RFP request 77");
+    expect(htmlBody).toContain("deal-1");
+    expect(htmlBody).toContain("not told the job was refused");
+    for (const phrase of BID_BOARD_WORDING) expect(`${subject}\n${htmlBody}`).not.toContain(phrase);
+  });
+
+  it("keys its alert state under its own namespace, not the Core delivery stream's", async () => {
+    const { recordServiceRfpCrmNoticeOutcome } = await import("../server/sync/service-rfp-core-alert.ts");
+    process.env.BIDBOARD_CRM_ALERT_RECIPIENT = "ops@example.com";
+    poolMock.query.mockClear();
+    try {
+      await recordServiceRfpCrmNoticeOutcome({ office: "dallas", ok: false, status: 404, error: "x", event: "refused", rfpRequestId: 77, sourceDealId: "deal-1" });
+    } finally {
+      delete process.env.BIDBOARD_CRM_ALERT_RECIPIENT;
+    }
+    const params = poolMock.query.mock.calls.flatMap((call: any[]) => (call[1] ?? []) as unknown[]);
+    expect(params).toContain("service-rfp-crm-notice:dallas");
+    expect(params).not.toContain("service-rfp-core:dallas");
+  });
+});

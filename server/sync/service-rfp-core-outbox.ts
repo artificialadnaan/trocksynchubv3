@@ -12,7 +12,7 @@ import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { log } from "../index";
 import { coreRfpTenant } from "../constants";
-import { processCoreRefusalCrmNotifications } from "./service-rfp-core-crm-refusal";
+import { processCoreHandoffCrmNotices } from "./service-rfp-core-crm-notice";
 // Type-only: the alert module is imported dynamically at runtime (see reportDelivery).
 import type { ServiceRfpAlertSubject } from "./service-rfp-core-alert";
 import {
@@ -562,9 +562,10 @@ async function insertOutboxRow(input: {
           last_error = EXCLUDED.last_error,
           last_attempt_at = EXCLUDED.last_attempt_at,
           next_attempt_at = EXCLUDED.next_attempt_at
-      -- crm_notify_pending is a Core refusal whose CRM notice is still in flight (D-5): as terminal as 'failed' for
+      -- crm_notify_refused is a Core refusal whose CRM notice is still in flight (D-5): as terminal as 'failed' for
       -- Core, so a corrected re-approval may replace it too; the notice for the superseded refusal is then dropped.
-      WHERE service_rfp_core_outbox.status IN ('failed', 'dead', 'crm_notify_pending')
+      -- crm_notify_accepted is DELIVERED, like 'sent', and is excluded for the same reason.
+      WHERE service_rfp_core_outbox.status IN ('failed', 'dead', 'crm_notify_refused')
         AND EXCLUDED.target_url IS NOT NULL
     RETURNING id, attempt_count, max_attempts
   `);
@@ -577,11 +578,17 @@ async function insertOutboxRow(input: {
   };
 }
 
+/**
+ * Core accepted. The row is parked in `crm_notify_accepted`, due now, so the CRM is told the handoff landed (D-5: it
+ * clears a refusal alert a re-drive has now fixed, and orders later refusals against it); that drain settles it at
+ * 'sent'. It is a DELIVERED row in every other respect: sent_at is set, and the re-approval upsert cannot replace it.
+ */
 async function markSent(id: number, status: number, bidId: string | null): Promise<void> {
   const db = await getDb();
   await db.execute(sql`
     UPDATE service_rfp_core_outbox
-       SET status = 'sent',
+       SET status = 'crm_notify_accepted',
+           next_attempt_at = NOW(),
            sent_at = NOW(),
            last_attempt_at = NOW(),
            last_status_code = ${status},
@@ -592,8 +599,8 @@ async function markSent(id: number, status: number, bidId: string | null): Promi
 }
 
 /**
- * A terminal outcome. A Core 409 REFUSAL (it carries Core's reason) is parked in `crm_notify_pending` instead of
- * 'failed', due now, so the CRM is told why (service-rfp-core-crm-refusal.ts, D-5); that drain settles it at 'failed'.
+ * A terminal outcome. A Core 409 REFUSAL (it carries Core's reason) is parked in `crm_notify_refused` instead of
+ * 'failed', due now, so the CRM is told why (service-rfp-core-crm-notice.ts, D-5); that drain settles it at 'failed'.
  * Every other terminal outcome — a bad request, a rejected signature — is not Core refusing the RFP, and goes straight
  * to 'failed' as before.
  */
@@ -602,7 +609,7 @@ async function markTerminal(id: number, error: string, status?: number, coreReas
   if (status === 409 && coreReason) {
     await db.execute(sql`
       UPDATE service_rfp_core_outbox
-         SET status = 'crm_notify_pending',
+         SET status = 'crm_notify_refused',
              last_error = ${error},
              last_status_code = ${status},
              last_attempt_at = NOW(),
@@ -992,10 +999,10 @@ export function startServiceRfpCoreOutboxWorker(intervalMs = 30_000): void {
       .catch((error) => {
         log(`[service-rfp-core] Worker tick failed: ${error?.message || error}`, "sync");
       })
-      // After the Core deliveries, so a refusal this tick recorded is told to the CRM on the same tick.
-      .then(() => processCoreRefusalCrmNotifications())
+      // After the Core deliveries, so an outcome this tick recorded is told to the CRM on the same tick.
+      .then(() => processCoreHandoffCrmNotices())
       .catch((error) => {
-        log(`[service-rfp-core] CRM refusal notice tick failed: ${error?.message || error}`, "sync");
+        log(`[service-rfp-core] CRM notice tick failed: ${error?.message || error}`, "sync");
       });
   }, intervalMs);
   log(`[service-rfp-core] Worker started (${intervalMs}ms)`, "sync");

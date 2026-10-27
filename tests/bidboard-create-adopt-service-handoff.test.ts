@@ -245,7 +245,9 @@ describe("create-from-rfp ADOPT of a service deal -> TROCK Core handoff", () => 
 
     // What Core was actually told.
     const [core] = await rows("service_rfp_core_outbox");
-    expect(core.status).toBe("sent");
+    // Delivered: parked for the CRM's "accepted" notice (D-5), which settles it at 'sent'.
+    expect(core.status).toBe("crm_notify_accepted");
+    expect(core.sent_at).not.toBeNull();
     expect(core.payload.rfp).toEqual({ requestId: request.id, approvedAt: VOTE_AT });
     expect(core.payload.company.id).toBe(COMPANY_ID);
     expect(core.payload.property).toMatchObject({ id: PROPERTY_ID, name: "Tides North Dallas" });
