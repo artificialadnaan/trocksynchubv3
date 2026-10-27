@@ -82,7 +82,7 @@ export function renderServiceRfpCoreAlertEmail(
       <p>Other approvals that failed for the same reason inside the alert window are not emailed one by one. List
       the recent ones (last_error carries the reason shown above; a re-driven row keeps its created_at, so the
       latest attempt decides) with <code>select rfp_request_id, source_deal_id, status, last_error,
-      coalesce(last_attempt_at, created_at) as failed_at from service_rfp_core_outbox where status in ('failed','dead')
+      coalesce(last_attempt_at, created_at) as failed_at from service_rfp_core_outbox where status in ('failed','dead','crm_notify_pending')
       and coalesce(last_attempt_at, created_at) &gt; now() - interval '1 day' order by failed_at desc</code>.</p>`;
 
   const details = `${rfpLines}
@@ -113,7 +113,8 @@ export function renderServiceRfpCoreAlertEmail(
       <p>Core returned a deterministic refusal (a 409 conflict, a bad request, or a rejected signature),
       or the approval could not be expressed on the v1 contract at all — a non-CRM source deal, an office
       with no Core tenant, or a missing CRM company/property uuid. Either way it will <strong>not</strong>
-      be accepted as-is, so the row is recorded 'failed' in service_rfp_core_outbox and is never retried;
+      be accepted as-is, so the row is recorded 'failed' in service_rfp_core_outbox (a Core 409 first waits in
+      'crm_notify_pending' while the CRM is told, then settles at 'failed') and is never retried;
       the Error above is the reason. Fix the cause and re-drive the row.</p>${unaffected}${others}
     `,
     };

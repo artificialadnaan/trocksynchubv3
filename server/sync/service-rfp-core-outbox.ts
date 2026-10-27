@@ -12,6 +12,7 @@ import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { log } from "../index";
 import { coreRfpTenant } from "../constants";
+import { processCoreRefusalCrmNotifications } from "./service-rfp-core-crm-refusal";
 // Type-only: the alert module is imported dynamically at runtime (see reportDelivery).
 import type { ServiceRfpAlertSubject } from "./service-rfp-core-alert";
 import {
@@ -561,7 +562,9 @@ async function insertOutboxRow(input: {
           last_error = EXCLUDED.last_error,
           last_attempt_at = EXCLUDED.last_attempt_at,
           next_attempt_at = EXCLUDED.next_attempt_at
-      WHERE service_rfp_core_outbox.status IN ('failed', 'dead')
+      -- crm_notify_pending is a Core refusal whose CRM notice is still in flight (D-5): as terminal as 'failed' for
+      -- Core, so a corrected re-approval may replace it too; the notice for the superseded refusal is then dropped.
+      WHERE service_rfp_core_outbox.status IN ('failed', 'dead', 'crm_notify_pending')
         AND EXCLUDED.target_url IS NOT NULL
     RETURNING id, attempt_count, max_attempts
   `);
@@ -588,8 +591,26 @@ async function markSent(id: number, status: number, bidId: string | null): Promi
   `);
 }
 
-async function markTerminal(id: number, error: string, status?: number): Promise<void> {
+/**
+ * A terminal outcome. A Core 409 REFUSAL (it carries Core's reason) is parked in `crm_notify_pending` instead of
+ * 'failed', due now, so the CRM is told why (service-rfp-core-crm-refusal.ts, D-5); that drain settles it at 'failed'.
+ * Every other terminal outcome — a bad request, a rejected signature — is not Core refusing the RFP, and goes straight
+ * to 'failed' as before.
+ */
+async function markTerminal(id: number, error: string, status?: number, coreReason?: string): Promise<void> {
   const db = await getDb();
+  if (status === 409 && coreReason) {
+    await db.execute(sql`
+      UPDATE service_rfp_core_outbox
+         SET status = 'crm_notify_pending',
+             last_error = ${error},
+             last_status_code = ${status},
+             last_attempt_at = NOW(),
+             next_attempt_at = NOW()
+       WHERE id = ${id}
+    `);
+    return;
+  }
   await db.execute(sql`
     UPDATE service_rfp_core_outbox
        SET status = 'failed',
@@ -678,7 +699,7 @@ async function deliver(
   }
 
   if (outcome.kind === "terminal") {
-    await markTerminal(row.id, outcome.error, outcome.status);
+    await markTerminal(row.id, outcome.error, outcome.status, outcome.coreReason);
     await reportDelivery({
       office: row.office,
       rfp: rowSubject(row),
@@ -967,9 +988,15 @@ export function startServiceRfpCoreOutboxWorker(intervalMs = 30_000): void {
     // nothing, and without this the migration-specific diagnosis would never be emitted for the very
     // case it exists to catch — a transient outage at boot over a genuinely missing table.
     if (!outboxPreflightSettled) void preflightOutboxTable();
-    processServiceRfpCoreOutbox().catch((error) => {
-      log(`[service-rfp-core] Worker tick failed: ${error?.message || error}`, "sync");
-    });
+    processServiceRfpCoreOutbox()
+      .catch((error) => {
+        log(`[service-rfp-core] Worker tick failed: ${error?.message || error}`, "sync");
+      })
+      // After the Core deliveries, so a refusal this tick recorded is told to the CRM on the same tick.
+      .then(() => processCoreRefusalCrmNotifications())
+      .catch((error) => {
+        log(`[service-rfp-core] CRM refusal notice tick failed: ${error?.message || error}`, "sync");
+      });
   }, intervalMs);
   log(`[service-rfp-core] Worker started (${intervalMs}ms)`, "sync");
 }

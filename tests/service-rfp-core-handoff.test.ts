@@ -600,7 +600,7 @@ describe("service RFP → TROCK Core handoff", () => {
   });
 
   describe("refusals are terminal, recorded and alerted — never a silent drop", () => {
-    it("marks a 409 FAILED, alerts, and does not retry it", async () => {
+    it("parks a 409 for the CRM's refusal notice (D-5), alerts, and never retries it against Core", async () => {
       coreFetchMock.mockResolvedValue(
         new Response(JSON.stringify({ error: "service_rfp_conflict", reason: "live_project" }), { status: 409 }),
       );
@@ -608,7 +608,10 @@ describe("service RFP → TROCK Core handoff", () => {
       const result = await runApproval();
 
       expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(executedSql()).toContain("status = 'failed'");
+      // crm_notify_pending, not 'pending': the Core claim (status = 'pending') can never pick it up again. The CRM
+      // notice drain settles it at 'failed' (tests/service-rfp-core-crm-refusal.test.ts).
+      expect(updateStatements()).toContain("status = 'crm_notify_pending'");
+      expect(updateStatements()).not.toContain("status = 'pending'");
       // No backoff was scheduled and no second attempt was made: a conflict retried on a schedule is
       // a retry storm against a refusal that can never change.
       expect(executedSql()).not.toContain("next_attempt_at = NOW() +");
@@ -1029,7 +1032,8 @@ describe("service RFP → TROCK Core handoff", () => {
       const predicate = String(insert).split("DO UPDATE")[1] ?? "";
       // A TERMINAL row may be replaced: "failed" covers a Core 4xx that kept its target_url, "dead" an
       // exhausted ladder. Restricting this to never-sent rows is what missed the motivating case.
-      expect(predicate).toMatch(/status IN \('failed', ?'dead'\)/);
+      // "crm_notify_pending" is a Core 409 whose CRM notice is in flight (D-5): as terminal as "failed" for Core.
+      expect(predicate).toMatch(/status IN \('failed', ?'dead', ?'crm_notify_pending'\)/);
       // …and only when THIS attempt is deliverable, so a refusal cannot clobber a real queued row.
       expect(predicate).toContain("EXCLUDED.target_url IS NOT NULL");
       // "pending" is never replaceable: overwriting an in-flight row races the worker.
