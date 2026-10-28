@@ -82,7 +82,7 @@ export function renderServiceRfpCoreAlertEmail(
       <p>Other approvals that failed for the same reason inside the alert window are not emailed one by one. List
       the recent ones (last_error carries the reason shown above; a re-driven row keeps its created_at, so the
       latest attempt decides) with <code>select rfp_request_id, source_deal_id, status, last_error,
-      coalesce(last_attempt_at, created_at) as failed_at from service_rfp_core_outbox where status in ('failed','dead')
+      coalesce(last_attempt_at, created_at) as failed_at from service_rfp_core_outbox where status in ('failed','dead','crm_notify_refused')
       and coalesce(last_attempt_at, created_at) &gt; now() - interval '1 day' order by failed_at desc</code>.</p>`;
 
   const details = `${rfpLines}
@@ -113,7 +113,8 @@ export function renderServiceRfpCoreAlertEmail(
       <p>Core returned a deterministic refusal (a 409 conflict, a bad request, or a rejected signature),
       or the approval could not be expressed on the v1 contract at all — a non-CRM source deal, an office
       with no Core tenant, or a missing CRM company/property uuid. Either way it will <strong>not</strong>
-      be accepted as-is, so the row is recorded 'failed' in service_rfp_core_outbox and is never retried;
+      be accepted as-is, so the row is recorded 'failed' in service_rfp_core_outbox (a Core 409 first waits in
+      'crm_notify_refused' while the CRM is told, then settles at 'failed') and is never retried;
       the Error above is the reason. Fix the cause and re-drive the row.</p>${unaffected}${others}
     `,
     };
@@ -282,6 +283,78 @@ export async function recordServiceRfpCoreDelivery(
     else if (!outcome.ok && "action" in result && result.action === "alert_failure" && result.sent) {
       reasons.set(reason, now.getTime());
     }
+    return "action" in result ? { action: result.action } : result;
+  });
+}
+
+// ── The CRM notice (D-5) ─────────────────────────────────────────────────────
+//
+// SyncHub tells the CRM how Core answered an approved service RFP (service-rfp-core-crm-notice.ts). A notice that will
+// never land — the CRM refused it, or it was given up after 24 h — is alerted through the SAME push-alert state machine,
+// under its OWN namespace, so a CRM-side failure can neither suppress nor falsely "recover" the Core delivery stream.
+
+export const SERVICE_RFP_CRM_NOTICE_ALERT_NAMESPACE = "service-rfp-crm-notice:";
+
+export interface ServiceRfpCrmNoticeOutcome {
+  office: string | null;
+  ok: boolean;
+  status?: number;
+  error?: string;
+  event: "refused" | "accepted";
+  rfpRequestId: number;
+  sourceDealId: string;
+}
+
+export function renderServiceRfpCrmNoticeAlertEmail(
+  e: PushAlertEmailInput,
+  notice: Pick<ServiceRfpCrmNoticeOutcome, "event" | "rfpRequestId" | "sourceDealId">,
+): { subject: string; htmlBody: string } {
+  const office = e.office.startsWith(SERVICE_RFP_CRM_NOTICE_ALERT_NAMESPACE)
+    ? e.office.slice(SERVICE_RFP_CRM_NOTICE_ALERT_NAMESPACE.length)
+    : e.office;
+  const details = `
+      <p><strong>RFP request:</strong> ${escapeHtml(String(notice.rfpRequestId))}</p>
+      <p><strong>CRM deal:</strong> ${escapeHtml(notice.sourceDealId)}</p>
+      <p><strong>Core's answer:</strong> ${escapeHtml(notice.event)}</p>
+      <p><strong>Office:</strong> ${escapeHtml(office)}</p>
+      <p><strong>When:</strong> ${e.now.toISOString()}</p>
+      <p><strong>Last HTTP status:</strong> ${e.status ?? "—"}</p>
+      <p><strong>Error:</strong> ${escapeHtml(e.error ?? "(none captured)")}</p>`;
+  if (e.kind === "recovered") {
+    return {
+      subject: `✅ CRM notices of TROCK Core RFP outcomes RECOVERED — office ${office}`,
+      htmlBody: `<h2>The CRM is receiving TROCK Core RFP outcomes again</h2>${details}`,
+    };
+  }
+  return {
+    subject: `⚠️ The CRM was NOT told TROCK Core ${notice.event} an RFP — office ${office} — RFP request ${notice.rfpRequestId}`,
+    htmlBody: `
+      <h2>The CRM could not be told how TROCK Core answered an approved service RFP</h2>${details}
+      <p>Core's answer itself is recorded on the service_rfp_core_outbox row and is unaffected. What is missing is the
+      CRM's copy: the requester was ${notice.event === "refused" ? "not told the job was refused, and the deal page shows no alert" : "not told a re-driven handoff landed, so the deal page may still show an old refusal"}.
+      The row has been settled and will not be re-sent on its own.</p>`,
+  };
+}
+
+export async function recordServiceRfpCrmNoticeOutcome(
+  outcome: ServiceRfpCrmNoticeOutcome,
+): Promise<{ action: PushAlertAction } | { skipped: true }> {
+  const officeSlug = `${SERVICE_RFP_CRM_NOTICE_ALERT_NAMESPACE}${outcome.office ?? "unmapped"}`;
+  return serializedByOffice(officeSlug, async () => {
+    const result = await recordPushOutcomeAndMaybeAlert(
+      {
+        pushResult: {
+          ok: outcome.ok,
+          attempts: 1,
+          status: outcome.status,
+          error: outcome.error,
+          rejected: !outcome.ok,
+        },
+        officeSlug,
+        now: new Date(),
+      },
+      { render: (input) => renderServiceRfpCrmNoticeAlertEmail(input, outcome) },
+    );
     return "action" in result ? { action: result.action } : result;
   });
 }

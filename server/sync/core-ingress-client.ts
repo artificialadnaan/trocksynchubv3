@@ -144,8 +144,14 @@ export type ServiceRfpIngressOutcome =
   | { kind: "sent"; status: number; bidId: string | null }
   /** Worth trying again unchanged — the row stays pending on the backoff schedule. */
   | { kind: "retryable"; status?: number; error: string }
-  /** Will never be accepted as-is. The row goes terminal and an alert is raised. */
-  | { kind: "terminal"; status?: number; error: string };
+  /**
+   * Will never be accepted as-is. The row goes terminal and an alert is raised. `coreReason` is Core's own
+   * closed-vocabulary reason, present only on a 409 refusal (the CRM is told it: service-rfp-core-crm-notice.ts).
+   */
+  | { kind: "terminal"; status?: number; error: string; coreReason?: string };
+
+/** The `error` a Core 409 refusal carries, before its reason. The CRM refusal callback reads the reason back off it. */
+export const CORE_REFUSAL_ERROR_PREFIX = "Core refused the approval: ";
 
 /**
  * Classify a Core response. The refusal shapes are load-bearing and deliberately NOT uniform:
@@ -189,7 +195,7 @@ async function classifyResponse(response: Response): Promise<ServiceRfpIngressOu
   if (response.status === 409) {
     const body = (await response.json().catch(() => ({}))) as { reason?: unknown };
     const reason = typeof body.reason === "string" ? body.reason : "unknown";
-    return { kind: "terminal", status: 409, error: `Core refused the approval: ${reason}` };
+    return { kind: "terminal", status: 409, error: `${CORE_REFUSAL_ERROR_PREFIX}${reason}`, coreReason: reason };
   }
 
   // Every remaining branch ignores the body, so it must be DISCARDED rather than left dangling: an

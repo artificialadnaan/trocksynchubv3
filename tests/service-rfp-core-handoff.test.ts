@@ -517,6 +517,7 @@ describe("service RFP → TROCK Core handoff", () => {
       // refusal row — so a substring match across ALL executed SQL now reads that guard as an outcome.
       // What these assert is that nothing MARKED the row sent or failed, which is the fail-open property.
       expect(updateStatements()).not.toContain("status = 'sent'");
+      expect(updateStatements()).not.toContain("status = 'crm_notify_accepted'");
       expect(updateStatements()).not.toContain("status = 'failed'");
     });
 
@@ -600,7 +601,7 @@ describe("service RFP → TROCK Core handoff", () => {
   });
 
   describe("refusals are terminal, recorded and alerted — never a silent drop", () => {
-    it("marks a 409 FAILED, alerts, and does not retry it", async () => {
+    it("parks a 409 for the CRM's refusal notice (D-5), alerts, and never retries it against Core", async () => {
       coreFetchMock.mockResolvedValue(
         new Response(JSON.stringify({ error: "service_rfp_conflict", reason: "live_project" }), { status: 409 }),
       );
@@ -608,7 +609,10 @@ describe("service RFP → TROCK Core handoff", () => {
       const result = await runApproval();
 
       expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(executedSql()).toContain("status = 'failed'");
+      // crm_notify_refused, not 'pending': the Core claim (status = 'pending') can never pick it up again. The CRM
+      // notice drain settles it at 'failed' (tests/service-rfp-core-crm-notice.test.ts).
+      expect(updateStatements()).toContain("status = 'crm_notify_refused'");
+      expect(updateStatements()).not.toContain("status = 'pending'");
       // No backoff was scheduled and no second attempt was made: a conflict retried on a schedule is
       // a retry storm against a refusal that can never change.
       expect(executedSql()).not.toContain("next_attempt_at = NOW() +");
@@ -810,7 +814,8 @@ describe("service RFP → TROCK Core handoff", () => {
     expect(body.occurredAt).not.toBe("2026-08-01T00:00:00.000Z");
     expect(Date.parse(body.occurredAt)).toBeGreaterThan(Date.now() - 60_000);
     expect(body.rfp.approvedAt).toBe("2026-08-01T00:00:00.000Z");
-    expect(executedSql()).toContain("status = 'sent'");
+    // Delivered: parked for the CRM's "accepted" notice (D-5), which settles it at 'sent'.
+    expect(executedSql()).toContain("status = 'crm_notify_accepted'");
   });
 
   it("a REDELIVERY differs from the first send in occurredAt and NOTHING else [Codex #76]", async () => {
@@ -903,7 +908,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
       // Without this the namespaced state stays 'failing' forever: no recovery email is ever sent, and
       // the failure debounce swallows the NEXT incident as a repeat of one that already cleared.
-      expect(executedSql()).toContain("status = 'sent'");
+      expect(executedSql()).toContain("status = 'crm_notify_accepted'");
       expect(alertCalls).toHaveLength(1);
       expect(alertCalls[0]).toMatchObject({
         officeSlug: "service-rfp-core:dallas",
@@ -1029,7 +1034,10 @@ describe("service RFP → TROCK Core handoff", () => {
       const predicate = String(insert).split("DO UPDATE")[1] ?? "";
       // A TERMINAL row may be replaced: "failed" covers a Core 4xx that kept its target_url, "dead" an
       // exhausted ladder. Restricting this to never-sent rows is what missed the motivating case.
-      expect(predicate).toMatch(/status IN \('failed', ?'dead'\)/);
+      // "crm_notify_refused" is a Core 409 whose CRM notice is in flight (D-5): as terminal as "failed" for Core.
+      expect(predicate).toMatch(/status IN \('failed', ?'dead', ?'crm_notify_refused'\)/);
+      // A delivered row parked for its "accepted" notice is never replaceable, exactly like 'sent'.
+      expect(predicate).not.toContain("'crm_notify_accepted'");
       // …and only when THIS attempt is deliverable, so a refusal cannot clobber a real queued row.
       expect(predicate).toContain("EXCLUDED.target_url IS NOT NULL");
       // "pending" is never replaceable: overwriting an in-flight row races the worker.
