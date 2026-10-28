@@ -181,12 +181,28 @@ describe('getProjectChangeOrders', () => {
     });
   });
 
-  it('updates nothing when the "Update HubSpot deal amount on Change Orders" switch is off', async () => {
+  it('updates nothing when the "Update HubSpot deal amount on Change Orders" switch is off (is_active still true)', async () => {
     mockStorage.getSyncMappings.mockResolvedValue([
       { hubspotDealId: '321711034098', portfolioProjectId: null, procoreProjectId: '598134326572477' },
     ]);
     mockStorage.getProcoreProjectByProcoreId.mockResolvedValue({ active: true });
-    mockStorage.getAutomationConfig.mockResolvedValue({ key: 'sync_change_orders', value: { enabled: false } });
+    // As stored: the switch writes value.enabled only, and is_active keeps its default (true).
+    mockStorage.getAutomationConfig.mockResolvedValue({ key: 'sync_change_orders', value: { enabled: false }, isActive: true });
+    mockStorage.getSyncMappingByProcoreProjectId.mockResolvedValue({
+      hubspotDealId: '321711034098',
+      procoreProjectId: '598134326572477',
+    });
+    mockStorage.getHubspotDealByHubspotId.mockResolvedValue({ amount: '28571.43' });
+    mockStorage.createAuditLog.mockResolvedValue({ id: 1 });
+    // Everything an update needs is here, so only the switch can stop it.
+    mockClient.get.mockImplementation(async (path: string) => {
+      if (path === '/rest/v1.0/prime_contracts') return { data: [{ grand_total: '28571.43' }] };
+      if (path === '/rest/v1.0/change_order_packages') {
+        return { data: [{ id: 1, number: '001', title: 'Additional Asphalt', status: 'approved', grand_total: '1500.0' }] };
+      }
+      throw new Error(`Unexpected endpoint: ${path}`);
+    });
+    mockUpdateHubSpotDeal.mockResolvedValue({ success: true, message: 'ok' });
 
     const result = await syncAllProjectChangeOrders();
 

@@ -261,7 +261,9 @@ function buildNormalizedFromHubspot(d: {
     normalizedNumber: normalizeProjectNumber(projectNumber || null),
     location,
     amount,
-    stage: d.dealStage || null,
+    // The stage NAME first, as the fetcher's normalizer does (fetcher.ts): comparing the internal id would raise a
+    // false stage conflict against Procore's name and reopen a resolved project.
+    stage: d.dealStageName || d.dealStage || null,
     rawData: snapshot,
   };
 }

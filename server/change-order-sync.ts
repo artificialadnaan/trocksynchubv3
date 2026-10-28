@@ -211,7 +211,9 @@ export async function syncChangeOrdersToHubSpot(procoreProjectId: string): Promi
 }> {
   // Check if change order sync is enabled (Sync Config: "Update HubSpot deal amount on Change Orders")
   const changeOrderSyncConfig = await storage.getAutomationConfig("sync_change_orders");
-  const syncEnabled = (changeOrderSyncConfig?.value as any)?.enabled === true || (changeOrderSyncConfig as any)?.isActive === true;
+  // ONLY value.enabled: it is what the settings switch writes. is_active defaults to true on every stored config and
+  // the switch never clears it, so honouring it kept HubSpot deal amounts updating after an admin turned this off.
+  const syncEnabled = (changeOrderSyncConfig?.value as any)?.enabled === true;
   
   if (!syncEnabled) {
     console.log(`[ChangeOrder] Change order sync disabled - skipping HubSpot update for project ${procoreProjectId}`);
