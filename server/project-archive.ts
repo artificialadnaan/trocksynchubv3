@@ -343,9 +343,9 @@ export async function previewArchive(
   const estimatingCountForTotal = opts.includeEstimating && docs.estimating.length > 0 ? 1 : 0;
   const observationsCount = opts.includeObservations && (docs.observationsData?.length ?? 0) > 0 ? 1 : 0;
   const actionPlansCount = opts.includeActionPlans && (docs.actionPlansData?.length ?? 0) > 0 ? 1 : 0;
-  const weatherLogsCount = opts.includeWeatherLogs && (docs.weatherLogsData?.length ?? 0) > 0 ? 1 : 0;
-  const safetyViolationsCount = opts.includeSafetyViolations && (docs.safetyViolationsData?.length ?? 0) > 0 ? 1 : 0;
-  const accidentLogsCount = opts.includeAccidentLogs && (docs.accidentLogsData?.length ?? 0) > 0 ? 1 : 0;
+  const weatherLogsCount = opts.includeWeatherLogs && (docs.weatherLogs?.length ?? 0) > 0 ? 1 : 0;
+  const safetyViolationsCount = opts.includeSafetyViolations && (docs.safetyViolations?.length ?? 0) > 0 ? 1 : 0;
+  const accidentLogsCount = opts.includeAccidentLogs && (docs.accidentLogs?.length ?? 0) > 0 ? 1 : 0;
 
   const total =
     docCount + drawingsCount + submittalsCount + rfisCount + bidPackagesCount + photosCount +
@@ -391,9 +391,9 @@ export async function previewArchive(
   if (opts.includeEstimating && docs.estimating.length > 0) folderStructure.push(`${basePath}/Estimating`);
   if (opts.includeObservations && (docs.observationsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Observations`);
   if (opts.includeActionPlans && (docs.actionPlansData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Action Plans`);
-  if (opts.includeWeatherLogs && (docs.weatherLogsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Weather Logs`);
-  if (opts.includeSafetyViolations && (docs.safetyViolationsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Safety Violations`);
-  if (opts.includeAccidentLogs && (docs.accidentLogsData?.length ?? 0) > 0) folderStructure.push(`${basePath}/Accident Logs`);
+  if (opts.includeWeatherLogs && (docs.weatherLogs?.length ?? 0) > 0) folderStructure.push(`${basePath}/Weather Logs`);
+  if (opts.includeSafetyViolations && (docs.safetyViolations?.length ?? 0) > 0) folderStructure.push(`${basePath}/Safety Violations`);
+  if (opts.includeAccidentLogs && (docs.accidentLogs?.length ?? 0) > 0) folderStructure.push(`${basePath}/Accident Logs`);
 
   return {
     projectId,
@@ -1177,18 +1177,18 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       }
     }
 
-    if (options.includeWeatherLogs && docs.weatherLogsData?.length > 0) {
+    if (options.includeWeatherLogs && docs.weatherLogs?.length > 0) {
       progress.currentStep = 'Uploading weather logs...';
       await provider.createFolder(`${basePath}/Weather Logs`);
       try {
         const { generateWeatherLogsPdf } = await import('./archive-pdf-generator');
-        const pdfBuffer = await generateWeatherLogsPdf(docs.weatherLogsData, docs.projectName);
+        const pdfBuffer = await generateWeatherLogsPdf(docs.weatherLogs, docs.projectName);
         await uploadDocumentWithRetry(provider, `${basePath}/Weather Logs`, 'weather_logs_report.pdf', pdfBuffer, 'application/pdf');
         filesUploaded++;
       } catch (e: any) {
         console.warn(`[Archive] PDF generation failed for weather logs, falling back to JSON: ${e.message}`);
         try {
-          const json = JSON.stringify(docs.weatherLogsData, null, 2);
+          const json = JSON.stringify(docs.weatherLogs, null, 2);
           await uploadDocumentWithRetry(provider, `${basePath}/Weather Logs`, 'weather_logs_data.json', Buffer.from(json), 'application/json');
           filesUploaded++;
         } catch (e2: any) {
@@ -1197,18 +1197,18 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       }
     }
 
-    if (options.includeSafetyViolations && docs.safetyViolationsData?.length > 0) {
+    if (options.includeSafetyViolations && docs.safetyViolations?.length > 0) {
       progress.currentStep = 'Uploading safety violations...';
       await provider.createFolder(`${basePath}/Safety Violations`);
       try {
         const { generateSafetyViolationsPdf } = await import('./archive-pdf-generator');
-        const pdfBuffer = await generateSafetyViolationsPdf(docs.safetyViolationsData, docs.projectName);
+        const pdfBuffer = await generateSafetyViolationsPdf(docs.safetyViolations, docs.projectName);
         await uploadDocumentWithRetry(provider, `${basePath}/Safety Violations`, 'safety_violations_report.pdf', pdfBuffer, 'application/pdf');
         filesUploaded++;
       } catch (e: any) {
         console.warn(`[Archive] PDF generation failed for safety violations, falling back to JSON: ${e.message}`);
         try {
-          const json = JSON.stringify(docs.safetyViolationsData, null, 2);
+          const json = JSON.stringify(docs.safetyViolations, null, 2);
           await uploadDocumentWithRetry(provider, `${basePath}/Safety Violations`, 'safety_violations_data.json', Buffer.from(json), 'application/json');
           filesUploaded++;
         } catch (e2: any) {
@@ -1217,18 +1217,18 @@ async function runArchive(archiveId: string, projectId: string, options: Archive
       }
     }
 
-    if (options.includeAccidentLogs && docs.accidentLogsData?.length > 0) {
+    if (options.includeAccidentLogs && docs.accidentLogs?.length > 0) {
       progress.currentStep = 'Uploading accident logs...';
       await provider.createFolder(`${basePath}/Accident Logs`);
       try {
         const { generateAccidentLogsPdf } = await import('./archive-pdf-generator');
-        const pdfBuffer = await generateAccidentLogsPdf(docs.accidentLogsData, docs.projectName);
+        const pdfBuffer = await generateAccidentLogsPdf(docs.accidentLogs, docs.projectName);
         await uploadDocumentWithRetry(provider, `${basePath}/Accident Logs`, 'accident_logs_report.pdf', pdfBuffer, 'application/pdf');
         filesUploaded++;
       } catch (e: any) {
         console.warn(`[Archive] PDF generation failed for accident logs, falling back to JSON: ${e.message}`);
         try {
-          const json = JSON.stringify(docs.accidentLogsData, null, 2);
+          const json = JSON.stringify(docs.accidentLogs, null, 2);
           await uploadDocumentWithRetry(provider, `${basePath}/Accident Logs`, 'accident_logs_data.json', Buffer.from(json), 'application/json');
           filesUploaded++;
         } catch (e2: any) {
