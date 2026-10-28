@@ -30,12 +30,16 @@ function refusedRow(fields: Record<string, unknown> = {}) {
     sent_at: null,
     created_at: "2026-10-27T14:59:00.000Z",
     payload: { office: "dallas", rfp: { requestId: 77 }, deal: { id: CRM_DEAL_ID } },
+    // What the claim computes in SQL (the instants, and the generation it settles on).
+    last_attempt_at_ms: Date.parse(REFUSED_AT),
+    sent_at_ms: null,
+    generation: "2026-10-27 15:00:00.123456",
     ...fields,
   };
 }
 
 function acceptedRow(fields: Record<string, unknown> = {}) {
-  return refusedRow({ status: "crm_notify_accepted", last_status_code: 201, last_error: null, attempt_count: 3, last_attempt_at: SENT_AT, sent_at: SENT_AT, ...fields });
+  return refusedRow({ status: "crm_notify_accepted", last_status_code: 201, last_error: null, attempt_count: 3, last_attempt_at: SENT_AT, sent_at: SENT_AT, last_attempt_at_ms: Date.parse(SENT_AT), sent_at_ms: Date.parse(SENT_AT), ...fields });
 }
 
 function statements(): string[] {
@@ -103,6 +107,51 @@ describe("postCoreHandoffToCrm", () => {
   });
 });
 
+describe("postCoreHandoffToCrm bounds (#125 review)", () => {
+  // A body that never ends, but errors when the request's signal aborts, as a real fetch body does.
+  function stalledBodyFetch(status: number) {
+    return vi.fn(async (_url: string, init: RequestInit) => {
+      const body = new ReadableStream({
+        start(controller) {
+          init.signal?.addEventListener("abort", () => controller.error(new Error("aborted")), { once: true });
+        },
+      });
+      return new Response(body, { status });
+    });
+  }
+
+  it("never follows a redirect: the signed POST is sent with redirect 'error'", async () => {
+    const { postCoreHandoffToCrm, crmNoticeForRow } = await load();
+    const fetchImpl = respond(200);
+    await postCoreHandoffToCrm(crmNoticeForRow(refusedRow())!, deps(fetchImpl));
+    expect((fetchImpl.mock.calls[0] as any[])[1].redirect).toBe("error");
+  });
+
+  it("does not wait on a 2xx body", async () => {
+    const { postCoreHandoffToCrm, crmNoticeForRow } = await load();
+    const outcome = await Promise.race([
+      postCoreHandoffToCrm(crmNoticeForRow(refusedRow())!, deps(stalledBodyFetch(200))),
+      new Promise((resolve) => setTimeout(() => resolve("stalled"), 1_000)),
+    ]);
+    expect(outcome).toEqual({ kind: "sent", status: 200 });
+  });
+
+  it("bounds a stalled error body with its own deadline, then treats the answer by its status", async () => {
+    vi.useFakeTimers();
+    try {
+      const { postCoreHandoffToCrm, crmNoticeForRow, CRM_CALLBACK_DEADLINE_MS } = await load();
+      const fetchImpl = stalledBodyFetch(503);
+      const done = postCoreHandoffToCrm(crmNoticeForRow(refusedRow())!, deps(fetchImpl));
+      await vi.advanceTimersByTimeAsync(CRM_CALLBACK_DEADLINE_MS + 100);
+      const outcome = await Promise.race([done, Promise.resolve("still waiting")]);
+      expect(outcome).toEqual(expect.objectContaining({ kind: "retryable", status: 503 }));
+      expect(((fetchImpl.mock.calls[0] as any[])[1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("crmNoticeForRow (the signed body)", () => {
   it("describes a refusal: office, deal, request, Core's reason, when Core refused and on which attempt", async () => {
     const { crmNoticeForRow } = await load();
@@ -146,8 +195,10 @@ describe("notifyCrmForRow", () => {
     // Guarded: a re-drive that replaced the row meanwhile is not overwritten.
     expect(settle).toContain("status = 'crm_notify_refused'");
     for (const column of ["last_error", "last_attempt_at", "attempt_count", "sent_at", "last_status_code"]) {
-      expect(settle).not.toContain(column);
+      expect(settle).not.toMatch(new RegExp(`${column}\\s*=`));
     }
+    // ...and guarded by the generation it was claimed at (an in-flight older notice cannot settle a newer refusal).
+    expect(settle).toContain("last_attempt_at IS NOT DISTINCT FROM");
     expect(alertMock).toHaveBeenCalledWith(expect.objectContaining({ ok: true, event: "refused" }));
   });
 
@@ -223,7 +274,10 @@ describe("the drain", () => {
     expect(claim).toContain("status IN ('crm_notify_refused', 'crm_notify_accepted')");
     expect(claim).toContain("FOR UPDATE SKIP LOCKED");
     expect(claim).not.toContain("attempt_count");
-    expect(claim).not.toContain("last_attempt_at");
+    expect(claim).not.toMatch(/last_attempt_at\s*=/);
+    // The instants and the generation are computed in SQL, never parsed from the zone-less columns in JS.
+    expect(claim).toContain("::timestamptz");
+    expect(claim).toContain("AS generation");
   });
 
   it("tells the CRM about each claimed row", async () => {

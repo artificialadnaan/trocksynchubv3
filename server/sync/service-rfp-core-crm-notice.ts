@@ -34,6 +34,8 @@ export const CRM_NOTIFY_REFUSED_STATUS = "crm_notify_refused" as const;
 export const CRM_NOTIFY_ACCEPTED_STATUS = "crm_notify_accepted" as const;
 /** Stop retrying a day after Core answered (the CRM refuses events older than 48 h anyway). */
 export const CRM_NOTIFY_HORIZON_MS = 24 * 60 * 60 * 1000;
+/** One callback exchange, headers AND body, ends within this (the drain is sequential: one stall must not hold it). */
+export const CRM_CALLBACK_DEADLINE_MS = 10_000;
 const MIN_DELAY_MS = 30_000;
 const MAX_DELAY_MS = 2 * 60 * 60 * 1000;
 
@@ -88,17 +90,34 @@ export async function postCoreHandoffToCrm(
     return { kind: "retryable", error: "TROCK_CRM_BASE_URL or RFP_REQUEST_SYNC_SECRET is not configured" };
   }
   const rawBody = JSON.stringify(payload);
+  // A caller-owned deadline: fetchWithTimeout's own timer stops when the HEADERS arrive, so it cannot bound a CRM that
+  // answers and then stalls the body. Aborting (not abandoning the read) releases the connection.
+  const deadline = new AbortController();
+  const expiry = setTimeout(() => deadline.abort(), CRM_CALLBACK_DEADLINE_MS);
   try {
-    const response = await (deps.fetchImpl ?? fetchWithTimeout)(targetUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-rfp-request-signature": `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`,
+    const response = await (deps.fetchImpl ?? fetchWithTimeout)(
+      targetUrl,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-rfp-request-signature": `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`,
+        },
+        body: rawBody,
+        // Never followed: a 307/308 replays the method, body AND signature header to wherever it points (an http:
+        // target sends both in cleartext, and the signature is valid for that body). A redirect is a transport
+        // failure, retried like one.
+        redirect: "error",
+        signal: deadline.signal,
       },
-      body: rawBody,
-    });
+      CRM_CALLBACK_DEADLINE_MS,
+    );
+    if (response.ok) {
+      // Nothing in a 2xx body is used: do not wait on it.
+      await response.body?.cancel().catch(() => undefined);
+      return { kind: "sent", status: response.status };
+    }
     const text = await response.text().catch(() => "");
-    if (response.ok) return { kind: "sent", status: response.status };
     const error = `CRM core-rfp-handoff callback returned ${response.status}: ${text.slice(0, 200)}`;
     if (response.status === 408 || response.status === 429 || response.status >= 500) {
       return { kind: "retryable", status: response.status, error };
@@ -106,10 +125,22 @@ export async function postCoreHandoffToCrm(
     return { kind: "terminal", status: response.status, error };
   } catch (error: any) {
     return { kind: "retryable", error: `CRM core-rfp-handoff callback failed: ${error?.message || error}` };
+  } finally {
+    clearTimeout(expiry);
   }
 }
 
-/** Claim due rows. Only next_attempt_at moves (a short lease), so the Core evidence on the row is untouched. */
+/**
+ * Claim due rows. Only next_attempt_at moves (a short lease), so the Core evidence on the row is untouched.
+ *
+ * Two values are computed HERE, in SQL, because last_attempt_at and sent_at are `timestamp` WITHOUT time zone (written
+ * by NOW(), so they hold the session TimeZone's wall clock) and node-postgres would parse them in the Node process's
+ * own zone:
+ *   - last_attempt_at_ms / sent_at_ms: the true instants (cast to timestamptz in this same session zone), which feed
+ *     the signed occurredAt, the 24 h horizon and the retry delay;
+ *   - generation: last_attempt_at exactly, as text (microseconds kept). Every answer from Core re-stamps
+ *     last_attempt_at, so it names THIS refusal or acceptance; settle and reschedule match on it.
+ */
 export async function claimCrmNoticeRows(limit = 5): Promise<any[]> {
   const db = await getDb();
   const result = await db.execute(sql`
@@ -124,32 +155,54 @@ export async function claimCrmNoticeRows(limit = 5): Promise<any[]> {
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
      )
-     RETURNING *
+     RETURNING *,
+       (EXTRACT(EPOCH FROM last_attempt_at::timestamptz) * 1000)::float8 AS last_attempt_at_ms,
+       (EXTRACT(EPOCH FROM sent_at::timestamptz) * 1000)::float8 AS sent_at_ms,
+       last_attempt_at::text AS generation
   `);
   return rowsOf(result);
 }
 
-/** Settle at the status the row always ended at. Guarded: a re-drive that replaced the row meanwhile owns it now. */
-async function settle(id: number, parked: string): Promise<void> {
+/** The claimed row's generation (its last_attempt_at, exactly), or null. */
+function generationOf(row: any): string | null {
+  return typeof row?.generation === "string" && row.generation ? row.generation : null;
+}
+
+/**
+ * Settle at the status the row always ended at. Guarded by status AND generation: an operator re-drive that replaced
+ * the row while this callback was in flight, and drew another Core answer, owns the row now, and this older notice
+ * must neither settle nor delay it.
+ */
+async function settle(id: number, parked: string, generation: string | null): Promise<void> {
   const db = await getDb();
   if (parked === CRM_NOTIFY_ACCEPTED_STATUS) {
     await db.execute(sql`
-      UPDATE service_rfp_core_outbox SET status = 'sent' WHERE id = ${id} AND status = 'crm_notify_accepted'
+      UPDATE service_rfp_core_outbox SET status = 'sent'
+       WHERE id = ${id} AND status = 'crm_notify_accepted'
+         AND last_attempt_at IS NOT DISTINCT FROM ${generation}::timestamp
     `);
     return;
   }
   await db.execute(sql`
-    UPDATE service_rfp_core_outbox SET status = 'failed' WHERE id = ${id} AND status = 'crm_notify_refused'
+    UPDATE service_rfp_core_outbox SET status = 'failed'
+     WHERE id = ${id} AND status = 'crm_notify_refused'
+       AND last_attempt_at IS NOT DISTINCT FROM ${generation}::timestamp
   `);
 }
 
-async function reschedule(id: number, parked: string, delayMs: number): Promise<void> {
+async function reschedule(id: number, parked: string, generation: string | null, delayMs: number): Promise<void> {
   const db = await getDb();
   await db.execute(sql`
     UPDATE service_rfp_core_outbox
        SET next_attempt_at = NOW() + ${`${Math.round(delayMs / 1000)} seconds`}::interval
      WHERE id = ${id} AND status = ${parked}
+       AND last_attempt_at IS NOT DISTINCT FROM ${generation}::timestamp
   `);
+}
+
+function instantMs(value: unknown): number {
+  if (value === null || value === undefined || value === "") return NaN;
+  return Number(value);
 }
 
 /** The notice a parked row describes, or null when it cannot describe one (it is then settled without a POST). */
@@ -159,8 +212,10 @@ export function crmNoticeForRow(row: any): CoreHandoffCallbackPayload | null {
   const office = typeof body?.office === "string" && body.office ? body.office : null;
   const sourceDealId = typeof body?.deal?.id === "string" ? body.deal.id : String(row.source_deal_id ?? "");
   const rfpApprovalRequestId = Number(body?.rfp?.requestId ?? row.rfp_request_id);
-  const at = event === "accepted" ? (row.sent_at ?? row.last_attempt_at) : row.last_attempt_at;
-  const occurredMs = at ? new Date(at).getTime() : NaN;
+  // The instants the claim computed in SQL, never a JS parse of the zone-less columns (see claimCrmNoticeRows).
+  const refusedMs = instantMs(row.last_attempt_at_ms);
+  const sentMs = instantMs(row.sent_at_ms);
+  const occurredMs = event === "accepted" ? (Number.isFinite(sentMs) ? sentMs : refusedMs) : refusedMs;
   const attempt = Number(row.attempt_count ?? 0);
   if (!event || !office || !sourceDealId || !Number.isInteger(rfpApprovalRequestId) || !Number.isFinite(occurredMs)) return null;
   if (event === "refused") {
@@ -225,10 +280,11 @@ export async function notifyCrmForRow(
 ): Promise<"sent" | "terminal" | "gave_up" | "retrying"> {
   const id = Number(row.id);
   const parked = String(row.status);
+  const generation = generationOf(row);
   const notice = crmNoticeForRow(row);
   if (!notice) {
     // Nothing this module can describe; never strand the row in a parked state.
-    await settle(id, parked);
+    await settle(id, parked, generation);
     log(`[service-rfp-core] Row ${id} parked for a CRM notice it cannot describe; settled`, "sync");
     if (parked === CRM_NOTIFY_REFUSED_STATUS) await alertSettledFailure(null, row, "the refusal could not be described to the CRM");
     return "terminal";
@@ -236,25 +292,25 @@ export async function notifyCrmForRow(
 
   const outcome = await postCoreHandoffToCrm(notice, deps);
   if (outcome.kind === "sent") {
-    await settle(id, parked);
+    await settle(id, parked, generation);
     await reportNoticeDelivered(notice, row);
     log(`[service-rfp-core] Row ${id}: CRM told Core ${notice.event} RFP request ${notice.rfpApprovalRequestId}`, "sync");
     return "sent";
   }
   if (outcome.kind === "terminal") {
-    await settle(id, parked);
+    await settle(id, parked, generation);
     await alertSettledFailure(notice, row, outcome.error, outcome.status);
     log(`[service-rfp-core] Row ${id}: CRM refused the Core ${notice.event} notice: ${outcome.error}`, "sync");
     return "terminal";
   }
   const elapsed = Math.max(0, (deps.now ?? Date.now)() - new Date(notice.occurredAt).getTime());
   if (elapsed >= CRM_NOTIFY_HORIZON_MS) {
-    await settle(id, parked);
+    await settle(id, parked, generation);
     await alertSettledFailure(notice, row, `gave up after 24 h: ${outcome.error}`, outcome.status);
     log(`[service-rfp-core] Row ${id}: gave up telling the CRM about Core's ${notice.event} after 24 h: ${outcome.error}`, "sync");
     return "gave_up";
   }
-  await reschedule(id, parked, nextCrmNotifyDelayMs(elapsed));
+  await reschedule(id, parked, generation, nextCrmNotifyDelayMs(elapsed));
   return "retrying";
 }
 
