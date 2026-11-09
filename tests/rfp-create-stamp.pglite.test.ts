@@ -187,7 +187,7 @@ describe("RE-ARM (stamp = ROUTE NOW, core; §2 b8 M2 / M5)", () => {
       await enqueueBidboardCreateCommand(e1());
       await pg.exec(`UPDATE rfp_core_create_outbox SET status = '${status}', attempt_count = 4`);
       await enqueueBidboardCreateCommand(e1());
-      expect((await coreRows())[0].status, status).toBe("pending");
+      const rearmedRows = await coreRows(); expect(rearmedRows, status).toHaveLength(1); expect(rearmedRows[0].status, status).toBe("pending");
       expect((await coreRows())[0].attempt_count, status).toBe(0);
     }
   });
@@ -199,7 +199,7 @@ describe("RE-ARM (stamp = ROUTE NOW, core; §2 b8 M2 / M5)", () => {
   });
   it("core create already sent ⇒ E2 is NEVER re-sent; a dead E4 / E5 follow-up ⇒ pending; link_refused is never re-armed", async () => {
     await enqueueBidboardCreateCommand(e1());
-    const id = (await coreRows())[0].id;
+    const createdRows = await coreRows(); expect(createdRows).toHaveLength(1); const id = createdRows[0].id;
     await pg.exec(`UPDATE rfp_core_create_outbox SET status = 'sent', core_bid_id = '00000000-0000-4000-8000-0000000000b1'`);
     await pg.query(
       `INSERT INTO rfp_core_followup_outbox (create_id, kind, payload, status, attempt_count) VALUES ($1, 'crm_link', '{}'::jsonb, 'dead', 6), ($1, 'core_confirm', '{}'::jsonb, 'dead', 6)`,
