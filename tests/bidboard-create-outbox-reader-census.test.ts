@@ -42,7 +42,7 @@ const readers = SCAN_DIRS.flatMap((d) => walk(join(ROOT, d)))
   .map((f) => relative(ROOT, f).split("\\").join("/"))
   .sort();
 
-const NEGATIVE_RE = /\bstatus\s*(<>|!=|NOT\s+IN)\b/i;
+const NEGATIVE_RE = /\bstatus\s*(<>|!=|NOT\s+IN\b)/i;
 const NAMES_ROUTED_CORE_RE = /\bstatus\b[^;\n]*'routed_core'/i;
 
 describe("bidboard_create_outbox reader census (E-8)", () => {
