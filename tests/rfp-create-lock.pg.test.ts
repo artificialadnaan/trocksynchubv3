@@ -32,12 +32,14 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 
 const { enqueueBidboardCreateCommand, processBidboardCreateOutbox } = await import("../server/sync/bidboard-create-worker.ts");
 const { lockRfpCreateDeal, readProcoreFootprint, readCoreFootprint } = await import("../server/sync/rfp-create-lock.ts");
+const { preflightRfpCoreTables } = await import("../server/sync/rfp-core-preflight.ts");
 
 const DDL_0023 = readFileSync(new URL("../migrations/0023_create_bidboard_create_outbox.sql", import.meta.url), "utf8");
 const DDL_0027 = readFileSync(new URL("../migrations/0027_rfp_core_routing.sql", import.meta.url), "utf8");
 
 let admin: pg.Client;
 let pool: pg.Pool;
+let ddlCommittedAt = "";
 const DB_NAME = `s0b_lock_${process.pid}_${Date.now()}`;
 const sql = (text: string, params: unknown[] = []) => pool.query(text, params);
 
@@ -65,6 +67,7 @@ beforeAll(async () => {
   `);
   await sql(DDL_0023); // also drops NOT NULL on bidboard_callback_outbox.rfp_approval_request_id
   await sql(DDL_0027);
+  ddlCommittedAt = (await sql(`SELECT clock_timestamp()::text AS t`)).rows[0].t;
   dbHolder.pool = pool;
   dbHolder.db = drizzle(pool);
 }, 60000);
@@ -129,6 +132,48 @@ const coreStatus = async (key: string) => (await sql(`SELECT status FROM rfp_cor
 const f1Errors = async () =>
   (await sql(`SELECT payload FROM bidboard_callback_outbox WHERE payload->>'status' = 'failed' ORDER BY id`)).rows.map((r) => r.payload.error);
 const alertCodes = () => alertMock.mock.calls.map((c) => c[0]);
+// r2 DIAGNOSTICS (a4): the r1 run saw S0a's preflight read "missing" (to_regclass NULL) on one of 2 concurrent enqueues. For
+// every preflight these guards record, on the SAME pooled session that ran it: the database, backend pid, search_path, both
+// to_regclass results, the same check by an MVCC pg_class / pg_namespace query, and the session's start vs the DDL commit.
+const PREFLIGHT_RE = /to_regclass\('public\.rfp_core_create_outbox'\)/;
+const DIAG_SQL = `
+  SELECT current_database() AS db, pg_backend_pid() AS pid, current_setting('search_path') AS search_path,
+         to_regclass('public.rfp_core_create_outbox')::text AS regclass_create,
+         to_regclass('public.rfp_core_followup_outbox')::text AS regclass_followup,
+         (SELECT count(*)::int FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+           WHERE n.nspname = 'public' AND c.relname IN ('rfp_core_create_outbox', 'rfp_core_followup_outbox')) AS mvcc_tables,
+         (SELECT backend_start::text FROM pg_stat_activity WHERE pid = pg_backend_pid()) AS backend_start`;
+type PreflightCall = Record<string, unknown>;
+/** The test db, except that each preflight query runs on an explicitly checked-out pooled session (what pool.query does
+ *  internally) and that session's diagnostics are recorded right after it, before release. Everything else is untouched. */
+function diagnosingDb(calls: PreflightCall[]) {
+  const real = dbHolder.db;
+  return {
+    transaction: (fn: any, config?: any) => real.transaction(fn, config),
+    execute: async (q: any) => {
+      if (!PREFLIGHT_RE.test(JSON.stringify(q))) return real.execute(q);
+      const client = await pool.connect();
+      try {
+        const res: any = await drizzle(client).execute(q);
+        const diag = (await client.query(DIAG_SQL)).rows[0];
+        calls.push({ preflight: res.rows?.[0] ?? null, ...diag });
+        return res;
+      } finally {
+        client.release();
+      }
+    },
+  };
+}
+async function sessionsSnapshot() {
+  const r = await admin.query(
+    `SELECT pid, datname, backend_type, state, backend_start::text, xact_start::text FROM pg_stat_activity
+      WHERE backend_type IN ('client backend', 'autovacuum worker') ORDER BY pid`,
+  );
+  return r.rows;
+}
+const diagnosis = async (calls: PreflightCall[]) =>
+  JSON.stringify({ ddlCommittedAt, calls, sessions: await sessionsSnapshot() });
+
 async function until(cond: () => Promise<boolean>, ms = 5000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -301,9 +346,25 @@ describe.skipIf(!BASE_URL)("P2 the Procore worker re-checks the Core footprint a
 describe.skipIf(!BASE_URL)("races on one deal (real PG, separate sessions)", () => {
   it("two concurrent posts of the same vote under core ⇒ one command row and one Core row, both calls resolve", async () => {
     process.env.RFP_NONSERVICE_DESTINATION = "core";
-    await Promise.all([enqueueBidboardCreateCommand(e1()), enqueueBidboardCreateCommand(e1())]);
+    const calls: PreflightCall[] = [];
+    const real = dbHolder.db;
+    dbHolder.db = diagnosingDb(calls);
+    let settled: PromiseSettledResult<void>[];
+    try {
+      settled = await Promise.allSettled([enqueueBidboardCreateCommand(e1()), enqueueBidboardCreateCommand(e1())]);
+    } finally {
+      dbHolder.db = real;
+    }
+    const rejected = settled.flatMap((r) => (r.status === "rejected" ? [String((r.reason as any)?.message ?? r.reason)] : []));
+    expect(rejected, await diagnosis(calls)).toEqual([]);
     expect((await sql(`SELECT count(*)::int AS n FROM bidboard_create_outbox`)).rows[0].n).toBe(1);
     expect((await sql(`SELECT count(*)::int AS n FROM rfp_core_create_outbox`)).rows[0].n).toBe(1);
+  });
+  it("the 0027 preflight reads present on every pooled session, 20 at once (r2 diagnostic)", async () => {
+    const calls: PreflightCall[] = [];
+    const db = diagnosingDb(calls);
+    const results = await Promise.all(Array.from({ length: 20 }, () => preflightRfpCoreTables(db as any)));
+    expect(results.filter((r) => r !== "present"), await diagnosis(calls)).toEqual([]);
   });
   it("a core vote arriving while the Procore create runs ⇒ the Procore create proceeds, the Core row is held + F1 (one destination)", async () => {
     await insertCommand(OLD_KEY, "pending", { payload: override({ sourceEventId: OLD_KEY }) });
