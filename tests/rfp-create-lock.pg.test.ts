@@ -13,6 +13,11 @@ import { drizzle } from "drizzle-orm/node-postgres";
 const LIVE = process.env.LIVE === "1";
 const BASE_URL = process.env.DATABASE_URL;
 if (LIVE && !BASE_URL) throw new Error("LIVE=1 needs DATABASE_URL (a real postgres): refusing to skip the S0b lock / footprint tests");
+// r3 HARNESS (a4): r2 showed a same-tick dynamic import reaching the REAL server/db.ts, whose pool then read the runner's BASE
+// database. From here on the environment points at an unroutable sentinel, so any un-mocked db use FAILS LOUDLY (a connection
+// error, so the preflight reads "inconclusive") and can never quietly read another database. The test's own clients use BASE_URL.
+const SENTINEL_DATABASE_URL = "postgres://s0b-real-db-must-not-be-used.invalid:5432/sentinel";
+process.env.DATABASE_URL = SENTINEL_DATABASE_URL;
 
 const dbHolder = vi.hoisted(() => ({ db: null as any, pool: null as any }));
 const alertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
@@ -72,6 +77,7 @@ beforeAll(async () => {
   dbHolder.db = drizzle(pool);
 }, 60000);
 afterAll(async () => {
+  process.env.DATABASE_URL = BASE_URL; // the sentinel must not outlive this file in a reused worker
   if (!BASE_URL) return;
   await pool?.end();
   await admin?.query(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`);
@@ -137,7 +143,8 @@ const alertCodes = () => alertMock.mock.calls.map((c) => c[0]);
 // to_regclass results, the same check by an MVCC pg_class / pg_namespace query, and the session's start vs the DDL commit.
 const PREFLIGHT_RE = /to_regclass\('public\.rfp_core_create_outbox'\)/;
 const DIAG_SQL = `
-  SELECT current_database() AS db, pg_backend_pid() AS pid, current_setting('search_path') AS search_path,
+  SELECT current_database() AS db, pg_backend_pid() AS pid, current_user AS usr, current_setting('search_path') AS search_path,
+         current_setting('application_name') AS application_name,
          to_regclass('public.rfp_core_create_outbox')::text AS regclass_create,
          to_regclass('public.rfp_core_followup_outbox')::text AS regclass_followup,
          (SELECT count(*)::int FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -166,13 +173,16 @@ function diagnosingDb(calls: PreflightCall[]) {
 }
 async function sessionsSnapshot() {
   const r = await admin.query(
-    `SELECT pid, datname, backend_type, state, backend_start::text, xact_start::text FROM pg_stat_activity
+    `SELECT pid, datname, usename, application_name, backend_type, state, backend_start::text, xact_start::text,
+            left(query, 400) AS query FROM pg_stat_activity
       WHERE backend_type IN ('client backend', 'autovacuum worker') ORDER BY pid`,
   );
   return r.rows;
 }
 const diagnosis = async (calls: PreflightCall[]) => {
-  const text = JSON.stringify({ ddlCommittedAt, calls, sessions: await sessionsSnapshot() });
+  const text = JSON.stringify({
+    ddlCommittedAt, envDatabaseUrlIsSentinel: process.env.DATABASE_URL === SENTINEL_DATABASE_URL, calls, sessions: await sessionsSnapshot(),
+  });
   console.log(`[s0b1-r2 preflight diagnosis] ${text}`); // printed pass or fail, so either outcome carries the data
   return text;
 };
