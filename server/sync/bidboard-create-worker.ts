@@ -8,6 +8,7 @@ import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 import { buildBidBoardCreatedCallbackTargetUrl } from "./bidboard-callback-worker";
 import type { CreateFromRfpInput } from "../routes/rfp-requests";
 import {
+  RFP_HELD_CROSS_DESTINATION_STATUS,
   RFP_HELD_DESTINATION_CHANGED_STATUS,
   RFP_ROUTED_CORE_STATUS,
   rfpNonserviceDestinationSetting,
@@ -17,6 +18,7 @@ import {
 } from "./rfp-destination";
 import { preflightRfpCoreTables } from "./rfp-core-preflight";
 import { raiseRfpCoreAlert, type RfpCoreAlertCode } from "./rfp-core-alert";
+import { lockRfpCreateDeal, readCoreFootprint, readProcoreFootprint } from "./rfp-create-lock";
 
 // Durable command outbox for create-from-rfp (findings V1-V4). See shared/schema.ts bidboardCreateOutbox.
 // The endpoint persists a command before its 202; this SERIAL worker (one create at a time, matching the global
@@ -58,8 +60,22 @@ export class UnconfirmedCreateError extends Error {
   }
 }
 
+// The db module is resolved ONCE and every caller shares that promise. In production Node caches the module anyway, so this is
+// behaviour-neutral; it removes a same-tick race in which two concurrent dynamic imports could get past a test's module mock
+// and reach the real db (S0b-1 r2 / r3). A failed import (no DATABASE_URL) is not memoised: the next call imports again.
+let dbModulePromise: Promise<any> | null = null;
+function loadDbModule(): Promise<any> {
+  if (!dbModulePromise) {
+    dbModulePromise = import("../db").catch((err) => {
+      dbModulePromise = null;
+      throw err;
+    });
+  }
+  return dbModulePromise;
+}
+
 async function getDb() {
-  return (await import("../db")).db;
+  return (await loadDbModule()).db;
 }
 
 // The Procore create-command enqueue (finding V3: persisted BEFORE the endpoint's 202). Idempotent on source_event_id:
@@ -245,6 +261,8 @@ function routeInputOf(input: CreateFromRfpInput, approvalKind: string | null): R
   };
 }
 
+type AlertList = Array<[RfpCoreAlertCode, Record<string, unknown>]>;
+
 function firstRow(res: any): any | undefined {
   return (Array.isArray(res) ? res : (res?.rows ?? []))[0];
 }
@@ -257,7 +275,7 @@ async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string)
   const payload = {
     status: "failed" as const,
     sourceDealId: input.sourceDealId,
-    projectNumber: input.deal.projectNumber,
+    projectNumber: input.deal?.projectNumber,
     procoreCompanyId,
     error: reason,
     createdAt: new Date().toISOString(),
@@ -277,6 +295,14 @@ async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string)
   `);
 }
 
+/** §10 cross-destination hold, inside the caller's transaction: F1 'cross_destination_hold' now, the alert after commit. */
+async function holdCrossDestination(
+  tx: any, input: CreateFromRfpInput, heldDestination: RfpDestination, footprint: string[], alerts: AlertList,
+): Promise<void> {
+  await enqueueF1InTx(tx, input, "cross_destination_hold");
+  alerts.push(["cross_destination_hold", { heldDestination, footprint }]);
+}
+
 /**
  * Persist a create-from-rfp command (before the route's 202). RFP Phase 2 (CONTRACT v2.2 §2): the destination is stamped
  * ONCE at first arrival and every later re-post of the same sourceEventId reads it:
@@ -286,7 +312,8 @@ async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string)
  *   - re-attempt: a NON-NULL kind conflict ⇒ refused + alert; a NULL stored kind is ADOPTED once; then stamp ≠ ROUTE NOW ⇒ HELD
  *     (held_destination_changed + alert + F1) unless the row is in flight (§11); stamp = ROUTE NOW ⇒ procore: today's re-queue;
  *     core: RE-ARM failed / dead / refused ⇒ pending, or, once sent, only a dead E4 / E5 follow-up (never E2, never link_refused).
- * Everything runs under ONE per-deal advisory lock `rfp_create:<sourceDealId>` (xact-scoped).
+ * Everything runs under ONE per-deal advisory lock `rfp_create:<sourceDealId>` (xact-scoped), and each create checks the
+ * OTHER destination's footprint under it (§10): found ⇒ held_cross_destination + alert + F1, never a second record.
  */
 export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
   const db = await getDb();
@@ -303,14 +330,14 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
     await runProcoreEnqueueCte(db, input, null);
     return;
   }
-  const alerts: Array<[RfpCoreAlertCode, Record<string, unknown>]> = [];
+  const alerts: AlertList = [];
   await db.transaction(async (tx: any) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"rfp_create:" + input.sourceDealId}))`);
+    await lockRfpCreateDeal(tx, input.sourceDealId);
     const existing = firstRow(await tx.execute(sql`
       SELECT * FROM bidboard_create_outbox WHERE source_event_id = ${input.sourceEventId} FOR UPDATE
     `));
     if (!existing) {
-      await stampFirstArrival(tx, input, route, setting ?? null, kind);
+      await stampFirstArrival(tx, input, route, setting ?? null, kind, alerts);
       return;
     }
     await handleReattempt(tx, input, existing, setting, kind, alerts);
@@ -319,12 +346,26 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
 }
 
 async function stampFirstArrival(
-  tx: any, input: CreateFromRfpInput, route: RfpDestination, setting: string | null, kind: string | null,
+  tx: any, input: CreateFromRfpInput, route: RfpDestination, setting: string | null, kind: string | null, alerts: AlertList,
 ): Promise<void> {
   if (route === "procore") {
+    const core = await readCoreFootprint(tx, input.sourceSystem, input.sourceDealId);
+    if (core.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO bidboard_create_outbox
+          (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at,
+           processed_at, last_error, destination, destination_setting, approval_kind, stamped_at)
+        VALUES (${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null},
+                ${JSON.stringify(input)}::jsonb, ${RFP_HELD_CROSS_DESTINATION_STATUS}, NOW(), NOW(), NOW(), 'cross_destination_hold',
+                'procore', ${setting}, ${kind}, NOW())
+      `);
+      await holdCrossDestination(tx, input, "procore", core, alerts);
+      return;
+    }
     await runProcoreEnqueueCte(tx, input, { setting, kind });
     return;
   }
+  const procore = await readProcoreFootprint(tx, input.sourceSystem, input.sourceDealId);
   const inserted = firstRow(await tx.execute(sql`
     INSERT INTO bidboard_create_outbox
       (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at,
@@ -343,15 +384,18 @@ async function stampFirstArrival(
   `);
   // A still-live Core create for the deal (pending / sending, another round) trips the per-deal partial unique index: the
   // insert throws, the whole transaction rolls back and the CRM retries. The per-deal footprint rules are S0b (§10).
+  // A Procore footprint for the deal ⇒ the Core row is written HELD (no E2 is ever sent from it); the command stays routed.
+  const coreStatus = procore.length > 0 ? RFP_HELD_CROSS_DESTINATION_STATUS : "pending";
   await tx.execute(sql`
     INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
-    VALUES (${inserted.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null}, 'pending')
+    VALUES (${inserted.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null}, ${coreStatus})
   `);
+  if (procore.length > 0) await holdCrossDestination(tx, input, "core", procore, alerts);
 }
 
 async function handleReattempt(
   tx: any, input: CreateFromRfpInput, existing: any, setting: string | undefined, kind: string | null,
-  alerts: Array<[RfpCoreAlertCode, Record<string, unknown>]>,
+  alerts: AlertList,
 ): Promise<void> {
   const stored: string | null = existing.approval_kind ?? null;
   if (stored && kind && stored !== kind) {
@@ -365,6 +409,7 @@ async function handleReattempt(
   const routeNow = routeRfpCreate(routeInputOf(input, effectiveKind), setting);
   if (PROCORE_IN_FLIGHT.has(existing.status)) return; // §11: continues on its stamp
   if (existing.status === RFP_HELD_DESTINATION_CHANGED_STATUS) return; // already held: a person resolves it
+  if (existing.status === RFP_HELD_CROSS_DESTINATION_STATUS) return; // held across destinations: a person resolves it
   if (existing.destination === "procore" && PROCORE_TERMINAL_KEEP.has(existing.status)) {
     await runProcoreEnqueueCte(tx, input, { setting: setting ?? null, kind: effectiveKind });
     return;
@@ -380,6 +425,16 @@ async function handleReattempt(
     return;
   }
   if (existing.destination === "procore") {
+    const core = await readCoreFootprint(tx, input.sourceSystem, input.sourceDealId);
+    if (core.length > 0) {
+      await tx.execute(sql`
+        UPDATE bidboard_create_outbox
+           SET status = ${RFP_HELD_CROSS_DESTINATION_STATUS}, processed_at = NOW(), last_error = 'cross_destination_hold'
+         WHERE id = ${existing.id}
+      `);
+      await holdCrossDestination(tx, input, "procore", core, alerts);
+      return;
+    }
     await runProcoreEnqueueCte(tx, input, { setting: setting ?? null, kind: effectiveKind });
     return;
   }
@@ -392,6 +447,26 @@ async function handleReattempt(
     SELECT * FROM rfp_core_create_outbox
      WHERE source_system = ${input.sourceSystem} AND source_event_id = ${input.sourceEventId} FOR UPDATE
   `));
+  if (!core || CORE_REARMABLE.has(core.status)) {
+    const procore = await readProcoreFootprint(tx, input.sourceSystem, input.sourceDealId);
+    if (procore.length > 0) {
+      if (core) {
+        await tx.execute(sql`
+          UPDATE rfp_core_create_outbox SET status = ${RFP_HELD_CROSS_DESTINATION_STATUS}, last_error = 'cross_destination_hold'
+           WHERE id = ${core.id}
+        `);
+      } else {
+        await tx.execute(sql`
+          INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
+          VALUES (${existing.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null},
+                  ${RFP_HELD_CROSS_DESTINATION_STATUS})
+          ON CONFLICT DO NOTHING
+        `);
+      }
+      await holdCrossDestination(tx, input, "core", procore, alerts);
+      return;
+    }
+  }
   if (!core) {
     await tx.execute(sql`
       INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
@@ -420,6 +495,32 @@ async function handleReattempt(
     `);
   }
   // pending / sending: in flight, nothing to do
+}
+
+/** P2 (§10): true ⇒ the claimed command was held (held_cross_destination + F1 in one transaction, alert after). */
+async function holdClaimedOnCoreFootprint(row: any): Promise<boolean> {
+  const db = await getDb();
+  if ((await preflightRfpCoreTables(db as any)) !== "present") return false; // no Core table ⇒ no Core footprint
+  const sourceSystem = String(row.source_system);
+  const sourceDealId = String(row.source_deal_id);
+  const input = { ...((row.payload ?? {}) as any), sourceSystem, sourceDealId } as CreateFromRfpInput;
+  let footprint: string[] = [];
+  await db.transaction(async (tx: any) => {
+    await lockRfpCreateDeal(tx, sourceDealId);
+    footprint = await readCoreFootprint(tx, sourceSystem, sourceDealId);
+    if (footprint.length === 0) return;
+    await tx.execute(sql`
+      UPDATE bidboard_create_outbox
+         SET status = ${RFP_HELD_CROSS_DESTINATION_STATUS}, processed_at = NOW(), last_error = 'cross_destination_hold'
+       WHERE id = ${row.id}
+    `);
+    await enqueueF1InTx(tx, input, "cross_destination_hold");
+  });
+  if (footprint.length === 0) return false;
+  await raiseRfpCoreAlert("cross_destination_hold", {
+    sourceSystem, sourceDealId, sourceEventId: row.source_event_id, commandId: row.id, heldDestination: "procore", footprint,
+  });
+  return true;
 }
 
 // Claim ONE pending/retryable command at a time (serial → satisfies the same-project-number ordering V1 needs +
@@ -1349,7 +1450,7 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
   let lockClient: { query: (text: string, params?: any[]) => Promise<any>; release: (err?: any) => void } | null = null;
   let locked = false;
   try {
-    const dbModule: any = await import("../db");
+    const dbModule: any = await loadDbModule();
     if (dbModule.pool?.connect) {
       lockClient = await dbModule.pool.connect();
       // Parameterized (not interpolated) even though CREATE_WORKER_LOCK_KEY is a constant — keeps the raw-SQL clean.
@@ -1393,6 +1494,14 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // sibling-recovery guard, so an unreconciled row can't duplicate the project. Breaking here would let this
         // low-id row (re-claimed first every tick) starve ALL later commands — including unrelated deals — until it
         // is manually resolved. Continue so unrelated commands drain.
+        continue;
+      }
+
+      // RFP Phase 2 (CONTRACT v2.2 §10, path P2): the claim made this command's footprint visible ('processing'). Under the
+      // per-deal lock, a Core footprint for the deal HOLDS it before Playwright: a PENDING procore row is not a Procore
+      // footprint, so a core vote may have been routed after this row was queued (d9 iv).
+      if (await holdClaimedOnCoreFootprint(row)) {
+        processed += 1;
         continue;
       }
 

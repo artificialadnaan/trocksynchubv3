@@ -49,3 +49,6 @@ export function routeRfpCreate(r: RouteInput, setting: string | undefined): RfpD
 export const RFP_ROUTED_CORE_STATUS = "routed_core";
 /** The command-row status when a re-attempt's stamp ≠ ROUTE NOW (§2 HELD). A person resolves it. */
 export const RFP_HELD_DESTINATION_CHANGED_STATUS = "held_destination_changed";
+/** A create held because the deal already has the OTHER destination's footprint (§10). A person resolves it. Used on the
+ *  command row (a procore create) and on the Core row (a core create; the command row then stays routed). */
+export const RFP_HELD_CROSS_DESTINATION_STATUS = "held_cross_destination";
