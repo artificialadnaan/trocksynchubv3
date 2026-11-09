@@ -171,8 +171,11 @@ async function sessionsSnapshot() {
   );
   return r.rows;
 }
-const diagnosis = async (calls: PreflightCall[]) =>
-  JSON.stringify({ ddlCommittedAt, calls, sessions: await sessionsSnapshot() });
+const diagnosis = async (calls: PreflightCall[]) => {
+  const text = JSON.stringify({ ddlCommittedAt, calls, sessions: await sessionsSnapshot() });
+  console.log(`[s0b1-r2 preflight diagnosis] ${text}`); // printed pass or fail, so either outcome carries the data
+  return text;
+};
 
 async function until(cond: () => Promise<boolean>, ms = 5000) {
   const end = Date.now() + ms;
