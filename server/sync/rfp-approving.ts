@@ -29,6 +29,18 @@ export type RfpCreateClaimInput = {
   force: boolean;
   /** The F1 written in the hold's own transaction (trock_crm requests only; a HubSpot request has no CRM callback). */
   holdCallback?: { targetUrl: string; payload: Record<string, unknown> } | null;
+  /** S0b-2b (d9 QA): the approval's own inputs, recorded on rfp_approval_approving with the claim (runbook r5 §3B). */
+  recorded?: RecordedApprovalInputs;
+};
+
+/** What the resolve CLI's `recreate` replays. `approvedAttachments.override` null = no override (the deal's own files). */
+export type RecordedApprovalInputs = {
+  approvedBy: string;
+  editedFields: Record<string, unknown>;
+  approvedAttachments: { override: Array<{ name: string; url?: string; _new?: boolean }> | null };
+  force: boolean;
+  /** When every pre-create HubSpot / CRM step reported success; null when one did not (recreate then refuses). */
+  hubspotDoneAt: Date | null;
 };
 
 export type RfpCreateClaim =

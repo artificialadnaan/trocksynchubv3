@@ -255,6 +255,34 @@ export interface RfpReportRow {
   bidBoardUrl: string | null;
   /** Source CRM/HubSpot deep link to the deal; null when unavailable. */
   crmUrl: string | null;
+  /** How `approvalStatus` reads to a person (shared/rfp-status-display): `approving` ⇒ "Creating Bid Board project…". */
+  approvalStatusLabel?: string;
+}
+
+/**
+ * The report's status pair for one request (S0b-2b; d9 Q10): the machine value (declined normalised to rejected, as before)
+ * and the label every surface prints.
+ *
+ * S0b-2b RED: stub. The label is the raw value.
+ */
+export function toReportApprovalStatus(rawStatus: string): { approvalStatus: string; approvalStatusLabel: string } {
+  const approvalStatus = rawStatus === "declined" ? "rejected" : rawStatus;
+  return { approvalStatus, approvalStatusLabel: approvalStatus };
+}
+
+/**
+ * The summary chips' counts (S0b-2b; d9 Q10): an in-progress count (a Bid Board create running) next to pending / approved /
+ * rejected, so the chips add up.
+ *
+ * S0b-2b RED: stub. No in-progress count.
+ */
+export function summarizeApprovals(rows: Array<{ approvalStatus: string }>): { pending: number; approved: number; rejected: number; inProgress: number } {
+  return {
+    pending: rows.filter((r) => r.approvalStatus === "pending").length,
+    approved: rows.filter((r) => r.approvalStatus === "approved").length,
+    rejected: rows.filter((r) => r.approvalStatus === "rejected").length,
+    inProgress: 0,
+  };
 }
 
 /**
@@ -754,7 +782,7 @@ export async function buildRfpReportEmailHtml(options: {
   periodLabel: string;
   rfps: RfpReportRow[];
   changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>;
-  approvalSummary: { pending: number; approved: number; rejected: number };
+  approvalSummary: { pending: number; approved: number; rejected: number; inProgress?: number };
   includeRfpLog: boolean;
   /** @deprecated The raw change-history section was removed in the redesign; this flag is
    *  accepted for backward compatibility but ignored. `changes` is still used for the count stat. */

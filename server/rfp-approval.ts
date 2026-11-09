@@ -1816,6 +1816,35 @@ export async function processRfpApproval(
   }
 }
 
+/**
+ * Runbook r5 §3A (`found`), for scripts/rfp-resolve-approving.ts only: finalise a STUCK `approving` request against the ONE
+ * Procore project the dry-run found, the way a successful create would (approved + bidboard_project_id, the sync mapping, the
+ * CRM `created` callback through the existing outbox) and with NO Procore write. Only a row still `approving` is finalised.
+ *
+ * S0b-2b RED: stub.
+ */
+export async function finaliseApprovingFound(
+  _requestId: number,
+  _bidboardProjectId: string,
+): Promise<{ success: boolean; error?: string }> {
+  return { success: false, error: "not implemented (S0b-2b red)" };
+}
+
+/**
+ * Runbook r5 §3B (`recreate`; d9 QA), for scripts/rfp-resolve-approving.ts only: re-enter the CREATE STEP once, under the deal
+ * lock (lock → the footprint check, excluding this request's own `approving` row → Playwright), with exactly the inputs the
+ * original approval recorded on rfp_approval_approving. No HubSpot writes: the pre-create steps already ran (hubspot_done_at).
+ * Refuses when an input is not recorded ("original approval inputs not recorded"), when hubspot_done_at is NULL, or on any
+ * footprint. The row stays `approving` until the create's normal end.
+ *
+ * S0b-2b RED: stub.
+ */
+export async function recreateApprovingRequest(
+  _requestId: number,
+): Promise<{ success: boolean; error?: string; bidboardProjectId?: string }> {
+  return { success: false, error: "not implemented (S0b-2b red)" };
+}
+
 export async function processRfpDecline(
   token: string,
   declinerEmail: string

@@ -1073,6 +1073,12 @@ export const rfpApprovalApproving = pgTable("rfp_approval_approving", {
   requestId: integer("request_id").primaryKey().references(() => rfpApprovalRequests.id),
   startedAt: timestamp("started_at").notNull().defaultNow(),
   submitAt: timestamp("submit_at"),
+  // S0b-2b (d9 QA): the original approval's inputs, recorded at the flip, for the resolve CLI's `recreate`.
+  approvedBy: text("approved_by"),
+  editedFields: jsonb("edited_fields"),
+  approvedAttachments: jsonb("approved_attachments"),
+  force: boolean("force"),
+  hubspotDoneAt: timestamp("hubspot_done_at"),
 });
 
 export const rfpApprovalEdits = pgTable("rfp_approval_edits", {

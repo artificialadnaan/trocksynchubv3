@@ -22,10 +22,19 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 --     started_at = the flip (same transaction); submit_at = committed before createBidBoardProject starts (NULL ⇒ the
 --     create never started). Written only after the preflight reads present. Created BEFORE the Core tables, so "Core
 --     tables present" implies this table is too.
+--     S0b-2b (d9 QA): the ORIGINAL approval's inputs, recorded in the flip's own transaction, so the resolve CLI's
+--     `recreate` replays exactly them (runbook r5 §3B): approved_by / edited_fields / approved_attachments ({"override":
+--     null | [...]}) / force. hubspot_done_at = the pre-create HubSpot / CRM steps all reported success (NULL ⇒ recreate
+--     refuses). All nullable: a row claimed without them is refused, never replayed.
 CREATE TABLE IF NOT EXISTS rfp_approval_approving (
   request_id integer PRIMARY KEY,
   started_at timestamp NOT NULL DEFAULT now(),
-  submit_at timestamp
+  submit_at timestamp,
+  approved_by text,
+  edited_fields jsonb,
+  approved_attachments jsonb,
+  force boolean,
+  hubspot_done_at timestamp
 );
 -- The WIDER live-request indexes (0021's two stay exactly as they are: no DROP) and the side table's FK. Guarded because a
 -- narrow test schema may have no rfp_approval_requests. Deploy note: the pre-apply collision read must return 0 first.
