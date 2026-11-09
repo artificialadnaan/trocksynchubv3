@@ -16,6 +16,35 @@ DO $$ BEGIN
     ADD CONSTRAINT bidboard_create_outbox_approval_kind_check CHECK (approval_kind IS NULL OR approval_kind IN ('vote', 'override'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- (1b) S0b-2a (§10 path P3; runbook r5): the email path's create-in-progress record. The `approving` STATUS lives on the
+--     request row; its timestamps live HERE, not as rfp_approval_requests columns: the drizzle request table is read
+--     everywhere and SyncHub code can be live before 0027 is, so a column there would break every request read (d9).
+--     started_at = the flip (same transaction); submit_at = committed before createBidBoardProject starts (NULL ⇒ the
+--     create never started). Written only after the preflight reads present. Created BEFORE the Core tables, so "Core
+--     tables present" implies this table is too.
+CREATE TABLE IF NOT EXISTS rfp_approval_approving (
+  request_id integer PRIMARY KEY,
+  started_at timestamp NOT NULL DEFAULT now(),
+  submit_at timestamp
+);
+-- The WIDER live-request indexes (0021's two stay exactly as they are: no DROP) and the side table's FK. Guarded because a
+-- narrow test schema may have no rfp_approval_requests. Deploy note: the pre-apply collision read must return 0 first.
+DO $$ BEGIN
+  IF to_regclass('public.rfp_approval_requests') IS NOT NULL THEN
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rfp_approval_live_source_deal
+      ON rfp_approval_requests(source_system, source_deal_id)
+      WHERE status IN ('pending', 'approving', 'override_approving');
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rfp_approval_live_project_number
+      ON rfp_approval_requests(project_number)
+      WHERE status IN ('pending', 'approving', 'override_approving') AND project_number IS NOT NULL AND project_number != '';
+    BEGIN
+      ALTER TABLE rfp_approval_approving
+        ADD CONSTRAINT rfp_approval_approving_request_id_rfp_approval_requests_id_fk
+        FOREIGN KEY (request_id) REFERENCES rfp_approval_requests(id);
+    EXCEPTION WHEN duplicate_object THEN NULL; END;
+  END IF;
+END $$;
+
 -- (2) E2 (SyncHub → Core create). Its own table: the Procore worker never sees it (§2, §10).
 --     status: pending | sending | sent | refused | failed | dead | held_cross_destination
 CREATE TABLE IF NOT EXISTS rfp_core_create_outbox (
