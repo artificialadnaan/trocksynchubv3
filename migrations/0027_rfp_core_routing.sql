@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS rfp_core_create_outbox (
   refusal_reason text,
   attempt_count integer NOT NULL DEFAULT 0,
   max_attempts integer NOT NULL DEFAULT 6,
+  -- Set true BEFORE the first E2 send and never reset (a RE-ARM resets attempt_count, so attempt_count can't tell). A held
+  -- row that never sent E2 made no bid and is NOT a Core footprint; one that ever sent may have (d9, S0b; §10 FOOTPRINT).
+  e2_ever_sent boolean NOT NULL DEFAULT false,
   last_error text,
   last_status_code integer,
   core_bid_id text,

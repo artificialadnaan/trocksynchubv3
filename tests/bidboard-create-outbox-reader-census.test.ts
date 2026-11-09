@@ -15,7 +15,7 @@ const SCAN_DIRS = ["server", "shared", "client", "scripts", "script"];
 const TABLE_RE = /bidboard_create_outbox|bidboardCreateOutbox/;
 
 /** Files allowed to reference the table (paths relative to the repo root). A new one must be classified here first. */
-const READER_FILES = ["scripts/migrate-multi-source-rfp.ts", "server/sync/bidboard-create-worker.ts", "shared/schema.ts"];
+const READER_FILES = ["scripts/migrate-multi-source-rfp.ts", "server/sync/bidboard-create-worker.ts", "server/sync/rfp-create-lock.ts", "shared/schema.ts"];
 
 /** Negative / routed_core-naming status predicates, by exact trimmed line, with WHY routed_core is handled. */
 const CLASSIFIED: Record<string, string> = {
@@ -23,6 +23,10 @@ const CLASSIFIED: Record<string, string> = {
     "re-queue sibling guard: a NEWER routed_core row for the deal is a live round ⇒ an older failed Procore round is NOT re-queued (desired; the footprint rule then holds it)",
   "AND nb.status NOT IN ('superseded', 'failed')":
     "done-branch sibling guard: same as above, routed_core counted as a live newer round by design",
+  "AND status <> 'refused'":
+    "S0b Core footprint (rfp_create_lock), on rfp_core_create_outbox, not the command table: a refused Core create made no bid",
+  "AND (status <> 'held_cross_destination' OR e2_ever_sent)":
+    "S0b Core footprint (rfp_create_lock), on rfp_core_create_outbox: a held Core row counts only once an E2 was ever sent (d9)",
 };
 
 function walk(dir: string): string[] {
