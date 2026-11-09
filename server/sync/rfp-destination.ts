@@ -35,6 +35,17 @@ export function effectiveTypeDigit(deal: RouteInput["deal"]): string | null {
   return parseProjectTypeFromNumber(deal.projectNumber ?? "") ?? (deal.projectType?.trim() || null);
 }
 
-export function routeRfpCreate(_r: RouteInput, _setting: string | undefined): RfpDestination {
-  return "procore"; // RED STUB (S0a): replaced by the real ROUTE(r)
+export function routeRfpCreate(r: RouteInput, setting: string | undefined): RfpDestination {
+  if (setting !== "core") return "procore"; // (a)
+  if (r.ingress !== "create-from-rfp" || r.sourceSystem !== "trock_crm" || r.decision !== "approved") return "procore"; // (b)
+  if (r.approvalKind !== "vote") return "procore"; // (c)
+  if (effectiveTypeDigit(r.deal) === "4") return "procore"; // (d)
+  const n = r.deal.projectNumber;
+  if (typeof n !== "string" || !CRM_FORMAT_PROJECT_NUMBER_RE.test(n)) return "procore"; // (e)
+  return "core";
 }
+
+/** The command-row status of a core-stamped create: never claimable by the Procore worker (claim filters destination). */
+export const RFP_ROUTED_CORE_STATUS = "routed_core";
+/** The command-row status when a re-attempt's stamp ≠ ROUTE NOW (§2 HELD). A person resolves it. */
+export const RFP_HELD_DESTINATION_CHANGED_STATUS = "held_destination_changed";

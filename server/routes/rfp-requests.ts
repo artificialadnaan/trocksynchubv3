@@ -87,6 +87,24 @@ export type RfpRequestBody = z.infer<typeof rfpRequestBodySchema>;
 // must be exactly "approved".
 export const createFromRfpBodySchema = rfpRequestBodySchema.extend({
   decision: z.literal("approved"),
+  // RFP Phase 2 (CONTRACT v2.2 §3): additive E1 fields, every one OPTIONAL and SOFT exactly like ownerEmail above — a
+  // malformed value is DROPPED, never a 422, and an old CRM body (none of them) parses unchanged. A dropped / absent
+  // approvalKind ⇒ ROUTE = procore (server/sync/rfp-destination.ts), i.e. today's behaviour.
+  approvalKind: z.enum(["vote", "override"]).optional().catch(undefined),
+  approval: z.object({
+    roundEventId: z.string().trim().min(1).nullable(),
+    approvals: z.number().int().nonnegative(),
+    rejections: z.number().int().nonnegative(),
+    invitedVoterCount: z.number().int().nonnegative(),
+    decidedAt: z.string().trim().datetime({ offset: true }),
+  }).optional().catch(undefined),
+  office: z.string().trim().min(1).optional().catch(undefined),
+  // Files the CRM left out to stay under its body budget (a COUNT, not a size; CRM rfp-payload.ts:454,573,726). Absent ⇒ 0.
+  attachmentsOmitted: z.number().int().nonnegative().optional().catch(undefined),
+  deal: rfpRequestBodySchema.shape.deal.extend({
+    // The CRM's scope title (rfp-payload.ts:710; blank ⇒ null). E2 carries it verbatim; absent on an old body ⇒ null.
+    scopeTitle: z.string().trim().nullable().optional().catch(undefined),
+  }),
 });
 export type CreateFromRfpInput = z.infer<typeof createFromRfpBodySchema>;
 

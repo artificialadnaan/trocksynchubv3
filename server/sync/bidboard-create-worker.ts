@@ -7,6 +7,16 @@ import { buildSourceDealUrl, checkRfpApprovalSourceEligibility, normalizedDealDa
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 import { buildBidBoardCreatedCallbackTargetUrl } from "./bidboard-callback-worker";
 import type { CreateFromRfpInput } from "../routes/rfp-requests";
+import {
+  RFP_HELD_DESTINATION_CHANGED_STATUS,
+  RFP_ROUTED_CORE_STATUS,
+  rfpNonserviceDestinationSetting,
+  routeRfpCreate,
+  type RfpDestination,
+  type RouteInput,
+} from "./rfp-destination";
+import { preflightRfpCoreTables } from "./rfp-core-preflight";
+import { raiseRfpCoreAlert, type RfpCoreAlertCode } from "./rfp-core-alert";
 
 // Durable command outbox for create-from-rfp (findings V1-V4). See shared/schema.ts bidboardCreateOutbox.
 // The endpoint persists a command before its 202; this SERIAL worker (one create at a time, matching the global
@@ -52,11 +62,13 @@ async function getDb() {
   return (await import("../db")).db;
 }
 
-// Persist a create command (called by the endpoint BEFORE its 202 — finding V3). Idempotent on source_event_id:
+// The Procore create-command enqueue (finding V3: persisted BEFORE the endpoint's 202). Idempotent on source_event_id:
 // a duplicate delivery is a no-op; a previously FAILED command is re-queued (the CRM's rep-driven retry re-POSTs
 // the same source_event_id, so DO NOTHING would otherwise strand the retry).
-export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
-  const db = await getDb();
+// The Procore create-command enqueue (the atomic insert / re-queue / supersede CTE). With stamp = null it is the EXACT
+// pre-Phase-2 statement (0027 not applied yet); with a stamp it also writes the four 0027 stamp columns on INSERT. The
+// ON CONFLICT re-queue never touches them: a stamp is written once, at first arrival (CONTRACT v2.2 §2).
+async function runProcoreEnqueueCte(db: any, input: CreateFromRfpInput, stamp: ProcoreStamp | null): Promise<void> {
   // finding (atomic enqueue+supersede): the INSERT and the same-deal supersede run as ONE statement via a
   // data-modifying CTE. Two separate statements leave a window where the INSERT has committed but the supersede
   // hasn't run yet, during which a worker tick (this or another instance) can claim the older pending row (flip it
@@ -75,10 +87,10 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
   await db.execute(sql`
     WITH upsert AS (
     INSERT INTO bidboard_create_outbox
-      (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at)
+      (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at${stamp ? sql`, destination, destination_setting, approval_kind, stamped_at` : sql``})
     VALUES (
       ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId},
-      ${input.deal.projectNumber ?? null}, ${JSON.stringify(input)}::jsonb, 'pending', NOW(), NOW()
+      ${input.deal.projectNumber ?? null}, ${JSON.stringify(input)}::jsonb, 'pending', NOW(), NOW()${stamp ? sql`, 'procore', ${stamp.setting}, ${stamp.kind}, NOW()` : sql``}
     )
     ON CONFLICT (source_event_id) DO UPDATE
       -- finding Y4: refresh the stored payload + project_number + source fields on re-queue. A rep who corrected
@@ -204,6 +216,212 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
   `);
 }
 
+// ── RFP Phase 2: the destination stamp (CONTRACT v2.2 §2, §10, §11) ──────────────────────────────────────────────
+type ProcoreStamp = { setting: string | null; kind: string | null };
+
+/** In flight on the Procore side: a re-post is not a re-attempt, so the row continues on its stamp (§11). */
+const PROCORE_IN_FLIGHT = new Set(["processing", "reclaiming", "needs_manual"]);
+/**
+ * Terminal Procore outcomes a cross-flip re-post must NOT turn into held: 'done' means a Procore project exists (the re-post
+ * is the CRM's callback-recovery retry, and an F1 'failed' would contradict it); 'superseded' is a retired round. Both keep
+ * today's re-queue statement (recovery / no-op). The per-deal footprint (S0b) covers a Procore project vs a core route.
+ */
+const PROCORE_TERMINAL_KEEP = new Set(["done", "superseded"]);
+/** A core create not yet sent that a matching re-post may re-arm (§2 RE-ARM; never from an in-flight status). */
+const CORE_REARMABLE = new Set(["failed", "dead", "refused"]);
+
+function approvalKindOf(input: CreateFromRfpInput): string | null {
+  const k = (input as any).approvalKind;
+  return k === "vote" || k === "override" ? k : null;
+}
+
+function routeInputOf(input: CreateFromRfpInput, approvalKind: string | null): RouteInput {
+  return {
+    ingress: "create-from-rfp",
+    sourceSystem: input.sourceSystem,
+    decision: (input as any).decision ?? null,
+    approvalKind,
+    deal: { projectNumber: input.deal?.projectNumber ?? null, projectType: input.deal?.projectType ?? null },
+  };
+}
+
+function firstRow(res: any): any | undefined {
+  return (Array.isArray(res) ? res : (res?.rows ?? []))[0];
+}
+
+/** F1 (§10): the existing failed callback to the CRM, written INSIDE the caller's transaction, reason code VERBATIM in `error`. */
+async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string): Promise<void> {
+  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
+  if (!targetUrl) throw new Error("TROCK_CRM_BASE_URL not configured; cannot enqueue the RFP routing F1 failed callback");
+  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+  const payload = {
+    status: "failed" as const,
+    sourceDealId: input.sourceDealId,
+    projectNumber: input.deal.projectNumber,
+    procoreCompanyId,
+    error: reason,
+    createdAt: new Date().toISOString(),
+  };
+  await tx.execute(sql`
+    DELETE FROM bidboard_callback_outbox
+     WHERE source_system = ${input.sourceSystem}
+       AND source_deal_id = ${input.sourceDealId}
+       AND rfp_approval_request_id IS NULL
+       AND status = 'pending'
+       AND payload->>'createdAt' IS NOT NULL
+       AND (payload->>'createdAt')::timestamptz <= ${payload.createdAt}::timestamptz
+  `);
+  await tx.execute(sql`
+    INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+    VALUES (${input.sourceSystem}, ${input.sourceDealId}, NULL, ${JSON.stringify(payload)}::jsonb, ${targetUrl}, 'pending')
+  `);
+}
+
+/**
+ * Persist a create-from-rfp command (before the route's 202). RFP Phase 2 (CONTRACT v2.2 §2): the destination is stamped
+ * ONCE at first arrival and every later re-post of the same sourceEventId reads it:
+ *   - 0027 not applied: ROUTE procore ⇒ today's statement, unchanged; ROUTE core ⇒ HOLD (throw ⇒ 500; the CRM retries) + alert;
+ *   - first arrival: procore ⇒ today's CTE + the stamp columns; core ⇒ a routed_core command row + ONE pending rfp_core_create_outbox
+ *     row, in one transaction (an older still-pending Procore round for the deal is superseded, as today);
+ *   - re-attempt: a NON-NULL kind conflict ⇒ refused + alert; a NULL stored kind is ADOPTED once; then stamp ≠ ROUTE NOW ⇒ HELD
+ *     (held_destination_changed + alert + F1) unless the row is in flight (§11); stamp = ROUTE NOW ⇒ procore: today's re-queue;
+ *     core: RE-ARM failed / dead / refused ⇒ pending, or, once sent, only a dead E4 / E5 follow-up (never E2, never link_refused).
+ * Everything runs under ONE per-deal advisory lock `rfp_create:<sourceDealId>` (xact-scoped).
+ */
+export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
+  const db = await getDb();
+  const setting = rfpNonserviceDestinationSetting();
+  const kind = approvalKindOf(input);
+  const route = routeRfpCreate(routeInputOf(input, kind), setting);
+  const tables = await preflightRfpCoreTables(db as any);
+  const ids = { sourceSystem: input.sourceSystem, sourceDealId: input.sourceDealId, sourceEventId: input.sourceEventId };
+  if (tables !== "present") {
+    if (route === "core") {
+      await raiseRfpCoreAlert("core_tables_missing", { ...ids, preflight: tables });
+      throw new Error(`RFP core tables missing (0027 not applied, preflight=${tables}): refusing to route an eligible vote; HOLD, no Procore fallback`);
+    }
+    await runProcoreEnqueueCte(db, input, null);
+    return;
+  }
+  const alerts: Array<[RfpCoreAlertCode, Record<string, unknown>]> = [];
+  await db.transaction(async (tx: any) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"rfp_create:" + input.sourceDealId}))`);
+    const existing = firstRow(await tx.execute(sql`
+      SELECT * FROM bidboard_create_outbox WHERE source_event_id = ${input.sourceEventId} FOR UPDATE
+    `));
+    if (!existing) {
+      await stampFirstArrival(tx, input, route, setting ?? null, kind);
+      return;
+    }
+    await handleReattempt(tx, input, existing, setting, kind, alerts);
+  });
+  for (const [code, detail] of alerts) await raiseRfpCoreAlert(code, { ...ids, ...detail });
+}
+
+async function stampFirstArrival(
+  tx: any, input: CreateFromRfpInput, route: RfpDestination, setting: string | null, kind: string | null,
+): Promise<void> {
+  if (route === "procore") {
+    await runProcoreEnqueueCte(tx, input, { setting, kind });
+    return;
+  }
+  const inserted = firstRow(await tx.execute(sql`
+    INSERT INTO bidboard_create_outbox
+      (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at,
+       destination, destination_setting, approval_kind, stamped_at)
+    VALUES (${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null},
+            ${JSON.stringify(input)}::jsonb, ${RFP_ROUTED_CORE_STATUS}, NOW(), NOW(), 'core', ${setting}, ${kind}, NOW())
+    RETURNING id
+  `));
+  // An older still-pending round for the deal (either destination) is retired, as today's enqueue does for Procore.
+  await tx.execute(sql`
+    UPDATE bidboard_create_outbox
+       SET status = 'superseded', processed_at = NOW(),
+           last_error = 'superseded by a newer create command for the same source deal'
+     WHERE source_system = ${input.sourceSystem} AND source_deal_id = ${input.sourceDealId}
+       AND status = 'pending' AND id < ${inserted.id}
+  `);
+  // A still-live Core create for the deal (pending / sending, another round) trips the per-deal partial unique index: the
+  // insert throws, the whole transaction rolls back and the CRM retries. The per-deal footprint rules are S0b (§10).
+  await tx.execute(sql`
+    INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
+    VALUES (${inserted.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null}, 'pending')
+  `);
+}
+
+async function handleReattempt(
+  tx: any, input: CreateFromRfpInput, existing: any, setting: string | undefined, kind: string | null,
+  alerts: Array<[RfpCoreAlertCode, Record<string, unknown>]>,
+): Promise<void> {
+  const stored: string | null = existing.approval_kind ?? null;
+  if (stored && kind && stored !== kind) {
+    alerts.push(["approval_kind_conflict", { stored, received: kind, commandId: existing.id }]);
+    return; // refused: never re-stamped, nothing refreshed
+  }
+  const effectiveKind = stored ?? kind;
+  if (!stored && kind) {
+    await tx.execute(sql`UPDATE bidboard_create_outbox SET approval_kind = ${kind} WHERE id = ${existing.id} AND approval_kind IS NULL`);
+  }
+  const routeNow = routeRfpCreate(routeInputOf(input, effectiveKind), setting);
+  if (PROCORE_IN_FLIGHT.has(existing.status)) return; // §11: continues on its stamp
+  if (existing.status === RFP_HELD_DESTINATION_CHANGED_STATUS) return; // already held: a person resolves it
+  if (existing.destination === "procore" && PROCORE_TERMINAL_KEEP.has(existing.status)) {
+    await runProcoreEnqueueCte(tx, input, { setting: setting ?? null, kind: effectiveKind });
+    return;
+  }
+  if (existing.destination !== routeNow) {
+    await tx.execute(sql`
+      UPDATE bidboard_create_outbox
+         SET status = ${RFP_HELD_DESTINATION_CHANGED_STATUS}, processed_at = NOW(), last_error = 'destination_changed_hold'
+       WHERE id = ${existing.id}
+    `);
+    await enqueueF1InTx(tx, input, "destination_changed_hold");
+    alerts.push(["destination_changed_hold", { stamped: existing.destination, routeNow, commandId: existing.id }]);
+    return;
+  }
+  if (existing.destination === "procore") {
+    await runProcoreEnqueueCte(tx, input, { setting: setting ?? null, kind: effectiveKind });
+    return;
+  }
+  // core, stamp = ROUTE NOW
+  if (existing.source_deal_id !== input.sourceDealId) {
+    alerts.push(["source_event_reused", { storedDealId: existing.source_deal_id, commandId: existing.id }]);
+    return;
+  }
+  const core = firstRow(await tx.execute(sql`
+    SELECT * FROM rfp_core_create_outbox
+     WHERE source_system = ${input.sourceSystem} AND source_event_id = ${input.sourceEventId} FOR UPDATE
+  `));
+  if (!core) {
+    await tx.execute(sql`
+      INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
+      VALUES (${existing.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null}, 'pending')
+      ON CONFLICT DO NOTHING
+    `);
+    return;
+  }
+  if (CORE_REARMABLE.has(core.status)) {
+    await tx.execute(sql`UPDATE bidboard_create_outbox SET payload = ${JSON.stringify(input)}::jsonb WHERE id = ${existing.id}`);
+    await tx.execute(sql`
+      UPDATE rfp_core_create_outbox
+         SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL, refusal_reason = NULL,
+             project_number = ${input.deal.projectNumber ?? null}
+       WHERE id = ${core.id}
+    `);
+    return;
+  }
+  if (core.status === "sent") {
+    // Core created the bid: NEVER re-send E2. Re-arm a dead E4 / E5 follow-up only (the rep's Retry after a dead link);
+    // a link_refused E4 is never re-armed (a person resolves it).
+    await tx.execute(sql`
+      UPDATE rfp_core_followup_outbox
+         SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL
+       WHERE create_id = ${core.id} AND kind IN ('crm_link', 'core_confirm') AND status = 'dead'
+    `);
+  }
+  // pending / sending: in flight, nothing to do
+}
+
 // Claim ONE pending/retryable command at a time (serial → satisfies the same-project-number ordering V1 needs +
 // keeps at most one Playwright create in flight, matching withBrowserLock). FOR UPDATE SKIP LOCKED so overlapping
 // ticks can't double-claim. Also RE-CLAIMS a stale 'processing' row (finding X3): if the worker crashed after
@@ -227,6 +445,10 @@ export async function claimNextBidboardCreateCommand(excludeIds: Iterable<number
   // ids come from row.id (DB serial) — coerce to finite integers, so raw interpolation carries no injection risk.
   const excluded = Array.from(excludeIds, Number).filter((n) => Number.isInteger(n));
   const excludeClause = excluded.length > 0 ? sql`AND id NOT IN (${sql.raw(excluded.join(","))})` : sql``;
+  // RFP Phase 2 (CONTRACT v2.2 §2): never claim a core-stamped command, whatever its status. Only once 0027 exists (the
+  // column does not before); until then every row is a Procore row and the claim is today's statement.
+  const destinationClause =
+    (await preflightRfpCoreTables(db as any)) === "present" ? sql`AND destination = 'procore'` : sql``;
   const result = await db.execute(sql`
     UPDATE bidboard_create_outbox
        SET status = 'processing', last_attempt_at = NOW(), attempt_count = attempt_count + 1
@@ -267,6 +489,7 @@ export async function claimNextBidboardCreateCommand(excludeIds: Iterable<number
           -- the pass runs — otherwise a long pass burns all its max_attempts in one go. This is duration-independent
           -- (unlike a time-based backoff); the row is re-claimable on the NEXT tick's pass (fresh exclusion set).
           ${excludeClause}
+          ${destinationClause}
         -- finding: drain by the immutable serial id (arrival order), NOT created_at. created_at is REFRESHED to
         -- NOW() when a still-pending/failed command is re-queued (Y4), which would reorder the FIFO drain and let a
         -- later-arrived same-project-number command create/link the project first while the corrected original then
