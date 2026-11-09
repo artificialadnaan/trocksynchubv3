@@ -270,7 +270,14 @@ describe.skipIf(!BASE_URL)("processRfpApproval email path (V3) on real PG", () =
   });
   it("a double click (two approvals of one token at once) ⇒ exactly one Playwright create; the other reads 'Request already approving'", async () => {
     const { token } = await insertRequest("pending");
-    const results = await Promise.all([processRfpApproval(token, {}, APPROVER), processRfpApproval(token, {}, APPROVER)]);
+    // The create is HELD until the losing call has returned, so the loser deterministically meets the in-flight row (green1 showed
+    // an instant mock lets the winner approve first, and the loser then reads "approved").
+    let release: ((v: unknown) => void) | undefined;
+    createMock.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const calls = [processRfpApproval(token, {}, APPROVER), processRfpApproval(token, {}, APPROVER)];
+    await Promise.race(calls);
+    release?.({ success: true, projectId: "900111" });
+    const results = await Promise.all(calls);
     expect(createMock).toHaveBeenCalledTimes(1);
     expect(results).toContainEqual({ success: false, error: "Request already approving" });
   });
