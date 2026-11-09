@@ -109,7 +109,6 @@ export function registerReportsRoutes(app: Express, requireAuth: RequestHandler)
       timezone: body.timezone || "America/Chicago",
       recipients: Array.isArray(body.recipients) ? body.recipients : [],
       includeRfpLog: body.includeRfpLog ?? body.include_rfp_log ?? true,
-      includeChangeHistory: body.includeChangeHistory ?? body.include_change_history ?? true,
       includeApprovalSummary: body.includeApprovalSummary ?? body.include_approval_summary ?? true,
     });
     res.json(config);

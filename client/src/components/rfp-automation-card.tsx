@@ -97,7 +97,6 @@ interface ScheduleConfig {
   timezone: string;
   recipients: string[];
   includeRfpLog: boolean;
-  includeChangeHistory: boolean;
   includeApprovalSummary: boolean;
 }
 
@@ -637,7 +636,6 @@ function ScheduledEmailsTab() {
   const [recipients, setRecipients] = useState<string[]>(config?.recipients ?? []);
   const [recipientInput, setRecipientInput] = useState("");
   const [includeRfpLog, setIncludeRfpLog] = useState(config?.includeRfpLog ?? true);
-  const [includeChangeHistory, setIncludeChangeHistory] = useState(config?.includeChangeHistory ?? true);
   const [includeApprovalSummary, setIncludeApprovalSummary] = useState(config?.includeApprovalSummary ?? true);
 
   React.useEffect(() => {
@@ -649,7 +647,6 @@ function ScheduledEmailsTab() {
       setTimezone(config.timezone ?? "America/Chicago");
       setRecipients(config.recipients ?? []);
       setIncludeRfpLog(config.includeRfpLog ?? true);
-      setIncludeChangeHistory(config.includeChangeHistory ?? true);
       setIncludeApprovalSummary(config.includeApprovalSummary ?? true);
     }
   }, [config]);
@@ -664,7 +661,6 @@ function ScheduledEmailsTab() {
         timezone,
         recipients,
         includeRfpLog,
-        includeChangeHistory,
         includeApprovalSummary,
       });
       return res.json();
@@ -809,16 +805,6 @@ function ScheduledEmailsTab() {
                 />
                 <label htmlFor="include-rfp-log" className="text-sm cursor-pointer">
                   RFP Send Log
-                </label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="include-change-history"
-                  checked={includeChangeHistory}
-                  onCheckedChange={(v) => setIncludeChangeHistory(!!v)}
-                />
-                <label htmlFor="include-change-history" className="text-sm cursor-pointer">
-                  Change History
                 </label>
               </div>
               <div className="flex items-center space-x-2">

@@ -756,9 +756,6 @@ export async function buildRfpReportEmailHtml(options: {
   changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>;
   approvalSummary: { pending: number; approved: number; rejected: number };
   includeRfpLog: boolean;
-  /** @deprecated The raw change-history section was removed in the redesign; this flag is
-   *  accepted for backward compatibility but ignored. `changes` is still used for the count stat. */
-  includeChangeHistory?: boolean;
   includeApprovalSummary: boolean;
   /** The span the estimates lookup actually asked for, so the section can caption itself honestly. */
   estimatesPeriod?: { from: Date; to: Date };
