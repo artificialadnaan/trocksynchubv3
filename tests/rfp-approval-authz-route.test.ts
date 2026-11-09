@@ -26,6 +26,9 @@ vi.mock("../server/storage.ts", () => ({
   },
 }));
 
+// The route imports the real service-retype gate, whose builder module logs through server/index.ts.
+vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
+
 vi.mock("../server/rfp-approval.ts", async () => {
   // Use the REAL canonical-type resolver (the dependency-free source of truth in constants.ts) so the
   // route's baseline/created gate is exercised against the exact derivation the processor uses — and
@@ -84,6 +87,37 @@ describe("RFP approve/decline route authorization", () => {
     processRfpApprovalMock.mockClear();
     processRfpDeclineMock.mockClear();
     requestRow.current = makeRequest();
+  });
+
+  it("refuses a CRM RFP retyped to service without Core's fields: 422 before the 202, nothing dispatched", async () => {
+    // trockcrm#1479. The approval runs in the background after the 202, so the refusal has to happen here to reach
+    // the approver's screen at all.
+    requestRow.current = makeRequest({
+      sourceSystem: "trock_crm",
+      sourceDealId: "1b4e28ba-2fa1-4d3b-a3f5-ef19b5a7633b",
+      hubspotDealId: null,
+      projectNumber: "DFW-2-42001",
+      dealData: {
+        dealname: "Roof leak", project_number: "DFW-2-42001", project_types: "2", attachments: [], description: "Scope",
+        company_name: "Oak Plaza LLC", crm_company_id: "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f607", crm_property_id: null,
+      },
+    });
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "cburling@trockgc.com");
+      form.append("editedFields", JSON.stringify({ project_types: "4" }));
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+      const body = await response.json();
+
+      expect(response.status).toBe(422);
+      expect(body).toMatchObject({ success: false, error: "service_retype_incomplete" });
+      expect(body.message).toMatch(/property/);
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+      expect(auditRows.at(-1)).toMatchObject({
+        action: "rfp_approval_attempt",
+        details: expect.objectContaining({ outcome: "service_retype_incomplete" }),
+      });
+    });
   });
 
   it("rejects an unauthorized approver with 403 and audits the attempt", async () => {

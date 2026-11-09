@@ -45,6 +45,8 @@ describe("RFP approval route", () => {
     };
 
     vi.doMock("../server/storage.ts", () => ({ storage }));
+    // The route imports the real service-retype gate, whose builder module logs through server/index.ts.
+    vi.doMock("../server/index.ts", () => ({ log: vi.fn() }));
     vi.doMock("../server/rfp-approval.ts", () => ({
       processRfpApproval,
       resolveRfpDescription: vi.fn(() => ""),
