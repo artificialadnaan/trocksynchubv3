@@ -25,6 +25,15 @@ let pool: pg.Pool;
 const DB_NAME = `s0b2_parity_${process.pid}_${Date.now()}`;
 const q = (text: string, params: unknown[] = []) => pool.query(text, params);
 
+/** Teardown: pool.end() can resolve before the server has closed its sessions; DROP … WITH (FORCE) would then kill them and the
+ *  late 57P01 surfaces as an unhandled error. Wait (bounded) until the database has no sessions first. */
+async function waitNoSessions(name: string) {
+  for (let i = 0; i < 100; i++) {
+    const n = Number((await admin.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1`, [name])).rows[0].n);
+    if (n === 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 beforeAll(async () => {
   if (!BASE_URL) return;
   admin = new pg.Client({ connectionString: BASE_URL });
@@ -33,6 +42,7 @@ beforeAll(async () => {
   const url = new URL(BASE_URL);
   url.pathname = `/${DB_NAME}`;
   pool = new pg.Pool({ connectionString: url.toString(), max: 2 });
+  pool.on("error", () => {});
   // The base tables as production has them before the hand-applied migrations: rfp_approval_requests as drizzle pushed it
   // (its token unique constraint carries drizzle's name), and the callback outbox 0023 alters.
   await q(`
@@ -58,6 +68,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!BASE_URL) return;
   await pool?.end();
+  if (admin) await waitNoSessions(DB_NAME);
   await admin?.query(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`);
   await admin?.end();
 });

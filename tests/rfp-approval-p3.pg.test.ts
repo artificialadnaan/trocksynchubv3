@@ -90,6 +90,15 @@ const dbUrl = (name: string) => {
   return url.toString();
 };
 
+/** Teardown: pool.end() can resolve before the server has closed its sessions; DROP … WITH (FORCE) would then kill them and the
+ *  late 57P01 surfaces as an unhandled error. Wait (bounded) until the database has no sessions first. */
+async function waitNoSessions(name: string) {
+  for (let i = 0; i < 100; i++) {
+    const n = Number((await admin.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1`, [name])).rows[0].n);
+    if (n === 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 beforeAll(async () => {
   if (!BASE_URL) return;
   admin = new pg.Client({ connectionString: BASE_URL });
@@ -97,7 +106,9 @@ beforeAll(async () => {
   await admin.query(`CREATE DATABASE ${DB_NAME}`);
   await admin.query(`CREATE DATABASE ${DB_NAME_27LESS}`);
   pool = new pg.Pool({ connectionString: dbUrl(DB_NAME), max: 8 });
+  pool.on("error", () => {});
   pool27less = new pg.Pool({ connectionString: dbUrl(DB_NAME_27LESS), max: 4 });
+  pool27less.on("error", () => {});
   for (const p of [pool, pool27less]) {
     await p.query(BASE_DDL);
     await p.query(migration("0021_extend_pending_unique_indexes_to_override_approving.sql"));
@@ -114,7 +125,9 @@ afterAll(async () => {
   if (!BASE_URL) return;
   await pool?.end();
   await pool27less?.end();
+  if (admin) await waitNoSessions(DB_NAME);
   await admin?.query(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`);
+  if (admin) await waitNoSessions(DB_NAME_27LESS);
   await admin?.query(`DROP DATABASE IF EXISTS ${DB_NAME_27LESS} WITH (FORCE)`);
   await admin?.end();
 });

@@ -48,6 +48,15 @@ let ddlCommittedAt = "";
 const DB_NAME = `s0b_lock_${process.pid}_${Date.now()}`;
 const sql = (text: string, params: unknown[] = []) => pool.query(text, params);
 
+/** Teardown: pool.end() can resolve before the server has closed its sessions; DROP … WITH (FORCE) would then kill them and the
+ *  late 57P01 surfaces as an unhandled error (S0b-1 GREEN1; a4 ruling (a)). Wait (bounded) until the database has no sessions first. */
+async function waitNoSessions(name: string) {
+  for (let i = 0; i < 100; i++) {
+    const n = Number((await admin.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1`, [name])).rows[0].n);
+    if (n === 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 beforeAll(async () => {
   if (!BASE_URL) return;
   admin = new pg.Client({ connectionString: BASE_URL });
@@ -56,6 +65,7 @@ beforeAll(async () => {
   const url = new URL(BASE_URL);
   url.pathname = `/${DB_NAME}`;
   pool = new pg.Pool({ connectionString: url.toString(), max: 8 });
+  pool.on("error", () => {});
   await sql(`
     CREATE TABLE bidboard_callback_outbox (
       id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL,
@@ -80,6 +90,7 @@ afterAll(async () => {
   process.env.DATABASE_URL = BASE_URL; // the sentinel must not outlive this file in a reused worker
   if (!BASE_URL) return;
   await pool?.end();
+  if (admin) await waitNoSessions(DB_NAME);
   await admin?.query(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`);
   await admin?.end();
 });
