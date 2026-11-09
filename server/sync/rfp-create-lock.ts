@@ -27,7 +27,7 @@ export async function lockRfpCreateDeal(tx: Executor, sourceDealId: string): Pro
 
 /**
  * The deal's Procore footprint (§10; d9 iii / iv), one reason per row: `command:<status>` / `command:recovered_project`,
- * `request:approved` / `request:override_approving`, `sync_mapping`. Empty ⇒ no Procore project exists or may exist.
+ * `request:approved` / `request:override_approving` / `request:approving` (S0b-2a: the email path's create in progress, d9 Q5), `sync_mapping`. Empty ⇒ no Procore project exists or may exist.
  * Needs 0027 (the destination column): callers ask only once the preflight reads "present". A request / mapping table that
  * does not exist holds no footprint: both always exist in production; only a narrow test schema omits them.
  */
@@ -43,7 +43,7 @@ export async function readProcoreFootprint(tx: Executor, sourceSystem: string, s
   `))[0] ?? {};
   const requests = !tables.req ? [] : rowsOf(await tx.execute(sql`
     SELECT id, status FROM rfp_approval_requests
-     WHERE source_system = ${sourceSystem} AND source_deal_id = ${sourceDealId} AND status IN ('approved', 'override_approving')
+     WHERE source_system = ${sourceSystem} AND source_deal_id = ${sourceDealId} AND status IN ('approved', 'override_approving', 'approving')
      ORDER BY id
   `));
   const mappings = !tables.map ? [] : rowsOf(await tx.execute(sql`

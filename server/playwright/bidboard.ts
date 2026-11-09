@@ -2000,6 +2000,13 @@ type CreateBidBoardProjectFromDealOptions = {
   createProject?: (projectData: NewBidBoardProjectData) => Promise<CreateBidBoardProjectResult>;
   /** Test seam: look up an existing Procore project by exact number (defaults to findProcoreProjectByExactNumber). */
   findExistingProject?: (projectNumber: string) => Promise<ExistingProjectLookup>;
+  /**
+   * RFP Phase 2 (S0b-2a; runbook r5): awaited after the read-only number lookup and immediately BEFORE createProject (login,
+   * navigation, any create click), the earliest moment a Procore project can exist. processRfpApproval commits
+   * rfp_approval_approving.submit_at here. A hook that throws ABORTS the create: no evidence, no create (fail closed).
+   * Never called for an adopted project (not a create).
+   */
+  beforeCreate?: () => Promise<void>;
 };
 
 type CreateBidBoardProjectFromDealArgs = {
@@ -2451,7 +2458,24 @@ export async function createBidBoardProjectFromDeal(
       if (lookup.status === "error") {
         log(`Existing-project lookup did not complete (${lookup.message}); proceeding to create`, "playwright");
       }
-      result = await createProject(projectData);
+      let beforeCreateError: string | null = null;
+      if (effectiveOptions.beforeCreate) {
+        try {
+          await effectiveOptions.beforeCreate();
+        } catch (err: any) {
+          beforeCreateError = err?.message ?? String(err);
+        }
+      }
+      if (beforeCreateError !== null) {
+        log(`Not creating BidBoard project for deal ${dealId}: the submit record could not be written (${beforeCreateError})`, "playwright");
+        result = {
+          success: false,
+          projectName: projectData.name,
+          error: `BidBoard create aborted before it started: the submit record could not be written (${beforeCreateError})`,
+        };
+      } else {
+        result = await createProject(projectData);
+      }
     }
 
     if (result.success && result.projectId) {

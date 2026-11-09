@@ -16,9 +16,10 @@ import {
   type RfpDestination,
   type RouteInput,
 } from "./rfp-destination";
-import { preflightRfpCoreTables } from "./rfp-core-preflight";
+import { preflightRfpCoreTables, preflightRfpCoreTablesOrThrow, type RfpCoreTablesState } from "./rfp-core-preflight";
 import { raiseRfpCoreAlert, type RfpCoreAlertCode } from "./rfp-core-alert";
 import { lockRfpCreateDeal, readCoreFootprint, readProcoreFootprint } from "./rfp-create-lock";
+import { RFP_APPROVING_STATUS } from "./rfp-approving";
 
 // Durable command outbox for create-from-rfp (findings V1-V4). See shared/schema.ts bidboardCreateOutbox.
 // The endpoint persists a command before its 202; this SERIAL worker (one create at a time, matching the global
@@ -320,8 +321,20 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
   const setting = rfpNonserviceDestinationSetting();
   const kind = approvalKindOf(input);
   const route = routeRfpCreate(routeInputOf(input, kind), setting);
-  const tables = await preflightRfpCoreTables(db as any);
   const ids = { sourceSystem: input.sourceSystem, sourceDealId: input.sourceDealId, sourceEventId: input.sourceEventId };
+  // ROUTE core: the strict probe. An errored query is NOT "missing" (d9 hardening): alert with the real error and rethrow (the
+  // route answers 500, the CRM retries). ROUTE procore keeps the lenient probe, so today's enqueue is unchanged.
+  let tables: RfpCoreTablesState;
+  if (route === "core") {
+    try {
+      tables = await preflightRfpCoreTablesOrThrow(db as any);
+    } catch (err) {
+      await raiseRfpCoreAlert("core_preflight_error", { ...ids, error: String((err as Error)?.message ?? err) });
+      throw err;
+    }
+  } else {
+    tables = await preflightRfpCoreTables(db as any);
+  }
   if (tables !== "present") {
     if (route === "core") {
       await raiseRfpCoreAlert("core_tables_missing", { ...ids, preflight: tables });
@@ -500,7 +513,8 @@ async function handleReattempt(
 /** P2 (§10): true ⇒ the claimed command was held (held_cross_destination + F1 in one transaction, alert after). */
 async function holdClaimedOnCoreFootprint(row: any): Promise<boolean> {
   const db = await getDb();
-  if ((await preflightRfpCoreTables(db as any)) !== "present") return false; // no Core table ⇒ no Core footprint
+  // Strict: an errored probe throws (never "no footprint"), so Playwright cannot run unchecked (d9 hardening).
+  if ((await preflightRfpCoreTablesOrThrow(db as any)) !== "present") return false; // no Core table ⇒ no Core footprint
   const sourceSystem = String(row.source_system);
   const sourceDealId = String(row.source_deal_id);
   const input = { ...((row.payload ?? {}) as any), sourceSystem, sourceDealId } as CreateFromRfpInput;
@@ -549,7 +563,7 @@ export async function claimNextBidboardCreateCommand(excludeIds: Iterable<number
   // RFP Phase 2 (CONTRACT v2.2 §2): never claim a core-stamped command, whatever its status. Only once 0027 exists (the
   // column does not before); until then every row is a Procore row and the claim is today's statement.
   const destinationClause =
-    (await preflightRfpCoreTables(db as any)) === "present" ? sql`AND destination = 'procore'` : sql``;
+    (await preflightRfpCoreTablesOrThrow(db as any)) === "present" ? sql`AND destination = 'procore'` : sql``; // errored ⇒ throw, nothing claimed
   const result = await db.execute(sql`
     UPDATE bidboard_create_outbox
        SET status = 'processing', last_attempt_at = NOW(), attempt_count = attempt_count + 1
@@ -1023,9 +1037,12 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   const inFlightApproval =
     (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "pending"))
     ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_OVERRIDE_APPROVING_STATUS))
+    // S0b-2a: an `approving` request (the email path mid-create) is in flight exactly like override_approving.
+    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_APPROVING_STATUS))
     ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "approved"))
     ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, "pending"))
     ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS))
+    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_APPROVING_STATUS))
     // finding X6: also block an already-APPROVED RFP for the SAME source deal. If this deal was approved earlier
     // with project number A and a later vote arrives with a revised number B, createBidBoardProjectFromDeal would
     // adopt the existing source-deal mapping and send a 'created' callback for B pointing at A's old project.
@@ -1217,7 +1234,7 @@ async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboa
     const byEvent = await storage.getRfpApprovalRequestBySourceEventId(input.sourceSystem, input.sourceEventId);
     const ownRequest = byEvent && byEvent.sourceDealId === input.sourceDealId ? byEvent : undefined;
     const latest = ownRequest ? undefined : await storage.getLatestRfpApprovalRequestBySourceDeal(input.sourceSystem, input.sourceDealId);
-    if (latest && (latest.status === "pending" || latest.status === RFP_OVERRIDE_APPROVING_STATUS)) {
+    if (latest && (latest.status === "pending" || latest.status === RFP_OVERRIDE_APPROVING_STATUS || latest.status === RFP_APPROVING_STATUS)) {
       log(`[bidboard-create] Adopted service deal ${input.sourceDealId} has RFP request ${latest.id} still ${latest.status}; its approval hands off to Core, skipping here`, "sync");
       return;
     }

@@ -20,15 +20,24 @@ async function defaultDb(): Promise<Executor> {
   return (await import("../db")).db as unknown as Executor;
 }
 
+/**
+ * The strict probe (S0b-2a, d9's hardening): "missing" ONLY on a successful NULL; a query that ERRORS throws its real error
+ * (fail closed). The core route, the Procore claim (P2) and processRfpApproval (P3) use this one.
+ */
+export async function preflightRfpCoreTablesOrThrow(db?: Executor): Promise<"present" | "missing"> {
+  const exec = db ?? (await defaultDb());
+  const res = await exec.execute(sql`
+    SELECT to_regclass('public.rfp_core_create_outbox')::text AS create_tbl,
+           to_regclass('public.rfp_core_followup_outbox')::text AS followup_tbl
+  `);
+  const row = (Array.isArray(res) ? res : (res as any).rows ?? [])[0] ?? {};
+  return row.create_tbl && row.followup_tbl ? "present" : "missing";
+}
+
+/** The lenient probe: an error reads "inconclusive". ROUTE procore (setting unset) keeps today's enqueue on it. */
 export async function preflightRfpCoreTables(db?: Executor): Promise<RfpCoreTablesState> {
   try {
-    const exec = db ?? (await defaultDb());
-    const res = await exec.execute(sql`
-      SELECT to_regclass('public.rfp_core_create_outbox')::text AS create_tbl,
-             to_regclass('public.rfp_core_followup_outbox')::text AS followup_tbl
-    `);
-    const row = (Array.isArray(res) ? res : (res as any).rows ?? [])[0] ?? {};
-    return row.create_tbl && row.followup_tbl ? "present" : "missing";
+    return await preflightRfpCoreTablesOrThrow(db);
   } catch {
     return "inconclusive";
   }

@@ -2364,11 +2364,13 @@ export class DatabaseStorage implements IStorage {
     callbackData?: InsertBidboardCallbackOutbox | null,
   ): Promise<RfpApprovalRequest | undefined> {
     return db.transaction(async (tx) => {
+      // Only a still-PENDING request is declined (S0b-2a, d9 5b): a decline that read `pending` just before the email path
+      // flipped the row to `approving` must not overwrite it. No row updated ⇒ undefined, and no declined callback.
       const [updated] = await tx.update(rfpApprovalRequests)
         .set(declineData)
-        .where(eq(rfpApprovalRequests.id, id))
+        .where(and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, 'pending')))
         .returning();
-      if (callbackData) {
+      if (updated && callbackData) {
         await tx.insert(bidboardCallbackOutbox)
           .values(callbackData)
           .onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });

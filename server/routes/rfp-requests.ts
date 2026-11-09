@@ -470,9 +470,10 @@ export function registerRfpRequestRoutes(app: Express): void {
 
     // No blanket claim-release here: a release that fires after the Playwright job already created a
     // project (but a later step threw before persisting it) would wrongly re-open the request for a
-    // retry and create a SECOND project. Instead processRfpApproval restores 'declined' only in the
-    // branch where it KNOWS no project was created; an unexpected mid-create error leaves the request
-    // claimed ('override_approving') — a safe, indeterminate state needing manual resolution.
+    // retry and create a SECOND project. Nothing restores 'declined' after this point (only the ineligible-source
+    // release above, before any Playwright, does): a failed or unconfirmed override leaves the request claimed
+    // ('override_approving'), a safe, indeterminate state resolved manually (today via the token reset route, which
+    // raises rfp_request_override_reset with the deal's footprint).
     setImmediate(async () => {
       try {
         const result = await processRfpApproval(claimed.token, {}, approverEmail, { force: true });

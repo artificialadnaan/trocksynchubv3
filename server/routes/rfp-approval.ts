@@ -670,6 +670,8 @@ export function registerRfpApprovalRoutes(app: Express) {
 
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
+    // S0b-2a (runbook r5 §2): a create in progress can't be declined through the review link.
+    if (request.status === 'approving') return res.status(409).json({ success: false, error: 'Request already approving' });
     if (isRfpApprovalRequestExpired(request)) {
       const message = buildExpiredRfpMessage(request);
       await auditRouteAttempt(request, 'rfp_decline_attempt', 'expired', declinerEmail, 'Token expired');
@@ -704,7 +706,7 @@ export function registerRfpApprovalRoutes(app: Express) {
 
     const { processRfpDecline } = await import('../rfp-approval');
     const result = await processRfpDecline(token, declinerEmail);
-    res.json(result);
+    res.status(result.statusCode ?? 200).json(result);
   }));
 
   // Reset an approval request back to pending (admin endpoint for retrying failed BidBoard creation)
@@ -712,6 +714,11 @@ export function registerRfpApprovalRoutes(app: Express) {
     const { token } = req.params as { token: string };
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
+    // S0b-2a (runbook r5 §2; d9 5a): never re-open a create in progress or a cross-destination hold through a link.
+    if (request.status === 'approving' || request.status === 'held_cross_destination') {
+      return res.status(409).json({ success: false, error: `Request ${request.id} is ${request.status}; it cannot be reset` });
+    }
+    const wasOverrideApproving = request.status === 'override_approving';
     await storage.updateRfpApprovalRequest(request.id, {
       status: 'pending',
       approvedBy: null,
@@ -720,6 +727,17 @@ export function registerRfpApprovalRoutes(app: Express) {
       declinedAt: null,
       bidboardProjectId: null,
     });
+    if (wasOverrideApproving) {
+      // Today's only recovery for a stuck override stays allowed (I1), but loudly: the override being reset may already have
+      // created a project, so the alert carries the deal's footprint for a person to check (d9 5a).
+      const identity = sourceIdentityForRouteAudit(request);
+      const { describeOverrideResetFootprint } = await import('../sync/rfp-approving');
+      const footprint = await describeOverrideResetFootprint(identity.sourceSystem, identity.sourceDealId);
+      const { raiseRfpCoreAlert } = await import('../sync/rfp-core-alert');
+      await raiseRfpCoreAlert('rfp_request_override_reset', {
+        requestId: request.id, sourceSystem: identity.sourceSystem, sourceDealId: identity.sourceDealId, ...footprint,
+      });
+    }
     res.json({ success: true, message: `Request ${request.id} reset to pending. Token: ${token}` });
   }));
 }

@@ -21,7 +21,9 @@ export type RfpCoreAlertCode =
   | "core_bid_link_refused"
   | "core_confirm_delayed"
   | "core_request_rejected"
-  | "crm_notice_dead";
+  | "crm_notice_dead"
+  | "core_preflight_error"
+  | "rfp_request_override_reset";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
 

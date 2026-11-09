@@ -31,6 +31,7 @@ import {
 } from './sync/bidboard-callback-worker';
 import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox';
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
+import { RFP_APPROVING_STATUS } from './sync/rfp-approving';
 
 const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
 const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
@@ -1177,6 +1178,17 @@ export async function createRfpApprovalRequestFromNormalizedInput(
       return buildSourceDealPendingConflictResult(input.sourceSystem, input.sourceDealId, overrideSourceConflict);
     }
 
+    // S0b-2a (d9 Q6): an `approving` request (the email path creating a Bid Board project right now) is in flight exactly like
+    // override_approving, by project number and by source deal.
+    const approvingConflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, RFP_APPROVING_STATUS);
+    if (approvingConflict) {
+      return buildConflictResult('pending_collision', input.deal.projectNumber, approvingConflict);
+    }
+    const approvingSourceConflict = await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_APPROVING_STATUS);
+    if (approvingSourceConflict) {
+      return buildSourceDealPendingConflictResult(input.sourceSystem, input.sourceDealId, approvingSourceConflict);
+    }
+
     const token = randomUUID();
     const sourceDealUrl = await buildSourceDealUrl(input.sourceSystem, input.sourceDealId);
     // HubSpot resolves the owner via its own API; trock_crm sends the resolved owner (assigned_rep
@@ -1206,20 +1218,22 @@ export async function createRfpApprovalRequestFromNormalizedInput(
         dealData,
       });
     } catch (error) {
-      if (isUniqueViolation(error, 'idx_rfp_approval_pending_project_number')) {
+      if (isUniqueViolation(error, 'idx_rfp_approval_pending_project_number') || isUniqueViolation(error, 'idx_rfp_approval_live_project_number')) {
         // Since migration 0021 these indexes also cover 'override_approving', so a race-insert can
         // conflict with an in-flight override row — re-query both statuses so it surfaces as a
         // clean conflict, not a thrown 500.
         const conflict = (await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending'))
-          ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, RFP_OVERRIDE_APPROVING_STATUS));
+          ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, RFP_OVERRIDE_APPROVING_STATUS))
+          ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, RFP_APPROVING_STATUS));
         if (conflict) {
           return buildConflictResult('pending_collision', input.deal.projectNumber, conflict);
         }
       }
-      if (isUniqueViolation(error, 'idx_rfp_approval_pending_source_deal')) {
+      if (isUniqueViolation(error, 'idx_rfp_approval_pending_source_deal') || isUniqueViolation(error, 'idx_rfp_approval_live_source_deal')) {
         const conflict = (await storage.getRfpApprovalRequestBySourceDealId(input.sourceSystem, input.sourceDealId))
-          ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS));
-        if (conflict && (conflict.status === 'pending' || conflict.status === RFP_OVERRIDE_APPROVING_STATUS)) {
+          ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS))
+          ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_APPROVING_STATUS));
+        if (conflict && (conflict.status === 'pending' || conflict.status === RFP_OVERRIDE_APPROVING_STATUS || conflict.status === RFP_APPROVING_STATUS)) {
           return buildSourceDealPendingConflictResult(input.sourceSystem, input.sourceDealId, conflict);
         }
       }
@@ -1306,9 +1320,11 @@ export async function createRfpApprovalRequest(
   hubspotDealId: string
 ): Promise<{ success: boolean; token?: string; error?: string }> {
   try {
-    const existing = await storage.getRfpApprovalRequestByDealId(hubspotDealId);
+    // S0b-2a: an `approving` request (mid-create) blocks a new one exactly like a pending one.
+    const existing = (await storage.getRfpApprovalRequestByDealId(hubspotDealId))
+      ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus('hubspot', hubspotDealId, RFP_APPROVING_STATUS));
     if (existing) {
-      log(`[rfp-approval] Pending approval already exists for deal ${hubspotDealId}, skipping`, 'rfp');
+      log(`[rfp-approval] ${existing.status === RFP_APPROVING_STATUS ? 'An approving' : 'Pending'} approval already exists for deal ${hubspotDealId}, skipping`, 'rfp');
       return { success: true, token: existing.token };
     }
 
@@ -1518,6 +1534,42 @@ export async function processRfpApproval(
       });
     }
 
+    // RFP Phase 2 (CONTRACT v2.2 §10, path P3; d9 S0b-2a rulings): the DECISION + CLAIM, in ONE short locked transaction right
+    // before the Playwright create. Nothing is held across the HubSpot / CRM calls above. The email path flips pending → approving
+    // (the create-in-progress footprint); the override path must still be override_approving. A Core footprint for the deal holds
+    // the request (held_cross_destination + F1, alert), never a second record. 0027 absent ⇒ today's path; an errored probe ⇒
+    // fail closed (the row stays as it was, nothing is created, the alert names the real error).
+    const { claimRfpRequestForCreate, markRfpApprovingSubmitted } = await import('./sync/rfp-approving');
+    const holdCallbackData = await buildBidBoardFailedCallbackData({
+      request,
+      sourceDealId,
+      projectNumber: finalProjectNumber,
+      error: 'cross_destination_hold',
+    });
+    const claimIds = { requestId: request.id, sourceSystem: identity.sourceSystem, sourceDealId };
+    let claim: Awaited<ReturnType<typeof claimRfpRequestForCreate>>;
+    try {
+      claim = await claimRfpRequestForCreate({
+        ...claimIds,
+        force,
+        holdCallback: holdCallbackData ? { targetUrl: holdCallbackData.targetUrl, payload: holdCallbackData.payload } : null,
+      });
+    } catch (claimErr: any) {
+      const { raiseRfpCoreAlert } = await import('./sync/rfp-core-alert');
+      await raiseRfpCoreAlert('core_preflight_error', { ...claimIds, error: String(claimErr?.message ?? claimErr) });
+      return { success: false, error: `RFP create check failed (${claimErr?.message ?? claimErr}); nothing was created` };
+    }
+    if (claim.outcome === 'not_claimable') {
+      return { success: false, error: `Request already ${claim.status}` };
+    }
+    if (claim.outcome === 'held_cross_destination') {
+      const { raiseRfpCoreAlert } = await import('./sync/rfp-core-alert');
+      await raiseRfpCoreAlert('cross_destination_hold', { ...claimIds, heldDestination: 'procore', footprint: claim.footprint });
+      return { success: false, error: 'cross_destination_hold: this deal already has a Core Bid Board footprint' };
+    }
+    // The submit evidence (runbook r5): committed before createBidBoardProject starts; only for a claimed row.
+    const beforeCreate = claim.outcome === 'claimed' ? () => markRfpApprovingSubmitted(request.id) : undefined;
+
     const TEMP_DIR = process.env.TEMP_DIR || '.playwright-temp';
     const tempPaths: string[] = [];
     let attachmentsToSync: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }> | undefined;
@@ -1557,6 +1609,7 @@ export async function processRfpApproval(
           projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
           editedFieldsOverride,
           proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
+          beforeCreate,
         },
       });
       if (bbResult.success && bbResult.projectId) {
@@ -1766,7 +1819,7 @@ export async function processRfpApproval(
 export async function processRfpDecline(
   token: string,
   declinerEmail: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; statusCode?: number }> {
   try {
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
@@ -1792,7 +1845,12 @@ export async function processRfpDecline(
     });
     const declineWithCallback = (storage as any).declineRfpApprovalRequestWithOptionalCallback;
     if (typeof declineWithCallback === 'function') {
-      await declineWithCallback.call(storage, request.id, declineData, callbackData);
+      const declined = await declineWithCallback.call(storage, request.id, declineData, callbackData);
+      if (!declined) {
+        // Lost the race to the email path's flip (or another resolution): the conditional decline updated nothing (d9 5b).
+        const now = await storage.getRfpApprovalRequestByToken(token);
+        return { success: false, error: `Request already ${now?.status ?? 'resolved'}`, statusCode: 409 };
+      }
     } else {
       await storage.updateRfpApprovalRequest(request.id, declineData);
       if (callbackData && typeof (storage as any).enqueueBidboardCallback === 'function') {
