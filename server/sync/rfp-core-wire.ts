@@ -44,6 +44,22 @@ export function buildCrmInternalTargetUrl(_path: string, _baseUrl: string | unde
   return null;
 }
 
+/** r2 (d9 ruling 5): the offices the Core path serves, carried end to end from E1. RED-r2: stubs only. */
+export const RFP_BID_CREATE_OFFICES = ["dallas", "atlanta"] as const;
+export type RfpBidCreateOffice = (typeof RFP_BID_CREATE_OFFICES)[number];
+
+export function resolveRfpBidCreateOffice(_value: unknown): RfpBidCreateOffice | null {
+  return null;
+}
+
+export function buildRfpBidCreateOfficeTargetUrl(_office: string, _baseUrl: string | undefined = process.env.CORE_INGRESS_BASE_URL): string | null {
+  return null;
+}
+
+export function buildRfpBidCreateLinkedOfficeTargetUrl(_office: string, _baseUrl: string | undefined = process.env.CORE_INGRESS_BASE_URL): string | null {
+  return null;
+}
+
 export interface RfpBidCreateBody {
   version: typeof RFP_BID_CREATE_DOMAIN;
   office: typeof RFP_BID_CREATE_OFFICE;

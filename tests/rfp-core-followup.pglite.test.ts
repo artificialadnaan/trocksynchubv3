@@ -8,11 +8,14 @@ import { drizzle } from "drizzle-orm/pglite";
 // a mocked CRM and Core. E4 → E5 sequencing (E4 decided on `result`; linked / claimed optional extras, a link-only answer
 // is linked); E4 stale / 409 / retry / dead / terminal; E5 never dead (the schedule, then every 2 h; ONE pending N1, daily
 // alerts; the CLEAR on success); each N1 kind on the strict wire; the stable noticeId across redelivery; N1 dead = alert
-// only; dark / unconfigured. Synthetic data only (I7).
-const dbHolder = vi.hoisted(() => ({ db: null as any }));
+// only. r2 (d9's §12 ruling): due follow-ups drain under ANY RFP_NONSERVICE_DESTINATION (inert by data); tables absent ⇒
+// silent unless the setting is core; unconfigured ⇒ one alert only when a follow-up is due. r2 (d9 ruling 5): the office
+// rides E4 / E5 / N1 (atlanta ⇒ Core's atlanta …/linked path). r2 (ruling 6): E5 after attempt 6 pinned explicitly.
+// Synthetic data only (I7).
+const dbHolder = vi.hoisted(() => ({ db: null as any, gets: 0 }));
 const alertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
-vi.mock("../server/db.ts", () => ({ get db() { return dbHolder.db; }, get pool() { return undefined; } }));
+vi.mock("../server/db.ts", () => ({ get db() { dbHolder.gets += 1; return dbHolder.db; }, get pool() { return undefined; } }));
 vi.mock("../server/playwright/bidboard.ts", () => ({ createBidBoardProjectFromDeal: vi.fn() }));
 vi.mock("../server/rfp-approval.ts", () => ({
   checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
@@ -36,6 +39,8 @@ const E4_URL = `${CRM_BASE}/api/internal/core-bid-created`;
 const N1_URL = `${CRM_BASE}/api/internal/rfp-core-notice`;
 const E5_URL = `${CORE_BASE}/webhooks/crm/dallas/rfp-bid-create/v1/linked`;
 const E5_PATH = "/webhooks/crm/dallas/rfp-bid-create/v1/linked";
+const E5_ATL_URL = `${CORE_BASE}/webhooks/crm/atlanta/rfp-bid-create/v1/linked`;
+const E5_ATL_PATH = "/webhooks/crm/atlanta/rfp-bid-create/v1/linked";
 const DEAL = "00000000-0000-4000-8000-0000000000a1";
 const BID = "00000000-0000-4000-8000-0000000000b1";
 const KEY = "crm:rfp-vote:approved:round-7";
@@ -84,12 +89,13 @@ async function reset() {
   resetRfpCoreFollowupStateForTests();
 }
 
-function e1(): any {
+const numberFor = (office: string) => (office === "atlanta" ? "ATL-2-12345-ab" : "DFW-2-12345-ab");
+function e1(office = "dallas"): any {
   return {
-    sourceSystem: "trock_crm", sourceDealId: DEAL, sourceEventId: KEY, decision: "approved", approvalKind: "vote", office: "dallas",
+    sourceSystem: "trock_crm", sourceDealId: DEAL, sourceEventId: KEY, decision: "approved", approvalKind: "vote", office,
     approval: { roundEventId: "round-7", approvals: 2, rejections: 0, invitedVoterCount: 3, decidedAt: "2026-11-01T15:00:00.000Z" },
     deal: {
-      name: "Synthetic Tower Reroof", projectNumber: "DFW-2-12345-ab", projectType: "2", amount: 1000, estimator: "Pat Example",
+      name: "Synthetic Tower Reroof", projectNumber: numberFor(office), projectType: "2", amount: 1000, estimator: "Pat Example",
       companyId: "00000000-0000-4000-8000-0000000000c1", companyName: "Synthetic Builders LLC", contactName: "Sam Synthetic",
       clientEmail: "sam@example.test", clientPhone: null, propertyId: null,
       address: { street: "1 Example St", city: "Dallas", state: "TX", zip: "75001", country: "US" },
@@ -99,15 +105,15 @@ function e1(): any {
   };
 }
 /** A Core create Core answered (sent), with its pending E4: the state the E2 sender leaves. */
-async function seedSent(): Promise<{ createId: number; e4Id: number }> {
-  await enqueueBidboardCreateCommand(e1());
+async function seedSent(office = "dallas"): Promise<{ createId: number; e4Id: number }> {
+  await enqueueBidboardCreateCommand(e1(office));
   const c = (await pg.query<any>(
     `UPDATE rfp_core_create_outbox SET status = 'sent', e2_ever_sent = true, attempt_count = 1, core_bid_id = $1,
             core_created_at = $2::timestamptz, warnings = '["owner_not_found"]'::jsonb, sent_at = NOW()
       RETURNING id`, [BID, CREATED_AT])).rows[0];
   const f = (await pg.query<any>(
     `INSERT INTO rfp_core_followup_outbox (create_id, kind, payload) VALUES ($1, 'crm_link', $2::jsonb) RETURNING id`,
-    [c.id, JSON.stringify(E4_BODY)])).rows[0];
+    [c.id, JSON.stringify({ ...E4_BODY, office, projectNumber: numberFor(office) })])).rows[0];
   return { createId: c.id, e4Id: f.id };
 }
 /** …and E4 linked: the pending E5. */
@@ -126,7 +132,7 @@ function router(h: { e4?: Handler; e5?: Handler; n1?: Handler } = {}) {
   return vi.fn(async (url: string, init: any) => {
     const body = JSON.parse(init.body);
     if (url === E4_URL) return h.e4 ? h.e4(body) : json(200, { result: "linked", linked: true, claimed: true });
-    if (url === E5_URL) return h.e5 ? h.e5(body) : json(200, { confirmed: true });
+    if (url === E5_URL || url === E5_ATL_URL) return h.e5 ? h.e5(body) : json(200, { confirmed: true });
     if (url === N1_URL) return h.n1 ? h.n1(body) : json(200, { result: "recorded" });
     throw new Error(`unexpected URL ${url}`);
   });
@@ -296,6 +302,18 @@ describe("E4 failures (§10 E4 results)", () => {
 });
 
 describe("E5 never dead-letters (§7, b8 M3)", () => {
+  it("(ruling 6) after attempt 6 E5 stays pending, never dead: the next attempt is in 2 h (and again after 7), and the stale alert core_confirm_delayed fires", async () => {
+    const { e5Id } = await seedConfirm();
+    await pg.query(`UPDATE rfp_core_followup_outbox SET attempt_count = 5 WHERE id = $1`, [e5Id]);
+    const fetchImpl = router({ e5: () => json(503, {}) });
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect((await rows()).find((r) => r.id === e5Id)).toMatchObject({ status: "pending", attempt_count: 6, delay_s: 7200 });
+    expect(alertCodes()).toContain("core_confirm_delayed");
+    await makeDue();
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect((await rows()).find((r) => r.id === e5Id)).toMatchObject({ status: "pending", attempt_count: 7, delay_s: 7200 });
+    expect((await rows()).filter((r) => r.status === "dead")).toEqual([]);
+  });
   it("the 6-step schedule, then every 2 h; at the 6th failure ONE ops alert + ONE N1 core_link_confirm_pending; then a daily alert; never dead", async () => {
     const { e5Id } = await seedConfirm();
     const fetchImpl = router({ e5: () => json(503, {}) });
@@ -420,17 +438,99 @@ describe("N1 notices (§10 wire shape)", () => {
   });
 });
 
-describe("dark and unconfigured", () => {
-  it("setting unset ⇒ no follow-up is sent; set to core ⇒ it is", async () => {
-    await seedSent();
-    delete process.env.RFP_NONSERVICE_DESTINATION;
+describe("office, carried end to end (d9 ruling 5, r2)", () => {
+  it("an atlanta create: E4 carries office atlanta, E5 goes to Core's atlanta …/linked path signed over it, N1 carries atlanta", async () => {
+    await seedSent("atlanta");
     const fetchImpl = router();
     await processRfpCoreFollowupOutbox({ fetchImpl });
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect((await byKind("crm_link"))[0]).toMatchObject({ status: "pending", attempt_count: 0 });
-    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    expect(fetchImpl.mock.calls.map((c) => c[0])).toEqual([E4_URL, E5_ATL_URL]);
+    expect(JSON.parse(callsTo(fetchImpl, E4_URL)[0]![1].body)).toMatchObject({ office: "atlanta", projectNumber: "ATL-2-12345-ab" });
+    const init = callsTo(fetchImpl, E5_ATL_URL)[0]![1];
+    expect(new Headers(init.headers).get("x-trock-signature")).toBe(framed("trock.crm.rfp-bid-create-linked.v1", E5_ATL_PATH, init.body, SECRET));
+    await reset();
+    const stale = router({ e4: () => json(200, { result: "stale" }) });
+    await seedSent("atlanta");
+    await processRfpCoreFollowupOutbox({ fetchImpl: stale });
+    expect(callsTo(stale, N1_URL)).toHaveLength(1);
+    expect(JSON.parse(callsTo(stale, N1_URL)[0]![1].body)).toMatchObject({ kind: "core_bid_orphan", office: "atlanta" });
+  });
+});
+
+describe("§12 drains by data, not by the setting (d9 ruling, r2); unconfigured", () => {
+  it("(a) setting unset or procore and NO follow-up rows ⇒ no fetch, no alert; the drain still looks for due rows (no setting gate)", async () => {
+    const fetchImpl = router();
+    for (const setting of [undefined, "procore"]) {
+      if (setting === undefined) delete process.env.RFP_NONSERVICE_DESTINATION;
+      else process.env.RFP_NONSERVICE_DESTINATION = setting;
+      const gets = dbHolder.gets;
+      await processRfpCoreFollowupOutbox({ fetchImpl });
+      expect(fetchImpl, String(setting)).not.toHaveBeenCalled();
+      expect(alertCodes(), String(setting)).toEqual([]);
+      expect(dbHolder.gets, `${setting}: not gated on the setting, the drain reads the outbox`).toBeGreaterThan(gets);
+    }
+  });
+  it("(b) the rollback: setting procore (or unset) + a due E4 ⇒ it drains, and the E5 it enqueues drains too", async () => {
+    for (const setting of ["procore", undefined]) {
+      await reset();
+      await seedSent();
+      if (setting === undefined) delete process.env.RFP_NONSERVICE_DESTINATION;
+      else process.env.RFP_NONSERVICE_DESTINATION = setting;
+      const fetchImpl = router();
+      await processRfpCoreFollowupOutbox({ fetchImpl });
+      expect(fetchImpl.mock.calls.map((c) => c[0]), String(setting)).toEqual([E4_URL, E5_URL]);
+      expect(await byKind("crm_link"), String(setting)).toMatchObject([{ status: "sent", result: "linked" }]);
+      expect(await byKind("core_confirm"), String(setting)).toMatchObject([{ status: "sent", result: "confirmed" }]);
+      process.env.RFP_NONSERVICE_DESTINATION = "core";
+    }
+  });
+  it("(c) the 0027 tables absent with the setting unset or procore ⇒ a SILENT no-op; the same with setting core ⇒ the HOLD alert", async () => {
+    const bare = new PGlite();
+    try {
+      await bare.exec(`
+        CREATE TABLE bidboard_callback_outbox (
+          id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL,
+          rfp_approval_request_id integer NOT NULL, payload jsonb NOT NULL, target_url text NOT NULL,
+          status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now()
+        );
+      `);
+      await bare.exec(DDL_0023);
+      dbHolder.db = drizzle(bare);
+      const fetchImpl = router();
+      for (const setting of [undefined, "procore"]) {
+        if (setting === undefined) delete process.env.RFP_NONSERVICE_DESTINATION;
+        else process.env.RFP_NONSERVICE_DESTINATION = setting;
+        await processRfpCoreFollowupOutbox({ fetchImpl });
+        await processRfpCoreFollowupOutbox({ fetchImpl });
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(alertCodes()).toEqual([]);
+      process.env.RFP_NONSERVICE_DESTINATION = "core";
+      await processRfpCoreFollowupOutbox({ fetchImpl });
+      expect(alertCodes()).toEqual(["core_tables_missing"]);
+    } finally {
+      dbHolder.db = drizzle(pg);
+      await bare.close();
+    }
+  });
+  it("(d) unconfigured (CRM secret unset): no due follow-up ⇒ NO alert (one not yet due included); a due one ⇒ ONE alert, unchanged", async () => {
+    delete process.env.RFP_REQUEST_SYNC_SECRET;
+    delete process.env.RFP_NONSERVICE_DESTINATION; // an un-activated deploy
+    const fetchImpl = router();
     await processRfpCoreFollowupOutbox({ fetchImpl });
-    expect(callsTo(fetchImpl, E4_URL)).toHaveLength(1);
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect(alertCodes(), "no rows").toEqual([]);
+    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    await seedSent();
+    delete process.env.RFP_NONSERVICE_DESTINATION;
+    await pg.exec(`UPDATE rfp_core_followup_outbox SET next_attempt_at = NOW() + interval '1 hour'`);
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect(alertCodes(), "a follow-up not yet due").toEqual([]);
+    await makeDue();
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(alertCodes(), "a due follow-up").toEqual(["rfp_core_unconfigured"]);
+    expect(await byKind("crm_link")).toMatchObject([{ status: "pending", attempt_count: 0 }]);
   });
   it("a missing CRM secret or base URL holds E4 / N1, a missing Core secret holds E5: rows stay pending, ONE alert", async () => {
     const cases: Array<[string, () => void, () => Promise<unknown>, string]> = [

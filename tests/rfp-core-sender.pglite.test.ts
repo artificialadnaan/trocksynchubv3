@@ -5,9 +5,12 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 
 // S1a (CONTRACT v2.4 §5 / §10): the E2 sender on the REAL S0 enqueue + the real 0023 / 0027 migrations (PGlite), with a
-// mocked Core. Dark and inert; one alert for a config / table gap; the request (signature, redirect, body from the command
-// row's stored E1); every E3 branch and the schedule; the pre-send refusals; the Procore-footprint hold under the per-deal
-// lock, incl. the operator re-drive skip (procore-done command + payload.operatorRedrive.go only; pending a4's final
+// mocked Core. r2 (d9's §12 ruling): RFP_NONSERVICE_DESTINATION governs only NEW stamping (S0), so rows ALREADY core-stamped
+// drain under ANY setting; pre-activation is inert by data. Tables absent ⇒ silent unless the setting is core (then HOLD +
+// alert); unconfigured ⇒ one alert only when a row is due. r2 (d9 ruling 5): the office is carried end to end (dallas |
+// atlanta; anything else refused office_not_supported). Also: the request (signature, redirect, body from the command row's
+// stored E1); every E3 branch and the schedule; the pre-send refusals; the Procore-footprint hold under the per-deal lock,
+// incl. the operator re-drive skip (procore-done command + payload.operatorRedrive.go only; pending a4's final
 // confirmation); retry idempotency after a lost response; the worker wiring. Synthetic data only (I7).
 const dbHolder = vi.hoisted(() => ({ db: null as any, gets: 0 }));
 const alertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
@@ -173,23 +176,32 @@ async function insertCoreRowFor(commandId: number, payload: unknown) {
 }
 const REDRIVE = { operatorRedrive: { reason: "operator_redrive", go: "GO-SYN-0001" } };
 
-describe("dark and inert", () => {
-  it("setting unset (or 'procore') ⇒ nothing sent and the database is not read; the same row is sent once the setting is core", async () => {
-    await enqueueBidboardCreateCommand(e1());
+describe("§12: drains by data, not by the setting (d9 ruling, r2)", () => {
+  it("(a) setting unset or procore and NO rows ⇒ no fetch, no alert; the drain still looks for due rows (no setting gate)", async () => {
     const fetchImpl = coreReturning(201, receipt());
-    for (const setting of [undefined, "procore", "CORE"]) {
+    for (const setting of [undefined, "procore"]) {
       if (setting === undefined) delete process.env.RFP_NONSERVICE_DESTINATION;
       else process.env.RFP_NONSERVICE_DESTINATION = setting;
       const gets = dbHolder.gets;
       await processRfpCoreCreateOutbox({ fetchImpl });
-      expect(dbHolder.gets, String(setting)).toBe(gets);
+      expect(fetchImpl, String(setting)).not.toHaveBeenCalled();
+      expect(alertCodes(), String(setting)).toEqual([]);
+      expect(dbHolder.gets, `${setting}: not gated on the setting, the drain reads the outbox`).toBeGreaterThan(gets);
     }
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect((await coreRows())[0]).toMatchObject({ status: "pending", attempt_count: 0 });
-    process.env.RFP_NONSERVICE_DESTINATION = "core";
-    await processRfpCoreCreateOutbox({ fetchImpl });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect((await coreRows())[0].status).toBe("sent");
+  });
+  it("(b) the rollback: setting procore (or unset) + an existing core-stamped pending row ⇒ it DRAINS, E2 sent", async () => {
+    for (const setting of ["procore", undefined]) {
+      await resetAll();
+      process.env.RFP_NONSERVICE_DESTINATION = "core";
+      await enqueueBidboardCreateCommand(e1());
+      if (setting === undefined) delete process.env.RFP_NONSERVICE_DESTINATION;
+      else process.env.RFP_NONSERVICE_DESTINATION = setting;
+      const fetchImpl = coreReturning(201, receipt());
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect(fetchImpl, String(setting)).toHaveBeenCalledTimes(1);
+      expect((await coreRows())[0], String(setting)).toMatchObject({ status: "sent", core_bid_id: BID });
+      expect((await followups()).map((f) => f.kind), String(setting)).toEqual(["crm_link"]);
+    }
   });
   it("a missing or short secret, an unset / http Core base URL or an unset CRM base URL ⇒ nothing sent, rows stay pending, ONE alert", async () => {
     const variants: Array<[string, () => void]> = [
@@ -243,6 +255,92 @@ describe("dark and inert", () => {
     } finally {
       dbHolder.db = mainDb;
       await bare.close();
+    }
+  });
+  it("(c) the 0027 tables absent with the setting unset or procore ⇒ a SILENT no-op; the same with setting core ⇒ the HOLD alert", async () => {
+    const bare = new PGlite();
+    try {
+      await bare.exec(BASE_DDL);
+      await bare.exec(DDL_0023);
+      dbHolder.db = drizzle(bare);
+      const fetchImpl = coreReturning(201, receipt());
+      for (const setting of [undefined, "procore"]) {
+        if (setting === undefined) delete process.env.RFP_NONSERVICE_DESTINATION;
+        else process.env.RFP_NONSERVICE_DESTINATION = setting;
+        await processRfpCoreCreateOutbox({ fetchImpl });
+        await processRfpCoreCreateOutbox({ fetchImpl });
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(alertCodes()).toEqual([]);
+      process.env.RFP_NONSERVICE_DESTINATION = "core";
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(alertCodes()).toEqual(["core_tables_missing"]);
+    } finally {
+      dbHolder.db = mainDb;
+      await bare.close();
+    }
+  });
+  it("(d) unconfigured: no due row ⇒ NO alert (a pending row not yet due included); a due row ⇒ ONE alert, the row unchanged", async () => {
+    const variants: Array<[string, () => void]> = [
+      ["secret unset", () => { delete process.env.RFP_BID_CREATE_INGRESS_SECRET_CURRENT; }],
+      ["Core base unset", () => { delete process.env.CORE_INGRESS_BASE_URL; }],
+      ["CRM base unset", () => { delete process.env.TROCK_CRM_BASE_URL; }],
+    ];
+    for (const [label, apply] of variants) {
+      await resetAll();
+      process.env.RFP_BID_CREATE_INGRESS_SECRET_CURRENT = SECRET;
+      process.env.CORE_INGRESS_BASE_URL = CORE_BASE;
+      process.env.TROCK_CRM_BASE_URL = CRM_BASE;
+      apply();
+      delete process.env.RFP_NONSERVICE_DESTINATION; // an un-activated deploy
+      const fetchImpl = coreReturning(201, receipt());
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect(alertCodes(), `${label}: no rows`).toEqual([]);
+      process.env.RFP_NONSERVICE_DESTINATION = "core";
+      await enqueueBidboardCreateCommand(e1());
+      delete process.env.RFP_NONSERVICE_DESTINATION;
+      await pg.exec(`UPDATE rfp_core_create_outbox SET next_attempt_at = NOW() + interval '1 hour'`);
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect(alertCodes(), `${label}: a row not yet due`).toEqual([]);
+      await makeDue();
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect(fetchImpl, label).not.toHaveBeenCalled();
+      expect(alertCodes(), `${label}: a due row`).toEqual(["rfp_core_unconfigured"]);
+      expect((await coreRows())[0], label).toMatchObject({ status: "pending", attempt_count: 0 });
+    }
+  });
+});
+
+describe("office, carried end to end (d9 ruling 5, r2)", () => {
+  it("an atlanta E2 goes to Core's /webhooks/crm/atlanta/rfp-bid-create/v1, signed over that exact path, body office atlanta; its E4 carries atlanta", async () => {
+    await enqueueBidboardCreateCommand(e1({ office: "atlanta" }, { projectNumber: "ATL-2-12345-ab" }));
+    const fetchImpl = coreReturning(201, receipt());
+    await processRfpCoreCreateOutbox({ fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toBe(`${CORE_BASE}/webhooks/crm/atlanta/rfp-bid-create/v1`);
+    expect(new Headers(init.headers).get("x-trock-signature"))
+      .toBe(framed("trock.crm.rfp-bid-create.v1", "/webhooks/crm/atlanta/rfp-bid-create/v1", init.body, SECRET));
+    expect(JSON.parse(init.body)).toMatchObject({ office: "atlanta", deal: { projectNumber: "ATL-2-12345-ab" } });
+    expect((await coreRows())[0].status).toBe("sent");
+    expect((await followups()).map((f) => f.payload)).toMatchObject([{ office: "atlanta", projectNumber: "ATL-2-12345-ab" }]);
+  });
+  it("an unsupported or missing office ⇒ refused office_not_supported before sending + alert + F1", async () => {
+    const missing = e1();
+    delete missing.office;
+    const cases: Array<[string, any]> = [["houston", e1({ office: "houston" })], ["missing", missing]];
+    for (const [label, input] of cases) {
+      await resetAll();
+      await enqueueBidboardCreateCommand(input);
+      const fetchImpl = coreReturning(201, receipt());
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect(fetchImpl, label).not.toHaveBeenCalled();
+      expect((await coreRows())[0], label).toMatchObject({ status: "refused", refusal_reason: "office_not_supported", e2_ever_sent: false });
+      expect(alertCodes(), label).toContain("core_create_refused");
+      expect(await f1Errors(), label).toEqual(["office_not_supported"]);
     }
   });
 });
@@ -524,21 +622,23 @@ describe("retry idempotency (§5 replay)", () => {
 });
 
 describe("wiring (server/routes/index.ts → rfp-core-worker.ts)", () => {
-  it("the timer is inert when dark (no query, no send) and drains the same row once the setting is core", async () => {
-    await enqueueBidboardCreateCommand(e1());
+  it("the timer: with no rows it sends and alerts nothing; it drains an existing core-stamped row under setting procore (§12)", async () => {
     fetchDefault.mockImplementation(async (url: string) => {
       if (url === E2_URL) return json(201, receipt());
       if (url.endsWith("/api/internal/core-bid-created")) return json(200, { result: "linked" });
       if (url.endsWith("/linked")) return json(200, { confirmed: true });
       return json(200, { result: "recorded" });
     });
-    delete process.env.RFP_NONSERVICE_DESTINATION;
-    const gets = dbHolder.gets;
+    process.env.RFP_NONSERVICE_DESTINATION = "procore";
     startRfpCoreWorkers(10);
     await new Promise((r) => setTimeout(r, 80));
+    stopRfpCoreWorkers();
     expect(fetchDefault).not.toHaveBeenCalled();
-    expect(dbHolder.gets).toBe(gets);
+    expect(alertCodes()).toEqual([]);
     process.env.RFP_NONSERVICE_DESTINATION = "core";
+    await enqueueBidboardCreateCommand(e1());
+    process.env.RFP_NONSERVICE_DESTINATION = "procore";
+    startRfpCoreWorkers(10);
     const drained = await until(async () => (await coreRows())[0]?.status === "sent");
     stopRfpCoreWorkers();
     expect(drained).toBe(true);

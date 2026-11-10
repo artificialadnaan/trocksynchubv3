@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 // S1a (CONTRACT v2.4 §5 / §6 / §7 / §10): the wire of the RFP Core path with no I/O: the golden vectors, the E1 → E2
 // mapping (incl. the company_missing pre-refusal and the property / contact null rules), the E4 / E5 / N1 bodies, every
 // classifier branch, the 30 s / 2 m / 10 m / 30 m / 2 h (6-attempt) schedule, E5's never-dead schedule, the stable N1
-// noticeId, the secret / base-URL guards, the operator re-drive marker, and the two signed POSTs. Wire details follow the
+// noticeId, the secret / base-URL guards, the operator re-drive marker, and the two signed POSTs; r2 (d9 ruling 5): the office
+// (dallas | atlanta) is the E2 body office and picks the per-office Core path, anything else is office_not_supported.
+// The golden vectors stay on the dallas path. Wire details follow the
 // counterparts (Core 3e13ff2e rfp-bid-create.contract.ts / .routes.ts; CRM PR-B 5f1109d8 core-bid-created-service.ts).
 // Synthetic data only (I7).
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
@@ -152,6 +154,14 @@ describe("E1 → E2 mapping (§5)", () => {
     expect(build(e1({ approval: undefined }))).toMatchObject({ ok: true, body: { approval: null } });
     expect(build(e1({ approvalKind: undefined }), "vote")).toMatchObject({ ok: true, body: { approvalKind: "vote" } });
     expect(build(e1(), null)).toMatchObject({ ok: true, body: { approvalKind: "vote" } });
+  });
+  it("(ruling 5) office: E1's dallas or atlanta is the E2 body office; any other or missing office ⇒ office_not_supported", () => {
+    expect(build(e1({ office: "atlanta" }, { projectNumber: "ATL-2-12345-ab" }))).toMatchObject({ ok: true, body: { office: "atlanta" } });
+    expect(build(e1())).toMatchObject({ ok: true, body: { office: "dallas" } });
+    for (const office of [undefined, null, "", "houston", "Dallas"]) {
+      expect(build(e1({ office })), String(office)).toEqual({ ok: false, reason: "office_not_supported" });
+    }
+    expect(build(e1({ office: "houston" }, { companyId: null }))).toEqual({ ok: false, reason: "office_not_supported" });
   });
   it("attachments verbatim, attachmentsOmitted defaults to 0, a blank crmActivityLog ⇒ null", () => {
     expect(build(e1({ attachments: [], attachmentsOmitted: undefined }, { crmActivityLog: "   " }))).toMatchObject({
@@ -301,6 +311,19 @@ describe("secret, targets and the operator re-drive marker", () => {
     expect(wire.buildRfpBidCreateLinkedTargetUrl("")).toBeNull();
     expect(wire.buildCrmInternalTargetUrl("/api/internal/core-bid-created", "https://crm.example.test/")).toBe("https://crm.example.test/api/internal/core-bid-created");
     expect(wire.buildCrmInternalTargetUrl("/api/internal/rfp-core-notice", "  ")).toBeNull();
+  });
+  it("(ruling 5) per-office Core targets: /webhooks/crm/<office>/rfp-bid-create/v1 and …/linked for dallas and atlanta; any other office ⇒ null", () => {
+    expect(wire.buildRfpBidCreateOfficeTargetUrl("atlanta", "https://core.example.test/")).toBe("https://core.example.test/webhooks/crm/atlanta/rfp-bid-create/v1");
+    expect(wire.buildRfpBidCreateLinkedOfficeTargetUrl("atlanta", "https://core.example.test")).toBe("https://core.example.test/webhooks/crm/atlanta/rfp-bid-create/v1/linked");
+    expect(wire.buildRfpBidCreateOfficeTargetUrl("dallas", "https://core.example.test")).toBe("https://core.example.test/webhooks/crm/dallas/rfp-bid-create/v1");
+    expect(wire.buildRfpBidCreateLinkedOfficeTargetUrl("dallas", "https://core.example.test")).toBe("https://core.example.test/webhooks/crm/dallas/rfp-bid-create/v1/linked");
+    expect(wire.buildRfpBidCreateOfficeTargetUrl("houston", "https://core.example.test")).toBeNull();
+    expect(wire.buildRfpBidCreateOfficeTargetUrl("atlanta", "http://core.example.test")).toBeNull();
+    expect(wire.buildRfpBidCreateLinkedOfficeTargetUrl("atlanta", "")).toBeNull();
+    expect(wire.resolveRfpBidCreateOffice("atlanta")).toBe("atlanta");
+    expect(wire.resolveRfpBidCreateOffice("dallas")).toBe("dallas");
+    for (const v of ["houston", "Atlanta", "", null, undefined, 7]) expect(wire.resolveRfpBidCreateOffice(v), String(v)).toBeNull();
+    expect(wire.RFP_BID_CREATE_OFFICES).toEqual(["dallas", "atlanta"]);
   });
   it("isOperatorRedrive: ONLY a non-empty string at payload.operatorRedrive.go", () => {
     expect(wire.isOperatorRedrive({ operatorRedrive: { reason: "operator_redrive", go: "GO-SYN-0001" } })).toBe(true);
