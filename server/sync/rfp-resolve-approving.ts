@@ -69,6 +69,8 @@ export type ResolveReport = {
   /** The recorded original-approval inputs, by field name only. */
   recordedInputs: string[];
   preCreateStepsRecorded: boolean;
+  /** Life left on the stored Procore token when the checks ran; null = no usable token. */
+  tokenMsLeft: number | null;
 };
 
 export type ResolveApplyResult = { applied: boolean; refused?: string; report: ResolveReport };
@@ -76,8 +78,13 @@ export type ResolveApplyResult = { applied: boolean; refused?: string; report: R
 /** (iii)'s window around rfp_approval_approving.started_at (runbook r5 §3 step 2). */
 const WINDOW_MS = 2 * 60 * 60_000;
 const PER_PAGE = 10;
-/** S0b-2b red 2 stub (d9 QC token ruling): the green sets the recreate token threshold. */
-export const RECREATE_MIN_TOKEN_MS: number = 0;
+/**
+ * The create step has no single overall timeout; its bound is the 30-minute approving window (a create still `approving` after
+ * that reads as stuck). d9 QC (2026-11-10): recreate needs the STORED token to outlive it by 5 min, never under 15 min, so the
+ * create step never reaches a token renewal.
+ */
+export const RECREATE_CREATE_STEP_MAX_MS = 30 * 60_000;
+export const RECREATE_MIN_TOKEN_MS = Math.max(RECREATE_CREATE_STEP_MAX_MS + 5 * 60_000, 15 * 60_000);
 
 export function parseResolveArgs(argv: string[]): ResolveArgs | { error: string } {
   const err = (error: string) => ({ error });
@@ -148,6 +155,7 @@ function emptyReport(requestId: number): ResolveReport {
     submitAt: null,
     recordedInputs: [],
     preCreateStepsRecorded: false,
+    tokenMsLeft: null,
   };
 }
 
@@ -213,6 +221,9 @@ export async function dryRunResolveApproving(requestId: number, deps: ResolveDep
     return stop("error", `the stored Procore token expired at ${token.expiresAt.toISOString()}; this tool never refreshes`);
   }
   const accessToken = token.accessToken;
+  const tokenMsLeft = token.expiresAt.getTime() - nowMs;
+  report.tokenMsLeft = tokenMsLeft;
+  out(`Procore token: ${Math.floor(tokenMsLeft / 60_000)} min left (recreate needs ${RECREATE_MIN_TOKEN_MS / 60_000})`);
 
   const dealData = facts.dealData;
   const edited = (facts.recorded?.editedFields ?? {}) as Record<string, unknown>;
@@ -354,6 +365,11 @@ export async function applyResolveApproving(args: ResolveArgs, deps: ResolveDeps
     if (!res.success) return refuse(`found could not be finalised: ${res.error ?? "unknown error"}`);
   } else if (args.resolution === "recreate") {
     if (report.decision !== "B_recreate") return refuse(`the checks say ${report.verdict} (decision ${report.decision}), not recreate`);
+    // d9 QC: never renew, not even through the create step's own token path. A short token: wait for the server's renewal.
+    const left = report.tokenMsLeft ?? 0;
+    if (left < RECREATE_MIN_TOKEN_MS) {
+      return refuse(`token too short to recreate without refresh: ${Math.floor(left / 60_000)} min left, recreate needs ${RECREATE_MIN_TOKEN_MS / 60_000}`);
+    }
     const res = await deps.recreate(args.id);
     if (!res.success) {
       // The locked path may have written (a hold, or a create that ended without a project): record the attempt.

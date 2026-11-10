@@ -6,8 +6,8 @@
  *   npx tsx scripts/rfp-resolve-approving.ts --id <requestId> --apply --resolution recreate
  *
  * The logic lives in server/sync/rfp-resolve-approving.ts. Its own Procore searches use the token as stored and NEVER renew
- * it: an expired token stops the run with `error`. Only `--resolution recreate` goes further: it re-enters the app's normal
- * create step, which gets its token the way the server does (renewed under the cross-replica lock when under 60 s remain).
+ * it: an expired token stops the run with `error`. `--resolution recreate` re-enters the app's normal create step, so it
+ * refuses unless the stored token has RECREATE_MIN_TOKEN_MS (35 min) left: the create step then never reaches a renewal (d9 QC).
  * Exit 0 = a dry-run that reached a decision, or an applied resolution; 1 = refused / STOP; 2 = bad arguments.
  */
 import { applyResolveApproving, dryRunResolveApproving, parseResolveArgs } from "../server/sync/rfp-resolve-approving";
