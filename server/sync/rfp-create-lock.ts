@@ -110,8 +110,20 @@ export async function readCreateCommandForUpdate(tx: Executor, commandId: number
 export async function readCoreCreateContext(db: Executor, createId: number): Promise<any | undefined> {
   return rowsOf(await db.execute(sql`
     SELECT c.id AS create_id, c.source_system, c.source_deal_id, c.source_event_id, c.core_bid_id, c.command_id,
-           b.payload AS command_payload
+           c.payload AS core_payload, b.payload AS command_payload
       FROM rfp_core_create_outbox c JOIN bidboard_create_outbox b ON b.id = c.command_id
      WHERE c.id = ${createId}
+  `))[0];
+}
+
+/**
+ * S1b (the one-deal operator re-drive, scripts/rfp-redrive-to-core.ts): the create COMMAND row of ONE approval by its
+ * unique source_event_id, read-only, or FOR UPDATE inside the CLI's locked transaction. A by-key read, never a status scan
+ * (E-8 reader census): the CLI itself requires the row to be procore-stamped and `done`.
+ */
+export async function readCreateCommandForEvent(tx: Executor, sourceEventId: string, forUpdate = false): Promise<any | undefined> {
+  return rowsOf(await tx.execute(sql`
+    SELECT id, source_system, source_deal_id, source_event_id, project_number, destination, status, approval_kind, payload
+      FROM bidboard_create_outbox WHERE source_event_id = ${sourceEventId} ${forUpdate ? sql`FOR UPDATE` : sql``}
   `))[0];
 }

@@ -50,6 +50,7 @@ import {
   type RfpBidCreateBody,
 } from "./rfp-core-wire";
 import { lockRfpCreateDeal, readCreateCommandForUpdate, readProcoreFootprint } from "./rfp-create-lock";
+import { operatorRedriveOf, type OperatorRedrive } from "./rfp-operator-redrive";
 import { RFP_HELD_CROSS_DESTINATION_STATUS, rfpNonserviceDestinationSetting } from "./rfp-destination";
 
 export interface RfpCoreDrainDeps {
@@ -129,6 +130,27 @@ function senderConfig(env: NodeJS.ProcessEnv = process.env): SenderConfig {
   if (!buildBidBoardCreatedCallbackTargetUrl(env.TROCK_CRM_BASE_URL)) missing.push("TROCK_CRM_BASE_URL (unset)");
   if (!secret || !coreBase || missing.length > 0) return { ok: false, missing };
   return { ok: true, secret, coreBase };
+}
+
+/**
+ * d9 Q1 (S1b r2) + ruling A (r3): an operator re-drive row's E1 may predate CRM PR-B (no office, no approvalKind, no
+ * approval block). ONLY for such a row, the office / approvalKind / vote evidence the re-drive CLI recorded (checked, attested
+ * by its GO) fill the gaps; a value the E1 HAS always wins. An ordinary row with no office stays office_not_supported, and
+ * one with no approval block is sent with approval null, as before.
+ */
+function withRedriveAttestation(input: CreateFromRfpInput, redrive: OperatorRedrive): CreateFromRfpInput {
+  const e1 = input as any;
+  const filled = { ...e1 };
+  if (!(typeof e1.office === "string" && e1.office.trim() !== "") && redrive.office) filled.office = redrive.office;
+  if (e1.approvalKind !== "vote" && e1.approvalKind !== "override" && redrive.approvalKind) filled.approvalKind = redrive.approvalKind;
+  // d9 ruling A (S1b r3): the attested vote evidence stands in for a missing approval block. Its `source` is recorded only:
+  // Core's E2 approval has exactly five keys, so the body builder copies those five and nothing else.
+  const hasBlock = e1.approval !== null && typeof e1.approval === "object" && !Array.isArray(e1.approval);
+  if (!hasBlock && redrive.approval) {
+    const { roundEventId, approvals, rejections, invitedVoterCount, decidedAt } = redrive.approval;
+    filled.approval = { roundEventId, approvals, rejections, invitedVoterCount, decidedAt };
+  }
+  return filled as CreateFromRfpInput;
 }
 
 /** The E1 input F1 / the body read: the command row's stored payload, keyed by the Core row's own identity. */
@@ -218,7 +240,9 @@ async function claimCandidate(db: any, candidate: { id: number; source_deal_id: 
 
     // (4) The body (§5). An office other than dallas | atlanta (r2, d9 ruling 5) or a null companyId ⇒ SyncHub pre-refuses
     // (refused + alert + F1, re-armable per §2); nothing is sent.
-    const built = buildRfpBidCreateBody(input, { occurredAt: now.toISOString(), approvalKind: command.approval_kind ?? null });
+    const redrive = operatorRedriveOf(row.payload);
+    const bodyInput = redrive ? withRedriveAttestation(input, redrive) : input;
+    const built = buildRfpBidCreateBody(bodyInput, { occurredAt: now.toISOString(), approvalKind: command.approval_kind ?? null });
     if (!built.ok) {
       const why = built.reason === "office_not_supported"
         ? `refused before sending: office ${JSON.stringify((input as any).office ?? null)} is not served by the Core path (dallas | atlanta)`

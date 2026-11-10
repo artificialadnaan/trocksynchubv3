@@ -52,6 +52,7 @@ import {
   type RfpCoreNoticeKind,
 } from "./rfp-core-wire";
 import { lockRfpCreateDeal, readCoreCreateContext } from "./rfp-create-lock";
+import { operatorRedriveOf } from "./rfp-operator-redrive";
 import { rfpNonserviceDestinationSetting } from "./rfp-destination";
 
 export interface RfpCoreFollowupDrainResult {
@@ -135,9 +136,13 @@ function followupConfig(env: NodeJS.ProcessEnv = process.env): FollowupConfig {
   return { ready, missing, crmSecret, crmLinkUrl, noticeUrl, coreSecret, coreBase };
 }
 
-/** The create's office (d9 ruling 5): E1's office on the command row, when dallas | atlanta. */
-function officeOf(commandPayload: any): string | null {
-  return resolveRfpBidCreateOffice(commandPayload?.office);
+/**
+ * The create's office (d9 ruling 5): E1's office on the command row, when dallas | atlanta; for an operator re-drive row
+ * whose E1 predates PR-B (no office), the office its GO attested (d9 Q1, S1b r2).
+ */
+function officeOf(ctx: any): string | null {
+  return resolveRfpBidCreateOffice(ctx?.command_payload?.office)
+    ?? resolveRfpBidCreateOffice(operatorRedriveOf(ctx?.core_payload)?.office ?? null);
 }
 
 /**
@@ -150,7 +155,7 @@ async function enqueueNoticeInTx(
   const base = {
     sourceDealId: String(ctx.source_deal_id),
     sourceEventId: String(ctx.source_event_id),
-    office: officeOf(ctx.command_payload),
+    office: officeOf(ctx),
     kind,
     reason,
     coreBidId: ctx.core_bid_id ?? null,
@@ -201,7 +206,7 @@ async function send(row: any, ctx: any, config: FollowupConfig, deps: RfpCoreDra
   if (kind === "core_confirm") {
     const p = (row.payload ?? {}) as any;
     // The office E2 went to (stored on E5 at enqueue from E4's body), else the create's E1 office.
-    const office = resolveRfpBidCreateOffice(p.office) ?? officeOf(ctx.command_payload);
+    const office = resolveRfpBidCreateOffice(p.office) ?? officeOf(ctx);
     const targetUrl = office ? buildRfpBidCreateLinkedOfficeTargetUrl(office, config.coreBase!) : null;
     // Never dead (§7): an office the Core path does not serve is retried like any failure, and alerted.
     if (!targetUrl) return { kind: "transport", error: `office_not_supported: ${JSON.stringify(p.office ?? ctx.command_payload?.office ?? null)}` };

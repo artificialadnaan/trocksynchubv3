@@ -34,7 +34,12 @@ export type RfpCoreAlertCode =
   | "crm_link_retry"
   | "crm_request_rejected"
   | "core_confirm_retry"
-  | "crm_notice_retry";
+  | "crm_notice_retry"
+  // S1b: the one-deal operator CLIs (each --apply under its own a4 GO).
+  | "rfp_operator_redrive_applied"
+  | "rfp_requeue_applied"
+  // S1b r2 (d9 Q2): a CRM re-post of a re-driven approval, answered as a no-op replay.
+  | "redrive_repost_replayed";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
 

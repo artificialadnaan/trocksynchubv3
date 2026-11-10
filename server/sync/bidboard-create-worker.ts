@@ -20,6 +20,8 @@ import { preflightRfpCoreTables, preflightRfpCoreTablesOrThrow, type RfpCoreTabl
 import { raiseRfpCoreAlert, type RfpCoreAlertCode } from "./rfp-core-alert";
 import { lockRfpCreateDeal, readCoreFootprint, readProcoreFootprint } from "./rfp-create-lock";
 import { RFP_APPROVING_STATUS } from "./rfp-approving";
+import { coreCreateRearmSet, coreFollowupRearmSet } from "./rfp-core-rearm";
+import { operatorRedriveOf } from "./rfp-operator-redrive";
 
 // Durable command outbox for create-from-rfp (findings V1-V4). See shared/schema.ts bidboardCreateOutbox.
 // The endpoint persists a command before its 202; this SERIAL worker (one create at a time, matching the global
@@ -415,6 +417,22 @@ async function handleReattempt(
     alerts.push(["approval_kind_conflict", { stored, received: kind, commandId: existing.id }]);
     return; // refused: never re-stamped, nothing refreshed
   }
+  // d9 Q2 (S1b r2): this approval was re-driven to Core by the operator CLI (its Procore create is `done`, and its event has
+  // an operatorRedrive Core row). A CRM re-post is a NO-OP REPLAY: the route answers the same 202 the done branch answers,
+  // and NOTHING is re-queued, re-stamped, adopted or refreshed (the done branch's callback-recovery re-queue would put the
+  // command back to pending, the Procore claim would then hold it on the Core footprint, and the re-drive row would lose its
+  // footprint skip). ONE alert.
+  if (existing.destination === "procore" && existing.status === "done") {
+    const core = firstRow(await tx.execute(sql`
+      SELECT id, status, payload FROM rfp_core_create_outbox
+       WHERE source_system = ${input.sourceSystem} AND source_event_id = ${input.sourceEventId}
+    `));
+    const redrive = core ? operatorRedriveOf(core.payload) : null;
+    if (core && redrive) {
+      alerts.push(["redrive_repost_replayed", { commandId: existing.id, coreId: core.id, coreStatus: core.status, go: redrive.go }]);
+      return;
+    }
+  }
   const effectiveKind = stored ?? kind;
   if (!stored && kind) {
     await tx.execute(sql`UPDATE bidboard_create_outbox SET approval_kind = ${kind} WHERE id = ${existing.id} AND approval_kind IS NULL`);
@@ -491,10 +509,7 @@ async function handleReattempt(
   if (CORE_REARMABLE.has(core.status)) {
     await tx.execute(sql`UPDATE bidboard_create_outbox SET payload = ${JSON.stringify(input)}::jsonb WHERE id = ${existing.id}`);
     await tx.execute(sql`
-      UPDATE rfp_core_create_outbox
-         SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL, refusal_reason = NULL,
-             project_number = ${input.deal.projectNumber ?? null}
-       WHERE id = ${core.id}
+      UPDATE rfp_core_create_outbox SET ${coreCreateRearmSet(input.deal.projectNumber ?? null)} WHERE id = ${core.id}
     `);
     // S1a (owner: every re-arm is VISIBLE): the rep's re-post put a not-yet-sent Core create back on the E2 schedule.
     alerts.push(["core_create_rearmed", { coreId: core.id, from: core.status, refusalReason: core.refusal_reason ?? null }]);
@@ -504,8 +519,7 @@ async function handleReattempt(
     // Core created the bid: NEVER re-send E2. Re-arm a dead E4 / E5 follow-up only (the rep's Retry after a dead link);
     // a link_refused E4 is never re-armed (a person resolves it).
     const rearmed = await tx.execute(sql`
-      UPDATE rfp_core_followup_outbox
-         SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL
+      UPDATE rfp_core_followup_outbox SET ${coreFollowupRearmSet()}
        WHERE create_id = ${core.id} AND kind IN ('crm_link', 'core_confirm') AND status = 'dead'
       RETURNING id, kind
     `);

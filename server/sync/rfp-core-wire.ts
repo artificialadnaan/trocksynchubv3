@@ -472,11 +472,8 @@ export function coreConfirmDisposition(attemptCount: number): CoreConfirmDisposi
 }
 
 /**
- * A one-deal operator re-drive row (re-drive design r2 001ab3ba, pending a4's final confirmation): a non-empty string at
- * `payload.operatorRedrive.go`. Only such a row, whose command is procore-done, skips the sender's Procore-footprint hold.
+ * A one-deal operator re-drive row (re-drive design r2 001ab3ba): a non-empty string at `payload.operatorRedrive.go`. Only
+ * such a row, whose command is procore-done, skips the sender's Procore-footprint hold. Lives in rfp-operator-redrive.ts
+ * (S0 reads it too); re-exported here unchanged.
  */
-export function isOperatorRedrive(payload: unknown): boolean {
-  if (!isObject(payload)) return false;
-  const redrive = payload.operatorRedrive;
-  return isObject(redrive) && typeof redrive.go === "string" && redrive.go.trim() !== "";
-}
+export { isOperatorRedrive } from "./rfp-operator-redrive";
