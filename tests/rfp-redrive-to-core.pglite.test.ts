@@ -25,8 +25,11 @@ import { drizzle } from "drizzle-orm/pglite";
 //      invited ≥ approvals + rejections, a path + a 64-hex sha; the source is recorded as attested, never opened. Stored in
 //      payload.operatorRedrive.approval; the S1 sender sends it as E2's `approval` (source NOT on the wire: Core's contract
 //      has no field for it) ONLY for a re-drive row whose E1 lacks the block. Core stays strict.
+// r4 (d9 on the r3 questions): a stored block with a null roundEventId stays "present" (no change); when --source-event-id
+//      is crm:rfp-vote:approved:<round> the evidence roundEventId must EQUAL <round> (any other form: nothing to compare,
+//      printed, not refused); 2000-01-01T00:00:00Z ≤ decidedAt ≤ now (an injectable clock), as Core checks.
 // Synthetic data only (I7): a synthetic DFW- number shaped like a real pre-PR-B approval, never a real deal's; a fake round
-// id, path and sha for the evidence.
+// id (round-syn-1, matching the synthetic event id), path and sha for the evidence; a fixed synthetic clock.
 const dbHolder = vi.hoisted(() => ({ db: null as any }));
 const alertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
 const fetchSpy = vi.hoisted(() => vi.fn());
@@ -71,8 +74,10 @@ const DEAL = "00000000-0000-4000-8000-0000000000a1";
 const OTHER_DEAL = "00000000-0000-4000-8000-0000000000a2";
 const COMPANY = "00000000-0000-4000-8000-0000000000c1";
 const BID = "00000000-0000-4000-8000-0000000000b1";
-const KEY = "crm:rfp-vote:approved:round-7";
-const OTHER_KEY = "crm:rfp-vote:approved:round-8";
+const KEY = "crm:rfp-vote:approved:round-syn-1";
+const OTHER_KEY = "crm:rfp-vote:approved:round-syn-2";
+/** r4: the CLI's injected clock (the evidence's decidedAt must not be after it). */
+const CLOCK = new Date("2026-11-10T12:00:00.000Z");
 const GO = "A4-GO-SYN-REDRIVE-0001";
 const ACTOR = "Synthetic Operator";
 const OS_USER = "os:synthetic-runner";
@@ -153,7 +158,7 @@ function senderEnv() {
 function e1(o: Record<string, any> = {}, deal: Record<string, any> = {}): any {
   return {
     sourceSystem: "trock_crm", sourceDealId: DEAL, sourceEventId: KEY, decision: "approved", approvalKind: "vote", office: "dallas",
-    approval: { roundEventId: "round-7", approvals: 2, rejections: 0, invitedVoterCount: 3, decidedAt: "2026-11-01T15:00:00.000Z" },
+    approval: { roundEventId: "round-syn-1", approvals: 2, rejections: 0, invitedVoterCount: 3, decidedAt: "2026-11-01T15:00:00.000Z" },
     attachments: [],
     ...o,
     deal: {
@@ -193,7 +198,9 @@ async function insertCore(commandId: number, o: { key?: string; deal?: string; s
 const ARGS = (...extra: string[]) => ["--deal", DEAL, "--source-event-id", KEY, "--go", GO, "--actor", ACTOR, ...extra];
 async function run(argv: string[], env: NodeJS.ProcessEnv = CORE_ENV) {
   const lines: string[] = [];
-  const res = await runRedriveToCore(argv, { db: dbHolder.db, out: (l: string) => lines.push(l), env, osUser: OS_USER, readFile: readFileFake } as any);
+  const res = await runRedriveToCore(argv, {
+    db: dbHolder.db, out: (l: string) => lines.push(l), env, osUser: OS_USER, readFile: readFileFake, now: () => CLOCK,
+  } as any);
   return { res, text: lines.join("\n") };
 }
 const count = async (table: string) => Number((await pg.query<any>(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n);
@@ -385,9 +392,10 @@ describe("(Q1) --office / --approval-kind for an approval whose stored E1 lacks 
     expect(res).toMatchObject({ code: 0, applied: true });
     expect(text).toContain(`office dallas (attested by GO ${GO})`);
     expect(text).toContain(`approvalKind vote (attested by GO ${GO})`);
-    for (const key of ["approval", "approval.parse", "approval.shape", "approval.votes", "approval.invited", "approval.source"]) {
+    for (const key of ["approval", "approval.parse", "approval.shape", "approval.round", "approval.decidedAt", "approval.votes", "approval.invited", "approval.source"]) {
       expect(text, key).toContain(`PASS (${key})`);
     }
+    expect(text).toContain("roundEventId round-syn-1 = the round in crm:rfp-vote:approved:round-syn-1");
     expect(text).toContain(`approval evidence: attested by GO ${GO} (source ${SOURCE_PATH} ${SOURCE_SHA.slice(0, 8)})`);
     expect(readFileFake.mock.calls.map((c) => c[0])).toEqual([EVIDENCE_FILE]);
     expect((await coreRowsFor())[0].payload).toEqual({
@@ -677,5 +685,49 @@ describe("(r3, d9 ruling A) --approval-evidence: the pre-PR-B approval block as 
     await processRfpCoreCreateOutbox({ fetchImpl });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetchImpl.mock.calls[0]![1].body).approval).toBeNull();
+  });
+});
+
+describe("(r4, d9 on the r3 questions) the evidence round must match the event id; decidedAt within [2000-01-01, now]", () => {
+  const PRE = (key = KEY) => ["--deal", DEAL, "--source-event-id", key, "--go", GO, "--actor", ACTOR,
+    "--office", "dallas", "--approval-kind", "vote", "--approval-evidence", EVIDENCE_FILE, "--apply"];
+  it("an evidence roundEventId that does not equal the round in crm:rfp-vote:approved:<round> ⇒ refused, 0 rows written", async () => {
+    files[EVIDENCE_FILE] = JSON.stringify({ ...EVIDENCE, roundEventId: "round-syn-9" });
+    await seedProcore(e1PrePrb());
+    const before = await counts();
+    const { res, text } = await run(PRE());
+    expect(res).toMatchObject({ code: 1, applied: false });
+    expect(text).toContain("FAIL (approval.round)");
+    expect(await counts()).toEqual(before);
+    expect(await count("rfp_core_create_outbox")).toBe(0);
+    expect(await count("audit_logs")).toBe(0);
+    expect(alertCodes()).toEqual([]);
+  });
+  it("an event id of any other form ⇒ nothing to compare (printed, not refused): it applies when everything else is valid", async () => {
+    const otherForm = "crm:rfp-approval:syn-legacy-1";
+    await seedProcore({ ...e1PrePrb(), sourceEventId: otherForm });
+    const { res, text } = await run(PRE(otherForm));
+    expect(res).toMatchObject({ code: 0, applied: true });
+    expect(text).toContain("PASS (approval.round)");
+    expect(text).toContain("nothing to compare");
+    expect((await coreRowsFor(otherForm))[0].payload.operatorRedrive.approval).toEqual(EVIDENCE);
+  });
+  it("decidedAt in 1999 ⇒ refused, 0 rows written (Core refuses an event before 2000)", async () => {
+    files[EVIDENCE_FILE] = JSON.stringify({ ...EVIDENCE, decidedAt: "1999-12-31T23:59:59.000Z" });
+    await seedProcore(e1PrePrb());
+    const before = await counts();
+    const { res, text } = await run(PRE());
+    expect(res.code).toBe(1);
+    expect(text).toContain("FAIL (approval.decidedAt)");
+    expect(await counts()).toEqual(before);
+  });
+  it("decidedAt in the future (the injected clock + 1 day) ⇒ refused, 0 rows written", async () => {
+    files[EVIDENCE_FILE] = JSON.stringify({ ...EVIDENCE, decidedAt: new Date(CLOCK.getTime() + 24 * 60 * 60 * 1000).toISOString() });
+    await seedProcore(e1PrePrb());
+    const before = await counts();
+    const { res, text } = await run(PRE());
+    expect(res.code).toBe(1);
+    expect(text).toContain("FAIL (approval.decidedAt)");
+    expect(await counts()).toEqual(before);
   });
 });
