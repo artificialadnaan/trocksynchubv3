@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { storage } from "../storage";
+import { RFP_APPROVING_LABEL } from "@shared/rfp-status-display";
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import {
   buildExpiredRfpMessage,
@@ -477,8 +478,16 @@ export function registerRfpApprovalRoutes(app: Express) {
       return res.status(410).send(renderRfpPage('Link Expired', `<p>${buildExpiredRfpMessage(request)}</p>`));
     }
     if (request.status !== 'pending') {
+      // `approving` = the Bid Board create is running (S0b-2b; d9 Q10): it reads as such, never "declined". The other
+      // non-declined statuses (an override in progress, held, cancelled) are not "declined" either.
       const statusMsg = request.status === 'approved'
         ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>`
+        : request.status === 'approving'
+        ? `<p>This RFP was approved and its Bid Board project is being created: <strong>${RFP_APPROVING_LABEL}</strong></p>`
+        : request.status === 'override_approving'
+        ? `<p>An override approval of this RFP is in progress.</p>`
+        : request.status === 'held_cross_destination' || request.status === 'cancelled_source_ineligible'
+        ? `<p>This RFP is no longer open for review (status: <strong>${request.status}</strong>).</p>`
         : `<p>This RFP was <strong>declined</strong> by ${request.declinedBy || 'a reviewer'}.</p>`;
       return res.send(renderRfpPage('Already Processed', statusMsg));
     }

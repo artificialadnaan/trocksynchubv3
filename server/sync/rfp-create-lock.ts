@@ -75,3 +75,17 @@ export async function readCoreFootprint(tx: Executor, sourceSystem: string, sour
   `));
   return rows.map((r) => `core:${r.status}`);
 }
+
+/**
+ * Every create command the deal has, whatever its status or destination, one `create_command:<destination>:<status>` per row
+ * (S0b-2b: the resolve CLI's "no other create row" for `recreate`, runbook r5 §3B). Stricter than the Procore footprint on
+ * purpose: even a pending or routed command means someone else is already creating this deal.
+ */
+export async function readDealCreateCommands(tx: Executor, sourceSystem: string, sourceDealId: string): Promise<string[]> {
+  const rows = rowsOf(await tx.execute(sql`
+    SELECT destination, status FROM bidboard_create_outbox
+     WHERE source_system = ${sourceSystem} AND source_deal_id = ${sourceDealId}
+     ORDER BY id
+  `));
+  return rows.map((r) => `create_command:${r.destination}:${r.status}`);
+}

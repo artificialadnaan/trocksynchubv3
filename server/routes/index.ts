@@ -56,6 +56,7 @@ import { startBidboardCreateWorker } from "../sync/bidboard-create-worker";
 import { startServiceRfpCoreOutboxWorker } from "../sync/service-rfp-core-outbox";
 import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
 import { startPendingRfpDigestScheduler } from "../cron/pendingRfpDigestScheduler";
+import { startRfpApprovingStuckScheduler } from "../cron/rfpApprovingStuckScheduler";
 
 const PgSession = connectPgSimple(session);
 
@@ -139,6 +140,7 @@ export async function registerRoutes(
   startServiceRfpCoreOutboxWorker();
   startTrockCrmRelayScheduler();
   startPendingRfpDigestScheduler();
+  startRfpApprovingStuckScheduler();
 
   // Initialize polling systems from saved config
   initPolling().catch((err: any) => {

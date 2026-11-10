@@ -15,6 +15,7 @@ import {
   reportScheduleConfig,
   syncMappings,
 } from "@shared/schema";
+import { RFP_APPROVING_LABEL, RFP_IN_PROGRESS_STATUSES, rfpStatusLabel } from "@shared/rfp-status-display";
 import { sendEmail, type EmailAttachment } from "./email-service";
 import { buildEstimatesSentPdf, estimatesSentPdfFilename } from "./estimates-sent-pdf";
 import {
@@ -262,26 +263,22 @@ export interface RfpReportRow {
 /**
  * The report's status pair for one request (S0b-2b; d9 Q10): the machine value (declined normalised to rejected, as before)
  * and the label every surface prints.
- *
- * S0b-2b RED: stub. The label is the raw value.
  */
 export function toReportApprovalStatus(rawStatus: string): { approvalStatus: string; approvalStatusLabel: string } {
   const approvalStatus = rawStatus === "declined" ? "rejected" : rawStatus;
-  return { approvalStatus, approvalStatusLabel: approvalStatus };
+  return { approvalStatus, approvalStatusLabel: rfpStatusLabel(approvalStatus) };
 }
 
 /**
  * The summary chips' counts (S0b-2b; d9 Q10): an in-progress count (a Bid Board create running) next to pending / approved /
  * rejected, so the chips add up.
- *
- * S0b-2b RED: stub. No in-progress count.
  */
 export function summarizeApprovals(rows: Array<{ approvalStatus: string }>): { pending: number; approved: number; rejected: number; inProgress: number } {
   return {
     pending: rows.filter((r) => r.approvalStatus === "pending").length,
     approved: rows.filter((r) => r.approvalStatus === "approved").length,
     rejected: rows.filter((r) => r.approvalStatus === "rejected").length,
-    inProgress: 0,
+    inProgress: rows.filter((r) => RFP_IN_PROGRESS_STATUSES.includes(r.approvalStatus)).length,
   };
 }
 
@@ -431,8 +428,7 @@ export async function getRfpReportList(
 
     const changeCount = changeMap.get(rfp.id) ?? 0;
 
-    // Normalize "declined" → "rejected" for report display, filters, and approval summary
-    const approvalStatus = rfp.status === "declined" ? "rejected" : rfp.status;
+    // "declined" → "rejected" for report display, filters, and approval summary; the label is what a person reads (S0b-2b).
 
     return {
       id: rfp.id,
@@ -445,7 +441,7 @@ export async function getRfpReportList(
       recipient,
       dateSent: rfp.createdAt ? new Date(rfp.createdAt).toISOString() : "",
       bidboardStage,
-      approvalStatus,
+      ...toReportApprovalStatus(rfp.status),
       changeCount,
       amount,
       // Flipped by resolveMissingAmountsFromCrm below when a blank snapshot is backfilled live.
@@ -662,7 +658,7 @@ export function exportRfpsToCsv(data: RfpReportRow[]): string {
     r.recipient,
     r.dateSent ? new Date(r.dateSent).toLocaleString() : "",
     r.bidboardStage,
-    r.approvalStatus,
+    rfpStatusLabel(r.approvalStatus),
     String(r.changeCount),
   ]);
 
@@ -690,7 +686,7 @@ export function exportRfpsToPdfHtml(data: RfpReportRow[]): string {
       <td>${escapeHtml(r.recipient)}</td>
       <td>${r.dateSent ? new Date(r.dateSent).toLocaleString() : ""}</td>
       <td>${escapeHtml(r.bidboardStage)}</td>
-      <td>${escapeHtml(r.approvalStatus)}</td>
+      <td>${escapeHtml(rfpStatusLabel(r.approvalStatus))}</td>
       <td>${r.changeCount}</td>
     </tr>`
     )
@@ -857,7 +853,7 @@ export async function buildRfpReportEmailHtml(options: {
 
   sections.push(`
     <tr><td class="mobile-pad" style="padding: 20px 32px 12px 32px;">
-      ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${estimatesChip}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}
+      ${statChip(`${totalRfps} RFPs Sent`, "#1e2024", "#ffffff", true)}${estimatesChip}${statChip(`${totalChanges} ${totalChanges === 1 ? "Change" : "Changes"}`, "#1e2024", "#ffffff", true)}${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}${approvalSummary.inProgress ? statChip(`${approvalSummary.inProgress} In progress`, "#dbeafe", "#1e40af") : ""}
     </td></tr>`);
 
   // ONE label/value row helper for every card in this email. It was defined identically in the RFP
@@ -887,6 +883,10 @@ export async function buildRfpReportEmailHtml(options: {
       }
       if (r.approvalStatus === "pending") {
         return pill("Awaiting approval", "#fef3c7", "#92400e");
+      }
+      // A Bid Board create in progress (S0b-2b): its own label, never "Awaiting approval" and never the raw value.
+      if (r.approvalStatus === "approving") {
+        return pill(escapeHtml(RFP_APPROVING_LABEL), "#dbeafe", "#1e40af");
       }
       // Any other terminal/non-pending status (e.g. cancelled_source_ineligible) — show it
       // neutrally rather than implying action is still pending.
@@ -1118,7 +1118,7 @@ export async function buildRfpReportEmailHtml(options: {
     sections.push(`
     <tr><td class="mobile-pad" style="padding: 20px 32px;">
       <h3 style="margin: 0 0 10px 0; font-size: 15px; font-weight: 700; color: #111214; letter-spacing: -0.01em;">Approval Summary</h3>
-      ${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}${statChip(`${approvalSummary.approved} Approved`, "#dcfce7", "#166534")}${statChip(`${approvalSummary.rejected} Rejected`, "#fee2e2", "#991b1b")}
+      ${statChip(`${approvalSummary.pending} Pending`, "#fef3c7", "#92400e")}${approvalSummary.inProgress ? statChip(`${approvalSummary.inProgress} In progress`, "#dbeafe", "#1e40af") : ""}${statChip(`${approvalSummary.approved} Approved`, "#dcfce7", "#166534")}${statChip(`${approvalSummary.rejected} Rejected`, "#fee2e2", "#991b1b")}
     </td></tr>`);
   }
 
@@ -1188,7 +1188,7 @@ async function getRfpsForPeriod(
    * never going to print.
    */
   includeRfpLog: boolean
-): Promise<{ rfps: RfpReportRow[]; changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>; approvalSummary: { pending: number; approved: number; rejected: number } }> {
+): Promise<{ rfps: RfpReportRow[]; changes: Array<{ rfpId: number; projectName: string; projectNumber: string; items: Array<{ field: string; oldVal: string; newVal: string; changedBy: string }> }>; approvalSummary: { pending: number; approved: number; rejected: number; inProgress: number } }> {
   // The email is the ONE surface that renders an amount, so it is the one that opts into the live
   // CRM backfill for blank snapshots. See getRfpReportList.
   const { data: rfps } = await getRfpReportList(
@@ -1243,11 +1243,7 @@ async function getRfpsForPeriod(
     };
   });
 
-  const approvalSummary = {
-    pending: rfps.filter((r) => r.approvalStatus === "pending").length,
-    approved: rfps.filter((r) => r.approvalStatus === "approved").length,
-    rejected: rfps.filter((r) => r.approvalStatus === "rejected").length,
-  };
+  const approvalSummary = summarizeApprovals(rfps);
 
   return { rfps, changes, approvalSummary };
 }

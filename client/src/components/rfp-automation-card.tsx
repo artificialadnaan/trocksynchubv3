@@ -59,6 +59,7 @@ import {
   ArrowDown,
 } from "lucide-react";
 import React, { useState, useMemo } from "react";
+import { RFP_APPROVING_LABEL, rfpStatusLabel } from "@shared/rfp-status-display";
 
 interface RfpReportRow {
   id: number;
@@ -373,6 +374,7 @@ function InstantReportTab() {
             <SelectContent>
               <SelectItem value="all">All</SelectItem>
               <SelectItem value="pending">Pending</SelectItem>
+              <SelectItem value="approving">{RFP_APPROVING_LABEL}</SelectItem>
               <SelectItem value="approved">Approved</SelectItem>
               <SelectItem value="rejected">Rejected</SelectItem>
               <SelectItem value="declined">Declined</SelectItem>
@@ -505,6 +507,8 @@ function RfpTableRow({ row, isEven }: { row: RfpReportRow; isEven: boolean }) {
       ? "bg-green-500/10 text-green-700 border-green-500/20"
       : row.approvalStatus === "rejected"
       ? "bg-red-500/10 text-red-700 border-red-500/20"
+      : row.approvalStatus === "approving"
+      ? "bg-blue-500/10 text-blue-700 border-blue-500/20"
       : "bg-amber-500/10 text-amber-700 border-amber-500/20";
 
   return (
@@ -525,7 +529,7 @@ function RfpTableRow({ row, isEven }: { row: RfpReportRow; isEven: boolean }) {
             {row.approvalStatus === "approved" && <CheckCircle2 className="w-3 h-3 mr-1" />}
             {row.approvalStatus === "rejected" && <XCircle className="w-3 h-3 mr-1" />}
             {row.approvalStatus === "pending" && <AlertCircle className="w-3 h-3 mr-1" />}
-            {row.approvalStatus}
+            {rfpStatusLabel(row.approvalStatus)}
           </Badge>
         </TableCell>
         <TableCell className="py-2">{row.changeCount}</TableCell>
