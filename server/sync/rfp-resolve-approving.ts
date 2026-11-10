@@ -80,8 +80,9 @@ const WINDOW_MS = 2 * 60 * 60_000;
 const PER_PAGE = 10;
 /**
  * The create step has no single overall timeout; its bound is the 30-minute approving window (a create still `approving` after
- * that reads as stuck). d9 QC (2026-11-10): recreate needs the STORED token to outlive it by 5 min, never under 15 min, so the
- * create step never reaches a token renewal.
+ * that reads as stuck). d9 QC (2026-11-10): recreate needs the STORED token to outlive it by 5 min, never under 15 min. That
+ * floor only gates the START; the never-renew guarantee is recreateApprovingRequest running the create step inside
+ * withoutProcoreTokenRenewal (server/procore.ts), where a token that runs short fails closed.
  */
 export const RECREATE_CREATE_STEP_MAX_MS = 30 * 60_000;
 export const RECREATE_MIN_TOKEN_MS = Math.max(RECREATE_CREATE_STEP_MAX_MS + 5 * 60_000, 15 * 60_000);

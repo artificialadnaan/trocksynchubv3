@@ -1941,7 +1941,13 @@ export async function recreateApprovingRequest(
     const override = facts.recorded.approvedAttachments?.override ?? null;
     const options = override ? { attachmentsOverride: override.map((a) => ({ name: a.name, url: a.url })) } : undefined;
     const editedFields = Object.fromEntries(Object.entries(facts.recorded.editedFields).map(([k, v]) => [k, String(v)]));
-    return await processRfpApproval(facts.token, editedFields, facts.recorded.approvedBy, options, { requestId });
+    const approvedBy = facts.recorded.approvedBy;
+    // The create step has no overall timeout, so it runs with Procore token renewal OFF: a stored token that runs short
+    // fails the step closed instead of renewing (successor ec69 residual; the resolver's 35-min floor gates the start).
+    const { withoutProcoreTokenRenewal } = await import('./procore');
+    return await withoutProcoreTokenRenewal(`the recreate of RFP request ${requestId}`, () =>
+      processRfpApproval(facts.token, editedFields, approvedBy, options, { requestId }),
+    );
   } catch (e: any) {
     return { success: false, error: e?.message ?? String(e) };
   }
