@@ -33,6 +33,13 @@ const CRM_E4_KEYS = ["sourceSystem", "sourceDealId", "sourceEventId", "approvalK
 const N1_KEYS = ["sourceSystem", "sourceDealId", "sourceEventId", "office", "kind", "reason", "coreBidId", "noticeId", "occurredAt"];
 const sorted = (keys: string[]) => [...keys].sort();
 
+/** SIGNING-HARDENING r1: the SyncHub → CRM v2 signature, computed independently of server/crm-signing-v2.ts. */
+function crmV2(key: string, method: string, path: string, ts: number, body: string): string {
+  const bodyHash = crypto.createHash("sha256").update(body).digest("hex");
+  return `sha256=${crypto.createHmac("sha256", key).update(`v2\n${method}\n${path}\n${ts}\n${bodyHash}`).digest("hex")}`;
+}
+const CRM_V2_KEY = "synthetic-crm-sign-v2-key-0123456789abcdef";
+
 function framed(domain: string, path: string, body: string, key: string): string {
   const NUL = Buffer.from([0]);
   const pre = Buffer.concat([Buffer.from(domain), NUL, Buffer.from("POST"), NUL, Buffer.from(path), NUL, Buffer.from(body)]);
@@ -359,20 +366,25 @@ describe("the signed POSTs (rfp-core-http.ts)", () => {
     expect(headers.get("x-trock-signature")).toBe(framed("trock.crm.rfp-bid-create.v1", "/edge/webhooks/crm/dallas/rfp-bid-create/v1", GOLDEN_BODY, GOLDEN_KEY));
     expect(r).toEqual({ kind: "response", status: 201, body: { result: "created" } });
   });
-  it("postCrmSigned: x-rfp-request-signature = sha256=HMAC-SHA256(raw body) under the CRM secret, redirect 'error'", async () => {
+  it("postCrmSigned (E4 / N1): the v2 signature (SIGNING-HARDENING r1) over the requested path with the version + timestamp headers, redirect 'error'", async () => {
     const fetchImpl = vi.fn(async (_url: string, _init: any) => json(200, { result: "linked" }));
     const raw = JSON.stringify({ sourceSystem: "trock_crm", sourceDealId: DEAL });
-    const r = await http.postCrmSigned({ targetUrl: "https://crm.example.test/api/internal/core-bid-created", rawBody: raw, secret: "synthetic-crm-secret" }, { fetchImpl });
+    const r = await http.postCrmSigned(
+      { targetUrl: "https://crm.example.test/api/internal/core-bid-created", rawBody: raw, secret: CRM_V2_KEY },
+      { fetchImpl, now: () => new Date(1767225600 * 1000) } as any,
+    );
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const init = fetchImpl.mock.calls[0]![1];
     expect(init.redirect).toBe("error");
-    expect(new Headers(init.headers).get("x-rfp-request-signature"))
-      .toBe(`sha256=${crypto.createHmac("sha256", "synthetic-crm-secret").update(raw).digest("hex")}`);
+    const headers = new Headers(init.headers);
+    expect(headers.get("x-signature-version")).toBe("2");
+    expect(headers.get("x-signature-timestamp")).toBe("1767225600");
+    expect(headers.get("x-rfp-request-signature")).toBe(crmV2(CRM_V2_KEY, "POST", "/api/internal/core-bid-created", 1767225600, raw));
     expect(r).toEqual({ kind: "response", status: 200, body: { result: "linked" } });
   });
   it("never throws: a transport failure is { kind: 'transport' }, a non-JSON answer reads as {}", async () => {
     const boom = vi.fn(async () => { throw new TypeError("fetch failed: redirect mode is error"); });
-    const r1 = await http.postCrmSigned({ targetUrl: "https://crm.example.test/x", rawBody: "{}", secret: "k" }, { fetchImpl: boom as any });
+    const r1 = await http.postCrmSigned({ targetUrl: "https://crm.example.test/x", rawBody: "{}", secret: CRM_V2_KEY }, { fetchImpl: boom as any });
     expect(boom).toHaveBeenCalledTimes(1);
     expect(r1).toMatchObject({ kind: "transport" });
     const html = vi.fn(async () => new Response("<html>bad gateway</html>", { status: 502 }));

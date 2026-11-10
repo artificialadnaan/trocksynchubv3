@@ -84,7 +84,7 @@ const OS_USER = "os:synthetic-runner";
 /** A synthetic number shaped like a real pre-PR-B approval's (DFW, type 2, five digits, a suffix). */
 const PRE_PRB_NUMBER = "DFW-2-40001-syn";
 const CORE_ENV = { RFP_NONSERVICE_DESTINATION: "core" } as NodeJS.ProcessEnv;
-const CRM_SECRET = "synthetic-crm-internal-secret";
+const CRM_SECRET = "synthetic-crm-internal-secret-0123456789"; // ≥ 32 bytes (SIGNING-HARDENING r1)
 const CORE_BASE = "https://core.example.test";
 const CRM_BASE = "https://crm.example.test";
 const E2_DALLAS_URL = `${CORE_BASE}/webhooks/crm/dallas/rfp-bid-create/v1`;

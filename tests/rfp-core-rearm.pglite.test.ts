@@ -76,7 +76,7 @@ beforeEach(async () => {
   process.env.RFP_BID_CREATE_INGRESS_SECRET_CURRENT = "synthetic-rfp-bid-create-secret-0123456789";
   process.env.CORE_INGRESS_BASE_URL = CORE_BASE;
   process.env.TROCK_CRM_BASE_URL = CRM_BASE;
-  process.env.RFP_REQUEST_SYNC_SECRET = "synthetic-crm-internal-secret";
+  process.env.RFP_REQUEST_SYNC_SECRET = "synthetic-crm-internal-secret-0123456789"; // ≥ 32 bytes (SIGNING-HARDENING r1)
   resetRfpCoreSenderStateForTests();
   resetRfpCoreFollowupStateForTests();
 });
