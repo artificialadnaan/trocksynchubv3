@@ -39,7 +39,9 @@ export type RfpCoreAlertCode =
   | "rfp_operator_redrive_applied"
   | "rfp_requeue_applied"
   // S1b r2 (d9 Q2): a CRM re-post of a re-driven approval, answered as a no-op replay.
-  | "redrive_repost_replayed";
+  | "redrive_repost_replayed"
+  // SIGNING-HARDENING r1: a SyncHub → CRM send refused at first use (secret < 32 bytes, or a non-https CRM URL).
+  | "crm_signing_refused";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
 

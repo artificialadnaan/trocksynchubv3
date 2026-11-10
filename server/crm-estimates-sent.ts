@@ -21,7 +21,7 @@
  * does not.
  */
 
-import crypto from "crypto";
+import { alertCrmSigningRefused, clearCrmSigningRefusal, crmSigningRefusal, crmV2Headers } from "./crm-signing-v2";
 
 /** One deal that entered a "sent to client" stage in the window. Mirrors the CRM's response shape. */
 export interface CrmEstimateSent {
@@ -151,6 +151,8 @@ export interface CrmEstimatesSentDeps {
   secret?: string;
   timeoutMs?: number;
   logger?: (message: string) => void;
+  /** The clock the v2 signature timestamp reads (SIGNING-HARDENING r1). Injected in tests. */
+  now?: () => Date;
 }
 
 export async function fetchCrmEstimatesSent(
@@ -168,6 +170,15 @@ export async function fetchCrmEstimatesSent(
     // separately so the email can stay quiet about it rather than claiming something broke.
     return { ok: false, reason: "not_configured" };
   }
+  // SyncHub → CRM v2 signing, checked at first use (server/crm-signing-v2.ts): a secret under 32 bytes or a non-https base
+  // (localhost / 127.0.0.1 excepted) refuses every request, with one alert; reported as not configured.
+  const refusal = crmSigningRefusal({ secret, url: `${baseUrl}/api/internal/estimates-sent` });
+  if (refusal) {
+    logger(`[rfp-reports] CRM estimates-sent lookup refused before sending (${refusal.reason})`);
+    await alertCrmSigningRefused("estimates_sent", refusal);
+    return { ok: false, reason: "not_configured" };
+  }
+  clearCrmSigningRefusal("estimates_sent");
 
   const doFetch = deps.fetchImpl ?? fetch;
 
@@ -240,7 +251,9 @@ async function fetchOneWindow(
 ): Promise<{ ok: true; deals: CrmEstimateSent[]; malformed: number } | { ok: false; reason: "failed" }> {
   const { baseUrl, secret, doFetch, deps, logger } = ctx;
   const rawBody = JSON.stringify({ from: window.from.toISOString(), to: window.to.toISOString() });
-  const signature = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+  const url = `${baseUrl}/api/internal/estimates-sent`;
+  const signed = crmV2Headers({ url, rawBody, secret, signatureHeader: "x-rfp-request-signature", now: deps.now?.() });
+  if (!signed.ok) return { ok: false, reason: "failed" }; // checked once before the windows; never reached
 
   // One deadline covering the request, the response headers AND the body read — cleared only after
   // response.json() has settled, so a server that sends 200 and then stalls mid-JSON aborts into the
@@ -250,11 +263,11 @@ async function fetchOneWindow(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await doFetch(`${baseUrl}/api/internal/estimates-sent`, {
+    const response = await doFetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-rfp-request-signature": signature,
+        ...signed.headers,
       },
       body: rawBody,
       signal: controller.signal,

@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import path from "path";
 import { log } from "../index";
+import { alertCrmSigningRefused, clearCrmSigningRefusal, crmSigningRefusal, crmV2Headers } from "../crm-signing-v2";
 import type { BidBoardExcelRow } from "./bidboard-stage-sync";
 
 export interface BuildBidBoardCrmPayloadInput {
@@ -15,6 +16,8 @@ export interface PushBidBoardRowsInput extends BuildBidBoardCrmPayloadInput {
   statusPollDelaysMs?: number[];
   /** Injectable fetch for tests. */
   fetchImpl?: typeof fetch;
+  /** The clock the v2 signature timestamp reads (SIGNING-HARDENING r1). Injected in tests. */
+  now?: () => Date;
 }
 
 /**
@@ -53,8 +56,14 @@ export function buildBidBoardCrmPayload(input: BuildBidBoardCrmPayloadInput) {
   };
 }
 
-export function signBidBoardCrmPayload(body: string, secret: string) {
-  return `sha256=${crypto.createHmac("sha256", secret).update(body).digest("hex")}`;
+/**
+ * The x-bid-board-sync-signature v2 headers for ONE request to `url` (its pathname is signed; server/crm-signing-v2.ts,
+ * SIGNING-HARDENING r1). The push checks the refusal before its first request, so this never refuses in practice.
+ */
+export function bidBoardCrmHeadersV2(url: string, body: string, secret: string, now?: Date): Record<string, string> {
+  const signed = crmV2Headers({ url, rawBody: body, secret, signatureHeader: "x-bid-board-sync-signature", now });
+  if (!signed.ok) throw new Error(`refused before sending: ${signed.detail}`);
+  return signed.headers;
 }
 
 /** The CRM's idempotency key for a push: sha256 of the EXACT request body bytes.
@@ -130,7 +139,7 @@ interface StatusProbeResult {
 
 async function probeCrmIngestionStatus(
   statusUrl: string,
-  args: { officeSlug: string; idempotencyKey: string; secret: string; fetchImpl: typeof fetch }
+  args: { officeSlug: string; idempotencyKey: string; secret: string; fetchImpl: typeof fetch; now?: () => Date }
 ): Promise<StatusProbeResult> {
   const body = JSON.stringify({ office_slug: args.officeSlug, idempotency_key: args.idempotencyKey });
   try {
@@ -141,7 +150,7 @@ async function probeCrmIngestionStatus(
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-bid-board-sync-signature": signBidBoardCrmPayload(body, args.secret),
+          ...bidBoardCrmHeadersV2(statusUrl, body, args.secret, args.now?.()),
         },
         body,
       },
@@ -195,6 +204,16 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
     };
   }
 
+  // SyncHub → CRM v2 signing, checked at first use (server/crm-signing-v2.ts): BID_BOARD_SYNC_SECRET under 32 bytes, or a
+  // push / status URL that is not https (localhost / 127.0.0.1 excepted), refuses the push with one alert; nothing is sent.
+  const refusal = crmSigningRefusal({ secret, url }) ?? crmSigningRefusal({ secret, url: deriveBidBoardStatusUrl(url) });
+  if (refusal) {
+    log(`[BidBoardCRM] CRM ingestion push refused before sending (${refusal.reason}): ${refusal.detail}`, "sync");
+    await alertCrmSigningRefused("bid_board_sync", refusal);
+    return { ok: false, attempts: 0, skipped: true, error: `CRM Bid Board sync refused before sending: ${refusal.detail}` };
+  }
+  clearCrmSigningRefusal("bid_board_sync");
+
   const fetchImpl = input.fetchImpl ?? fetch;
   const payload = buildBidBoardCrmPayload(input);
   const officeSlug = payload.office_slug;
@@ -223,7 +242,7 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "x-bid-board-sync-signature": signBidBoardCrmPayload(body, secret),
+            ...bidBoardCrmHeadersV2(url, body, secret, input.now?.()),
           },
           body,
         },
@@ -277,7 +296,7 @@ export async function pushBidBoardRowsToCrm(input: PushBidBoardRowsInput): Promi
   let repostsRemaining = 1;
   for (const wait of pollDelays) {
     await delay(wait);
-    const probe = await probeCrmIngestionStatus(statusUrl, { officeSlug, idempotencyKey, secret, fetchImpl });
+    const probe = await probeCrmIngestionStatus(statusUrl, { officeSlug, idempotencyKey, secret, fetchImpl, now: input.now });
     if (probe.ok && probe.status) {
       if (probe.status === "queued" || probe.status === "processing" || probe.status === "succeeded") {
         log(`[BidBoardCRM] Ambiguous POST resolved as durably accepted (status=${probe.status})`, "sync");
