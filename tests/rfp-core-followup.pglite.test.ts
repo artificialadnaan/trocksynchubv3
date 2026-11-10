@@ -425,6 +425,20 @@ describe("N1 notices (§10 wire shape)", () => {
     expect(JSON.parse(raws[0]).noticeId).toBe(after.notice_id);
     expect(after.payload.noticeId).toBe(after.notice_id);
   });
+  it("(c4 pin) an N1 answered 409 missing_audit_actor ⇒ failed after ONE attempt, ONE crm_request_rejected alert, never retried, no F1", async () => {
+    await seedSent();
+    const fetchImpl = router({ e4: () => json(200, { result: "stale" }), n1: () => json(409, { error: "missing_audit_actor" }) });
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect(await byKind("crm_notice", "core_bid_orphan")).toMatchObject([{ status: "failed", attempt_count: 1, last_status_code: 409 }]);
+    const rejected = alertMock.mock.calls.filter((c) => c[0] === "crm_request_rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]![1]).toMatchObject({ status: 409 });
+    expect(String(rejected[0]![1].error)).toContain("missing_audit_actor");
+    await makeDue();
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect(callsTo(fetchImpl, N1_URL)).toHaveLength(1);
+    expect(await f1Errors()).toEqual([]);
+  });
   it("an N1 dead after the schedule ⇒ alert only (no F1)", async () => {
     await seedSent();
     const fetchImpl = router({ e4: () => json(200, { result: "stale" }), n1: () => json(503, {}) });

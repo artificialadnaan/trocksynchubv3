@@ -265,6 +265,11 @@ describe("E5 and N1 classifiers", () => {
     expect((wire.classifyCoreConfirmResponse(409, { error: "rfp_bid_create_conflict", reason: "deal_mismatch" }) as any).error).toContain("deal_mismatch");
     expect(wire.classifyCoreConfirmResponse(200, {})).toMatchObject({ kind: "retry", status: 200 });
   });
+  it("(c4 pin) N1 409 missing_audit_actor ⇒ terminal, status 409, the reason in the error (never retried)", () => {
+    const r = wire.classifyCrmNoticeResponse(409, { error: "missing_audit_actor" });
+    expect(r).toMatchObject({ kind: "terminal", status: 409 });
+    expect((r as any).error).toContain("missing_audit_actor");
+  });
   it("N1: 2xx recorded | replay ⇒ sent; 503 / 5xx ⇒ retry; 422 / 404 / 401 ⇒ terminal", () => {
     expect(wire.classifyCrmNoticeResponse(200, { result: "recorded" })).toEqual({ kind: "sent", result: "recorded" });
     expect(wire.classifyCrmNoticeResponse(200, { result: "replay" })).toEqual({ kind: "sent", result: "replay" });
