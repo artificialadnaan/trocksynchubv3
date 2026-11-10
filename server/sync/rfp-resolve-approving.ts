@@ -76,6 +76,8 @@ export type ResolveApplyResult = { applied: boolean; refused?: string; report: R
 /** (iii)'s window around rfp_approval_approving.started_at (runbook r5 §3 step 2). */
 const WINDOW_MS = 2 * 60 * 60_000;
 const PER_PAGE = 10;
+/** S0b-2b red 2 stub (d9 QC token ruling): the green sets the recreate token threshold. */
+export const RECREATE_MIN_TOKEN_MS: number = 0;
 
 export function parseResolveArgs(argv: string[]): ResolveArgs | { error: string } {
   const err = (error: string) => ({ error });

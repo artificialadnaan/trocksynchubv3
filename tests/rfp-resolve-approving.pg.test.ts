@@ -666,3 +666,63 @@ describe.skipIf(!BASE_URL)("processRfpApproval records the original approval's i
     expect(seen).toMatchObject({ approved_by: APPROVER, force: true });
   });
 });
+
+// S0b-2b red 2 (d9 QC ruling, 2026-11-10): recreate never renews the Procore token, not even through the server's locked
+// path. It refuses unless the STORED token outlives the create step: its 30 min bound (an approving row older than that reads
+// as stuck) + 5 min, never under 15 min. A short token means wait for the server's own renewal, then retry.
+const { RECREATE_MIN_TOKEN_MS } = await import("../server/sync/rfp-resolve-approving.ts");
+const { fetchWithTimeout: fetchMock } = await import("../server/lib/fetch-with-timeout.ts");
+/** Token renewals reach Procore's oauth/token endpoint through fetchWithTimeout (mocked above): count them. */
+const renewCalls = () => vi.mocked(fetchMock).mock.calls.filter(([u]) => String(u).includes("oauth/token")).length;
+const tokenLeft = (ms: number) => ({ token: { accessToken: "synthetic-procore-token", expiresAt: new Date(Date.now() + ms) } });
+
+describe.skipIf(!BASE_URL)("recreate needs a stored token that outlives the create step (d9 QC: never renew)", () => {
+  it("the threshold is the create step's 30 min bound + 5 min, and never under 15 min", () => {
+    expect(RECREATE_MIN_TOKEN_MS).toBe(35 * 60_000);
+    expect(RECREATE_MIN_TOKEN_MS).toBeGreaterThanOrEqual(15 * 60_000);
+  });
+
+  it("below the threshold ⇒ refused 'token too short to recreate without refresh': no create, nothing written, 0 renewals", async () => {
+    const { id } = await seed({ system: "hubspot" });
+    const before = await writable();
+    const renewalsBefore = renewCalls();
+    const res = await applyResolveApproving({ id, apply: true, resolution: "recreate" }, deps(procoreStub({}), tokenLeft(20 * 60_000)).d as any);
+    expect(res).toMatchObject({ applied: false, refused: expect.stringMatching(/token too short to recreate without refresh/) });
+    expect(createMock).not.toHaveBeenCalled();
+    expect(await writable()).toEqual(before);
+    expect(renewCalls()).toBe(renewalsBefore);
+  });
+
+  it("above the threshold ⇒ recreate proceeds: ONE create, the row ends approved, 0 renewals", async () => {
+    const { id } = await seed({ system: "hubspot" });
+    const renewalsBefore = renewCalls();
+    const res = await applyResolveApproving({ id, apply: true, resolution: "recreate" }, deps(procoreStub({}), tokenLeft(40 * 60_000)).d as any);
+    expect(res.applied).toBe(true);
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect((await writable()).requests).toEqual([{ id, status: "approved", bidboard_project_id: "900333", approved_by: APPROVER }]);
+    expect(renewCalls()).toBe(renewalsBefore);
+  });
+
+  it("the dry-run prints the minutes left on the stored token, never the token itself", async () => {
+    const { id } = await seed();
+    const { d, lines } = deps(procoreStub({}), tokenLeft(20 * 60_000));
+    await dryRunResolveApproving(id, d as any);
+    const printed = lines.join("\n");
+    expect(printed).toMatch(/Procore token: (19|20) min left/);
+    expect(printed).not.toContain("synthetic-procore-token");
+  });
+
+  it("source pin: the recreate path calls no renewal function, and the resolver refuses a short token before it", () => {
+    const approval = readFileSync(new URL("../server/rfp-approval.ts", import.meta.url), "utf8");
+    const start = approval.indexOf("export async function recreateApprovingRequest");
+    expect(start).toBeGreaterThan(-1);
+    const end = approval.indexOf("\nexport ", start + 1);
+    const body = approval.slice(start, end === -1 ? undefined : end);
+    expect(body).not.toMatch(/getAccessToken|getProcoreClient|refreshAccessToken|refresh_token|oauth\/token/);
+    const resolver = readFileSync(new URL("../server/sync/rfp-resolve-approving.ts", import.meta.url), "utf8");
+    const recreateBranch = resolver.slice(resolver.indexOf('args.resolution === "recreate"'));
+    expect(recreateBranch.indexOf("RECREATE_MIN_TOKEN_MS")).toBeGreaterThan(-1);
+    expect(recreateBranch.indexOf("RECREATE_MIN_TOKEN_MS")).toBeLessThan(recreateBranch.indexOf("deps.recreate("));
+    expect(resolver).toMatch(/token too short to recreate without refresh/);
+  });
+});
