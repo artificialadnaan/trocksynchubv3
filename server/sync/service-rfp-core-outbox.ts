@@ -174,7 +174,7 @@ function wireString(value: unknown, max: number): string | null {
  * never push the body past Core's 32 KiB. Values are sent trimmed, otherwise as the CRM has them (Core upper-cases the
  * state itself).
  */
-function wireCompanyBillAddress(value: unknown): { address: string; city: string; state: string; zip: string } | null {
+export function wireCompanyBillAddress(value: unknown): { address: string; city: string; state: string; zip: string } | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const parts = [raw.address, raw.city, raw.state, raw.zip];

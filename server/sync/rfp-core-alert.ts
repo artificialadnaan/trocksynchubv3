@@ -23,7 +23,18 @@ export type RfpCoreAlertCode =
   | "core_request_rejected"
   | "crm_notice_dead"
   | "core_preflight_error"
-  | "rfp_request_override_reset";
+  | "rfp_request_override_reset"
+  // S1a (the E2 sender + the E4 / E5 / N1 follow-ups): every retry, re-arm, refusal and config gap is visible.
+  | "rfp_core_unconfigured"
+  | "core_create_retry"
+  | "core_create_refused"
+  | "core_create_rearmed"
+  | "core_followup_rearmed"
+  | "operator_redrive_sent"
+  | "crm_link_retry"
+  | "crm_request_rejected"
+  | "core_confirm_retry"
+  | "crm_notice_retry";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
 

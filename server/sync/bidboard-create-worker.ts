@@ -262,14 +262,14 @@ function routeInputOf(input: CreateFromRfpInput, approvalKind: string | null): R
   };
 }
 
-type AlertList = Array<[RfpCoreAlertCode, Record<string, unknown>]>;
+export type AlertList = Array<[RfpCoreAlertCode, Record<string, unknown>]>;
 
 function firstRow(res: any): any | undefined {
   return (Array.isArray(res) ? res : (res?.rows ?? []))[0];
 }
 
 /** F1 (§10): the existing failed callback to the CRM, written INSIDE the caller's transaction, reason code VERBATIM in `error`. */
-async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string): Promise<void> {
+export async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string): Promise<void> {
   const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
   if (!targetUrl) throw new Error("TROCK_CRM_BASE_URL not configured; cannot enqueue the RFP routing F1 failed callback");
   const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
@@ -297,7 +297,7 @@ async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string)
 }
 
 /** §10 cross-destination hold, inside the caller's transaction: F1 'cross_destination_hold' now, the alert after commit. */
-async function holdCrossDestination(
+export async function holdCrossDestination(
   tx: any, input: CreateFromRfpInput, heldDestination: RfpDestination, footprint: string[], alerts: AlertList,
 ): Promise<void> {
   await enqueueF1InTx(tx, input, "cross_destination_hold");
@@ -496,16 +496,23 @@ async function handleReattempt(
              project_number = ${input.deal.projectNumber ?? null}
        WHERE id = ${core.id}
     `);
+    // S1a (owner: every re-arm is VISIBLE): the rep's re-post put a not-yet-sent Core create back on the E2 schedule.
+    alerts.push(["core_create_rearmed", { coreId: core.id, from: core.status, refusalReason: core.refusal_reason ?? null }]);
     return;
   }
   if (core.status === "sent") {
     // Core created the bid: NEVER re-send E2. Re-arm a dead E4 / E5 follow-up only (the rep's Retry after a dead link);
     // a link_refused E4 is never re-armed (a person resolves it).
-    await tx.execute(sql`
+    const rearmed = await tx.execute(sql`
       UPDATE rfp_core_followup_outbox
          SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL
        WHERE create_id = ${core.id} AND kind IN ('crm_link', 'core_confirm') AND status = 'dead'
+      RETURNING id, kind
     `);
+    // S1a: each re-armed follow-up is VISIBLE (owner requirement).
+    for (const f of (Array.isArray(rearmed) ? rearmed : (rearmed?.rows ?? []))) {
+      alerts.push(["core_followup_rearmed", { coreId: core.id, followupId: f.id, kind: f.kind }]);
+    }
   }
   // pending / sending: in flight, nothing to do
 }

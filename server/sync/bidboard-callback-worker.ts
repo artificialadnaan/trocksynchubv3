@@ -28,7 +28,8 @@ const BACKOFF_INTERVALS = ["30 seconds", "2 minutes", "10 minutes", "30 minutes"
 let callbackWorkerTimer: ReturnType<typeof setInterval> | null = null;
 let callbackWorkerRunning = false;
 
-function signPayload(rawBody: string, secret: string): string {
+/** The CRM internal-route HMAC (x-rfp-request-signature): reused by the RFP Phase 2 E4 / N1 posts (rfp-core-http.ts). */
+export function signPayload(rawBody: string, secret: string): string {
   return `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
 }
 
