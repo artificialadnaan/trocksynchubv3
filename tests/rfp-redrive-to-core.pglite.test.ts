@@ -19,7 +19,14 @@ import { drizzle } from "drizzle-orm/pglite";
 //   Q2 S0: a CRM re-post of the procore-done command whose event has an operatorRedrive Core row ⇒ a NO-OP replay: the
 //      CRM gets the done branch's answer (the route's 202, no callback row), nothing is re-queued or changed, ONE alert;
 //   Q3 a REQUIRED --actor, recorded on the audit row with the OS user.
-// Synthetic data only (I7): a synthetic DFW- number shaped like a real pre-PR-B approval, never a real deal's.
+// r3 (d9 ruling A): the pre-PR-B E1's missing `approval` block is supplied as ATTESTED evidence, --approval-evidence <json
+//      file> = {roundEventId, approvals, rejections, invitedVoterCount, decidedAt, source:"<path> <sha256>"}: REQUIRED only
+//      where the stored E1 lacks the block, REFUSED where it has one (the stored block wins); approvals ≥ 2, rejections < 2,
+//      invited ≥ approvals + rejections, a path + a 64-hex sha; the source is recorded as attested, never opened. Stored in
+//      payload.operatorRedrive.approval; the S1 sender sends it as E2's `approval` (source NOT on the wire: Core's contract
+//      has no field for it) ONLY for a re-drive row whose E1 lacks the block. Core stays strict.
+// Synthetic data only (I7): a synthetic DFW- number shaped like a real pre-PR-B approval, never a real deal's; a fake round
+// id, path and sha for the evidence.
 const dbHolder = vi.hoisted(() => ({ db: null as any }));
 const alertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
 const fetchSpy = vi.hoisted(() => vi.fn());
@@ -78,6 +85,21 @@ const CRM_BASE = "https://crm.example.test";
 const E2_DALLAS_URL = `${CORE_BASE}/webhooks/crm/dallas/rfp-bid-create/v1`;
 const ENV_KEYS = ["RFP_NONSERVICE_DESTINATION", "RFP_BID_CREATE_INGRESS_SECRET_CURRENT", "CORE_INGRESS_BASE_URL", "TROCK_CRM_BASE_URL", "RFP_REQUEST_SYNC_SECRET"];
 const savedEnv: Record<string, string | undefined> = {};
+/** r3: the attested vote evidence (synthetic: a fake round id, path and an obviously fake sha). */
+const EVIDENCE_FILE = "/synthetic/ops/approval-evidence.syn.json";
+const SOURCE_PATH = "synthetic/evidence/vote-log.syn.json";
+const SOURCE_SHA = "deadbeef".repeat(8);
+const EVIDENCE = {
+  roundEventId: "round-syn-1", approvals: 2, rejections: 0, invitedVoterCount: 3, decidedAt: "2026-01-15T16:00:00.000Z",
+  source: `${SOURCE_PATH} ${SOURCE_SHA}`,
+};
+const EVIDENCE_ON_WIRE = { roundEventId: "round-syn-1", approvals: 2, rejections: 0, invitedVoterCount: 3, decidedAt: "2026-01-15T16:00:00.000Z" };
+/** The files the CLI may read (only the --approval-evidence file; never the evidence's own source path). */
+let files: Record<string, string> = {};
+const readFileFake = vi.fn(async (path: string) => {
+  if (!(path in files)) throw new Error(`ENOENT: no such file ${path}`);
+  return files[path]!;
+});
 
 let pg: PGlite;
 beforeAll(async () => {
@@ -116,6 +138,8 @@ async function reset() {
   for (const k of ENV_KEYS) delete process.env[k];
   resetRfpCoreSenderStateForTests();
   resetRfpCoreFollowupStateForTests();
+  files = { [EVIDENCE_FILE]: JSON.stringify(EVIDENCE) };
+  readFileFake.mockClear();
 }
 /** The S1 sender / follow-up configuration (the CLI itself reads only RFP_NONSERVICE_DESTINATION, from deps.env). */
 function senderEnv() {
@@ -169,7 +193,7 @@ async function insertCore(commandId: number, o: { key?: string; deal?: string; s
 const ARGS = (...extra: string[]) => ["--deal", DEAL, "--source-event-id", KEY, "--go", GO, "--actor", ACTOR, ...extra];
 async function run(argv: string[], env: NodeJS.ProcessEnv = CORE_ENV) {
   const lines: string[] = [];
-  const res = await runRedriveToCore(argv, { db: dbHolder.db, out: (l: string) => lines.push(l), env, osUser: OS_USER } as any);
+  const res = await runRedriveToCore(argv, { db: dbHolder.db, out: (l: string) => lines.push(l), env, osUser: OS_USER, readFile: readFileFake } as any);
   return { res, text: lines.join("\n") };
 }
 const count = async (table: string) => Number((await pg.query<any>(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n);
@@ -355,23 +379,33 @@ describe("preconditions: each printed; any false ⇒ refused, nothing written", 
 });
 
 describe("(Q1) --office / --approval-kind for an approval whose stored E1 lacks them", () => {
-  it("a pre-PR-B E1 (no office, no approvalKind) + --office dallas --approval-kind vote ⇒ applied, both stored and printed as attested; E2 goes to the dallas path with office dallas, approvalKind vote", async () => {
+  it("a pre-PR-B E1 (no office, approvalKind or approval) + --office dallas --approval-kind vote + valid --approval-evidence ⇒ applied, each printed as attested; E2 goes to the dallas path with office dallas, approvalKind vote and the evidence as `approval` (no source on the wire)", async () => {
     await seedProcore(e1PrePrb());
-    const { res, text } = await run(ARGS("--office", "dallas", "--approval-kind", "vote", "--apply"));
+    const { res, text } = await run(ARGS("--office", "dallas", "--approval-kind", "vote", "--approval-evidence", EVIDENCE_FILE, "--apply"));
     expect(res).toMatchObject({ code: 0, applied: true });
     expect(text).toContain(`office dallas (attested by GO ${GO})`);
     expect(text).toContain(`approvalKind vote (attested by GO ${GO})`);
+    for (const key of ["approval", "approval.parse", "approval.shape", "approval.votes", "approval.invited", "approval.source"]) {
+      expect(text, key).toContain(`PASS (${key})`);
+    }
+    expect(text).toContain(`approval evidence: attested by GO ${GO} (source ${SOURCE_PATH} ${SOURCE_SHA.slice(0, 8)})`);
+    expect(readFileFake.mock.calls.map((c) => c[0])).toEqual([EVIDENCE_FILE]);
     expect((await coreRowsFor())[0].payload).toEqual({
-      operatorRedrive: { reason: "operator_redrive", go: GO, office: "dallas", approvalKind: "vote" },
+      operatorRedrive: { reason: "operator_redrive", go: GO, office: "dallas", approvalKind: "vote", approval: EVIDENCE },
     });
+    const audit = (await pg.query<any>(`SELECT details FROM audit_logs`)).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0].details).toMatchObject({ before: { e1Approval: null }, after: { payload: { operatorRedrive: { approval: EVIDENCE } } } });
     senderEnv();
     const fetchImpl = vi.fn(async (_url: string, _init: any) => json(201, receipt()));
     await processRfpCoreCreateOutbox({ fetchImpl });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0]![0]).toBe(E2_DALLAS_URL);
-    expect(JSON.parse(fetchImpl.mock.calls[0]![1].body)).toMatchObject({
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1].body);
+    expect(body).toMatchObject({
       office: "dallas", approvalKind: "vote", sourceEventId: KEY, crmDealId: DEAL, deal: { projectNumber: PRE_PRB_NUMBER },
     });
+    expect(body.approval).toEqual(EVIDENCE_ON_WIRE);
     expect((await coreRowsFor())[0].status).toBe("sent");
   });
   it("the same pre-PR-B row with NO --office / --approval-kind ⇒ refused: each is required where the stored E1 lacks it", async () => {
@@ -548,7 +582,7 @@ describe("(Q2) S0: a CRM re-post of the procore-done command after a re-drive �
   });
   it("end to end through the CLI: a pre-PR-B approval re-driven with --office / --approval-kind, then the CRM re-posts it ⇒ the same no-op replay, and E2 still goes out", async () => {
     await seedProcore(e1PrePrb());
-    const { res } = await run(ARGS("--office", "dallas", "--approval-kind", "vote", "--apply"));
+    const { res } = await run(ARGS("--office", "dallas", "--approval-kind", "vote", "--approval-evidence", EVIDENCE_FILE, "--apply"));
     expect(res.code).toBe(0);
     const commandBefore = await commandSnapshot();
     const coreBefore = await coreRowsFor();
@@ -564,5 +598,84 @@ describe("(Q2) S0: a CRM re-post of the procore-done command after a re-drive �
     await processRfpCoreCreateOutbox({ fetchImpl });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetchImpl.mock.calls[0]![1].body)).toMatchObject({ office: "dallas", approvalKind: "vote" });
+  });
+});
+
+describe("(r3, d9 ruling A) --approval-evidence: the pre-PR-B approval block as attested evidence; Core stays strict", () => {
+  const PRE = () => ARGS("--office", "dallas", "--approval-kind", "vote");
+  it("the same pre-PR-B row WITHOUT --approval-evidence ⇒ refused: the evidence is required where the stored E1 has no approval block", async () => {
+    await seedProcore(e1PrePrb());
+    const before = await counts();
+    const { res, text } = await run([...PRE(), "--apply"]);
+    expect(res).toMatchObject({ code: 1, applied: false });
+    expect(text).toContain("FAIL (approval)");
+    expect(await counts()).toEqual(before);
+    expect(alertCodes()).toEqual([]);
+  });
+  it("bad evidence ⇒ refused, each check printed: approvals 1 / rejections 2 / invited too few / roundEventId null / an extra key / a non-ISO decidedAt / no sha / a short sha / bad JSON / an unreadable file", async () => {
+    const bad = (o: Record<string, unknown>) => JSON.stringify({ ...EVIDENCE, ...o });
+    const cases: Array<[string, string | null, string]> = [
+      ["approvals 1", bad({ approvals: 1 }), "FAIL (approval.votes)"],
+      ["rejections 2", bad({ approvals: 2, rejections: 2, invitedVoterCount: 5 }), "FAIL (approval.votes)"],
+      ["invited too few", bad({ approvals: 2, rejections: 1, invitedVoterCount: 2 }), "FAIL (approval.invited)"],
+      ["roundEventId null", bad({ roundEventId: null }), "FAIL (approval.shape)"],
+      ["an extra key", bad({ note: "synthetic" }), "FAIL (approval.shape)"],
+      ["decidedAt not ISO", bad({ decidedAt: "15/01/2026" }), "FAIL (approval.shape)"],
+      ["no sha", bad({ source: SOURCE_PATH }), "FAIL (approval.source)"],
+      ["a short sha", bad({ source: `${SOURCE_PATH} deadbeef` }), "FAIL (approval.source)"],
+      ["bad JSON", "{ not json", "FAIL (approval.parse)"],
+      ["an unreadable file", null, "FAIL (approval.parse)"],
+    ];
+    for (const [label, content, fail] of cases) {
+      await reset();
+      if (content === null) delete files[EVIDENCE_FILE];
+      else files[EVIDENCE_FILE] = content;
+      await seedProcore(e1PrePrb());
+      const before = await counts();
+      const { res, text } = await run([...PRE(), "--approval-evidence", EVIDENCE_FILE, "--apply"]);
+      expect(res.code, label).toBe(1);
+      expect(text, label).toContain(fail);
+      expect(await counts(), label).toEqual(before);
+      expect(alertCodes(), label).toEqual([]);
+    }
+  });
+  it("evidence given when the stored E1 already HAS an approval block ⇒ refused (the stored block wins; never replaced or compared)", async () => {
+    await seedProcore();
+    const before = await counts();
+    const { res, text } = await run(ARGS("--approval-evidence", EVIDENCE_FILE, "--apply"));
+    expect(res).toMatchObject({ code: 1, applied: false });
+    expect(text).toContain("FAIL (approval)");
+    expect(await counts()).toEqual(before);
+  });
+  it("the S1 sender sends payload.operatorRedrive.approval as E2's `approval` for a re-drive row whose E1 lacks the block; the source never goes on the wire", async () => {
+    const input = e1();
+    delete input.approval;
+    const cmd = await seedProcore(input);
+    await insertCore(cmd.id, {
+      key: KEY, status: "pending",
+      payload: { operatorRedrive: { reason: "operator_redrive", go: GO, office: "dallas", approvalKind: "vote", approval: EVIDENCE } },
+    });
+    senderEnv();
+    const fetchImpl = vi.fn(async (_url: string, _init: any) => json(201, receipt()));
+    await processRfpCoreCreateOutbox({ fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1].body);
+    expect(body.approval).toEqual(EVIDENCE_ON_WIRE);
+    expect(JSON.stringify(body)).not.toContain(SOURCE_SHA);
+    expect((await coreRowsFor())[0].status).toBe("sent");
+  });
+  it("(pin) an ORDINARY core-stamped row whose E1 lacks the approval block is still sent as S1a sends it, approval: null (buildRfpBidCreateBody maps a missing block to null), never filled from a payload approval", async () => {
+    const input = e1();
+    delete input.approval;
+    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    await enqueueBidboardCreateCommand(input); // an ordinary core-stamped row (vote, dallas, no approval block)
+    await pg.query(`UPDATE rfp_core_create_outbox SET payload = $1::jsonb WHERE source_event_id = $2`, [
+      JSON.stringify({ operatorRedrive: { reason: "operator_redrive", office: "dallas", approvalKind: "vote", approval: EVIDENCE } }), KEY,
+    ]);
+    senderEnv();
+    const fetchImpl = vi.fn(async (_url: string, _init: any) => json(201, receipt()));
+    await processRfpCoreCreateOutbox({ fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1].body).approval).toBeNull();
   });
 });
