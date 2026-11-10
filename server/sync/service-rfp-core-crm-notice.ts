@@ -298,7 +298,8 @@ export async function notifyCrmForRow(
     return "terminal";
   }
 
-  const outcome = await postCoreHandoffToCrm(notice, deps);
+  // deps.now is this module's ms clock (the retry schedule); the v2 signer takes a Date, so adapt it here.
+  const outcome = await postCoreHandoffToCrm(notice, { ...deps, now: deps.now ? () => new Date(deps.now!()) : undefined });
   if (outcome.kind === "sent") {
     await settle(id, parked, generation);
     await reportNoticeDelivered(notice, row);
