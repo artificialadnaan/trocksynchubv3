@@ -116,8 +116,8 @@ async function seedProcoreDone() {
   await sql(`UPDATE bidboard_create_outbox SET status = 'done', processed_at = NOW() WHERE source_event_id = $1`, [KEY]);
   return (await sql(`SELECT id FROM bidboard_create_outbox WHERE source_event_id = $1`, [KEY])).rows[0].id as number;
 }
-const APPLY = ["--deal", DEAL, "--source-event-id", KEY, "--go", GO, "--apply"];
-const apply = () => runRedriveToCore(APPLY, { db: dbHolder.db, out: () => {}, env: CORE_ENV, actor: "ops:synthetic-tester" });
+const APPLY = ["--deal", DEAL, "--source-event-id", KEY, "--go", GO, "--actor", "Synthetic Operator", "--apply"];
+const apply = () => runRedriveToCore(APPLY, { db: dbHolder.db, out: () => {}, env: CORE_ENV, osUser: "os:synthetic-runner" } as any);
 const count = async (table: string) => Number((await sql(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n);
 async function until(cond: () => Promise<boolean>, ms = 5000) {
   const end = Date.now() + ms;

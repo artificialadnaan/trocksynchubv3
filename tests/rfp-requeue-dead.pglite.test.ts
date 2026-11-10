@@ -8,6 +8,8 @@ import { drizzle } from "drizzle-orm/pglite";
 // stamp; dry by default, --apply needs --go. create: only a dead E2 row; followup: only a dead crm_link (E4) or crm_notice
 // (N1); link_refused and core_confirm (E5, never dead) are refused, as is every non-dead status. Apply = S0's re-arm reset
 // EXACTLY (compared with a real S0 re-post) + ONE audit_logs row + the alert rfp_requeue_applied; a replay is refused.
+// r2 (d9 Q3): a REQUIRED --actor, recorded on the audit row with the OS user. r2 (d9 Q4, a pin): a requeued dead E2 for a
+// deal with a Procore footprint is held_cross_destination at send (alert + F1) by the sender's under-lock check.
 // Synthetic data only (I7).
 const dbHolder = vi.hoisted(() => ({ db: null as any }));
 const alertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
@@ -24,6 +26,7 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 
 const { enqueueBidboardCreateCommand } = await import("../server/sync/bidboard-create-worker.ts");
 const { runRequeueDead } = await import("../server/sync/rfp-requeue-dead.ts");
+const { processRfpCoreCreateOutbox, resetRfpCoreSenderStateForTests } = await import("../server/sync/rfp-core-sender.ts");
 
 const DDL_0023 = readFileSync(new URL("../migrations/0023_create_bidboard_create_outbox.sql", import.meta.url), "utf8");
 const DDL_0027 = readFileSync(new URL("../migrations/0027_rfp_core_routing.sql", import.meta.url), "utf8");
@@ -41,18 +44,23 @@ const DEAL_2 = "00000000-0000-4000-8000-0000000000a2";
 const KEY = "crm:rfp-vote:approved:round-7";
 const KEY_2 = "crm:rfp-vote:approved:round-9";
 const GO = "A4-GO-SYN-REQUEUE-0001";
-const ACTOR = "ops:synthetic-tester";
+const ACTOR = "Synthetic Operator";
+const OS_USER = "os:synthetic-runner";
+const ENV_KEYS = ["RFP_NONSERVICE_DESTINATION", "RFP_BID_CREATE_INGRESS_SECRET_CURRENT", "CORE_INGRESS_BASE_URL", "TROCK_CRM_BASE_URL", "RFP_REQUEST_SYNC_SECRET"];
+const savedEnv: Record<string, string | undefined> = {};
 
 let pg: PGlite;
-let savedSetting: string | undefined;
 beforeAll(async () => {
-  savedSetting = process.env.RFP_NONSERVICE_DESTINATION;
+  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE bidboard_callback_outbox (
       id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL,
       rfp_approval_request_id integer NOT NULL, payload jsonb NOT NULL, target_url text NOT NULL,
       status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE sync_mappings (
+      id serial PRIMARY KEY, source_system text NOT NULL DEFAULT 'hubspot', source_deal_id text NOT NULL, bidboard_project_id text
     );
     ${AUDIT_DDL}
   `);
@@ -61,8 +69,10 @@ beforeAll(async () => {
   dbHolder.db = drizzle(pg);
 }, 30000);
 afterAll(async () => {
-  if (savedSetting === undefined) delete process.env.RFP_NONSERVICE_DESTINATION;
-  else process.env.RFP_NONSERVICE_DESTINATION = savedSetting;
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
   await pg?.close?.();
 });
 beforeEach(async () => {
@@ -70,9 +80,11 @@ beforeEach(async () => {
 });
 async function reset() {
   await pg.exec(`DELETE FROM rfp_core_followup_outbox; DELETE FROM rfp_core_create_outbox; DELETE FROM bidboard_create_outbox;
-                 DELETE FROM bidboard_callback_outbox; DELETE FROM audit_logs;`);
+                 DELETE FROM bidboard_callback_outbox; DELETE FROM audit_logs; DELETE FROM sync_mappings;`);
   alertMock.mockReset();
+  for (const k of ENV_KEYS) delete process.env[k];
   process.env.RFP_NONSERVICE_DESTINATION = "core";
+  resetRfpCoreSenderStateForTests();
 }
 
 function e1(deal = DEAL, key = KEY): any {
@@ -117,22 +129,31 @@ async function seedFollowup(kind: string, status: string, noticeKind = ""): Prom
 }
 async function run(argv: string[]) {
   const lines: string[] = [];
-  const res = await runRequeueDead(argv, { db: dbHolder.db, out: (l: string) => lines.push(l), actor: ACTOR });
+  const res = await runRequeueDead(argv, { db: dbHolder.db, out: (l: string) => lines.push(l), osUser: OS_USER } as any);
   return { res, text: lines.join("\n") };
 }
 const createRow = async (id: number) => (await pg.query<any>(`SELECT * FROM rfp_core_create_outbox WHERE id = $1`, [id])).rows[0];
 const followupRow = async (id: number) => (await pg.query<any>(`SELECT * FROM rfp_core_followup_outbox WHERE id = $1`, [id])).rows[0];
 const auditRows = async () => (await pg.query<any>(`SELECT * FROM audit_logs ORDER BY id`)).rows;
 const alertCodes = () => alertMock.mock.calls.map((c) => c[0]);
-const APPLY = (outbox: string, id: number, destination = "core") => ["--outbox", outbox, "--id", String(id), "--destination", destination, "--apply", "--go", GO];
+const APPLY = (outbox: string, id: number, destination = "core") =>
+  ["--outbox", outbox, "--id", String(id), "--destination", destination, "--actor", ACTOR, "--apply", "--go", GO];
+const f1Errors = async () =>
+  (await pg.query<any>(`SELECT payload FROM bidboard_callback_outbox WHERE payload->>'status' = 'failed' ORDER BY id`)).rows.map((r) => r.payload.error);
+function senderEnv() {
+  process.env.RFP_NONSERVICE_DESTINATION = "core";
+  process.env.RFP_BID_CREATE_INGRESS_SECRET_CURRENT = "synthetic-rfp-bid-create-secret-0123456789";
+  process.env.CORE_INGRESS_BASE_URL = "https://core.example.test";
+  process.env.TROCK_CRM_BASE_URL = "https://crm.example.test";
+}
 
 describe("arguments", () => {
   it("a missing or doubled --id ⇒ exit 2, nothing written", async () => {
     const id = await seedCore("dead");
     for (const argv of [
-      ["--outbox", "create", "--destination", "core", "--apply", "--go", GO],
-      ["--outbox", "create", "--id", String(id), "--id", String(id), "--destination", "core", "--apply", "--go", GO],
-      ["--outbox", "create", "--id", "0", "--destination", "core"],
+      ["--outbox", "create", "--destination", "core", "--actor", ACTOR, "--apply", "--go", GO],
+      ["--outbox", "create", "--id", String(id), "--id", String(id), "--destination", "core", "--actor", ACTOR, "--apply", "--go", GO],
+      ["--outbox", "create", "--id", "0", "--destination", "core", "--actor", ACTOR],
     ]) {
       const { res } = await run(argv);
       expect(res.code, argv.join(" ")).toBe(2);
@@ -143,10 +164,10 @@ describe("arguments", () => {
   it("a bad or missing --outbox, or a missing / bad --destination ⇒ exit 2", async () => {
     const id = await seedCore("dead");
     for (const argv of [
-      ["--outbox", "e4", "--id", String(id), "--destination", "core"],
-      ["--id", String(id), "--destination", "core"],
-      ["--outbox", "create", "--id", String(id)],
-      ["--outbox", "create", "--id", String(id), "--destination", "hubspot"],
+      ["--outbox", "e4", "--id", String(id), "--destination", "core", "--actor", ACTOR],
+      ["--id", String(id), "--destination", "core", "--actor", ACTOR],
+      ["--outbox", "create", "--id", String(id), "--actor", ACTOR],
+      ["--outbox", "create", "--id", String(id), "--destination", "hubspot", "--actor", ACTOR],
     ]) {
       const { res } = await run(argv);
       expect(res.code, argv.join(" ")).toBe(2);
@@ -155,9 +176,24 @@ describe("arguments", () => {
   });
   it("--apply without --go ⇒ exit 2, nothing written, no alert", async () => {
     const id = await seedCore("dead");
-    const { res } = await run(["--outbox", "create", "--id", String(id), "--destination", "core", "--apply"]);
+    const { res } = await run(["--outbox", "create", "--id", String(id), "--destination", "core", "--actor", ACTOR, "--apply"]);
     expect(res).toMatchObject({ code: 2, applied: false });
     expect(res.refused).toContain("--go");
+    expect((await createRow(id)).status).toBe("dead");
+    expect(await auditRows()).toEqual([]);
+    expect(alertCodes()).toEqual([]);
+  });
+  it("(Q3) --actor missing or blank ⇒ exit 2, nothing written, no alert", async () => {
+    const id = await seedCore("dead");
+    for (const argv of [
+      ["--outbox", "create", "--id", String(id), "--destination", "core", "--apply", "--go", GO],
+      ["--outbox", "create", "--id", String(id), "--destination", "core", "--actor", "  ", "--apply", "--go", GO],
+      ["--outbox", "create", "--id", String(id), "--destination", "core"],
+    ]) {
+      const { res } = await run(argv);
+      expect(res.code, argv.join(" ")).toBe(2);
+      expect(res.refused, argv.join(" ")).toContain("--actor");
+    }
     expect((await createRow(id)).status).toBe("dead");
     expect(await auditRows()).toEqual([]);
     expect(alertCodes()).toEqual([]);
@@ -224,7 +260,7 @@ describe("checks: any false ⇒ refused, nothing written", () => {
   });
   it("a dry run prints each check and writes nothing", async () => {
     const id = await seedCore("dead");
-    const { res, text } = await run(["--outbox", "create", "--id", String(id), "--destination", "core"]);
+    const { res, text } = await run(["--outbox", "create", "--id", String(id), "--destination", "core", "--actor", ACTOR]);
     expect(res).toMatchObject({ code: 0, applied: false });
     for (const key of ["row", "destination", "status"]) expect(text, key).toContain(`PASS (${key})`);
     expect(text).toContain("DRY-RUN");
@@ -251,7 +287,9 @@ describe("--apply", () => {
     const audit = await auditRows();
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ action: "rfp_requeue_dead", entity_type: "rfp_core_create_outbox", entity_id: String(id), status: "success" });
-    expect(audit[0].details).toMatchObject({ actor: ACTOR, go: GO, outbox: "create", id, destination: "core", before: { status: "dead" }, after: { status: "pending" } });
+    expect(audit[0].details).toMatchObject({
+      actor: ACTOR, osUser: OS_USER, go: GO, outbox: "create", id, destination: "core", before: { status: "dead" }, after: { status: "pending" },
+    });
     expect(alertCodes()).toEqual(["rfp_requeue_applied"]);
     expect(alertMock.mock.calls[0]![1]).toMatchObject({ go: GO, outbox: "create", id });
   });
@@ -291,5 +329,37 @@ describe("--apply", () => {
     expect(replay.text).toContain("FAIL (status)");
     expect(await auditRows()).toHaveLength(1);
     expect(alertCodes()).toEqual(["rfp_requeue_applied"]);
+  });
+});
+
+describe("(Q4) a requeued dead E2 for a deal with a Procore footprint is held at send", () => {
+  it("(pin) the sender's under-lock check holds a re-armed (S0 reset shape) dead E2 when the deal has a Procore footprint: held_cross_destination + alert + F1, nothing sent", async () => {
+    const id = await seedCore("dead");
+    await pg.query(
+      `UPDATE rfp_core_create_outbox SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL, refusal_reason = NULL WHERE id = $1`,
+      [id],
+    );
+    await pg.query(`INSERT INTO sync_mappings (source_system, source_deal_id, bidboard_project_id) VALUES ('trock_crm', $1, '900031')`, [DEAL]);
+    senderEnv();
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 201 }));
+    await processRfpCoreCreateOutbox({ fetchImpl: fetchImpl as any });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(await createRow(id)).toMatchObject({ status: "held_cross_destination" });
+    expect(alertCodes()).toContain("cross_destination_hold");
+    expect(await f1Errors()).toEqual(["cross_destination_hold"]);
+  });
+  it("end to end: requeue a dead E2 through the CLI, the deal has gained a Procore footprint ⇒ the sender holds it (held + alert + F1), nothing sent", async () => {
+    const id = await seedCore("dead");
+    await pg.query(`INSERT INTO sync_mappings (source_system, source_deal_id, bidboard_project_id) VALUES ('trock_crm', $1, '900032')`, [DEAL]);
+    const { res } = await run(APPLY("create", id));
+    expect(res).toMatchObject({ code: 0, applied: true });
+    expect((await createRow(id)).status).toBe("pending");
+    senderEnv();
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 201 }));
+    await processRfpCoreCreateOutbox({ fetchImpl: fetchImpl as any });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(await createRow(id)).toMatchObject({ status: "held_cross_destination" });
+    expect(alertCodes()).toEqual(["rfp_requeue_applied", "cross_destination_hold"]);
+    expect(await f1Errors()).toEqual(["cross_destination_hold"]);
   });
 });
