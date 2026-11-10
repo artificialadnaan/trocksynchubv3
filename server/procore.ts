@@ -86,6 +86,11 @@ let refreshPromise: Promise<string> | null = null;
 /** By default a token with less than this much life left is refreshed first. Callers may ask for more. */
 const DEFAULT_MIN_VALIDITY_MS = 60_000;
 
+/** S0b-2b red 3 stub: the no-renewal scope is not enforced yet. */
+export function withoutProcoreTokenRenewal<T>(_reason: string, fn: () => Promise<T>): Promise<T> {
+  return fn();
+}
+
 /**
  * A valid Procore access token, refreshed first (under the cross-replica lock) when it has less than
  * `minValidityMs` left. The default keeps the historical 60 s threshold; Core's token read asks for 5 minutes.
