@@ -245,6 +245,8 @@ async function repost(body: any): Promise<{ status: number; body: any }> {
   }
 }
 
+process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
+
 describe("arguments: exactly one deal, a GO, an --actor, no bulk mode", () => {
   it("no --go ⇒ exit 2, nothing written, no alert", async () => {
     await seedProcore();

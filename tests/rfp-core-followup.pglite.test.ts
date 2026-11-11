@@ -152,6 +152,8 @@ function framed(domain: string, path: string, body: string, key: string): string
   return `sha256=${crypto.createHmac("sha256", key).update(pre).digest("hex")}`;
 }
 
+process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
+
 describe("E4 → E5 sequencing (§6 / §7)", () => {
   it("E4 is POSTed to the CRM's core-bid-created with bid-board-created's HMAC over the raw body, redirect 'error', the stored strict body", async () => {
     await seedSent();

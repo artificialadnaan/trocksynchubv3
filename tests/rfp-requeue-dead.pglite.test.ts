@@ -147,6 +147,8 @@ function senderEnv() {
   process.env.TROCK_CRM_BASE_URL = "https://crm.example.test";
 }
 
+process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
+
 describe("arguments", () => {
   it("a missing or doubled --id ⇒ exit 2, nothing written", async () => {
     const id = await seedCore("dead");

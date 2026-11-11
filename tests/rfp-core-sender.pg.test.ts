@@ -138,6 +138,8 @@ async function until(cond: () => Promise<boolean>, ms = 5000) {
   return false;
 }
 
+process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
+
 describe.skipIf(!BASE_URL)("the E2 claim and the per-deal lock (real PG, separate sessions)", () => {
   it("two drains racing on one due row (two instances) ⇒ exactly one claims it: ONE E2, ONE follow-up", async () => {
     await enqueueBidboardCreateCommand(e1());
