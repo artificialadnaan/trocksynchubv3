@@ -11,6 +11,7 @@ import {
   RFP_HELD_CROSS_DESTINATION_STATUS,
   RFP_HELD_DESTINATION_CHANGED_STATUS,
   RFP_ROUTED_CORE_STATUS,
+  rfpCoreOfficesSetting,
   rfpNonserviceDestinationSetting,
   routeRfpCreate,
   type RfpDestination,
@@ -260,6 +261,7 @@ function routeInputOf(input: CreateFromRfpInput, approvalKind: string | null): R
     sourceSystem: input.sourceSystem,
     decision: (input as any).decision ?? null,
     approvalKind,
+    office: (input as any).office ?? null,
     deal: { projectNumber: input.deal?.projectNumber ?? null, projectType: input.deal?.projectType ?? null },
   };
 }
@@ -321,8 +323,9 @@ export async function holdCrossDestination(
 export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
   const db = await getDb();
   const setting = rfpNonserviceDestinationSetting();
+  const coreOffices = rfpCoreOfficesSetting();
   const kind = approvalKindOf(input);
-  const route = routeRfpCreate(routeInputOf(input, kind), setting);
+  const route = routeRfpCreate(routeInputOf(input, kind), setting, coreOffices);
   const ids = { sourceSystem: input.sourceSystem, sourceDealId: input.sourceDealId, sourceEventId: input.sourceEventId };
   // ROUTE core: the strict probe. An errored query is NOT "missing" (d9 hardening): alert with the real error and rethrow (the
   // route answers 500, the CRM retries). ROUTE procore keeps the lenient probe, so today's enqueue is unchanged.
@@ -355,7 +358,7 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       await stampFirstArrival(tx, input, route, setting ?? null, kind, alerts);
       return;
     }
-    await handleReattempt(tx, input, existing, setting, kind, alerts);
+    await handleReattempt(tx, input, existing, setting, coreOffices, kind, alerts);
   });
   for (const [code, detail] of alerts) await raiseRfpCoreAlert(code, { ...ids, ...detail });
 }
@@ -409,7 +412,7 @@ async function stampFirstArrival(
 }
 
 async function handleReattempt(
-  tx: any, input: CreateFromRfpInput, existing: any, setting: string | undefined, kind: string | null,
+  tx: any, input: CreateFromRfpInput, existing: any, setting: string | undefined, coreOffices: ReadonlySet<string>, kind: string | null,
   alerts: AlertList,
 ): Promise<void> {
   const stored: string | null = existing.approval_kind ?? null;
@@ -437,7 +440,7 @@ async function handleReattempt(
   if (!stored && kind) {
     await tx.execute(sql`UPDATE bidboard_create_outbox SET approval_kind = ${kind} WHERE id = ${existing.id} AND approval_kind IS NULL`);
   }
-  const routeNow = routeRfpCreate(routeInputOf(input, effectiveKind), setting);
+  const routeNow = routeRfpCreate(routeInputOf(input, effectiveKind), setting, coreOffices);
   if (PROCORE_IN_FLIGHT.has(existing.status)) return; // §11: continues on its stamp
   if (existing.status === RFP_HELD_DESTINATION_CHANGED_STATUS) return; // already held: a person resolves it
   if (existing.status === RFP_HELD_CROSS_DESTINATION_STATUS) return; // held across destinations: a person resolves it

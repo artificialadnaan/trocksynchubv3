@@ -30,7 +30,7 @@ async function freshDb(with0027: boolean) {
   if (with0027) await pg.exec(DDL_0027);
   dbHolder.db = drizzle(pg);
 }
-beforeEach(() => { alertMock.mockReset(); delete process.env.RFP_NONSERVICE_DESTINATION; });
+beforeEach(() => { alertMock.mockReset(); delete process.env.RFP_NONSERVICE_DESTINATION; process.env.RFP_CORE_OFFICES = "dallas"; });
 afterEach(async () => { await pg?.close?.(); });
 
 function e1(o: Record<string, any> = {}) {

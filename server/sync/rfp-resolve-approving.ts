@@ -19,9 +19,9 @@
  */
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import {
   approvingRecreateRefusal,
+  effectiveApprovingProjectNumber,
   readApprovingFacts,
   readApprovingResolveFootprint,
   RECORDED_APPROVAL_FIELDS,
@@ -229,11 +229,8 @@ export async function dryRunResolveApproving(requestId: number, deps: ResolveDep
   const dealData = facts.dealData;
   const edited = (facts.recorded?.editedFields ?? {}) as Record<string, unknown>;
   const str = (v: unknown) => (v === undefined || v === null || String(v).trim() === "" ? null : String(v).trim());
-  const baseNumber = str(edited.project_number) ?? str(facts.projectNumber) ?? str(dealData.project_number);
   // The create renumbers when the approver changed the type (processRfpApproval): search (i) by the number it created under.
-  const editedType = str(edited.project_types);
-  const currentType = baseNumber ? (parseProjectTypeFromNumber(baseNumber) ?? str(dealData.project_types)) : null;
-  const number = baseNumber && editedType && editedType !== currentType ? replaceProjectTypeInNumber(baseNumber, editedType) : baseNumber;
+  const number = effectiveApprovingProjectNumber(facts);
   const name = str(edited.dealname) ?? str(dealData.dealname);
   const address = str(edited.address) ?? str(dealData.address);
   const client = str(edited.company_name) ?? str(dealData.company_name);
