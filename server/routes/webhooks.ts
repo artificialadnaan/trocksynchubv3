@@ -1452,12 +1452,17 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
         if (objectType === "deal") {
           try { await processHubspotWebhookForProcore(eventType, objectType, objectId); } catch (e) { console.error('[webhook] processHubspotWebhookForProcore failed during replay:', (e as Error).message); }
+          // Codex 4535379047 on #131: the refresh's result is kept; it returns {success:false} on failure rather than throwing.
+          let refresh: { success: boolean; error?: string } = { success: false, error: "no refresh result" };
           try {
             const { syncSingleHubSpotDeal } = await import("../hubspot");
-            await syncSingleHubSpotDeal(objectId);
-          } catch (e) { console.error('[webhook] syncSingleHubSpotDeal failed during replay:', (e as Error).message); }
+            refresh = (await syncSingleHubSpotDeal(objectId)) ?? refresh;
+          } catch (e) {
+            console.error('[webhook] syncSingleHubSpotDeal failed during replay:', (e as Error).message);
+            refresh = { success: false, error: (e as Error).message };
+          }
           // F-181: re-run the stage trigger (never the stage-change email). Throws, with its replay class, if it fails again.
-          if (isHubspotDealStageEvent(event)) replayNote = await replayHubspotStageTrigger(objectId, String(event.propertyValue || ""));
+          if (isHubspotDealStageEvent(event)) replayNote = await replayHubspotStageTrigger(objectId, String(event.propertyValue || ""), refresh);
         }
       } else if (log.source === "procore") {
         const event = log.payload as any;
@@ -1493,21 +1498,26 @@ async function isHubspotRfpStage(newValue: string): Promise<boolean> {
 }
 
 /**
- * F-181: replay a failed HubSpot deal-stage trigger. The RFP stage re-runs createRfpApprovalRequest (dedupe-safe: a pending
- * request returns its token, so the approvers still get exactly one email). Any other stage re-runs processDealStageChange,
- * but only while the deal (as the replay's own deal sync just cached it) is still at the event's stage: a late replay must not
- * create a project for a deal that moved on. Returns a note for the response, or throws with the failure's replay class.
+ * F-181: replay a failed HubSpot deal-stage trigger, only while the deal (as the replay's own deal sync just refreshed it) is
+ * still at the event's stage: a late replay must not create a project, or a request and its approver email, for a deal that
+ * moved on (Codex 4535379041: the check covers BOTH branches). A refresh that did not succeed leaves the stage unverified, so
+ * nothing runs and the row stays failed + replayable (Codex 4535379047). The RFP stage re-runs createRfpApprovalRequest
+ * (dedupe-safe: a pending request returns its token, so the approvers still get exactly one email); any other stage re-runs
+ * processDealStageChange. Returns a note for the response, or throws with the failure's replay class.
  */
-async function replayHubspotStageTrigger(dealId: string, newValue: string): Promise<string | null> {
+async function replayHubspotStageTrigger(dealId: string, newValue: string, refresh: { success: boolean; error?: string }): Promise<string | null> {
+  if (!refresh.success) {
+    throw new Error(`${REPLAYABLE_PREFIX}the deal's current stage could not be verified (HubSpot refresh failed: ${refresh.error || "unknown error"}); the stage trigger was not re-run`);
+  }
+  const deal = await storage.getHubspotDealByHubspotId(dealId);
+  if (!deal || String(deal.dealStage ?? "").toLowerCase() !== newValue.toLowerCase()) {
+    return `stage moved on (now ${deal?.dealStageName || deal?.dealStage || "unknown"}); the stage trigger was not re-run`;
+  }
   if (await isHubspotRfpStage(newValue)) {
     const { createRfpApprovalRequest } = await import("../rfp-approval");
     const result = await createRfpApprovalRequest(dealId);
     if (!result.success && result.fault) throw new Error(rfpRequestFaultMessage(dealId, result.error));
     return null;
-  }
-  const deal = await storage.getHubspotDealByHubspotId(dealId);
-  if (!deal || String(deal.dealStage ?? "").toLowerCase() !== newValue.toLowerCase()) {
-    return `stage moved on (now ${deal?.dealStageName || deal?.dealStage || "unknown"}); the stage trigger was not re-run`;
   }
   const { processDealStageChange } = await import("../hubspot-bidboard-trigger");
   let outcome: Awaited<ReturnType<typeof processDealStageChange>>;
