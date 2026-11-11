@@ -496,6 +496,20 @@ describe.skipIf(!BASE_URL)("--apply", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it("found after a recorded TYPE edit: the mapping and the created callback carry the renumbered number the search used (Codex P2 on #127)", async () => {
+    // The approver changed the type 2 -> 3, so processRfpApproval created the project as DFW-3-…; the searches look for that number.
+    const renumbered = "DFW-3-80001-ab";
+    const { id } = await seed({ recorded: { edited_fields: { dealname: NAME, project_types: "3" } } });
+    const procore = procoreStub({ [renumbered]: [{ id: 900222, project_number: renumbered, name: NAME, created_at: await inWindow(id) }] });
+    const res = await applyResolveApproving({ id, apply: true, resolution: "found", project: "900222" }, deps(procore).d as any);
+    expect(res.applied).toBe(true);
+    expect(terms(procore.calls)[0]).toBe(renumbered);
+    const mapping = (await sql(`SELECT bidboard_project_id, procore_project_number FROM sync_mappings`)).rows;
+    expect(mapping).toEqual([{ bidboard_project_id: "900222", procore_project_number: renumbered }]);
+    const callbacks = (await sql(`SELECT payload FROM bidboard_callback_outbox`)).rows;
+    expect(callbacks).toEqual([{ payload: expect.objectContaining({ status: "created", bidboardProjectId: "900222", projectNumber: renumbered }) }]);
+  });
+
   it("found with a --project that is NOT the one the checks found ⇒ refused, nothing written", async () => {
     const { id } = await seed();
     const procore = procoreStub({ [NUMBER]: [{ id: 900222, project_number: NUMBER, name: NAME, created_at: await inWindow(id) }] });

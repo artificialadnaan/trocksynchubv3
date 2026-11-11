@@ -45,6 +45,7 @@ beforeEach(async () => {
   await pg.exec(`DELETE FROM rfp_core_followup_outbox; DELETE FROM rfp_core_create_outbox; DELETE FROM bidboard_create_outbox; DELETE FROM bidboard_callback_outbox;`);
   alertMock.mockReset();
   delete process.env.RFP_NONSERVICE_DESTINATION;
+  process.env.RFP_CORE_OFFICES = "dallas"; // c6 rule (f): the E1 office (dallas) is listed unless a case says otherwise
 });
 
 const KEY = "crm:rfp-vote:approved:round-1";
@@ -101,6 +102,23 @@ describe("the stamp (§2)", () => {
     expect(row.status).toBe("pending");
     expect(await coreRows()).toHaveLength(0);
   });
+  it("setting core but RFP_CORE_OFFICES unset ⇒ stamped procore, no Core row (c6 rule (f))", async () => {
+    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    delete process.env.RFP_CORE_OFFICES;
+    await enqueueBidboardCreateCommand(e1());
+    const row = await cmd();
+    expect(row.destination).toBe("procore");
+    expect(row.status).toBe("pending");
+    expect(await coreRows()).toHaveLength(0);
+  });
+  it("setting core, the E1 office not in RFP_CORE_OFFICES ⇒ stamped procore, no Core row (c6 rule (f))", async () => {
+    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    process.env.RFP_CORE_OFFICES = "atlanta";
+    await enqueueBidboardCreateCommand(e1());
+    const row = await cmd();
+    expect(row.destination).toBe("procore");
+    expect(await coreRows()).toHaveLength(0);
+  });
 });
 
 describe("HELD = stamp ≠ ROUTE NOW (§2, b8 M4; §11)", () => {
@@ -108,6 +126,17 @@ describe("HELD = stamp ≠ ROUTE NOW (§2, b8 M4; §11)", () => {
     process.env.RFP_NONSERVICE_DESTINATION = "core";
     await enqueueBidboardCreateCommand(e1());
     process.env.RFP_NONSERVICE_DESTINATION = "procore";
+    await enqueueBidboardCreateCommand(e1());
+    expect((await cmd()).status).toBe("held_destination_changed");
+    expect((await cmd()).destination).toBe("core");
+    expect(alertCodes()).toContain("destination_changed_hold");
+    expect(await f1Rows()).toEqual([expect.objectContaining({ status: "failed", error: "destination_changed_hold" })]);
+    expect((await coreRows())[0].status).toBe("pending");
+  });
+  it("core stamp, re-posted after its office left RFP_CORE_OFFICES ⇒ held_destination_changed + alert + F1, never silently re-routed (c6)", async () => {
+    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    await enqueueBidboardCreateCommand(e1());
+    process.env.RFP_CORE_OFFICES = "atlanta";
     await enqueueBidboardCreateCommand(e1());
     expect((await cmd()).status).toBe("held_destination_changed");
     expect((await cmd()).destination).toBe("core");

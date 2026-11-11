@@ -100,6 +100,7 @@ beforeEach(async () => {
                       sync_mappings, rfp_approval_requests RESTART IDENTITY CASCADE`);
   alertMock.mockReset();
   delete process.env.RFP_NONSERVICE_DESTINATION;
+  process.env.RFP_CORE_OFFICES = "dallas"; // c6 rule (f): the E1 office (dallas) is listed
 });
 
 const DEAL = "00000000-0000-4000-8000-0000000000e1";
