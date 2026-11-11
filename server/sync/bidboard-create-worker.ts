@@ -744,6 +744,26 @@ async function markReclaiming(id: number, bidboardProjectId: string, proposalId:
 // Park it at 'needs_manual': NOT claimed by claimNext (no auto re-drain → no duplicate), NOT supersedable (not
 // 'pending'), NO callback (never tell the CRM it failed when a project may exist). A human resolves it — matching
 // the override-approve path's indeterminate handling.
+/** CodeRabbit 4534600249: consecutive post-claim footprint-check failures before a row is parked needs_manual. */
+export const CORE_HOLD_CHECK_MAX_FAILURES = 3;
+
+/** The reclaim reset of a failed footprint check, carrying the consecutive-failure count in the payload. */
+async function recordCoreHoldCheckFailure(id: number, failures: number, note: string): Promise<boolean> {
+  const db = await getDb();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await db.execute(sql`
+        UPDATE bidboard_create_outbox
+           SET attempt_count = 0, last_error = ${note},
+               payload = jsonb_set(payload, '{__coreHoldCheckFailures}', to_jsonb(${failures}::int))
+         WHERE id = ${id}
+      `);
+      return true;
+    } catch { /* retry a transient blip */ }
+  }
+  return false;
+}
+
 async function markNeedsManual(id: number, note: string, bidboardProjectId?: string): Promise<void> {
   const db = await getDb();
   if (bidboardProjectId) {
@@ -1551,8 +1571,29 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // budget and leave it for the stale reclaim to re-check, as the other recoverable paths below do; if even that can't
         // land, surface it 'needs_manual'.
         const message = holdErr?.message || String(holdErr);
-        log(`[bidboard-create] Command ${row.id} core-footprint check failed before the create (${message}); leaving 'processing' for reclaim`, "sync");
-        const reset = await resetCreateCommandForReclaim(row.id, `core-footprint check failed before the create; pending reclaim: ${message}`);
+        // CodeRabbit 4534600249: visible and bounded. Every failure raises the (re-alert-windowed) core_footprint_check_failed;
+        // after CORE_HOLD_CHECK_MAX_FAILURES consecutive failures the row is parked needs_manual with its own alert instead
+        // of resetting the attempt budget forever. The count rides in the payload, like __recoveredProjectId.
+        const failures = (Number((row.payload as any)?.__coreHoldCheckFailures) || 0) + 1;
+        await raiseRfpCoreAlert("core_footprint_check_failed", {
+          commandId: row.id, sourceSystem: row.source_system, sourceDealId: row.source_deal_id, failures, error: message,
+        });
+        if (failures >= CORE_HOLD_CHECK_MAX_FAILURES) {
+          log(`[bidboard-create] Command ${row.id} core-footprint check failed ${failures} times in a row (${message}); parked needs_manual`, "sync");
+          let parked = false;
+          for (let attempt = 1; attempt <= 3 && !parked; attempt++) {
+            try { await markNeedsManual(row.id, `core-footprint check failed ${failures} consecutive times before the create; needs manual resolution: ${message}`); parked = true; }
+            catch { /* retry a transient blip */ }
+          }
+          await raiseRfpCoreAlert("core_footprint_check_needs_manual", {
+            commandId: row.id, sourceSystem: row.source_system, sourceDealId: row.source_deal_id, failures, error: message, parked,
+          });
+          if (!parked) log(`[bidboard-create] CRITICAL: Command ${row.id} could NOT be parked needs_manual after ${failures} failed core-footprint checks; manual check needed for deal ${input.sourceDealId}`, "sync");
+          processed += 1;
+          continue;
+        }
+        log(`[bidboard-create] Command ${row.id} core-footprint check failed before the create (${message}); leaving 'processing' for reclaim (${failures} of ${CORE_HOLD_CHECK_MAX_FAILURES})`, "sync");
+        const reset = await recordCoreHoldCheckFailure(row.id, failures, `core-footprint check failed before the create (${failures} of ${CORE_HOLD_CHECK_MAX_FAILURES}); pending reclaim: ${message}`);
         if (!reset) {
           let surfaced = false;
           for (let attempt = 1; attempt <= 3 && !surfaced; attempt++) {
