@@ -7,7 +7,7 @@
  * Bid Board → CRM push. Imported DYNAMICALLY because bidboard-crm-alert's pool import throws without DATABASE_URL.
  * Never throws: an alert failure must not change a routing outcome.
  */
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex P1 on #128)
 
 export type RfpCoreAlertCode =
   | "destination_changed_hold"
