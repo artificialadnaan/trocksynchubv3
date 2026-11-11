@@ -97,10 +97,17 @@ export function crmV2Headers(input: {
 }
 
 const alerted = new Set<string>();
+/**
+ * CodeRabbit 4536816188 (#130 follow-up, a4 ADDENDUM-5): the signer + reason keys whose alert delivery is still pending. The
+ * key is recorded in `alerted` only after a confirmed delivery, so without this an overlapping refusal would send a second
+ * alert while the first is in flight. Cleared in finally, so a failed delivery leaves the next refusal free to alert again.
+ */
+const inFlight = new Set<string>();
 
 /** Test seam: forget which refusals were already alerted. */
 export function resetCrmSigningRefusalsForTests(): void {
   alerted.clear();
+  inFlight.clear();
 }
 
 /** A signer that sends again clears its refusal, so the next refusal is visible again. */
@@ -114,7 +121,8 @@ export function clearCrmSigningRefusal(signer: string): void {
  */
 export async function alertCrmSigningRefused(signer: string, refusal: CrmSignRefusal): Promise<void> {
   const key = `${signer}:${refusal.reason}`;
-  if (alerted.has(key)) return;
+  if (alerted.has(key) || inFlight.has(key)) return;
+  inFlight.add(key);
   try {
     const { raiseRfpCoreAlert } = await import("./sync/rfp-core-alert");
     const delivered = await raiseRfpCoreAlert("crm_signing_refused", { signer, reason: refusal.reason, detail: refusal.detail, action: "nothing was sent" });
@@ -123,5 +131,7 @@ export async function alertCrmSigningRefused(signer: string, refusal: CrmSignRef
     if (delivered !== false) alerted.add(key);
   } catch (err) {
     console.warn(`[crm-signing] alert for ${signer} ${refusal.reason} could not be raised: ${(err as Error)?.message ?? err}`);
+  } finally {
+    inFlight.delete(key);
   }
 }
