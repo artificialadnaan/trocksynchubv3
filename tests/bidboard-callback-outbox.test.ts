@@ -163,6 +163,7 @@ describe("BidBoard callback outbox worker", () => {
     dbExecuteMock
       .mockResolvedValueOnce([{ id: 1, attempt_count: 1, max_attempts: 5, payload: { sourceDealId: "crm-deal-1" }, target_url: "https://crm.example.com/api/internal/bid-board-created", rfp_approval_request_id: 77 }])
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] }) // tick 1's post-claim count of refused stored URLs (CodeRabbit 4536104336 on #130)
       .mockResolvedValueOnce([{ id: 1, attempt_count: 2, max_attempts: 5, payload: { sourceDealId: "crm-deal-1" }, target_url: "https://crm.example.com/api/internal/bid-board-created", rfp_approval_request_id: 77 }])
       .mockResolvedValue({ rows: [] });
     const fetchMock = vi.fn()
