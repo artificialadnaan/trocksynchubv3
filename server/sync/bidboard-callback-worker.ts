@@ -52,6 +52,23 @@ export function callbackUrlAdmittedSql(column: SQL): SQL {
   return sql`(coalesce(lower(${column}) ~ ${CALLBACK_URL_HTTPS_PATTERN}, false) OR coalesce(lower(${column}) ~ ${CALLBACK_URL_LOCAL_HTTP_PATTERN}, false))`;
 }
 
+/**
+ * Codex 4536463189 on #130 (a4 ADDENDUM-2 / -3): the (id, stored target_url) pairs crmUrlAllowed refused after a claim. The claim
+ * skips a row while BOTH still match, so released rows are never re-claimed ahead of later callbacks (a limit-5 claim in
+ * created_at order would otherwise take the same refused rows every tick and starve the rest), and a row whose target_url is
+ * rewritten (rfp-approving's hold upsert) is claimed on the next tick. In-process only: it resets on restart, and the refused
+ * rows are then found again at most `limit` per tick, so after a restart later callbacks wait at most ceil(n / limit) ticks
+ * for n refused rows. Stored rows are never changed.
+ */
+const refusedStoredUrls = new Map<number, string>();
+
+/** True for a row whose (id, target_url) pair was refused. The pairs travel as ONE bound jsonb text value (never a template). */
+function rememberedRefusalSql(): SQL {
+  const pairs = Array.from(refusedStoredUrls, ([id, url]) => ({ id, url }));
+  return sql`EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS refused(id bigint, url text)
+                      WHERE refused.id = bidboard_callback_outbox.id AND refused.url = bidboard_callback_outbox.target_url)`;
+}
+
 async function getDb() {
   return (await import("../db")).db;
 }
@@ -77,6 +94,7 @@ export async function claimPendingBidBoardCallbacks(limit = 5): Promise<any[]> {
        WHERE status = 'pending'
          AND next_attempt_at <= NOW()
          AND ${callbackUrlAdmittedSql(sql`target_url`)}
+         AND NOT ${rememberedRefusalSql()}
        ORDER BY created_at ASC
        LIMIT ${limit}
        FOR UPDATE SKIP LOCKED
@@ -108,7 +126,10 @@ async function releaseClaimedCallback(row: any): Promise<void> {
   `);
 }
 
-/** CodeRabbit 4536104336 on #130: due pending rows the claim predicate EXCLUDED (their stored target_url is refused). */
+/**
+ * CodeRabbit 4536104336 on #130: due pending rows left unclaimed for their stored target_url: the ones the claim predicate
+ * EXCLUDED, plus (Codex 4536463189) the remembered released pairs, which include this tick's releases.
+ */
 async function countDueRefusedUrlCallbacks(): Promise<number> {
   const db = await getDb();
   const result = await db.execute(sql`
@@ -116,7 +137,7 @@ async function countDueRefusedUrlCallbacks(): Promise<number> {
       FROM bidboard_callback_outbox
      WHERE status = 'pending'
        AND next_attempt_at <= NOW()
-       AND NOT ${callbackUrlAdmittedSql(sql`target_url`)}
+       AND (NOT ${callbackUrlAdmittedSql(sql`target_url`)} OR ${rememberedRefusalSql()})
   `);
   const rows = Array.isArray(result) ? result : ((result as any).rows ?? []);
   return Number(rows[0]?.n) || 0;
@@ -241,6 +262,7 @@ export async function processBidBoardCallbackOutbox(
       // claim unchanged (never failed, never sent) and count it into the ONE alert below.
       if (!crmUrlAllowed(row.target_url)) {
         await releaseClaimedCallback(row);
+        refusedStoredUrls.set(Number(row.id), row.target_url);
         released += 1;
         continue;
       }
@@ -254,8 +276,9 @@ export async function processBidBoardCallbackOutbox(
       }
     }
     // CodeRabbit 4536104336 on #130: never silent. Rows left unclaimed for their stored URL (excluded or released) raise ONE
-    // alert per signer + reason (kept only after a confirmed delivery); none left ⇒ the next recurrence alerts again.
-    const refusedStored = released + (await countDueRefusedUrlCallbacks());
+    // alert per signer + reason (kept only after a confirmed delivery); none left ⇒ the next recurrence alerts again. The count
+    // already holds this tick's released rows (remembered above), so they are not added twice.
+    const refusedStored = await countDueRefusedUrlCallbacks();
     if (refusedStored > 0) {
       await alertCrmSigningRefused(STORED_URL_SIGNER, {
         reason: "url_refused",
