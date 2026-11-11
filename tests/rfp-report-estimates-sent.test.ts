@@ -1,6 +1,12 @@
 import crypto from "crypto";
 import { describe, expect, it, vi } from "vitest";
 
+// SIGNING-HARDENING r1: a refused send raises ONE visible alert (server/crm-signing-v2.ts → rfp-core-alert).
+const signingAlertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
+vi.mock("../server/sync/rfp-core-alert", () => ({ raiseRfpCoreAlert: signingAlertMock }));
+/** ≥ 32 bytes: the SyncHub → CRM signing floor. Synthetic. */
+const ESTIMATES_SECRET = "synthetic-estimates-secret-0123456789abcdef";
+
 // Same stubs as rfp-report-email.test.ts: rfp-reports.ts imports ./db (which throws without
 // DATABASE_URL), ./storage and ./email-service. The builder under test is pure.
 // A chainable drizzle stub that resolves to no rows, so the scheduler path can be exercised end to end
@@ -208,7 +214,7 @@ describe("the row cap and ordering the email relies on", () => {
   it("returns rows newest first, so the email's first 30 really are the newest", async () => {
     const result = await fetchCrmEstimatesSent(new Date("2026-08-01T00:00:00Z"), new Date("2026-08-07T00:00:00Z"), {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ deals: many(50) }) }) as unknown as Response,
       logger: () => {},
     });
@@ -221,7 +227,7 @@ describe("the row cap and ordering the email relies on", () => {
   it("enforces the declared cap instead of documenting one it never applied", async () => {
     const result = await fetchCrmEstimatesSent(new Date("2026-08-01T00:00:00Z"), new Date("2026-08-07T00:00:00Z"), {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async () =>
         ({ ok: true, status: 200, json: async () => ({ deals: many(MAX_ESTIMATES_SENT_ROWS + 25) }) }) as unknown as Response,
       logger: () => {},
@@ -297,7 +303,7 @@ describe("the request window", () => {
     let body = "";
     await fetchCrmEstimatesSent(new Date("2026-07-06T00:00:00Z"), new Date("2026-08-06T08:00:00Z"), {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async (_url, init) => {
         body = String(init?.body);
         return { ok: true, status: 200, json: async () => ({ deals: [] }) } as unknown as Response;
@@ -378,17 +384,18 @@ describe("the CRM client", () => {
     expect(result).toEqual({ ok: false, reason: "not_configured" });
   });
 
-  it("signs the body it actually sends", async () => {
+  it("signs the body it actually sends, v2 (SIGNING-HARDENING r1): the version + timestamp headers and the framed HMAC over the path", async () => {
     let seen: { url?: string; init?: RequestInit } = {};
     await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com/",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async (url, init) => {
         seen = { url, init };
         return { ok: true, status: 200, json: async () => ({ deals: [] }) } as unknown as Response;
       },
       logger: () => {},
-    });
+      now: () => new Date(1767225600 * 1000),
+    } as any);
 
     expect(seen.url).toBe("https://crm.example.com/api/internal/estimates-sent");
     expect(String(seen.init?.body)).toBe(
@@ -397,15 +404,41 @@ describe("the CRM client", () => {
     // The DIGEST, not its shape. Any HMAC over any input is 64 hex characters, so a format check passes
     // even if the module signed the wrong payload, used the wrong secret, or signed a re-serialised body
     // whose key order differs from the one actually sent. Signature correctness is the whole boundary.
-    const header = (seen.init?.headers as Record<string, string>)["x-rfp-request-signature"];
-    const expected = `sha256=${crypto.createHmac("sha256", "shhh").update(String(seen.init?.body)).digest("hex")}`;
-    expect(header).toBe(expected);
+    const headers = seen.init?.headers as Record<string, string>;
+    expect(headers["x-signature-version"]).toBe("2");
+    expect(headers["x-signature-timestamp"]).toBe("1767225600");
+    const bodyHash = crypto.createHash("sha256").update(String(seen.init?.body)).digest("hex");
+    const expected = `sha256=${crypto.createHmac("sha256", ESTIMATES_SECRET).update(`v2\nPOST\n/api/internal/estimates-sent\n1767225600\n${bodyHash}`).digest("hex")}`;
+    expect(headers["x-rfp-request-signature"]).toBe(expected);
+  });
+
+  it("(SIGNING-HARDENING r1) a secret under 32 bytes or an http base ⇒ nothing sent, not_configured, ONE alert each; localhost / 127.0.0.1 allowed", async () => {
+    (await import("../server/crm-signing-v2")).resetCrmSigningRefusalsForTests();
+    signingAlertMock.mockReset();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ deals: [] }) }) as unknown as Response);
+    for (let i = 0; i < 2; i++) {
+      expect(await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, { baseUrl: "https://crm.example.com", secret: "s".repeat(31), fetchImpl, logger: () => {} }))
+        .toEqual({ ok: false, reason: "not_configured" });
+      expect(await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, { baseUrl: "http://crm.example.test", secret: ESTIMATES_SECRET, fetchImpl, logger: () => {} }))
+        .toEqual({ ok: false, reason: "not_configured" });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([
+      ["crm_signing_refused", "estimates_sent", "secret_short"],
+      ["crm_signing_refused", "estimates_sent", "url_refused"],
+    ]);
+    for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
+      fetchImpl.mockClear();
+      await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, { baseUrl: base, secret: ESTIMATES_SECRET, fetchImpl, logger: () => {} });
+      expect((fetchImpl.mock.calls[0] as any[])?.[0], base).toBe(`${base}/api/internal/estimates-sent`);
+      expect(((fetchImpl.mock.calls[0] as any[])[1].headers as Record<string, string>)["x-signature-version"], base).toBe("2");
+    }
   });
 
   it("reports a failure on a non-2xx, rather than an empty day", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }) as unknown as Response,
       logger: () => {},
     });
@@ -416,7 +449,7 @@ describe("the CRM client", () => {
   it("reports a failure on an unexpected shape", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: ok({ nope: true }),
       logger: () => {},
     });
@@ -427,7 +460,7 @@ describe("the CRM client", () => {
   it("reports a failure when the request throws, and never rejects", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async () => {
         throw new Error("ECONNREFUSED");
       },
@@ -443,7 +476,7 @@ describe("the CRM client", () => {
   it("reports a failure rather than presenting the surviving rows as the whole answer", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: ok({
         deals: [
           { ...deal(), dealId: "" },
@@ -460,7 +493,7 @@ describe("the CRM client", () => {
   it("still succeeds when every row is well-formed", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: ok({ deals: [deal({ dealId: "a" }), deal({ dealId: "b" })] }),
       logger: () => {},
     });
@@ -476,7 +509,7 @@ describe("the CRM client", () => {
   it("keeps the amount as the string the CRM sent", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: ok({ deals: [deal({ amount: "120000.55" })] }),
       logger: () => {},
     });
@@ -489,7 +522,7 @@ describe("the CRM client", () => {
   it("times out rather than hanging the scheduled email", async () => {
     const result = await fetchCrmEstimatesSent(WINDOW_FROM, WINDOW_TO, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       timeoutMs: 10,
       fetchImpl: (_url, init) =>
         new Promise((_resolve, reject) => {
@@ -586,7 +619,7 @@ describe("covering a long catch-up interval", () => {
 
     const result = await fetchCrmEstimatesSent(from, to, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: countingFetch(seen),
       logger: () => {},
     });
@@ -607,7 +640,7 @@ describe("covering a long catch-up interval", () => {
     const seen: string[][] = [];
     await fetchCrmEstimatesSent(new Date("2026-08-05T00:00:00Z"), new Date("2026-08-06T00:00:00Z"), {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: countingFetch(seen),
       logger: () => {},
     });
@@ -623,7 +656,7 @@ describe("covering a long catch-up interval", () => {
 
     const result = await fetchCrmEstimatesSent(from, to, {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: countingFetch([]),
       logger: () => {},
     });
@@ -646,7 +679,7 @@ describe("a malformed resend count", () => {
     for (const bad of [undefined, null, "2", -1, 1.5, Number.NaN]) {
       const result = await fetchCrmEstimatesSent(new Date("2026-08-05T00:00:00Z"), new Date("2026-08-06T00:00:00Z"), {
         baseUrl: "https://crm.example.com",
-        secret: "shhh",
+        secret: ESTIMATES_SECRET,
         fetchImpl: async () =>
           ({
             ok: true,
@@ -663,7 +696,7 @@ describe("a malformed resend count", () => {
   it("accepts a genuine zero", async () => {
     const result = await fetchCrmEstimatesSent(new Date("2026-08-05T00:00:00Z"), new Date("2026-08-06T00:00:00Z"), {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async () =>
         ({ ok: true, status: 200, json: async () => ({ deals: [deal({ priorEntryCount: 0 })] }) }) as unknown as Response,
       logger: () => {},
@@ -780,7 +813,7 @@ describe("the estimates checkpoint", () => {
       return { ok: true, status: 200, json: async () => ({ deals: [] }) } as unknown as Response;
     }) as typeof fetch;
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
-    process.env.RFP_REQUEST_SYNC_SECRET = "shhh";
+    process.env.RFP_REQUEST_SYNC_SECRET = ESTIMATES_SECRET;
 
     await sendScheduledRfpReport(undefined, RUN_AT);
 
@@ -915,7 +948,7 @@ describe("the links survive parsing the CRM response", () => {
   const fetchWith = (deals: unknown[]) =>
     fetchCrmEstimatesSent(new Date("2026-08-12T00:00:00Z"), new Date("2026-08-13T00:00:00Z"), {
       baseUrl: "https://crm.example.com",
-      secret: "shhh",
+      secret: ESTIMATES_SECRET,
       fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ deals }) }) as unknown as Response,
       logger: () => {},
     });

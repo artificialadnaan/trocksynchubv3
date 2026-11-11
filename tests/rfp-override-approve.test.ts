@@ -132,7 +132,7 @@ describe("processRfpApproval — override (force) path", () => {
     createBidBoardMock.mockReset();
     createBidBoardMock.mockResolvedValue({ success: true, projectId: "BB-123" });
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
-    process.env.RFP_REQUEST_SYNC_SECRET = "secret";
+    process.env.RFP_REQUEST_SYNC_SECRET = "synthetic-rfp-request-sync-secret-0123456789"; // ≥ 32 bytes (SIGNING-HARDENING r1)
     approvalRequest.current = makeDeclinedRequest();
     // Eligibility check (trock_crm) → opportunity stage so the override proceeds.
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ stage: "opportunity" }), { status: 200, headers: { "content-type": "application/json" } })));

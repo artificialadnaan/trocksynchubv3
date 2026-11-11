@@ -1,4 +1,11 @@
+import crypto from "crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// SIGNING-HARDENING r1: a refused send raises ONE visible alert (server/crm-signing-v2.ts → rfp-core-alert).
+const signingAlertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
+vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: signingAlertMock }));
+/** ≥ 32 bytes: the SyncHub → CRM signing floor. Synthetic. */
+const ELIGIBILITY_SECRET = "synthetic-eligibility-secret-0123456789ab";
 
 const requestRow = vi.hoisted(() => ({ current: undefined as any }));
 const auditRows = vi.hoisted(() => [] as any[]);
@@ -151,7 +158,7 @@ describe("RFP source eligibility check", () => {
     getByIdCalls.length = 0;
     requestRow.current = makeRequest();
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
-    process.env.RFP_REQUEST_SYNC_SECRET = "secret";
+    process.env.RFP_REQUEST_SYNC_SECRET = ELIGIBILITY_SECRET;
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ stage: "opportunity" }), { status: 200, headers: { "content-type": "application/json" } })));
   });
 
@@ -296,10 +303,49 @@ describe("RFP source eligibility check", () => {
         headers: expect.objectContaining({
           "content-type": "application/json",
           "x-rfp-request-signature": expect.stringMatching(/^sha256=/),
+          "x-signature-version": "2",
         }),
         body: JSON.stringify({ sourceDealId: "crm-1" }),
       })
     );
+  });
+
+  it("(SIGNING-HARDENING r1) checkCrmDealEligibility signs v2 over its path; a secret under 32 bytes or an http base ⇒ nothing sent, fail-open, ONE alert each; localhost / 127.0.0.1 allowed", async () => {
+    const { checkCrmDealEligibility } = await import("../server/rfp-source-eligibility.ts");
+    (await import("../server/crm-signing-v2.ts")).resetCrmSigningRefusalsForTests();
+    signingAlertMock.mockReset();
+    const fetchMock = global.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockClear();
+    await checkCrmDealEligibility("crm-1", { now: () => new Date(1767225600 * 1000) } as any);
+    const [, init] = fetchMock.mock.calls[0] as any[];
+    const bodyHash = crypto.createHash("sha256").update(String(init.body)).digest("hex");
+    expect(init.headers["x-signature-version"]).toBe("2");
+    expect(init.headers["x-signature-timestamp"]).toBe("1767225600");
+    expect(init.headers["x-rfp-request-signature"]).toBe(
+      `sha256=${crypto.createHmac("sha256", ELIGIBILITY_SECRET).update(`v2\nPOST\n/api/internal/deals/eligibility-check\n1767225600\n${bodyHash}`).digest("hex")}`,
+    );
+    fetchMock.mockClear();
+    for (let i = 0; i < 2; i++) {
+      process.env.RFP_REQUEST_SYNC_SECRET = "s".repeat(31);
+      process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
+      expect(await checkCrmDealEligibility("crm-1")).toEqual({ exists: true, stage: null, checkFailed: true });
+      process.env.RFP_REQUEST_SYNC_SECRET = ELIGIBILITY_SECRET;
+      process.env.TROCK_CRM_BASE_URL = "http://crm.example.test";
+      expect(await checkCrmDealEligibility("crm-1")).toEqual({ exists: true, stage: null, checkFailed: true });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([
+      ["crm_signing_refused", "deals_eligibility_check", "secret_short"],
+      ["crm_signing_refused", "deals_eligibility_check", "url_refused"],
+    ]);
+    for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
+      fetchMock.mockClear();
+      process.env.TROCK_CRM_BASE_URL = base;
+      await checkCrmDealEligibility("crm-1");
+      expect((fetchMock.mock.calls[0] as any[])?.[0], base).toBe(`${base}/api/internal/deals/eligibility-check`);
+      expect((fetchMock.mock.calls[0] as any[])[1].headers["x-signature-version"], base).toBe("2");
+    }
+    process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
   });
 
   it("cancels when the CRM deal was deleted", async () => {

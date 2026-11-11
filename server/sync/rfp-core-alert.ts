@@ -23,11 +23,36 @@ export type RfpCoreAlertCode =
   | "core_request_rejected"
   | "crm_notice_dead"
   | "core_preflight_error"
-  | "rfp_request_override_reset";
+  // CodeRabbit 4534600249: a post-claim Core-footprint check that failed (windowed), and the row parked needs_manual after N.
+  | "core_footprint_check_failed"
+  | "core_footprint_check_needs_manual"
+  | "rfp_request_override_reset"
+  // S1a (the E2 sender + the E4 / E5 / N1 follow-ups): every retry, re-arm, refusal and config gap is visible.
+  | "rfp_core_unconfigured"
+  | "core_create_retry"
+  | "core_create_refused"
+  | "core_create_rearmed"
+  | "core_followup_rearmed"
+  | "operator_redrive_sent"
+  | "crm_link_retry"
+  | "crm_request_rejected"
+  | "core_confirm_retry"
+  | "crm_notice_retry"
+  // S1b: the one-deal operator CLIs (each --apply under its own a4 GO).
+  | "rfp_operator_redrive_applied"
+  | "rfp_requeue_applied"
+  // S1b r2 (d9 Q2): a CRM re-post of a re-driven approval, answered as a no-op replay.
+  | "redrive_repost_replayed"
+  // SIGNING-HARDENING r1: a SyncHub → CRM send refused at first use (secret < 32 bytes, or a non-https CRM URL).
+  | "crm_signing_refused";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
+/** Standing / repeating conditions: their repeats fall under the re-alert window instead of each mailing again. */
+const WINDOWED_RFP_CORE_ALERT_CODES: ReadonlySet<RfpCoreAlertCode> = new Set<RfpCoreAlertCode>(["core_tables_missing", "core_footprint_check_failed"]);
 
-export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<string, unknown>): Promise<void> {
+/** Resolves true only on a CONFIRMED delivery (the alert email was sent); false when it was not, nothing is configured, or the
+ * push threw (CodeRabbit 4536104331 on #130: a caller's dedupe must never trust a failed send). Never throws. */
+export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<string, unknown>): Promise<boolean> {
   let summary = "";
   try {
     summary = JSON.stringify(detail);
@@ -41,13 +66,13 @@ export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<s
   }
   try {
     const { recordPushOutcomeAndMaybeAlert, escapeHtml } = await import("./bidboard-crm-alert");
-    await recordPushOutcomeAndMaybeAlert(
+    const outcome = await recordPushOutcomeAndMaybeAlert(
       {
         pushResult: { ok: false, attempts: 1, error: `${code}: ${summary}`, rejected: true },
         officeSlug: `${RFP_CORE_ALERT_NAMESPACE}${code}`,
         // CodeRabbit 4534112641: a standing condition (core_tables_missing) repeats on every request, so it never bypasses the
         // re-alert window; every other code is a distinct event and still alerts each time.
-        signatureChanged: code !== "core_tables_missing",
+        signatureChanged: !WINDOWED_RFP_CORE_ALERT_CODES.has(code),
       },
       {
         render: (input) => ({
@@ -60,11 +85,13 @@ export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<s
         }),
       },
     );
+    return (outcome as { sent?: boolean } | undefined)?.sent === true;
   } catch (err) {
     try {
       log(`[rfp-core] alert delivery failed for ${code}: ${(err as Error)?.message ?? err}`, "rfp-core");
     } catch {
       /* swallow */
     }
+    return false;
   }
 }

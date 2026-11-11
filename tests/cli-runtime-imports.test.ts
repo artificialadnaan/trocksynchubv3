@@ -57,11 +57,12 @@ function chainTo(root: string, target: string): string[] {
   return [];
 }
 
-describe("the operator CLIs never load the server entry point (Codex 4534051215 on #127)", () => {
+describe("the operator CLIs never load the server entry point (Codex P1 on #128)", () => {
   it("positive control: the walker finds server/index.ts from a module that still imports it", () => {
     expect(chainTo("server/sync/bidboard-core-ingestion.ts", "server/index.ts")).toEqual(["server/sync/bidboard-core-ingestion.ts", "server/index.ts"]);
   });
-  for (const cli of ["scripts/rfp-resolve-approving.ts"]) {
+  // The union of #128's two CLIs and #127's resolver CLI (A3 carry): #128's describe title is kept so its frozen names hold.
+  for (const cli of ["scripts/rfp-requeue-dead.ts", "scripts/rfp-redrive-to-core.ts", "scripts/rfp-resolve-approving.ts"]) {
     it(`${cli}: server/index.ts is not in its runtime import graph`, () => {
       expect(existsSync(join(ROOT, cli))).toBe(true);
       expect(chainTo(cli, "server/index.ts")).toEqual([]);

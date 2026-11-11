@@ -89,3 +89,41 @@ export async function readDealCreateCommands(tx: Executor, sourceSystem: string,
   `));
   return rows.map((r) => `create_command:${r.destination}:${r.status}`);
 }
+
+/**
+ * S1a (the E2 sender, under the per-deal lock): the create COMMAND row a Core create row points at (`command_id`), FOR
+ * UPDATE. The source of the E2 body (its stored E1 payload, refreshed by a re-arm) and of the operator re-drive check
+ * (destination / status). A by-primary-key read of the Core row's OWN command, never a scan by status, so it can never
+ * take a routed_core row for an unprocessed one (E-8 reader census).
+ */
+export async function readCreateCommandForUpdate(tx: Executor, commandId: number): Promise<any | undefined> {
+  return rowsOf(await tx.execute(sql`
+    SELECT id, source_system, source_deal_id, source_event_id, destination, status, approval_kind, payload
+      FROM bidboard_create_outbox WHERE id = ${commandId} FOR UPDATE
+  `))[0];
+}
+
+/**
+ * S1a (the E4 / E5 / N1 follow-up drain): one Core create's identity, Core's bid id and its command's stored E1 payload
+ * (the CRM office, and F1's input), joined by primary key. Same E-8 reasoning: no status scan of the command table.
+ */
+export async function readCoreCreateContext(db: Executor, createId: number): Promise<any | undefined> {
+  return rowsOf(await db.execute(sql`
+    SELECT c.id AS create_id, c.source_system, c.source_deal_id, c.source_event_id, c.core_bid_id, c.command_id,
+           c.payload AS core_payload, b.payload AS command_payload
+      FROM rfp_core_create_outbox c JOIN bidboard_create_outbox b ON b.id = c.command_id
+     WHERE c.id = ${createId}
+  `))[0];
+}
+
+/**
+ * S1b (the one-deal operator re-drive, scripts/rfp-redrive-to-core.ts): the create COMMAND row of ONE approval by its
+ * unique source_event_id, read-only, or FOR UPDATE inside the CLI's locked transaction. A by-key read, never a status scan
+ * (E-8 reader census): the CLI itself requires the row to be procore-stamped and `done`.
+ */
+export async function readCreateCommandForEvent(tx: Executor, sourceEventId: string, forUpdate = false): Promise<any | undefined> {
+  return rowsOf(await tx.execute(sql`
+    SELECT id, source_system, source_deal_id, source_event_id, project_number, destination, status, approval_kind, payload
+      FROM bidboard_create_outbox WHERE source_event_id = ${sourceEventId} ${forUpdate ? sql`FOR UPDATE` : sql``}
+  `))[0];
+}

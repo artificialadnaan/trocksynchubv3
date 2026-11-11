@@ -21,6 +21,8 @@ import { preflightRfpCoreTables, preflightRfpCoreTablesOrThrow, type RfpCoreTabl
 import { raiseRfpCoreAlert, type RfpCoreAlertCode } from "./rfp-core-alert";
 import { lockRfpCreateDeal, readCoreFootprint, readProcoreFootprint } from "./rfp-create-lock";
 import { RFP_APPROVING_STATUS } from "./rfp-approving";
+import { coreCreateRearmSet, coreFollowupRearmSet } from "./rfp-core-rearm";
+import { operatorRedriveOf } from "./rfp-operator-redrive";
 
 // Durable command outbox for create-from-rfp (findings V1-V4). See shared/schema.ts bidboardCreateOutbox.
 // The endpoint persists a command before its 202; this SERIAL worker (one create at a time, matching the global
@@ -264,14 +266,14 @@ function routeInputOf(input: CreateFromRfpInput, approvalKind: string | null): R
   };
 }
 
-type AlertList = Array<[RfpCoreAlertCode, Record<string, unknown>]>;
+export type AlertList = Array<[RfpCoreAlertCode, Record<string, unknown>]>;
 
 function firstRow(res: any): any | undefined {
   return (Array.isArray(res) ? res : (res?.rows ?? []))[0];
 }
 
 /** F1 (§10): the existing failed callback to the CRM, written INSIDE the caller's transaction, reason code VERBATIM in `error`. */
-async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string): Promise<void> {
+export async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string): Promise<void> {
   const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
   if (!targetUrl) throw new Error("TROCK_CRM_BASE_URL not configured; cannot enqueue the RFP routing F1 failed callback");
   const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
@@ -300,7 +302,7 @@ async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string)
 }
 
 /** §10 cross-destination hold, inside the caller's transaction: F1 'cross_destination_hold' now, the alert after commit. */
-async function holdCrossDestination(
+export async function holdCrossDestination(
   tx: any, input: CreateFromRfpInput, heldDestination: RfpDestination, footprint: string[], alerts: AlertList,
 ): Promise<void> {
   await enqueueF1InTx(tx, input, "cross_destination_hold");
@@ -419,6 +421,22 @@ async function handleReattempt(
     alerts.push(["approval_kind_conflict", { stored, received: kind, commandId: existing.id }]);
     return; // refused: never re-stamped, nothing refreshed
   }
+  // d9 Q2 (S1b r2): this approval was re-driven to Core by the operator CLI (its Procore create is `done`, and its event has
+  // an operatorRedrive Core row). A CRM re-post is a NO-OP REPLAY: the route answers the same 202 the done branch answers,
+  // and NOTHING is re-queued, re-stamped, adopted or refreshed (the done branch's callback-recovery re-queue would put the
+  // command back to pending, the Procore claim would then hold it on the Core footprint, and the re-drive row would lose its
+  // footprint skip). ONE alert.
+  if (existing.destination === "procore" && existing.status === "done") {
+    const core = firstRow(await tx.execute(sql`
+      SELECT id, status, payload FROM rfp_core_create_outbox
+       WHERE source_system = ${input.sourceSystem} AND source_event_id = ${input.sourceEventId}
+    `));
+    const redrive = core ? operatorRedriveOf(core.payload) : null;
+    if (core && redrive) {
+      alerts.push(["redrive_repost_replayed", { commandId: existing.id, coreId: core.id, coreStatus: core.status, go: redrive.go }]);
+      return;
+    }
+  }
   const effectiveKind = stored ?? kind;
   if (!stored && kind) {
     await tx.execute(sql`UPDATE bidboard_create_outbox SET approval_kind = ${kind} WHERE id = ${existing.id} AND approval_kind IS NULL`);
@@ -495,21 +513,24 @@ async function handleReattempt(
   if (CORE_REARMABLE.has(core.status)) {
     await tx.execute(sql`UPDATE bidboard_create_outbox SET payload = ${JSON.stringify(input)}::jsonb WHERE id = ${existing.id}`);
     await tx.execute(sql`
-      UPDATE rfp_core_create_outbox
-         SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL, refusal_reason = NULL,
-             project_number = ${input.deal.projectNumber ?? null}
-       WHERE id = ${core.id}
+      UPDATE rfp_core_create_outbox SET ${coreCreateRearmSet(input.deal.projectNumber ?? null)} WHERE id = ${core.id}
     `);
+    // S1a (owner: every re-arm is VISIBLE): the rep's re-post put a not-yet-sent Core create back on the E2 schedule.
+    alerts.push(["core_create_rearmed", { coreId: core.id, from: core.status, refusalReason: core.refusal_reason ?? null }]);
     return;
   }
   if (core.status === "sent") {
     // Core created the bid: NEVER re-send E2. Re-arm a dead E4 / E5 follow-up only (the rep's Retry after a dead link);
     // a link_refused E4 is never re-armed (a person resolves it).
-    await tx.execute(sql`
-      UPDATE rfp_core_followup_outbox
-         SET status = 'pending', attempt_count = 0, next_attempt_at = NOW(), last_error = NULL
+    const rearmed = await tx.execute(sql`
+      UPDATE rfp_core_followup_outbox SET ${coreFollowupRearmSet()}
        WHERE create_id = ${core.id} AND kind IN ('crm_link', 'core_confirm') AND status = 'dead'
+      RETURNING id, kind
     `);
+    // S1a: each re-armed follow-up is VISIBLE (owner requirement).
+    for (const f of (Array.isArray(rearmed) ? rearmed : (rearmed?.rows ?? []))) {
+      alerts.push(["core_followup_rearmed", { coreId: core.id, followupId: f.id, kind: f.kind }]);
+    }
   }
   // pending / sending: in flight, nothing to do
 }
@@ -723,6 +744,39 @@ async function markReclaiming(id: number, bidboardProjectId: string, proposalId:
 // Park it at 'needs_manual': NOT claimed by claimNext (no auto re-drain → no duplicate), NOT supersedable (not
 // 'pending'), NO callback (never tell the CRM it failed when a project may exist). A human resolves it — matching
 // the override-approve path's indeterminate handling.
+/** CodeRabbit 4534600249: consecutive post-claim footprint-check failures before a row is parked needs_manual. */
+export const CORE_HOLD_CHECK_MAX_FAILURES = 3;
+
+/** The reclaim reset of a failed footprint check, carrying the consecutive-failure count in the payload. */
+async function recordCoreHoldCheckFailure(id: number, failures: number, note: string): Promise<boolean> {
+  const db = await getDb();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await db.execute(sql`
+        UPDATE bidboard_create_outbox
+           SET attempt_count = 0, last_error = ${note},
+               payload = jsonb_set(payload, '{__coreHoldCheckFailures}', to_jsonb(${failures}::int))
+         WHERE id = ${id}
+      `);
+      return true;
+    } catch { /* retry a transient blip */ }
+  }
+  return false;
+}
+
+/**
+ * Codex 4534861795 on #129: only CONSECUTIVE failures count, so a check that ran clears the carried count. Best effort: if the
+ * clear can't land, the next failure counts on from the old value and parks sooner (the safe direction); never a create.
+ */
+async function clearCoreHoldCheckFailures(id: number): Promise<void> {
+  try {
+    const db = await getDb();
+    await db.execute(sql`UPDATE bidboard_create_outbox SET payload = payload - '__coreHoldCheckFailures' WHERE id = ${id}`);
+  } catch (err: any) {
+    log(`[bidboard-create] Command ${id}: could not clear the core-footprint failure count (${err?.message || err}); the next failure counts on from it`, "sync");
+  }
+}
+
 async function markNeedsManual(id: number, note: string, bidboardProjectId?: string): Promise<void> {
   const db = await getDb();
   if (bidboardProjectId) {
@@ -1530,8 +1584,29 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // budget and leave it for the stale reclaim to re-check, as the other recoverable paths below do; if even that can't
         // land, surface it 'needs_manual'.
         const message = holdErr?.message || String(holdErr);
-        log(`[bidboard-create] Command ${row.id} core-footprint check failed before the create (${message}); leaving 'processing' for reclaim`, "sync");
-        const reset = await resetCreateCommandForReclaim(row.id, `core-footprint check failed before the create; pending reclaim: ${message}`);
+        // CodeRabbit 4534600249: visible and bounded. Every failure raises the (re-alert-windowed) core_footprint_check_failed;
+        // after CORE_HOLD_CHECK_MAX_FAILURES consecutive failures the row is parked needs_manual with its own alert instead
+        // of resetting the attempt budget forever. The count rides in the payload, like __recoveredProjectId.
+        const failures = (Number((row.payload as any)?.__coreHoldCheckFailures) || 0) + 1;
+        await raiseRfpCoreAlert("core_footprint_check_failed", {
+          commandId: row.id, sourceSystem: row.source_system, sourceDealId: row.source_deal_id, failures, error: message,
+        });
+        if (failures >= CORE_HOLD_CHECK_MAX_FAILURES) {
+          log(`[bidboard-create] Command ${row.id} core-footprint check failed ${failures} times in a row (${message}); parked needs_manual`, "sync");
+          let parked = false;
+          for (let attempt = 1; attempt <= 3 && !parked; attempt++) {
+            try { await markNeedsManual(row.id, `core-footprint check failed ${failures} consecutive times before the create; needs manual resolution: ${message}`); parked = true; }
+            catch { /* retry a transient blip */ }
+          }
+          await raiseRfpCoreAlert("core_footprint_check_needs_manual", {
+            commandId: row.id, sourceSystem: row.source_system, sourceDealId: row.source_deal_id, failures, error: message, parked,
+          });
+          if (!parked) log(`[bidboard-create] CRITICAL: Command ${row.id} could NOT be parked needs_manual after ${failures} failed core-footprint checks; manual check needed for deal ${input.sourceDealId}`, "sync");
+          processed += 1;
+          continue;
+        }
+        log(`[bidboard-create] Command ${row.id} core-footprint check failed before the create (${message}); leaving 'processing' for reclaim (${failures} of ${CORE_HOLD_CHECK_MAX_FAILURES})`, "sync");
+        const reset = await recordCoreHoldCheckFailure(row.id, failures, `core-footprint check failed before the create (${failures} of ${CORE_HOLD_CHECK_MAX_FAILURES}); pending reclaim: ${message}`);
         if (!reset) {
           let surfaced = false;
           for (let attempt = 1; attempt <= 3 && !surfaced; attempt++) {
@@ -1543,6 +1618,8 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         processed += 1;
         continue;
       }
+      // Codex 4534861795 on #129: the check ran, so a carried failure count is no longer consecutive. Zero ⇒ no write.
+      if (Number((row.payload as any)?.__coreHoldCheckFailures) > 0) await clearCoreHoldCheckFailures(row.id);
       if (heldOnCore) {
         processed += 1;
         continue;

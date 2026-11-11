@@ -7,8 +7,8 @@
  * checkCrmDealEligibility for its existing importers. Fail-open throughout: only a definitive "gone" or a definitive
  * out-of-stage answer is ineligible.
  */
-import crypto from 'crypto';
 import { storage, type SourceSystem } from './storage';
+import { alertCrmSigningRefused, clearCrmSigningRefusal, crmV2Headers } from './crm-signing-v2';
 import { getHubSpotClient } from './hubspot';
 import { log } from './log';
 
@@ -79,7 +79,10 @@ export function sourceIdentityForRequest(request: any): { sourceSystem: SourceSy
   };
 }
 
-export async function checkCrmDealEligibility(sourceDealId: string): Promise<SourceEligibilityResult> {
+export async function checkCrmDealEligibility(
+  sourceDealId: string,
+  deps: { now?: () => Date } = {},
+): Promise<SourceEligibilityResult> {
   const baseUrl = process.env.TROCK_CRM_BASE_URL?.replace(/\/+$/, '');
   const secret = process.env.RFP_REQUEST_SYNC_SECRET;
   if (!baseUrl || !secret) {
@@ -89,15 +92,24 @@ export async function checkCrmDealEligibility(sourceDealId: string): Promise<Sou
 
   const pathPart = '/api/internal/deals/eligibility-check';
   const rawBody = JSON.stringify({ sourceDealId });
-  const signature = `sha256=${crypto.createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  const url = `${baseUrl}${pathPart}`;
+  // SyncHub → CRM v2 signing (server/crm-signing-v2.ts): a secret under 32 bytes or a non-https base (localhost /
+  // 127.0.0.1 excepted) refuses the send, with one alert, and the check fails open exactly as when unconfigured.
+  const signed = crmV2Headers({ url, rawBody, secret, signatureHeader: 'x-rfp-request-signature', now: deps.now?.() });
+  if (!signed.ok) {
+    log(`[rfp-approval] CRM eligibility check refused before sending (${signed.reason}); proceeding fail-open`, 'rfp');
+    await alertCrmSigningRefused('deals_eligibility_check', signed);
+    return { exists: true, stage: null, checkFailed: true };
+  }
+  clearCrmSigningRefusal('deals_eligibility_check');
 
   try {
     // Phase 5 CRM endpoint: POST /api/internal/deals/eligibility-check.
-    const response = await fetch(`${baseUrl}${pathPart}`, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-rfp-request-signature': signature,
+        ...signed.headers,
       },
       body: rawBody,
       // Closes the socket at the deadline; the outer deadline in checkRfpApprovalSourceEligibility covers the rest.
