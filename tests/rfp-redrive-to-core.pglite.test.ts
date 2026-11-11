@@ -483,11 +483,20 @@ describe("(Q1) --office / --approval-kind for an approval whose stored E1 lacks 
     expect(calls.find((c) => c.url.endsWith("/api/internal/core-bid-created"))?.body).toMatchObject({ office: "dallas", approvalKind: "vote" });
     expect(calls.find((c) => c.url.endsWith("/api/internal/rfp-core-notice"))?.body).toMatchObject({ kind: "core_bid_orphan", office: "dallas" });
   });
-  it("(pin) a row WITHOUT the re-drive marker (no go) whose E1 lacks an office is still office_not_supported at send: payload office ignored", async () => {
+  it("(c6 rule (f)) an E1 that lacks an office and carries no re-drive marker is stamped procore: no Core row", async () => {
     const input = e1();
     delete input.office;
     process.env.RFP_NONSERVICE_DESTINATION = "core";
-    await enqueueBidboardCreateCommand(input); // an ordinary core-stamped row
+    await enqueueBidboardCreateCommand(input);
+    expect(await coreRowsFor()).toEqual([]);
+    expect((await pg.query<any>(`SELECT destination FROM bidboard_create_outbox WHERE source_event_id = $1`, [KEY])).rows).toEqual([{ destination: "procore" }]);
+  });
+  it("(pin) a row WITHOUT the re-drive marker (no go) whose E1 lacks an office is still office_not_supported at send: payload office ignored", async () => {
+    // Rule (f) now stamps an office-less E1 procore, so the row is seeded as one stamped core BEFORE (f): a Dallas E1, its office
+    // then stripped from the stored command payload.
+    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    await enqueueBidboardCreateCommand(e1()); // an ordinary core-stamped row
+    await pg.query(`UPDATE bidboard_create_outbox SET payload = payload - 'office' WHERE source_event_id = $1`, [KEY]);
     await pg.query(`UPDATE rfp_core_create_outbox SET payload = $1::jsonb WHERE source_event_id = $2`, [
       JSON.stringify({ operatorRedrive: { reason: "operator_redrive", office: "dallas", approvalKind: "vote" } }), KEY,
     ]);
