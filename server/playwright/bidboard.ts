@@ -1061,6 +1061,13 @@ export interface CreateBidBoardProjectResult {
   projectName?: string;
   error?: string;
   screenshotPath?: string;
+  /**
+   * F-181: set ONLY where no create control was clicked, so no Procore project can exist from this call (a failed login or
+   * navigation, no Create button, a throw before the first create click, a deal missing from the cache, the beforeCreate
+   * abort). The new UI creates an empty project at the Create dialog's Confirm, so the first create click is the line. A
+   * failure without it may have created a project: the HubSpot webhook marks it manual, never replayable.
+   */
+  beforeSubmit?: true;
 }
 
 /**
@@ -1105,15 +1112,19 @@ export async function createBidBoardProject(
   
   if (!success || !page) {
     result.error = error || "Failed to log in to Procore";
+    result.beforeSubmit = true;
     return result;
   }
 
+  // F-181: true from the first click on a create control; until then a failure is pre-submit evidence.
+  let createClicked = false;
   try {
     // Navigate to BidBoard (optionally with ?status=todo&proposalId=X for RFP flow)
     const navOptions = { status: "todo" as const, proposalId: projectData.proposalId };
     const navigated = await navigateToBidBoard(page, navOptions);
     if (!navigated) {
       result.error = "Failed to navigate to BidBoard";
+      result.beforeSubmit = true;
       result.screenshotPath = await takeScreenshot(page, "create-bidboard-nav-failed");
       return result;
     }
@@ -1137,9 +1148,11 @@ export async function createBidBoardProject(
       const createBtn = await findCreateNewProjectButton(page);
       if (!createBtn) {
         result.error = "Create New Project button not found (new UI)";
+        result.beforeSubmit = true;
         result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-button");
         return result;
       }
+      createClicked = true;
       await createBtn.click();
       await randomDelay(1500, 2500);
 
@@ -1171,9 +1184,11 @@ export async function createBidBoardProject(
       const createButton = await page.$(PROCORE_SELECTORS.bidboard.createNewProject);
       if (!createButton) {
         result.error = "Create New Project button not found";
+        result.beforeSubmit = true;
         result.screenshotPath = await takeScreenshot(page, "create-bidboard-no-button");
         return result;
       }
+      createClicked = true;
       await createButton.click();
       await randomDelay(1500, 2500);
     }
@@ -1964,6 +1979,7 @@ export async function createBidBoardProject(
 
     } catch (err: any) {
       result.error = err.message || "Unknown error during project creation";
+      if (!createClicked) result.beforeSubmit = true;
       result.screenshotPath = await takeScreenshot(page, "create-bidboard-error");
       log(`Error creating BidBoard project: ${result.error}`, "playwright");
       
@@ -2196,6 +2212,7 @@ export async function createBidBoardProjectFromDeal(
       return {
         success: false,
         error: `HubSpot deal ${dealId} not found in database`,
+        beforeSubmit: true,
       };
     }
 
@@ -2472,6 +2489,7 @@ export async function createBidBoardProjectFromDeal(
           success: false,
           projectName: projectData.name,
           error: `BidBoard create aborted before it started: the submit record could not be written (${beforeCreateError})`,
+          beforeSubmit: true,
         };
       } else {
         result = await createProject(projectData);
