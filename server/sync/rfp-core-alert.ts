@@ -23,6 +23,9 @@ export type RfpCoreAlertCode =
   | "core_request_rejected"
   | "crm_notice_dead"
   | "core_preflight_error"
+  // CodeRabbit 4534600249: a post-claim Core-footprint check that failed (windowed), and the row parked needs_manual after N.
+  | "core_footprint_check_failed"
+  | "core_footprint_check_needs_manual"
   | "rfp_request_override_reset"
   // S1a (the E2 sender + the E4 / E5 / N1 follow-ups): every retry, re-arm, refusal and config gap is visible.
   | "rfp_core_unconfigured"
@@ -44,6 +47,8 @@ export type RfpCoreAlertCode =
   | "crm_signing_refused";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
+/** Standing / repeating conditions: their repeats fall under the re-alert window instead of each mailing again. */
+const WINDOWED_RFP_CORE_ALERT_CODES: ReadonlySet<RfpCoreAlertCode> = new Set<RfpCoreAlertCode>(["core_tables_missing", "core_footprint_check_failed"]);
 
 export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<string, unknown>): Promise<void> {
   let summary = "";
@@ -65,7 +70,7 @@ export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<s
         officeSlug: `${RFP_CORE_ALERT_NAMESPACE}${code}`,
         // CodeRabbit 4534112641: a standing condition (core_tables_missing) repeats on every request, so it never bypasses the
         // re-alert window; every other code is a distinct event and still alerts each time.
-        signatureChanged: code !== "core_tables_missing",
+        signatureChanged: !WINDOWED_RFP_CORE_ALERT_CODES.has(code),
       },
       {
         render: (input) => ({

@@ -20,6 +20,12 @@ describe("raiseRfpCoreAlert and the re-alert window (CodeRabbit 4534112641)", ()
       expect(call[0]).toMatchObject({ officeSlug: "rfp-core:core_tables_missing", signatureChanged: false });
     }
   });
+  it("core_footprint_check_failed repeats fall under the re-alert window (signatureChanged false); its needs_manual escalation alerts each time (CodeRabbit 4534600249)", async () => {
+    await raiseRfpCoreAlert("core_footprint_check_failed" as any, { commandId: 1, failures: 1 });
+    await raiseRfpCoreAlert("core_footprint_check_needs_manual" as any, { commandId: 1, failures: 3 });
+    expect(recordMock.mock.calls[0][0]).toMatchObject({ officeSlug: "rfp-core:core_footprint_check_failed", signatureChanged: false });
+    expect(recordMock.mock.calls[1][0]).toMatchObject({ officeSlug: "rfp-core:core_footprint_check_needs_manual", signatureChanged: true });
+  });
   it("(guard) every other code still alerts each distinct event (signatureChanged true), as today", async () => {
     await raiseRfpCoreAlert("core_create_dead", { attempts: 6 });
     expect(recordMock.mock.calls[0][0]).toMatchObject({ officeSlug: "rfp-core:core_create_dead", signatureChanged: true });
