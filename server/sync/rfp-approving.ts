@@ -14,6 +14,7 @@
  */
 import { sql } from "drizzle-orm";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
+import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import { lockRfpCreateDeal, readCoreFootprint, readDealCreateCommands, readProcoreFootprint } from "./rfp-create-lock";
 import { preflightRfpCoreTablesOrThrow } from "./rfp-core-preflight";
 import { RFP_HELD_CROSS_DESTINATION_STATUS } from "./rfp-destination";
@@ -158,6 +159,20 @@ export type ApprovingFacts = {
   recordedFields: string[];
   preCreateStepsRecorded: boolean;
 };
+
+/**
+ * The project number the original approval created under, so the resolver's search (i) and the found-finalise's sync mapping
+ * and CRM `created` callback all name the SAME number (Codex P2 on #127). Base: the recorded edited number, else the request's,
+ * else the deal's. processRfpApproval renumbers when the approver changed the type, so a recorded type edit renumbers it here too.
+ */
+export function effectiveApprovingProjectNumber(facts: Pick<ApprovingFacts, "projectNumber" | "dealData" | "recorded">): string | null {
+  const str = (v: unknown) => (v === undefined || v === null || String(v).trim() === "" ? null : String(v).trim());
+  const edited = (facts.recorded?.editedFields ?? {}) as Record<string, unknown>;
+  const base = str(edited.project_number) ?? str(facts.projectNumber) ?? str(facts.dealData.project_number);
+  const editedType = str(edited.project_types);
+  const currentType = base ? (parseProjectTypeFromNumber(base) ?? str(facts.dealData.project_types)) : null;
+  return base && editedType && editedType !== currentType ? replaceProjectTypeInNumber(base, editedType) : base;
+}
 
 export async function readApprovingFacts(requestId: number, db?: Executor): Promise<ApprovingFacts | null> {
   const exec = db ?? (await defaultDb());
