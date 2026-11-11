@@ -29,9 +29,12 @@ vi.mock("../server/rfp-approval.ts", () => ({
   buildSourceDealUrl: vi.fn(() => null),
   normalizedDealData: vi.fn(() => ({})),
 }));
+const CALLBACK_URL = "https://crm.example.test/api/internal/bid-board-created";
+const callbackUrl = vi.hoisted(() => ({ value: null as string | null })); // null ⇒ the CRM base is not configured (enqueueF1InTx throws)
 vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
-  buildBidBoardCreatedCallbackTargetUrl: () => "https://crm.example.test/api/internal/bid-board-created",
+  buildBidBoardCreatedCallbackTargetUrl: () => callbackUrl.value,
 }));
+callbackUrl.value = CALLBACK_URL;
 vi.mock("../server/storage.ts", () => ({ storage: { getAutomationConfig: vi.fn(async () => ({ value: { companyId: "42" } })) } }));
 vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMock }));
 
@@ -238,6 +241,13 @@ describe.skipIf(!BASE_URL)("readProcoreFootprint (real PG; d9 iii / iv)", () => 
       expect(await readProcoreFootprint(dbHolder.db, "trock_crm", DEAL), reason).toEqual([reason]);
     }
   });
+  it("a sync mapping whose bidboard_project_id is blank or whitespace is not a footprint, as storage reads it (CodeRabbit 4529556672)", async () => {
+    for (const blank of ["", "   "]) {
+      await sql(`TRUNCATE rfp_core_create_outbox, bidboard_create_outbox, sync_mappings, rfp_approval_requests RESTART IDENTITY CASCADE`);
+      await sql(`INSERT INTO sync_mappings (source_system, source_deal_id, bidboard_project_id) VALUES ('trock_crm', $1, $2)`, [DEAL, blank]);
+      expect(await readProcoreFootprint(dbHolder.db, "trock_crm", DEAL), JSON.stringify(blank)).toEqual([]);
+    }
+  });
   it("a pending or held Procore command, a pending request, an unmapped mapping row, a core-stamped row and another deal's rows are not footprints", async () => {
     await insertCommand("k-pending", "pending");
     await insertCommand("k-held", "held_cross_destination");
@@ -358,6 +368,27 @@ describe.skipIf(!BASE_URL)("P2 the Procore worker re-checks the Core footprint a
     expect(await cmdStatus(OLD_KEY)).toBe("held_cross_destination");
     expect(alertCodes()).toContain("cross_destination_hold");
     expect(await f1Errors()).toEqual(["cross_destination_hold"]);
+  });
+  it("the Core-footprint check FAILS after the claim (the F1 cannot be queued) ⇒ the drain does not throw, no Playwright; the row is left for the stale reclaim with a fresh attempt budget, and the reclaim re-checks and holds it (CodeRabbit 4529556641)", async () => {
+    await insertCommand(OLD_KEY, "pending");
+    await insertCore(VOTE_KEY, "pending");
+    const perform = vi.fn(async () => "created" as const);
+    callbackUrl.value = null;
+    let outcome: string;
+    try {
+      outcome = await processBidboardCreateOutbox({ performImpl: perform as any }).then(() => "resolved", (e: any) => `threw: ${e?.message ?? e}`);
+    } finally {
+      callbackUrl.value = CALLBACK_URL;
+    }
+    expect(outcome).toBe("resolved");
+    expect(perform).not.toHaveBeenCalled();
+    const row = (await sql(`SELECT status, attempt_count, last_error FROM bidboard_create_outbox WHERE source_event_id = $1`, [OLD_KEY])).rows[0];
+    expect(row).toMatchObject({ status: "processing", attempt_count: 0 });
+    expect(String(row.last_error)).toContain("core-footprint check failed");
+    await sql(`UPDATE bidboard_create_outbox SET last_attempt_at = now() - interval '11 minutes' WHERE source_event_id = $1`, [OLD_KEY]);
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    expect(perform).not.toHaveBeenCalled();
+    expect(await cmdStatus(OLD_KEY)).toBe("held_cross_destination");
   });
   it("no Core footprint ⇒ today's create runs once and the row is done", async () => {
     await insertCommand(OLD_KEY, "pending");

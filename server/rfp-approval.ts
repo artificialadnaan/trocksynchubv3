@@ -1757,6 +1757,15 @@ export async function processRfpApproval(
       };
     }
 
+    if (bidboardFailed && resume) {
+      // S0b-2b recreate (CodeRabbit 4529556627): a failed, unconfirmed ("Could not confirm project creation") or thrown create
+      // on resume leaves the request `approving`. A project MAY exist, and `approved` with no project would end it: the
+      // stuck sweep would call it resolved, and the resolver's found / recreate both require `approving`. The stuck alert
+      // keeps firing and a person resolves it with the resolver.
+      log(`[rfp-approval] Recreate of RFP request ${resume.requestId}: BidBoard creation did not complete; left approving for the resolver: ${bidboardError || 'unknown error'}`, 'rfp');
+      return { success: false, error: bidboardError || 'BidBoard creation did not complete' };
+    }
+
     if (bidboardFailed) {
       // HubSpot was already updated (stage, fields). Mark as approved.
       // NOTE: reaching here implies bidboardProjectId is unset — createBidBoardProject only sets

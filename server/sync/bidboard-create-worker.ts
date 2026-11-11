@@ -1541,7 +1541,29 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       // RFP Phase 2 (CONTRACT v2.2 §10, path P2): the claim made this command's footprint visible ('processing'). Under the
       // per-deal lock, a Core footprint for the deal HOLDS it before Playwright: a PENDING procore row is not a Procore
       // footprint, so a core vote may have been routed after this row was queued (d9 iv).
-      if (await holdClaimedOnCoreFootprint(row)) {
+      let heldOnCore = false;
+      try {
+        heldOnCore = await holdClaimedOnCoreFootprint(row);
+      } catch (holdErr: any) {
+        // CodeRabbit 4529556641: the claim made this row 'processing' and spent an attempt. A failed check (an errored probe,
+        // the transaction, or an F1 that can't be queued) must not strand it there. Nothing was created, so reset the attempt
+        // budget and leave it for the stale reclaim to re-check, as the other recoverable paths below do; if even that can't
+        // land, surface it 'needs_manual'.
+        const message = holdErr?.message || String(holdErr);
+        log(`[bidboard-create] Command ${row.id} core-footprint check failed before the create (${message}); leaving 'processing' for reclaim`, "sync");
+        const reset = await resetCreateCommandForReclaim(row.id, `core-footprint check failed before the create; pending reclaim: ${message}`);
+        if (!reset) {
+          let surfaced = false;
+          for (let attempt = 1; attempt <= 3 && !surfaced; attempt++) {
+            try { await markNeedsManual(row.id, `core-footprint check failed and the reclaim reset could not land; needs manual resolution: ${message}`); surfaced = true; }
+            catch { /* retry a transient blip */ }
+          }
+          if (!surfaced) log(`[bidboard-create] CRITICAL: Command ${row.id} core-footprint check failed and it could NOT be reset for reclaim or surfaced needs_manual; manual check needed for deal ${input.sourceDealId}`, "sync");
+        }
+        processed += 1;
+        continue;
+      }
+      if (heldOnCore) {
         processed += 1;
         continue;
       }

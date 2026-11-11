@@ -554,6 +554,21 @@ describe.skipIf(!BASE_URL)("--apply", () => {
     expect(after.audit).toEqual([{ action: "rfp_resolve_approving" }]);
   });
 
+  it.each([
+    ["fails", () => createMock.mockResolvedValueOnce({ success: false, error: "Synthetic BidBoard failure" })],
+    ["is unconfirmed", () => createMock.mockResolvedValueOnce({ success: false, error: "Could not confirm project creation" })],
+    ["throws", () => createMock.mockRejectedValueOnce(new Error("Synthetic Playwright crash"))],
+  ])("recreate whose create %s ⇒ the request STAYS approving with no project and the error is returned, so it can be resolved again (CodeRabbit 4529556627)", async (_label, arrange) => {
+    const { id } = await seed({ system: "hubspot" });
+    arrange();
+    const res = await recreateApprovingRequest(id);
+    expect(res.success).toBe(false);
+    expect(createMock).toHaveBeenCalledTimes(1);
+    const after = await writable();
+    expect(after.requests).toEqual([{ id, status: "approving", bidboard_project_id: null, approved_by: null }]);
+    expect(after.mappings).toEqual([]);
+  });
+
   it("recreate when the checks say C (submit_at set) ⇒ refused: no create, nothing written", async () => {
     const { id } = await seed({ submitted: true });
     const before = await writable();
