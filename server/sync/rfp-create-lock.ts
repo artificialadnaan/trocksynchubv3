@@ -48,7 +48,7 @@ export async function readProcoreFootprint(tx: Executor, sourceSystem: string, s
   `));
   const mappings = !tables.map ? [] : rowsOf(await tx.execute(sql`
     SELECT id FROM sync_mappings
-     WHERE source_system = ${sourceSystem} AND source_deal_id = ${sourceDealId} AND bidboard_project_id IS NOT NULL
+     WHERE source_system = ${sourceSystem} AND source_deal_id = ${sourceDealId} AND length(trim(bidboard_project_id)) > 0
      ORDER BY id
   `));
   return [

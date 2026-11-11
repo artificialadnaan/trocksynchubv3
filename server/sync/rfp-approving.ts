@@ -94,9 +94,10 @@ export async function claimRfpRequestForCreate(input: RfpCreateClaimInput, db?: 
     const hubspotDone = rec?.hubspotDoneAt != null;
     await tx.execute(sql`
       INSERT INTO rfp_approval_approving (request_id, started_at, submit_at, approved_by, edited_fields, approved_attachments, force, hubspot_done_at)
-      VALUES (${input.requestId}, now(), NULL, ${approvedBy}, ${editedFields}::jsonb, ${approvedAttachments}::jsonb, ${force}, CASE WHEN ${hubspotDone}::boolean THEN now() END)
+      VALUES (${input.requestId}, now() AT TIME ZONE 'UTC', NULL, ${approvedBy}, ${editedFields}::jsonb, ${approvedAttachments}::jsonb, ${force},
+              CASE WHEN ${hubspotDone}::boolean THEN now() AT TIME ZONE 'UTC' END)
       ON CONFLICT (request_id) DO UPDATE
-        SET started_at = now(), submit_at = NULL, approved_by = EXCLUDED.approved_by, edited_fields = EXCLUDED.edited_fields,
+        SET started_at = now() AT TIME ZONE 'UTC', submit_at = NULL, approved_by = EXCLUDED.approved_by, edited_fields = EXCLUDED.edited_fields,
             approved_attachments = EXCLUDED.approved_attachments, force = EXCLUDED.force, hubspot_done_at = EXCLUDED.hubspot_done_at
     `);
     return { outcome: "claimed" };
@@ -106,7 +107,7 @@ export async function claimRfpRequestForCreate(input: RfpCreateClaimInput, db?: 
 /** Commits submit_at (its own statement) before createBidBoardProject starts. Called only after a "claimed" outcome. */
 export async function markRfpApprovingSubmitted(requestId: number, db?: Executor): Promise<void> {
   const exec = db ?? (await defaultDb());
-  await exec.execute(sql`UPDATE rfp_approval_approving SET submit_at = now() WHERE request_id = ${requestId}`);
+  await exec.execute(sql`UPDATE rfp_approval_approving SET submit_at = now() AT TIME ZONE 'UTC' WHERE request_id = ${requestId}`);
 }
 
 /**
@@ -151,7 +152,8 @@ export type ApprovingFacts = {
   ageMinutes: number | null;
   /** started_at older than 30 minutes, on the database clock. */
   olderThan30: boolean;
-  /** started_at as epoch ms (the column is the database's UTC wall clock). */
+  /** started_at as epoch ms. The columns are `timestamp` (0027) holding a UTC wall clock: every writer stores now() AT TIME ZONE 'UTC'
+   *  and every reader interprets them AT TIME ZONE 'UTC', so no session time zone shifts them (CodeRabbit 4529556652). */
   startedAtMs: number | null;
   submitAt: string | null;
   recorded: RecordedApprovalInputs | null;
@@ -179,12 +181,12 @@ export async function readApprovingFacts(requestId: number, db?: Executor): Prom
   const r = firstRow(await exec.execute(sql`
     SELECT r.id, r.token, r.status, r.source_system, r.source_deal_id, r.project_number, r.deal_data,
            a.request_id IS NOT NULL AS has_side,
-           floor(extract(epoch FROM (localtimestamp - a.started_at)) / 60)::int AS age_minutes,
-           COALESCE(a.started_at < localtimestamp - interval '30 minutes', false) AS older_than_30,
-           (extract(epoch FROM a.started_at) * 1000)::bigint AS started_ms,
+           floor(extract(epoch FROM ((now() AT TIME ZONE 'UTC') - a.started_at)) / 60)::int AS age_minutes,
+           COALESCE(a.started_at < (now() AT TIME ZONE 'UTC') - interval '30 minutes', false) AS older_than_30,
+           (extract(epoch FROM a.started_at AT TIME ZONE 'UTC') * 1000)::bigint AS started_ms,
            to_char(a.submit_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS submit_at,
            a.approved_by, a.edited_fields, a.approved_attachments, a.force,
-           a.hubspot_done_at IS NOT NULL AS hubspot_done, (extract(epoch FROM a.hubspot_done_at) * 1000)::bigint AS hubspot_done_ms
+           a.hubspot_done_at IS NOT NULL AS hubspot_done, (extract(epoch FROM a.hubspot_done_at AT TIME ZONE 'UTC') * 1000)::bigint AS hubspot_done_ms
       FROM rfp_approval_requests r
       LEFT JOIN rfp_approval_approving a ON a.request_id = r.id
      WHERE r.id = ${requestId}
@@ -282,7 +284,7 @@ export async function reclaimApprovingForRecreate(
     }
     const other = await readApprovingResolveFootprint(tx, input.sourceSystem, input.sourceDealId);
     if (other.length > 0) return { outcome: "refused", error: `Recreate refused: a footprint exists for the deal (${other.join(", ")})` };
-    await tx.execute(sql`UPDATE rfp_approval_approving SET started_at = now() WHERE request_id = ${input.requestId}`);
+    await tx.execute(sql`UPDATE rfp_approval_approving SET started_at = now() AT TIME ZONE 'UTC' WHERE request_id = ${input.requestId}`);
     return { outcome: "claimed" };
   });
 }
