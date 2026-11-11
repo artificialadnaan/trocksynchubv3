@@ -442,6 +442,62 @@ describe.skipIf(!BASE_URL)("P2 the Procore worker re-checks the Core footprint a
     expect(perform).not.toHaveBeenCalled();
     expect(await cmdStatus(OLD_KEY)).toBe("needs_manual");
   });
+  // Codex 4534861795 on #129: only CONSECUTIVE failures park the row. A check that RAN (and found no footprint) clears the carried
+  // count, so failures separated by a passing check start again from 1. Synthetic rows only.
+  it("a passing check clears the failure count: fail, pass, fail, fail ⇒ NOT needs_manual, the count restarts at 1 (Codex 4534861795)", async () => {
+    const id = await insertCommand(OLD_KEY, "pending");
+    const coreId = await insertCore(VOTE_KEY, "pending");
+    const { storage } = await import("../server/storage.ts");
+    // The create after the passing check fails recoverably (an indeterminate mapping lookup), so the row stays reclaimable.
+    (storage as any).getBidboardMappingBySourceDealId = vi.fn(async () => { throw new Error("synthetic mapping lookup blip"); });
+    const perform = vi.fn(async () => { throw new Error("synthetic transient create failure"); });
+    const backdate = () => sql(`UPDATE bidboard_create_outbox SET last_attempt_at = now() - interval '11 minutes' WHERE id = $1`, [id]);
+    const failingCheck = async () => {
+      callbackUrl.value = null;
+      try {
+        await processBidboardCreateOutbox({ performImpl: perform as any }).catch(() => undefined);
+      } finally {
+        callbackUrl.value = CALLBACK_URL;
+      }
+      await backdate();
+    };
+    try {
+      await failingCheck();
+      await sql(`UPDATE rfp_core_create_outbox SET status = 'refused' WHERE id = $1`, [coreId]); // no Core footprint: the check passes
+      await processBidboardCreateOutbox({ performImpl: perform as any }).catch(() => undefined);
+      await backdate();
+      expect(perform).toHaveBeenCalledTimes(1);
+      expect(await cmdStatus(OLD_KEY)).toBe("processing");
+      const carried = await sql(`SELECT payload ? '__coreHoldCheckFailures' AS has FROM bidboard_create_outbox WHERE id = $1`, [id]);
+      expect(carried.rows[0].has).toBe(false);
+      await sql(`UPDATE rfp_core_create_outbox SET status = 'pending' WHERE id = $1`, [coreId]); // the footprint is back
+      await failingCheck();
+      await failingCheck();
+    } finally {
+      delete (storage as any).getBidboardMappingBySourceDealId;
+    }
+    expect(await cmdStatus(OLD_KEY)).toBe("processing");
+    expect(alertMock.mock.calls.filter((c) => c[0] === "core_footprint_check_failed").map((c) => c[1].failures)).toEqual([1, 1, 2]);
+    expect(alertCodes()).not.toContain("core_footprint_check_needs_manual");
+  });
+  it("(guard) the zero-failure path makes no extra write: no statement touches the failure count (a4, Codex 4534861795)", async () => {
+    await insertCommand(OLD_KEY, "pending");
+    const perform = vi.fn(async () => "created" as const);
+    const seen: string[] = [];
+    const realQuery = pool.query.bind(pool);
+    (pool as any).query = (...args: any[]) => {
+      seen.push(String(typeof args[0] === "string" ? args[0] : args[0]?.text ?? ""));
+      return (realQuery as any)(...args);
+    };
+    try {
+      await processBidboardCreateOutbox({ performImpl: perform as any });
+    } finally {
+      delete (pool as any).query; // back to the prototype's query
+    }
+    expect(await cmdStatus(OLD_KEY)).toBe("done");
+    expect(seen.some((t) => /UPDATE bidboard_create_outbox SET status = 'done'/.test(t))).toBe(true); // positive control: the drain's writes are seen
+    expect(seen.filter((t) => t.includes("__coreHoldCheckFailures"))).toEqual([]);
+  });
   it("no Core footprint ⇒ today's create runs once and the row is done", async () => {
     await insertCommand(OLD_KEY, "pending");
     const perform = vi.fn(async () => "created" as const);
