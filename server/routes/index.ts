@@ -54,6 +54,7 @@ import { startAlertScheduler } from "../cron/alertScheduler";
 import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
 import { startBidboardCreateWorker } from "../sync/bidboard-create-worker";
 import { startRfpCoreWorkers } from "../sync/rfp-core-worker";
+import { startProcoreTokenKeepAlive } from "../procore-token-keepalive";
 import { startServiceRfpCoreOutboxWorker } from "../sync/service-rfp-core-outbox";
 import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
 import { startPendingRfpDigestScheduler } from "../cron/pendingRfpDigestScheduler";
@@ -139,6 +140,9 @@ export async function registerRoutes(
   // RFP Phase 2 (S1a): the E2 sender + the E4 / E5 / N1 follow-ups. Drains already core-stamped rows under any
   // RFP_NONSERVICE_DESTINATION (§12); nothing to send until the first core stamp.
   startRfpCoreWorkers();
+  // Keeps the shared Procore token renewed (every 10 min, below 30 min left) now that no poller calls Procore steadily:
+  // Core's signed read and the migration capture borrow the token and never refresh it themselves.
+  startProcoreTokenKeepAlive();
   // Drains service-RFP rows Core could not accept inline. A tick with an empty queue is one indexed
   // read, so this stays harmless while the ingress is unprovisioned.
   startServiceRfpCoreOutboxWorker();
