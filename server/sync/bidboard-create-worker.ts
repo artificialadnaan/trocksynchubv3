@@ -764,6 +764,19 @@ async function recordCoreHoldCheckFailure(id: number, failures: number, note: st
   return false;
 }
 
+/**
+ * Codex 4534861795 on #129: only CONSECUTIVE failures count, so a check that ran clears the carried count. Best effort: if the
+ * clear can't land, the next failure counts on from the old value and parks sooner (the safe direction); never a create.
+ */
+async function clearCoreHoldCheckFailures(id: number): Promise<void> {
+  try {
+    const db = await getDb();
+    await db.execute(sql`UPDATE bidboard_create_outbox SET payload = payload - '__coreHoldCheckFailures' WHERE id = ${id}`);
+  } catch (err: any) {
+    log(`[bidboard-create] Command ${id}: could not clear the core-footprint failure count (${err?.message || err}); the next failure counts on from it`, "sync");
+  }
+}
+
 async function markNeedsManual(id: number, note: string, bidboardProjectId?: string): Promise<void> {
   const db = await getDb();
   if (bidboardProjectId) {
@@ -1605,6 +1618,8 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         processed += 1;
         continue;
       }
+      // Codex 4534861795 on #129: the check ran, so a carried failure count is no longer consecutive. Zero ⇒ no write.
+      if (Number((row.payload as any)?.__coreHoldCheckFailures) > 0) await clearCoreHoldCheckFailures(row.id);
       if (heldOnCore) {
         processed += 1;
         continue;
