@@ -42,7 +42,7 @@
 import { Page } from "playwright";
 import { getPage, saveSession, clearSession, closeBrowser, withRetry, randomDelay, takeScreenshot } from "./browser";
 import { PROCORE_SELECTORS, PROCORE_URLS } from "./selectors";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import { storage } from "../storage";
 import {
   PROCORE_CREDENTIAL_REMEDIATION,

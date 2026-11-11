@@ -728,14 +728,19 @@ export function registerRfpApprovalRoutes(app: Express) {
       return res.status(409).json({ success: false, error: `Request ${request.id} is ${request.status}; it cannot be reset` });
     }
     const wasOverrideApproving = request.status === 'override_approving';
-    await storage.updateRfpApprovalRequest(request.id, {
+    // CodeRabbit 4534112622: the write is conditional on the status read above, so an approval that claims the row in between
+    // (pending → approving) is never flipped back; that reset answers 409 instead.
+    const reset = await storage.updateRfpApprovalRequest(request.id, {
       status: 'pending',
       approvedBy: null,
       approvedAt: null,
       declinedBy: null,
       declinedAt: null,
       bidboardProjectId: null,
-    });
+    }, { expectedStatus: request.status });
+    if (!reset) {
+      return res.status(409).json({ success: false, error: `Request ${request.id} changed while it was being reset; it cannot be reset` });
+    }
     if (wasOverrideApproving) {
       // Today's only recovery for a stuck override stays allowed (I1), but loudly: the override being reset may already have
       // created a project, so the alert carries the deal's footprint for a person to check (d9 5a).

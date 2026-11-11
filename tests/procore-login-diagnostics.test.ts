@@ -21,6 +21,8 @@ const getAutomationConfigMock = vi.hoisted(() => vi.fn(async (_key: string) => n
 const recordLoginOutcomeMock = vi.hoisted(() => vi.fn(async () => ({ action: "none" as const })));
 
 vi.mock("../server/index.ts", () => ({ log: logMock }));
+// A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
+vi.mock("../server/log.ts", () => ({ log: logMock }));
 vi.mock("../server/db.ts", () => ({ db: {}, pool: { query: vi.fn(async () => ({ rows: [] })) } }));
 vi.mock("../server/email-service.ts", () => ({ sendEmail: vi.fn(async () => ({ success: true, provider: "gmail" })) }));
 vi.mock("../server/storage.ts", () => ({ storage: { getAutomationConfig: getAutomationConfigMock } }));
@@ -644,4 +646,16 @@ describe("recordLoginOutcomeAndMaybeAlert — dedupe", () => {
     expect(ddl()).toBe(1);
   });
 
+});
+
+describe("harness: the log spy sees log() from both server/log and server/index (positive control for this file's log assertions)", () => {
+  it("a line logged through either module reaches the spy", async () => {
+    const viaLog = await import("../server/log.ts");
+    const viaIndex = await import("../server/index.ts");
+    viaLog.log("a3-harness-control-log", "test");
+    viaIndex.log("a3-harness-control-index", "test");
+    const seen = logMock.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(seen).toContain("a3-harness-control-log");
+    expect(seen).toContain("a3-harness-control-index");
+  });
 });

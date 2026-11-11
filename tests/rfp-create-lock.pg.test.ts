@@ -293,6 +293,21 @@ describe.skipIf(!BASE_URL)("P1 the create-from-rfp enqueue holds on the other de
     expect(alertCodes()).toContain("cross_destination_hold");
     expect(await f1Errors()).toEqual(["cross_destination_hold"]);
   });
+  it("a Core vote held on a done Procore round keeps that round's still-pending `created` callback; the hold F1 supersedes only an older pending `failed` one (CodeRabbit 4534112631)", async () => {
+    await insertCommand(OLD_KEY, "done");
+    const callback = (status: string, at: string) => sql(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+       VALUES ('trock_crm', $1, NULL, $2::jsonb, $3, 'pending')`,
+      [DEAL, JSON.stringify({ status, sourceDealId: DEAL, ...(status === "created" ? { bidboardProjectId: "900010" } : { error: "synthetic_older_failure" }), createdAt: at }), CALLBACK_URL],
+    );
+    await callback("created", "2026-11-01T00:00:00.000Z"); // the done round's 'created', still being delivered
+    await callback("failed", "2026-11-01T00:00:01.000Z"); // an older pending 'failed' for the deal: superseded, as today
+    process.env.RFP_NONSERVICE_DESTINATION = "core";
+    await enqueueBidboardCreateCommand(e1());
+    expect(await coreStatus(VOTE_KEY)).toBe("held_cross_destination");
+    const left = (await sql(`SELECT payload->>'status' AS status, payload->>'error' AS error FROM bidboard_callback_outbox WHERE source_deal_id = $1 ORDER BY id`, [DEAL])).rows;
+    expect(left).toEqual([{ status: "created", error: null }, { status: "failed", error: "cross_destination_hold" }]);
+  });
   it("core first arrival with an approved request or a Bid Board mapping for the deal ⇒ held the same way", async () => {
     const seeds: Array<[string, () => Promise<unknown>]> = [
       ["request approved", () => sql(`INSERT INTO rfp_approval_requests (source_system, source_deal_id, status) VALUES ('trock_crm', $1, 'approved')`, [DEAL])],

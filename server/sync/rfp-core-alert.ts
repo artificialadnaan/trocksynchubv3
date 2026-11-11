@@ -61,7 +61,9 @@ export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<s
       {
         pushResult: { ok: false, attempts: 1, error: `${code}: ${summary}`, rejected: true },
         officeSlug: `${RFP_CORE_ALERT_NAMESPACE}${code}`,
-        signatureChanged: true,
+        // CodeRabbit 4534112641: a standing condition (core_tables_missing) repeats on every request, so it never bypasses the
+        // re-alert window; every other code is a distinct event and still alerts each time.
+        signatureChanged: code !== "core_tables_missing",
       },
       {
         render: (input) => ({

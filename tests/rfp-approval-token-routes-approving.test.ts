@@ -108,7 +108,7 @@ describe("reset route vs a create in progress", () => {
     reqState.current = request("override_approving");
     const res = await post("reset");
     expect(res.status).toBe(200);
-    expect(updateRequest).toHaveBeenCalledWith(7, expect.objectContaining({ status: "pending" }));
+    expect(updateRequest).toHaveBeenCalledWith(7, expect.objectContaining({ status: "pending" }), { expectedStatus: "override_approving" });
     const call = alertMock.mock.calls.find((c) => c[0] === "rfp_request_override_reset");
     expect(call, "rfp_request_override_reset was raised").toBeDefined();
     expect(call?.[1]).toMatchObject({ requestId: 7, sourceSystem: "trock_crm", sourceDealId: DEAL, syncMapping: true, createCommand: false });
@@ -118,8 +118,16 @@ describe("reset route vs a create in progress", () => {
       reqState.current = request(status);
       const res = await post("reset");
       expect(res.status).toBe(200);
-      expect(updateRequest).toHaveBeenCalledWith(7, expect.objectContaining({ status: "pending" }));
+      expect(updateRequest).toHaveBeenCalledWith(7, expect.objectContaining({ status: "pending" }), { expectedStatus: status });
       expect(alertMock).not.toHaveBeenCalled();
     });
   }
+  it("a request claimed `approving` between the reset's read and its write ⇒ 409: the write is conditional on the status it read (CodeRabbit 4534112622)", async () => {
+    reqState.current = request("pending");
+    updateRequest.mockResolvedValueOnce(undefined); // the conditional UPDATE matched no row: an approval claimed it meanwhile
+    const res = await post("reset");
+    expect(res.status).toBe(409);
+    expect(updateRequest).toHaveBeenCalledWith(7, expect.objectContaining({ status: "pending" }), { expectedStatus: "pending" });
+    expect(alertMock).not.toHaveBeenCalled();
+  });
 });

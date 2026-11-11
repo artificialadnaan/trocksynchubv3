@@ -488,7 +488,7 @@ export interface IStorage {
   getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined>;
   getLatestRfpApprovalRequestBySourceDeal(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
-  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
+  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>, opts?: { expectedStatus?: string }): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
   createRfpApprovalEdit(data: InsertRfpApprovalEdit): Promise<RfpApprovalEdit>;
   getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
@@ -2265,8 +2265,17 @@ export class DatabaseStorage implements IStorage {
     );
   }
 
-  async updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined> {
-    const [result] = await db.update(rfpApprovalRequests).set(data).where(eq(rfpApprovalRequests.id, id)).returning();
+  async updateRfpApprovalRequest(
+    id: number,
+    data: Partial<InsertRfpApprovalRequest>,
+    opts: { expectedStatus?: string } = {},
+  ): Promise<RfpApprovalRequest | undefined> {
+    // opts.expectedStatus (CodeRabbit 4534112622): write only while the row still has the status the caller read, so a
+    // concurrent claim (pending → approving) makes this a no-op (undefined) instead of being overwritten.
+    const where = opts.expectedStatus === undefined
+      ? eq(rfpApprovalRequests.id, id)
+      : and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, opts.expectedStatus));
+    const [result] = await db.update(rfpApprovalRequests).set(data).where(where).returning();
     return result;
   }
 

@@ -46,7 +46,7 @@ import { randomDelay, takeScreenshot, withBrowserLock, withRetry, waitForNavigat
 // Static import is safe: bidboard-notes-flag has no imports of its own, so it cannot close the cycle
 // that forces bidboard-notes itself to be loaded dynamically at the call site.
 import { isBidBoardNotesEnabled } from "./bidboard-notes-flag";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import { storage, type SourceSystem } from "../storage";
 
 /** BidBoard project data extracted from web scrape */

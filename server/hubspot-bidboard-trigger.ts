@@ -133,7 +133,19 @@ export async function processDealStageChange(
     return { triggered: false, reason: "bidboard_project_already_exists" };
   }
 
-  if ((await readCoreFootprintUnderLock(dealId)).length > 0) {
+  let coreFootprint: string[];
+  try {
+    coreFootprint = await readCoreFootprintUnderLock(dealId);
+  } catch (err: any) {
+    // CodeRabbit 4534112615 (d9 option A): a check that cannot run is not "no footprint". Fail closed (no create) and say so
+    // visibly: the webhook would otherwise log the rejection and mark the event processed (F-181 owns that path).
+    const error = err?.message || String(err);
+    console.error(`[hubspot-bidboard] Deal ${dealId}: the Core footprint check failed (${error}); the Procore create is NOT run`);
+    const { raiseRfpCoreAlert } = await import("./sync/rfp-core-alert");
+    await raiseRfpCoreAlert("core_preflight_error", { sourceSystem: "hubspot", sourceDealId: dealId, stage: newStageId, error });
+    return { triggered: false, reason: "core_footprint_check_failed" };
+  }
+  if (coreFootprint.length > 0) {
     console.log(`[hubspot-bidboard] Deal ${dealId} has a Core Bid Board footprint; the Procore create is held (cross_destination_hold)`);
     return { triggered: false, reason: "cross_destination_hold" };
   }

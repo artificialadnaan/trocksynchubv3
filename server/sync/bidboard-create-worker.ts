@@ -291,6 +291,7 @@ export async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: 
        AND source_deal_id = ${input.sourceDealId}
        AND rfp_approval_request_id IS NULL
        AND status = 'pending'
+       AND payload->>'status' = 'failed'
        AND payload->>'createdAt' IS NOT NULL
        AND (payload->>'createdAt')::timestamptz <= ${payload.createdAt}::timestamptz
   `);

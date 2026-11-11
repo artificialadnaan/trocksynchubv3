@@ -22,6 +22,8 @@ vi.mock("../server/db.ts", () => ({
   pool: { query: vi.fn(async () => ({ rows: [] })) },
 }));
 vi.mock("../server/index.ts", () => ({ log: logMock }));
+// A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
+vi.mock("../server/log.ts", () => ({ log: logMock }));
 
 /** Everything the worker's own logging emits, joined — the operator's actual view. */
 function logged(): string {
@@ -97,5 +99,17 @@ describe("service-RFP outbox startup preflight", () => {
 
     expect(logged()).not.toContain("PROVISIONING ERROR");
     expect(logged()).toContain("Worker started");
+  });
+});
+
+describe("harness: the log spy sees log() from both server/log and server/index (positive control for this file's log assertions)", () => {
+  it("a line logged through either module reaches the spy", async () => {
+    const viaLog = await import("../server/log.ts");
+    const viaIndex = await import("../server/index.ts");
+    viaLog.log("a3-harness-control-log", "test");
+    viaIndex.log("a3-harness-control-index", "test");
+    const seen = logMock.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(seen).toContain("a3-harness-control-log");
+    expect(seen).toContain("a3-harness-control-index");
   });
 });
