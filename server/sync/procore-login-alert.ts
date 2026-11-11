@@ -13,7 +13,7 @@
 // when logins start working again.
 import { pool } from "../db";
 import { sendEmail } from "../email-service";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import {
   decideAlertTransition,
   escapeHtml,

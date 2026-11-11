@@ -7,7 +7,7 @@
  * Bid Board → CRM push. Imported DYNAMICALLY because bidboard-crm-alert's pool import throws without DATABASE_URL.
  * Never throws: an alert failure must not change a routing outcome.
  */
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex P1 on #128)
 
 export type RfpCoreAlertCode =
   | "destination_changed_hold"
@@ -45,7 +45,9 @@ export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<s
       {
         pushResult: { ok: false, attempts: 1, error: `${code}: ${summary}`, rejected: true },
         officeSlug: `${RFP_CORE_ALERT_NAMESPACE}${code}`,
-        signatureChanged: true,
+        // CodeRabbit 4534112641: a standing condition (core_tables_missing) repeats on every request, so it never bypasses the
+        // re-alert window; every other code is a distinct event and still alerts each time.
+        signatureChanged: code !== "core_tables_missing",
       },
       {
         render: (input) => ({

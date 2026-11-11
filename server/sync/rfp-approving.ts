@@ -317,6 +317,17 @@ export async function finaliseApprovingFoundRecord(
     if (mappedRows.some((m) => m.source_system !== input.sourceSystem || m.source_deal_id !== input.sourceDealId)) {
       return { success: false, error: `Bid Board project ${input.bidboardProjectId} is already mapped to another deal` };
     }
+    // CodeRabbit 4534112648: under the deal lock, a deal that already maps to a DIFFERENT Bid Board project (a mapping that
+    // appeared after the dry-run) is refused, never given a second mapping. A mapping to the found project itself is fine.
+    const dealMapped = await tx.execute(sql`
+      SELECT bidboard_project_id FROM sync_mappings
+       WHERE source_system = ${input.sourceSystem} AND source_deal_id = ${input.sourceDealId}
+         AND length(trim(bidboard_project_id)) > 0 AND bidboard_project_id <> ${input.bidboardProjectId}
+    `);
+    const other = (Array.isArray(dealMapped) ? dealMapped : (dealMapped?.rows ?? [])) as Array<{ bidboard_project_id: string }>;
+    if (other.length > 0) {
+      return { success: false, error: `the deal already maps to Bid Board project ${other.map((r) => r.bidboard_project_id).join(", ")}` };
+    }
     await tx.execute(sql`
       UPDATE rfp_approval_requests
          SET status = 'approved', bidboard_project_id = ${input.bidboardProjectId}, approved_by = ${input.approvedBy}, approved_at = now()

@@ -10,7 +10,7 @@
 import { sql } from "drizzle-orm";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex P1 on #128)
 import { coreRfpTenant } from "../constants";
 import { processCoreHandoffCrmNotices } from "./service-rfp-core-crm-notice";
 // Type-only: the alert module is imported dynamically at runtime (see reportDelivery).

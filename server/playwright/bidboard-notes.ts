@@ -43,7 +43,7 @@ import type { Locator, Page } from "playwright";
 import { PROCORE_SELECTORS } from "./selectors";
 import { randomDelay, takeScreenshot } from "./browser";
 import { navigateToProject } from "./bidboard";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 
 /**
  * The idempotency marker. PROJECT-SCOPED: Procore's Notes are already per-project, so matching the
