@@ -169,6 +169,10 @@ beforeEach(async () => {
   processDealStageChangeMock.mockResolvedValue({ triggered: true, result: { success: true, projectId: "900181" } });
   createRfpApprovalRequestMock.mockResolvedValue({ success: true, token: "token-f181" });
   recordPushMock.mockResolvedValue({ action: "alert", sent: true });
+  // Codex 4535379047 (RED-r3, declared harness): syncSingleHubSpotDeal returns {success:false} on failure rather than throwing,
+  // so the replay must read its result; by default the refresh succeeds.
+  const { syncSingleHubSpotDeal } = await import("../server/hubspot.ts");
+  vi.mocked(syncSingleHubSpotDeal).mockResolvedValue({ success: true, action: "updated" } as any);
 });
 
 afterEach(() => {
@@ -350,12 +354,46 @@ describe("F-181 replay (POST /api/webhooks/replay/:id)", () => {
 
   it("an RFP-fault replay re-runs createRfpApprovalRequest once", async () => {
     dbRows.current = [failedRow({ payload: stageEvent({ propertyValue: "rfp" }), errorMessage: "replayable: synthetic HubSpot fetch timeout" })];
+    storageMock.getHubspotDealByHubspotId.mockResolvedValue({ dealStageName: "RFP", dealStage: "rfp" }); // declared (RED-r3): still at the RFP stage
     const res = await replay();
     expect(res.status).toBe(200);
     expect(createRfpApprovalRequestMock).toHaveBeenCalledTimes(1);
     expect(createRfpApprovalRequestMock).toHaveBeenCalledWith(DEAL);
     expect(processDealStageChangeMock).not.toHaveBeenCalled();
     expect(finalMark(ROW_ID)).toMatchObject({ status: "processed", errorMessage: null });
+  });
+
+  // Codex 4535379041 / 4535379047 on #131 (RED-r3, d9 + a4): a replay never creates for, or emails about, a deal that left the stage,
+  // and never trusts a stale cache: the current-stage check runs before BOTH branches, on a refresh that succeeded.
+  it("an RFP-fault replay after the deal moved on makes no request and sends no approver email (Codex 4535379041)", async () => {
+    dbRows.current = [failedRow({ payload: stageEvent({ propertyValue: "rfp" }), errorMessage: "replayable: synthetic HubSpot fetch timeout" })];
+    storageMock.getHubspotDealByHubspotId.mockResolvedValue({ dealStageName: "Closed Lost", dealStage: "closedlost" });
+    const res = await replay();
+    expect(res.status).toBe(200);
+    expect(String(res.body.message)).toMatch(/stage moved on/);
+    expect(createRfpApprovalRequestMock).not.toHaveBeenCalled();
+    expect(finalMark(ROW_ID)).toMatchObject({ status: "processed" });
+  });
+
+  it("a replay whose HubSpot refresh failed ({success:false}) makes 0 trigger calls and stays failed, replayable (Codex 4535379047)", async () => {
+    dbRows.current = [failedRow()];
+    const { syncSingleHubSpotDeal } = await import("../server/hubspot.ts");
+    vi.mocked(syncSingleHubSpotDeal).mockResolvedValue({ success: false, action: "updated", error: "synthetic HubSpot 503" } as any);
+    const res = await replay();
+    expect(processDealStageChangeMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(500);
+    expect(finalMark(ROW_ID)).toMatchObject({ status: "failed", errorMessage: expect.stringMatching(/^replayable: .*could not be verified.*synthetic HubSpot 503/) });
+  });
+
+  it("an RFP replay whose HubSpot refresh threw makes no request and stays failed, replayable (Codex 4535379047)", async () => {
+    dbRows.current = [failedRow({ payload: stageEvent({ propertyValue: "rfp" }), errorMessage: "replayable: synthetic HubSpot fetch timeout" })];
+    storageMock.getHubspotDealByHubspotId.mockResolvedValue({ dealStageName: "RFP", dealStage: "rfp" });
+    const { syncSingleHubSpotDeal } = await import("../server/hubspot.ts");
+    vi.mocked(syncSingleHubSpotDeal).mockRejectedValue(new Error("synthetic HubSpot socket reset"));
+    const res = await replay();
+    expect(createRfpApprovalRequestMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(500);
+    expect(finalMark(ROW_ID)).toMatchObject({ status: "failed", errorMessage: expect.stringMatching(/^replayable: .*could not be verified.*synthetic HubSpot socket reset/) });
   });
 
   it("an RFP replay honours HUBSPOT_RFP_TRIGGER_ENABLED=false: 400, no state change, no request", async () => {
