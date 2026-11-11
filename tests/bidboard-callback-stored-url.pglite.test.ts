@@ -67,7 +67,8 @@ describe("CodeRabbit 4536104336 on #130: a stored target_url the v2 URL rule ref
     const worker = await import("../server/sync/bidboard-callback-worker.ts");
     const { crmUrlAllowed } = await import("../server/crm-signing-v2.ts");
     expect(typeof (worker as any).callbackUrlAdmittedSql).toBe("function");
-    // [url, TS admits, SQL admits]. SQL is stricter only where stated: userinfo, surrounding whitespace (TS trims; SQL does not).
+    // [url, TS admits, SQL admits]. SQL is stricter only where stated: userinfo, surrounding whitespace (TS trims; SQL does not),
+    // and (CodeRabbit 4536816201, declined: fail-closed, the row stays pending unchanged with ONE alert) a bracketed IPv6 host.
     const cases: Array<[string | null, boolean, boolean]> = [
       ["https://crm-sales.ops-example.test/api/internal/bid-board-created", true, true],
       ["https://crm.example.com:8443/api/internal/bid-board-created", true, true],
@@ -75,6 +76,7 @@ describe("CodeRabbit 4536104336 on #130: a stored target_url the v2 URL rule ref
       ["HTTPS://CRM.EXAMPLE.COM/API/INTERNAL/BID-BOARD-CREATED", true, true],
       ["https://user:pw@crm.example.com/api/internal/bid-board-created", true, false],
       ["  https://crm.example.com/api/internal/bid-board-created  ", true, false],
+      ["https://[::1]:3001/api/internal/bid-board-created", true, false],
       ["http://localhost/api/internal/bid-board-created", true, true],
       ["http://localhost:3001/api/internal/bid-board-created", true, true],
       ["HTTP://LOCALHOST:3001/api/internal/bid-board-created", true, true],
