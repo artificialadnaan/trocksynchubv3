@@ -115,10 +115,12 @@ export function clearCrmSigningRefusal(signer: string): void {
 export async function alertCrmSigningRefused(signer: string, refusal: CrmSignRefusal): Promise<void> {
   const key = `${signer}:${refusal.reason}`;
   if (alerted.has(key)) return;
-  alerted.add(key);
   try {
     const { raiseRfpCoreAlert } = await import("./sync/rfp-core-alert");
-    await raiseRfpCoreAlert("crm_signing_refused", { signer, reason: refusal.reason, detail: refusal.detail, action: "nothing was sent" });
+    const delivered = await raiseRfpCoreAlert("crm_signing_refused", { signer, reason: refusal.reason, detail: refusal.detail, action: "nothing was sent" });
+    // CodeRabbit 4536104331 on #130: the key is kept only after a CONFIRMED delivery, so a failed first alert never silences
+    // every later refusal for this signer + reason (the next refusal raises again).
+    if (delivered !== false) alerted.add(key);
   } catch (err) {
     console.warn(`[crm-signing] alert for ${signer} ${refusal.reason} could not be raised: ${(err as Error)?.message ?? err}`);
   }

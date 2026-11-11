@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import {
@@ -38,6 +38,19 @@ let callbackWorkerRunning = false;
 
 /** The alert / refusal namespace of this signer (server/crm-signing-v2.ts): bid-board-created + rfp-declined. */
 const CALLBACK_SIGNER = "bidboard_callbacks";
+/** CodeRabbit 4536104336 on #130: its own refusal key, so the per-tick clear of CALLBACK_SIGNER never re-arms it each tick. */
+const STORED_URL_SIGNER = "bidboard_callbacks_stored_url";
+/**
+ * CodeRabbit 4536104336 on #130: the v2 URL rule as a claim predicate, a FAIL-CLOSED mirror of crmUrlAllowed (lower-cased: https
+ * to a plain host[:port], or http to localhost / 127.0.0.1[:port]). Bound as PARAMETERS, never written inside the sql template
+ * (a cooked template string would drop backslash escapes). Stricter than the TS rule where noted in its parity test; a row it
+ * admits but crmUrlAllowed refuses is released unchanged after the claim, and rows it excludes are counted with ONE alert.
+ */
+const CALLBACK_URL_HTTPS_PATTERN = "^https://[a-z0-9][a-z0-9.-]*(:[0-9]{1,5})?(/|$)";
+const CALLBACK_URL_LOCAL_HTTP_PATTERN = "^http://(localhost|127[.]0[.]0[.]1)(:[0-9]{1,5})?(/|$)";
+export function callbackUrlAdmittedSql(column: SQL): SQL {
+  return sql`(coalesce(lower(${column}) ~ ${CALLBACK_URL_HTTPS_PATTERN}, false) OR coalesce(lower(${column}) ~ ${CALLBACK_URL_LOCAL_HTTP_PATTERN}, false))`;
+}
 
 async function getDb() {
   return (await import("../db")).db;
@@ -55,23 +68,58 @@ export function buildRfpDeclinedCallbackTargetUrl(baseUrl = process.env.TROCK_CR
 
 export async function claimPendingBidBoardCallbacks(limit = 5): Promise<any[]> {
   const db = await getDb();
+  // CodeRabbit 4536104336 on #130: only rows whose STORED target_url the URL predicate admits are claimed; each claimed row
+  // carries its pre-claim values (prev_*) so a row the TS rule still refuses can be released byte for byte.
   const result = await db.execute(sql`
+    WITH picked AS (
+      SELECT id, attempt_count AS prev_attempt_count, last_attempt_at AS prev_last_attempt_at, next_attempt_at AS prev_next_attempt_at
+        FROM bidboard_callback_outbox
+       WHERE status = 'pending'
+         AND next_attempt_at <= NOW()
+         AND ${callbackUrlAdmittedSql(sql`target_url`)}
+       ORDER BY created_at ASC
+       LIMIT ${limit}
+       FOR UPDATE SKIP LOCKED
+    )
     UPDATE bidboard_callback_outbox
        SET last_attempt_at = NOW(),
            attempt_count = attempt_count + 1,
            next_attempt_at = NOW() + interval '5 minutes'
-     WHERE id IN (
-       SELECT id
-         FROM bidboard_callback_outbox
-        WHERE status = 'pending'
-          AND next_attempt_at <= NOW()
-        ORDER BY created_at ASC
-        LIMIT ${limit}
-        FOR UPDATE SKIP LOCKED
-     )
-     RETURNING *
+      FROM picked
+     WHERE bidboard_callback_outbox.id = picked.id
+     RETURNING bidboard_callback_outbox.*, picked.prev_attempt_count,
+               picked.prev_last_attempt_at::text AS prev_last_attempt_at, picked.prev_next_attempt_at::text AS prev_next_attempt_at
   `);
   return Array.isArray(result) ? result : ((result as any).rows ?? []);
+}
+
+/**
+ * CodeRabbit 4536104336 on #130: undo a claim byte for byte (status untouched; attempts and both timestamps as before). The
+ * timestamps travel as text and are cast back (both columns are `timestamp`), so no microseconds are lost in a JS Date.
+ */
+async function releaseClaimedCallback(row: any): Promise<void> {
+  const db = await getDb();
+  await db.execute(sql`
+    UPDATE bidboard_callback_outbox
+       SET attempt_count = ${row.prev_attempt_count},
+           last_attempt_at = ${row.prev_last_attempt_at}::timestamp,
+           next_attempt_at = ${row.prev_next_attempt_at}::timestamp
+     WHERE id = ${row.id}
+  `);
+}
+
+/** CodeRabbit 4536104336 on #130: due pending rows the claim predicate EXCLUDED (their stored target_url is refused). */
+async function countDueRefusedUrlCallbacks(): Promise<number> {
+  const db = await getDb();
+  const result = await db.execute(sql`
+    SELECT count(*)::int AS n
+      FROM bidboard_callback_outbox
+     WHERE status = 'pending'
+       AND next_attempt_at <= NOW()
+       AND NOT ${callbackUrlAdmittedSql(sql`target_url`)}
+  `);
+  const rows = Array.isArray(result) ? result : ((result as any).rows ?? []);
+  return Number(rows[0]?.n) || 0;
 }
 
 async function markCallbackSent(id: number): Promise<void> {
@@ -187,7 +235,15 @@ export async function processBidBoardCallbackOutbox(
     }
     clearCrmSigningRefusal(CALLBACK_SIGNER);
     const rows = await claimPendingBidBoardCallbacks(options.limit ?? 5);
+    let released = 0;
     for (const row of rows) {
+      // CodeRabbit 4536104336 on #130: the claim predicate admitted it, but the authoritative TS rule refuses it: release the
+      // claim unchanged (never failed, never sent) and count it into the ONE alert below.
+      if (!crmUrlAllowed(row.target_url)) {
+        await releaseClaimedCallback(row);
+        released += 1;
+        continue;
+      }
       try {
         await sendBidBoardCallbackRow(row, { fetchImpl: options.fetchImpl, secret, now: options.now });
         await markCallbackSent(row.id);
@@ -197,7 +253,18 @@ export async function processBidBoardCallbackOutbox(
         await markCallbackFailed(row, error?.message || String(error));
       }
     }
-    return { processed: rows.length, sent, failed };
+    // CodeRabbit 4536104336 on #130: never silent. Rows left unclaimed for their stored URL (excluded or released) raise ONE
+    // alert per signer + reason (kept only after a confirmed delivery); none left ⇒ the next recurrence alerts again.
+    const refusedStored = released + (await countDueRefusedUrlCallbacks());
+    if (refusedStored > 0) {
+      await alertCrmSigningRefused(STORED_URL_SIGNER, {
+        reason: "url_refused",
+        detail: `${refusedStored} due callback row(s) carry a stored target_url that is not https (http only for localhost / 127.0.0.1); left unclaimed and unchanged`,
+      });
+    } else {
+      clearCrmSigningRefusal(STORED_URL_SIGNER);
+    }
+    return { processed: rows.length - released, sent, failed };
   } finally {
     callbackWorkerRunning = false;
   }
