@@ -405,6 +405,43 @@ describe.skipIf(!BASE_URL)("P2 the Procore worker re-checks the Core footprint a
     expect(perform).not.toHaveBeenCalled();
     expect(await cmdStatus(OLD_KEY)).toBe("held_cross_destination");
   });
+  it("a failing post-claim Core-footprint check raises ONE core_footprint_check_failed alert naming the command, the failure count and the error (CodeRabbit 4534600249)", async () => {
+    const id = await insertCommand(OLD_KEY, "pending");
+    await insertCore(VOTE_KEY, "pending");
+    const perform = vi.fn(async () => "created" as const);
+    callbackUrl.value = null;
+    try {
+      await processBidboardCreateOutbox({ performImpl: perform as any }).catch(() => undefined);
+    } finally {
+      callbackUrl.value = CALLBACK_URL;
+    }
+    const calls = alertMock.mock.calls.filter((c) => c[0] === "core_footprint_check_failed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toMatchObject({ commandId: id, failures: 1, error: expect.stringContaining("TROCK_CRM_BASE_URL") });
+    expect(perform).not.toHaveBeenCalled();
+  });
+  it("3 consecutive failing checks (N = 3) ⇒ the row moves to needs_manual with a core_footprint_check_needs_manual alert, instead of resetting the attempt budget forever (CodeRabbit 4534600249)", async () => {
+    const id = await insertCommand(OLD_KEY, "pending");
+    await insertCore(VOTE_KEY, "pending");
+    const perform = vi.fn(async () => "created" as const);
+    callbackUrl.value = null;
+    try {
+      for (let round = 1; round <= 3; round++) {
+        await processBidboardCreateOutbox({ performImpl: perform as any }).catch(() => undefined);
+        await sql(`UPDATE bidboard_create_outbox SET last_attempt_at = now() - interval '11 minutes' WHERE id = $1`, [id]);
+      }
+    } finally {
+      callbackUrl.value = CALLBACK_URL;
+    }
+    expect(await cmdStatus(OLD_KEY)).toBe("needs_manual");
+    const escalated = alertMock.mock.calls.filter((c) => c[0] === "core_footprint_check_needs_manual");
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0][1]).toMatchObject({ commandId: id, failures: 3 });
+    expect(alertMock.mock.calls.filter((c) => c[0] === "core_footprint_check_failed")).toHaveLength(3);
+    await processBidboardCreateOutbox({ performImpl: perform as any });
+    expect(perform).not.toHaveBeenCalled();
+    expect(await cmdStatus(OLD_KEY)).toBe("needs_manual");
+  });
   it("no Core footprint ⇒ today's create runs once and the row is done", async () => {
     await insertCommand(OLD_KEY, "pending");
     const perform = vi.fn(async () => "created" as const);
