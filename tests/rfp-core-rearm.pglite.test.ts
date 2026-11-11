@@ -140,6 +140,8 @@ const makeDue = () => pg.exec(`
   UPDATE rfp_core_followup_outbox SET next_attempt_at = NOW() - interval '1 second' WHERE status = 'pending';
 `);
 
+process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
+
 describe("core create not yet sent: refused / dead ⇒ re-armed, and the sender sends the corrected payload", () => {
   it("a Core 409 the rep fixed: the re-post re-arms refused ⇒ pending (+ alert), and the next E2 carries the CORRECTED deal", async () => {
     await enqueueBidboardCreateCommand(e1());

@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import {
   alertCrmSigningRefused,
   clearCrmSigningRefusal,

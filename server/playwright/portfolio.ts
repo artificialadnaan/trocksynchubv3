@@ -49,7 +49,7 @@ import { ensureLoggedIn } from "./auth";
 import { PROCORE_SELECTORS, getPortfolioProjectUrl } from "./selectors";
 import { randomDelay, takeScreenshot, withRetry } from "./browser";
 import { navigateToProject } from "./bidboard";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import { storage } from "../storage";
 import { getProjectTeamMembers, fetchProcoreProjectDetail } from "../procore";
 import { sendKickoffEmails } from "../email-notifications";

@@ -6,6 +6,8 @@ const logMock = vi.hoisted(() => vi.fn());
 vi.mock("../server/index.ts", () => ({
   log: logMock,
 }));
+// A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
+vi.mock("../server/log.ts", () => ({ log: logMock }));
 // SIGNING-HARDENING r1: a refused send raises ONE visible alert (server/crm-signing-v2.ts → rfp-core-alert).
 const signingAlertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
 vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: signingAlertMock }));
@@ -270,5 +272,17 @@ describe("Bid Board CRM ingestion push", () => {
       "[BidBoardCRM] CRM_BID_BOARD_SYNC_URL or BID_BOARD_SYNC_SECRET missing; skipping CRM ingestion push",
       "sync"
     );
+  });
+});
+
+describe("harness: the log spy sees log() from both server/log and server/index (positive control for this file's log assertions)", () => {
+  it("a line logged through either module reaches the spy", async () => {
+    const viaLog = await import("../server/log.ts");
+    const viaIndex = await import("../server/index.ts");
+    viaLog.log("a3-harness-control-log", "test");
+    viaIndex.log("a3-harness-control-index", "test");
+    const seen = logMock.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(seen).toContain("a3-harness-control-log");
+    expect(seen).toContain("a3-harness-control-index");
   });
 });

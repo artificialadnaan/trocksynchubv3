@@ -232,6 +232,21 @@ describe("E3 classifier (§5 / §10)", () => {
     expect(wire.classifyCoreCreateResponse(409, { error: "rfp_bid_create_conflict", reason: "live_project" })).toEqual({ kind: "refused", status: 409, reason: "live_project" });
     expect(wire.classifyCoreCreateResponse(409, {})).toEqual({ kind: "refused", status: 409, reason: "unknown" });
   });
+  it.each([
+    ["property_matches_other_company", "property_matches_other_company"],
+    ["property_address_match_name_differs", "property_address_match_name_differs"],
+    ["a reason SyncHub does not know", "a_reason_core_added_later"],
+  ])("CONTRACT v2.4 c5: 409 reason %s ⇒ refused with that reason verbatim", (_label, reason) => {
+    expect(wire.classifyCoreCreateResponse(409, { error: "rfp_bid_create_conflict", reason })).toEqual({ kind: "refused", status: 409, reason });
+  });
+  it.each([
+    ["absent", {}],
+    ["a known blank", { reason: "" }],
+    ["whitespace only", { reason: "   " }],
+    ["not a string", { reason: 42 }],
+  ])("CONTRACT v2.4 c5: 409 reason %s ⇒ refused \"unknown\"", (_label, body) => {
+    expect(wire.classifyCoreCreateResponse(409, { error: "rfp_bid_create_conflict", ...body })).toEqual({ kind: "refused", status: 409, reason: "unknown" });
+  });
   it("400 / 401 ⇒ terminal (and every other deterministic 4xx: 403 / 413 / 415 / 422)", () => {
     expect(wire.classifyCoreCreateResponse(400, { error: "bad_request", reason: "invalid_payload", field: "deal.amount" })).toMatchObject({ kind: "terminal", status: 400 });
     expect((wire.classifyCoreCreateResponse(400, { error: "bad_request", reason: "source_event_reused" }) as any).error).toContain("source_event_reused");

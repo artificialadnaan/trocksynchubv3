@@ -128,6 +128,8 @@ async function until(cond: () => Promise<boolean>, ms = 5000) {
   return false;
 }
 
+process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
+
 describe.skipIf(!BASE_URL)("the re-drive --apply under the per-deal lock (real PG, separate sessions)", () => {
   it("two applies racing on one deal ⇒ ONE row and ONE audit row; the other is refused by (b), never a unique-violation error", async () => {
     await seedProcoreDone();

@@ -40,11 +40,11 @@ export async function findStuckApprovingRequests(db: Querier, _now: Date): Promi
   const { rows } = await db.query(
     `SELECT r.id, r.source_system, r.source_deal_id, r.project_number,
             CASE WHEN a.request_id IS NULL THEN NULL
-                 ELSE floor(extract(epoch FROM (localtimestamp - a.started_at)) / 60)::int END AS age_minutes
+                 ELSE floor(extract(epoch FROM ((now() AT TIME ZONE 'UTC') - a.started_at)) / 60)::int END AS age_minutes
        FROM rfp_approval_requests r
        LEFT JOIN rfp_approval_approving a ON a.request_id = r.id
       WHERE r.status = 'approving'
-        AND (a.request_id IS NULL OR a.started_at < localtimestamp - make_interval(mins => $1))
+        AND (a.request_id IS NULL OR a.started_at < (now() AT TIME ZONE 'UTC') - make_interval(mins => $1))
       ORDER BY r.id`,
     [RFP_APPROVING_STUCK_AFTER_MINUTES],
   );

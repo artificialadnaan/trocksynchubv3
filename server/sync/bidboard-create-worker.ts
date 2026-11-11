@@ -11,6 +11,7 @@ import {
   RFP_HELD_CROSS_DESTINATION_STATUS,
   RFP_HELD_DESTINATION_CHANGED_STATUS,
   RFP_ROUTED_CORE_STATUS,
+  rfpCoreOfficesSetting,
   rfpNonserviceDestinationSetting,
   routeRfpCreate,
   type RfpDestination,
@@ -260,6 +261,7 @@ function routeInputOf(input: CreateFromRfpInput, approvalKind: string | null): R
     sourceSystem: input.sourceSystem,
     decision: (input as any).decision ?? null,
     approvalKind,
+    office: (input as any).office ?? null,
     deal: { projectNumber: input.deal?.projectNumber ?? null, projectType: input.deal?.projectType ?? null },
   };
 }
@@ -289,6 +291,7 @@ export async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: 
        AND source_deal_id = ${input.sourceDealId}
        AND rfp_approval_request_id IS NULL
        AND status = 'pending'
+       AND payload->>'status' = 'failed'
        AND payload->>'createdAt' IS NOT NULL
        AND (payload->>'createdAt')::timestamptz <= ${payload.createdAt}::timestamptz
   `);
@@ -321,8 +324,9 @@ export async function holdCrossDestination(
 export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
   const db = await getDb();
   const setting = rfpNonserviceDestinationSetting();
+  const coreOffices = rfpCoreOfficesSetting();
   const kind = approvalKindOf(input);
-  const route = routeRfpCreate(routeInputOf(input, kind), setting);
+  const route = routeRfpCreate(routeInputOf(input, kind), setting, coreOffices);
   const ids = { sourceSystem: input.sourceSystem, sourceDealId: input.sourceDealId, sourceEventId: input.sourceEventId };
   // ROUTE core: the strict probe. An errored query is NOT "missing" (d9 hardening): alert with the real error and rethrow (the
   // route answers 500, the CRM retries). ROUTE procore keeps the lenient probe, so today's enqueue is unchanged.
@@ -355,7 +359,7 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
       await stampFirstArrival(tx, input, route, setting ?? null, kind, alerts);
       return;
     }
-    await handleReattempt(tx, input, existing, setting, kind, alerts);
+    await handleReattempt(tx, input, existing, setting, coreOffices, kind, alerts);
   });
   for (const [code, detail] of alerts) await raiseRfpCoreAlert(code, { ...ids, ...detail });
 }
@@ -409,7 +413,7 @@ async function stampFirstArrival(
 }
 
 async function handleReattempt(
-  tx: any, input: CreateFromRfpInput, existing: any, setting: string | undefined, kind: string | null,
+  tx: any, input: CreateFromRfpInput, existing: any, setting: string | undefined, coreOffices: ReadonlySet<string>, kind: string | null,
   alerts: AlertList,
 ): Promise<void> {
   const stored: string | null = existing.approval_kind ?? null;
@@ -437,7 +441,7 @@ async function handleReattempt(
   if (!stored && kind) {
     await tx.execute(sql`UPDATE bidboard_create_outbox SET approval_kind = ${kind} WHERE id = ${existing.id} AND approval_kind IS NULL`);
   }
-  const routeNow = routeRfpCreate(routeInputOf(input, effectiveKind), setting);
+  const routeNow = routeRfpCreate(routeInputOf(input, effectiveKind), setting, coreOffices);
   if (PROCORE_IN_FLIGHT.has(existing.status)) return; // §11: continues on its stamp
   if (existing.status === RFP_HELD_DESTINATION_CHANGED_STATUS) return; // already held: a person resolves it
   if (existing.status === RFP_HELD_CROSS_DESTINATION_STATUS) return; // held across destinations: a person resolves it
@@ -1538,7 +1542,29 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
       // RFP Phase 2 (CONTRACT v2.2 §10, path P2): the claim made this command's footprint visible ('processing'). Under the
       // per-deal lock, a Core footprint for the deal HOLDS it before Playwright: a PENDING procore row is not a Procore
       // footprint, so a core vote may have been routed after this row was queued (d9 iv).
-      if (await holdClaimedOnCoreFootprint(row)) {
+      let heldOnCore = false;
+      try {
+        heldOnCore = await holdClaimedOnCoreFootprint(row);
+      } catch (holdErr: any) {
+        // CodeRabbit 4529556641: the claim made this row 'processing' and spent an attempt. A failed check (an errored probe,
+        // the transaction, or an F1 that can't be queued) must not strand it there. Nothing was created, so reset the attempt
+        // budget and leave it for the stale reclaim to re-check, as the other recoverable paths below do; if even that can't
+        // land, surface it 'needs_manual'.
+        const message = holdErr?.message || String(holdErr);
+        log(`[bidboard-create] Command ${row.id} core-footprint check failed before the create (${message}); leaving 'processing' for reclaim`, "sync");
+        const reset = await resetCreateCommandForReclaim(row.id, `core-footprint check failed before the create; pending reclaim: ${message}`);
+        if (!reset) {
+          let surfaced = false;
+          for (let attempt = 1; attempt <= 3 && !surfaced; attempt++) {
+            try { await markNeedsManual(row.id, `core-footprint check failed and the reclaim reset could not land; needs manual resolution: ${message}`); surfaced = true; }
+            catch { /* retry a transient blip */ }
+          }
+          if (!surfaced) log(`[bidboard-create] CRITICAL: Command ${row.id} core-footprint check failed and it could NOT be reset for reclaim or surfaced needs_manual; manual check needed for deal ${input.sourceDealId}`, "sync");
+        }
+        processed += 1;
+        continue;
+      }
+      if (heldOnCore) {
         processed += 1;
         continue;
       }

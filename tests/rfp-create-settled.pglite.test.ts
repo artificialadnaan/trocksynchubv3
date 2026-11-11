@@ -49,6 +49,7 @@ beforeEach(async () => {
   await pg.exec(`DELETE FROM rfp_core_followup_outbox; DELETE FROM rfp_core_create_outbox; DELETE FROM bidboard_create_outbox; DELETE FROM bidboard_callback_outbox;`);
   alertMock.mockReset();
   delete process.env.RFP_NONSERVICE_DESTINATION;
+  process.env.RFP_CORE_OFFICES = "dallas"; // c6 rule (f): the E1 office (dallas) is listed
 });
 
 const DEAL = "00000000-0000-4000-8000-0000000000d2";

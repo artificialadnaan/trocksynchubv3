@@ -51,6 +51,14 @@ describe("processDealStageChange (HubSpot stage trigger)", () => {
     expect(createMock).toHaveBeenCalledTimes(1);
     expect(lockMock.mock.invocationCallOrder[0]).toBeLessThan(createMock.mock.invocationCallOrder[0]);
   });
+  it("a Core-footprint check that ERRORS ⇒ no Playwright create, not triggered (core_footprint_check_failed), a visible core_preflight_error alert naming the deal and stage; never a silent rejection (CodeRabbit 4534112615)", async () => {
+    coreFootprintMock.mockRejectedValue(new Error("synthetic footprint DB failure"));
+    const res = await processDealStageChange(DEAL, "rfp").catch((e: any) => ({ threw: String(e?.message ?? e) }));
+    expect(res).toEqual({ triggered: false, reason: "core_footprint_check_failed" });
+    expect(createMock).not.toHaveBeenCalled();
+    const call = alertMock.mock.calls.find((c) => c[0] === "core_preflight_error");
+    expect(call?.[1]).toMatchObject({ sourceSystem: "hubspot", sourceDealId: DEAL, stage: "rfp", error: expect.stringContaining("synthetic footprint DB failure") });
+  });
   it("a Core footprint for the deal ⇒ no Playwright create, not triggered (cross_destination_hold), alert", async () => {
     coreFootprintMock.mockResolvedValue(["core:sent"]);
     const out = await processDealStageChange(DEAL, "rfp");

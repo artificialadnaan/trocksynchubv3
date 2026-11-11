@@ -14,6 +14,7 @@
  */
 import { sql } from "drizzle-orm";
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
+import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import { lockRfpCreateDeal, readCoreFootprint, readDealCreateCommands, readProcoreFootprint } from "./rfp-create-lock";
 import { preflightRfpCoreTablesOrThrow } from "./rfp-core-preflight";
 import { RFP_HELD_CROSS_DESTINATION_STATUS } from "./rfp-destination";
@@ -93,9 +94,10 @@ export async function claimRfpRequestForCreate(input: RfpCreateClaimInput, db?: 
     const hubspotDone = rec?.hubspotDoneAt != null;
     await tx.execute(sql`
       INSERT INTO rfp_approval_approving (request_id, started_at, submit_at, approved_by, edited_fields, approved_attachments, force, hubspot_done_at)
-      VALUES (${input.requestId}, now(), NULL, ${approvedBy}, ${editedFields}::jsonb, ${approvedAttachments}::jsonb, ${force}, CASE WHEN ${hubspotDone}::boolean THEN now() END)
+      VALUES (${input.requestId}, now() AT TIME ZONE 'UTC', NULL, ${approvedBy}, ${editedFields}::jsonb, ${approvedAttachments}::jsonb, ${force},
+              CASE WHEN ${hubspotDone}::boolean THEN now() AT TIME ZONE 'UTC' END)
       ON CONFLICT (request_id) DO UPDATE
-        SET started_at = now(), submit_at = NULL, approved_by = EXCLUDED.approved_by, edited_fields = EXCLUDED.edited_fields,
+        SET started_at = now() AT TIME ZONE 'UTC', submit_at = NULL, approved_by = EXCLUDED.approved_by, edited_fields = EXCLUDED.edited_fields,
             approved_attachments = EXCLUDED.approved_attachments, force = EXCLUDED.force, hubspot_done_at = EXCLUDED.hubspot_done_at
     `);
     return { outcome: "claimed" };
@@ -105,7 +107,7 @@ export async function claimRfpRequestForCreate(input: RfpCreateClaimInput, db?: 
 /** Commits submit_at (its own statement) before createBidBoardProject starts. Called only after a "claimed" outcome. */
 export async function markRfpApprovingSubmitted(requestId: number, db?: Executor): Promise<void> {
   const exec = db ?? (await defaultDb());
-  await exec.execute(sql`UPDATE rfp_approval_approving SET submit_at = now() WHERE request_id = ${requestId}`);
+  await exec.execute(sql`UPDATE rfp_approval_approving SET submit_at = now() AT TIME ZONE 'UTC' WHERE request_id = ${requestId}`);
 }
 
 /**
@@ -150,7 +152,8 @@ export type ApprovingFacts = {
   ageMinutes: number | null;
   /** started_at older than 30 minutes, on the database clock. */
   olderThan30: boolean;
-  /** started_at as epoch ms (the column is the database's UTC wall clock). */
+  /** started_at as epoch ms. The columns are `timestamp` (0027) holding a UTC wall clock: every writer stores now() AT TIME ZONE 'UTC'
+   *  and every reader interprets them AT TIME ZONE 'UTC', so no session time zone shifts them (CodeRabbit 4529556652). */
   startedAtMs: number | null;
   submitAt: string | null;
   recorded: RecordedApprovalInputs | null;
@@ -159,17 +162,31 @@ export type ApprovingFacts = {
   preCreateStepsRecorded: boolean;
 };
 
+/**
+ * The project number the original approval created under, so the resolver's search (i) and the found-finalise's sync mapping
+ * and CRM `created` callback all name the SAME number (Codex P2 on #127). Base: the recorded edited number, else the request's,
+ * else the deal's. processRfpApproval renumbers when the approver changed the type, so a recorded type edit renumbers it here too.
+ */
+export function effectiveApprovingProjectNumber(facts: Pick<ApprovingFacts, "projectNumber" | "dealData" | "recorded">): string | null {
+  const str = (v: unknown) => (v === undefined || v === null || String(v).trim() === "" ? null : String(v).trim());
+  const edited = (facts.recorded?.editedFields ?? {}) as Record<string, unknown>;
+  const base = str(edited.project_number) ?? str(facts.projectNumber) ?? str(facts.dealData.project_number);
+  const editedType = str(edited.project_types);
+  const currentType = base ? (parseProjectTypeFromNumber(base) ?? str(facts.dealData.project_types)) : null;
+  return base && editedType && editedType !== currentType ? replaceProjectTypeInNumber(base, editedType) : base;
+}
+
 export async function readApprovingFacts(requestId: number, db?: Executor): Promise<ApprovingFacts | null> {
   const exec = db ?? (await defaultDb());
   const r = firstRow(await exec.execute(sql`
     SELECT r.id, r.token, r.status, r.source_system, r.source_deal_id, r.project_number, r.deal_data,
            a.request_id IS NOT NULL AS has_side,
-           floor(extract(epoch FROM (localtimestamp - a.started_at)) / 60)::int AS age_minutes,
-           COALESCE(a.started_at < localtimestamp - interval '30 minutes', false) AS older_than_30,
-           (extract(epoch FROM a.started_at) * 1000)::bigint AS started_ms,
+           floor(extract(epoch FROM ((now() AT TIME ZONE 'UTC') - a.started_at)) / 60)::int AS age_minutes,
+           COALESCE(a.started_at < (now() AT TIME ZONE 'UTC') - interval '30 minutes', false) AS older_than_30,
+           (extract(epoch FROM a.started_at AT TIME ZONE 'UTC') * 1000)::bigint AS started_ms,
            to_char(a.submit_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS submit_at,
            a.approved_by, a.edited_fields, a.approved_attachments, a.force,
-           a.hubspot_done_at IS NOT NULL AS hubspot_done, (extract(epoch FROM a.hubspot_done_at) * 1000)::bigint AS hubspot_done_ms
+           a.hubspot_done_at IS NOT NULL AS hubspot_done, (extract(epoch FROM a.hubspot_done_at AT TIME ZONE 'UTC') * 1000)::bigint AS hubspot_done_ms
       FROM rfp_approval_requests r
       LEFT JOIN rfp_approval_approving a ON a.request_id = r.id
      WHERE r.id = ${requestId}
@@ -267,7 +284,7 @@ export async function reclaimApprovingForRecreate(
     }
     const other = await readApprovingResolveFootprint(tx, input.sourceSystem, input.sourceDealId);
     if (other.length > 0) return { outcome: "refused", error: `Recreate refused: a footprint exists for the deal (${other.join(", ")})` };
-    await tx.execute(sql`UPDATE rfp_approval_approving SET started_at = now() WHERE request_id = ${input.requestId}`);
+    await tx.execute(sql`UPDATE rfp_approval_approving SET started_at = now() AT TIME ZONE 'UTC' WHERE request_id = ${input.requestId}`);
     return { outcome: "claimed" };
   });
 }
@@ -299,6 +316,17 @@ export async function finaliseApprovingFoundRecord(
     const mappedRows: any[] = Array.isArray(mapped) ? mapped : (mapped?.rows ?? []);
     if (mappedRows.some((m) => m.source_system !== input.sourceSystem || m.source_deal_id !== input.sourceDealId)) {
       return { success: false, error: `Bid Board project ${input.bidboardProjectId} is already mapped to another deal` };
+    }
+    // CodeRabbit 4534112648: under the deal lock, a deal that already maps to a DIFFERENT Bid Board project (a mapping that
+    // appeared after the dry-run) is refused, never given a second mapping. A mapping to the found project itself is fine.
+    const dealMapped = await tx.execute(sql`
+      SELECT bidboard_project_id FROM sync_mappings
+       WHERE source_system = ${input.sourceSystem} AND source_deal_id = ${input.sourceDealId}
+         AND length(trim(bidboard_project_id)) > 0 AND bidboard_project_id <> ${input.bidboardProjectId}
+    `);
+    const other = (Array.isArray(dealMapped) ? dealMapped : (dealMapped?.rows ?? [])) as Array<{ bidboard_project_id: string }>;
+    if (other.length > 0) {
+      return { success: false, error: `the deal already maps to Bid Board project ${other.map((r) => r.bidboard_project_id).join(", ")}` };
     }
     await tx.execute(sql`
       UPDATE rfp_approval_requests

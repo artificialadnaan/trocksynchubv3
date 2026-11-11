@@ -176,6 +176,8 @@ async function insertCoreRowFor(commandId: number, payload: unknown) {
 }
 const REDRIVE = { operatorRedrive: { reason: "operator_redrive", go: "GO-SYN-0001" } };
 
+process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
+
 describe("§12: drains by data, not by the setting (d9 ruling, r2)", () => {
   it("(a) setting unset or procore and NO rows ⇒ no fetch, no alert; the drain still looks for due rows (no setting gate)", async () => {
     const fetchImpl = coreReturning(201, receipt());
@@ -328,13 +330,23 @@ describe("office, carried end to end (d9 ruling 5, r2)", () => {
     expect((await coreRows())[0].status).toBe("sent");
     expect((await followups()).map((f) => f.payload)).toMatchObject([{ office: "atlanta", projectNumber: "ATL-2-12345-ab" }]);
   });
-  it("an unsupported or missing office ⇒ refused office_not_supported before sending + alert + F1", async () => {
+  it("an unsupported or missing office is never routed to Core (c6 rule (f)): stamped procore, no Core row", async () => {
     const missing = e1();
     delete missing.office;
     const cases: Array<[string, any]> = [["houston", e1({ office: "houston" })], ["missing", missing]];
     for (const [label, input] of cases) {
       await resetAll();
       await enqueueBidboardCreateCommand(input);
+      expect(await coreRows(), label).toEqual([]);
+      expect((await pg.query<any>(`SELECT destination FROM bidboard_create_outbox`)).rows, label).toEqual([{ destination: "procore" }]);
+    }
+  });
+  it("a Core row whose stored office is unsupported or missing (stamped before rule (f)) ⇒ refused office_not_supported before sending + alert + F1", async () => {
+    const stored: Array<[string, string]> = [["houston", `jsonb_set(payload, '{office}', '"houston"')`], ["missing", `payload - 'office'`]];
+    for (const [label, payload] of stored) {
+      await resetAll();
+      await enqueueBidboardCreateCommand(e1());
+      await pg.exec(`UPDATE bidboard_create_outbox SET payload = ${payload}`);
       const fetchImpl = coreReturning(201, receipt());
       await processRfpCoreCreateOutbox({ fetchImpl });
       expect(fetchImpl, label).not.toHaveBeenCalled();
@@ -425,6 +437,24 @@ describe("E3 results (§10 classifier)", () => {
     await processRfpCoreCreateOutbox({ fetchImpl });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
+  it.each([["property_matches_other_company"], ["property_address_match_name_differs"]])(
+    "CONTRACT v2.4 c5: 409 %s ⇒ refused + F1 to bid-board-created with the reason verbatim + an alert; never N1, never retried",
+    async (reason) => {
+      await enqueueBidboardCreateCommand(e1());
+      const fetchImpl = coreReturning(409, { error: "rfp_bid_create_conflict", reason });
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect((await coreRows())[0]).toMatchObject({ status: "refused", refusal_reason: reason, last_status_code: 409 });
+      expect(await f1Errors()).toEqual([reason]);
+      const f1 = (await pg.query<any>(`SELECT target_url FROM bidboard_callback_outbox`)).rows;
+      expect(f1).toHaveLength(1);
+      expect(f1[0].target_url.endsWith("/api/internal/bid-board-created")).toBe(true);
+      expect(alertCodes()).toContain("core_create_refused");
+      expect(await followups()).toEqual([]);
+      await makeDue();
+      await processRfpCoreCreateOutbox({ fetchImpl });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
   it("400 and 401 ⇒ terminal (failed) + alert, no F1, not retried", async () => {
     for (const [status, body] of [[400, { error: "bad_request", reason: "invalid_payload", field: "deal.amount" }], [401, { error: "unauthorized" }]] as const) {
       await resetAll();

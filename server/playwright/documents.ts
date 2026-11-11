@@ -50,7 +50,7 @@ import { randomDelay, takeScreenshot } from "./browser";
 import { navigateToProject } from "./bidboard";
 import { waitForAttachModalToClose } from "./attach-verify";
 import { navigateToPortfolioProject } from "./portfolio";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import { storage } from "../storage";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import fs from "fs/promises";

@@ -496,6 +496,31 @@ describe.skipIf(!BASE_URL)("--apply", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it("found after a recorded TYPE edit: the mapping and the created callback carry the renumbered number the search used (Codex P2 on #127)", async () => {
+    // The approver changed the type 2 -> 3, so processRfpApproval created the project as DFW-3-…; the searches look for that number.
+    const renumbered = "DFW-3-80001-ab";
+    const { id } = await seed({ recorded: { edited_fields: { dealname: NAME, project_types: "3" } } });
+    const procore = procoreStub({ [renumbered]: [{ id: 900222, project_number: renumbered, name: NAME, created_at: await inWindow(id) }] });
+    const res = await applyResolveApproving({ id, apply: true, resolution: "found", project: "900222" }, deps(procore).d as any);
+    expect(res.applied).toBe(true);
+    expect(terms(procore.calls)[0]).toBe(renumbered);
+    const mapping = (await sql(`SELECT bidboard_project_id, procore_project_number FROM sync_mappings`)).rows;
+    expect(mapping).toEqual([{ bidboard_project_id: "900222", procore_project_number: renumbered }]);
+    const callbacks = (await sql(`SELECT payload FROM bidboard_callback_outbox`)).rows;
+    expect(callbacks).toEqual([{ payload: expect.objectContaining({ status: "created", bidboardProjectId: "900222", projectNumber: renumbered }) }]);
+  });
+
+  it("found-finalise when the deal already maps to a DIFFERENT Bid Board project (a mapping that appeared after the dry-run) ⇒ refused under the finalise lock: no second mapping, the request stays approving (CodeRabbit 4534112648)", async () => {
+    const { id } = await seed();
+    await sql(`INSERT INTO sync_mappings (source_system, source_deal_id, bidboard_project_id) VALUES ('trock_crm', $1, '900111')`, [DEAL]);
+    const res = await finaliseApprovingFound(id, "900222");
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("900111");
+    const after = await writable();
+    expect(after.mappings).toEqual([{ source_deal_id: DEAL, bidboard_project_id: "900111" }]);
+    expect(after.requests).toEqual([{ id, status: "approving", bidboard_project_id: null, approved_by: null }]);
+  });
+
   it("found with a --project that is NOT the one the checks found ⇒ refused, nothing written", async () => {
     const { id } = await seed();
     const procore = procoreStub({ [NUMBER]: [{ id: 900222, project_number: NUMBER, name: NAME, created_at: await inWindow(id) }] });
@@ -538,6 +563,29 @@ describe.skipIf(!BASE_URL)("--apply", () => {
     const after = await writable();
     expect(after.requests).toEqual([{ id, status: "approved", bidboard_project_id: "900333", approved_by: APPROVER }]);
     expect(after.audit).toEqual([{ action: "rfp_resolve_approving" }]);
+  });
+
+  it.each([
+    ["fails", () => createMock.mockResolvedValueOnce({ success: false, error: "Synthetic BidBoard failure" })],
+    ["is unconfirmed", () => createMock.mockResolvedValueOnce({ success: false, error: "Could not confirm project creation" })],
+    ["throws", () => createMock.mockRejectedValueOnce(new Error("Synthetic Playwright crash"))],
+  ])("recreate whose create %s ⇒ the request STAYS approving with no project and the error is returned, so it can be resolved again (CodeRabbit 4529556627)", async (_label, arrange) => {
+    const { id } = await seed({ system: "hubspot" });
+    arrange();
+    const res = await recreateApprovingRequest(id);
+    expect(res.success).toBe(false);
+    expect(createMock).toHaveBeenCalledTimes(1);
+    const after = await writable();
+    expect(after.requests).toEqual([{ id, status: "approving", bidboard_project_id: null, approved_by: null }]);
+    expect(after.mappings).toEqual([]);
+  });
+
+  it("storage's request update with an expectedStatus writes nothing when the row moved on (the reset's compare-and-set; CodeRabbit 4534112622)", async () => {
+    const { id } = await seed(); // `approving`: an approval claimed it after a reset read it as `pending`
+    const updated = await (storage as any).updateRfpApprovalRequest(id, { status: "pending", bidboardProjectId: null }, { expectedStatus: "pending" });
+    expect(updated).toBeUndefined();
+    expect((await writable()).requests).toEqual([{ id, status: "approving", bidboard_project_id: null, approved_by: null }]);
+    expect(await (storage as any).updateRfpApprovalRequest(id, { approvedBy: "synthetic@example.test" }, { expectedStatus: "approving" })).toBeDefined();
   });
 
   it("recreate when the checks say C (submit_at set) ⇒ refused: no create, nothing written", async () => {

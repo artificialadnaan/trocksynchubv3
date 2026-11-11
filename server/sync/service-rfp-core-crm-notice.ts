@@ -27,7 +27,7 @@
 import { sql } from "drizzle-orm";
 import { alertCrmSigningRefused, clearCrmSigningRefusal, crmV2Headers } from "../crm-signing-v2";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex P1 on #128)
 import { CORE_REFUSAL_ERROR_PREFIX } from "./core-ingress-client";
 
 export const CRM_NOTIFY_REFUSED_STATUS = "crm_notify_refused" as const;

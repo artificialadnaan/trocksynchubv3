@@ -38,7 +38,8 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 const { enqueueBidboardCreateCommand, processBidboardCreateOutbox } = await import("../server/sync/bidboard-create-worker.ts");
 const { readProcoreFootprint } = await import("../server/sync/rfp-create-lock.ts");
 const { preflightRfpCoreTables } = await import("../server/sync/rfp-core-preflight.ts");
-const { claimRfpRequestForCreate, markRfpApprovingSubmitted } = await import("../server/sync/rfp-approving.ts");
+const { claimRfpRequestForCreate, markRfpApprovingSubmitted, readApprovingFacts } = await import("../server/sync/rfp-approving.ts");
+const { findStuckApprovingRequests } = await import("../server/sync/rfp-approving-stuck.ts");
 
 const migration = (file: string) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
 const BASE_DDL = `
@@ -118,6 +119,7 @@ beforeEach(async () => {
                       sync_mappings, rfp_approval_approving, rfp_approval_requests RESTART IDENTITY CASCADE`);
   alertMock.mockReset();
   delete process.env.RFP_NONSERVICE_DESTINATION;
+  process.env.RFP_CORE_OFFICES = "dallas"; // c6 rule (f): the E1 office (dallas) is listed
 });
 
 const DEAL = "00000000-0000-4000-8000-0000000000f1";
@@ -413,5 +415,39 @@ describe.skipIf(!BASE_URL)("races on one deal (real PG, separate sessions)", () 
     expect(await coreStatus(VOTE_KEY)).toBe("held_cross_destination");
     expect(await claim(id, true)).toEqual({ outcome: "claimed" });
     expect(await requestStatus(id)).toBe("override_approving");
+  });
+});
+
+describe.skipIf(!BASE_URL)("the approving clock is UTC in ANY session time zone (CodeRabbit 4529556652; code-only, 0027 unchanged)", () => {
+  it("a claim + submit in an America/Chicago session read back as the TRUE instants (started / hubspot-done / submit within a minute of now); age 0, not older than 30 minutes; a claim 31 minutes old is stuck", async () => {
+    const chicago = new pg.Pool({ connectionString: dbUrl(DB_NAME), max: 2, options: "-c TimeZone=America/Chicago" });
+    chicago.on("error", () => {});
+    try {
+      expect((await chicago.query("SHOW TimeZone")).rows[0].TimeZone).toBe("America/Chicago"); // positive control: the session is not UTC
+      const db = drizzle(chicago);
+      const recorded = { approvedBy: "approver@example.test", editedFields: {}, approvedAttachments: { override: null }, force: false, hubspotDoneAt: new Date() };
+      const id = await insertRequest("pending");
+      const before = Date.now() - 60_000;
+      expect(await claimRfpRequestForCreate({ requestId: id, sourceSystem: "trock_crm", sourceDealId: DEAL, force: false, holdCallback: HOLD, recorded }, db))
+        .toMatchObject({ outcome: "claimed" });
+      await markRfpApprovingSubmitted(id, db);
+      const after = Date.now() + 60_000;
+      const facts = (await readApprovingFacts(id, db))!;
+      expect(facts.startedAtMs).toBeGreaterThanOrEqual(before);
+      expect(facts.startedAtMs).toBeLessThanOrEqual(after);
+      expect(facts.recorded?.hubspotDoneAt?.getTime()).toBeGreaterThanOrEqual(before);
+      expect(facts.recorded?.hubspotDoneAt?.getTime()).toBeLessThanOrEqual(after);
+      expect(Date.parse(`${facts.submitAt}Z`)).toBeGreaterThanOrEqual(before); // submit_at is shown as a UTC wall clock
+      expect(Date.parse(`${facts.submitAt}Z`)).toBeLessThanOrEqual(after);
+      expect(facts.ageMinutes).toBe(0);
+      expect(facts.olderThan30).toBe(false);
+      expect((await findStuckApprovingRequests(chicago, new Date())).map((r) => r.requestId)).not.toContain(id);
+      await sql(`UPDATE rfp_approval_approving SET started_at = started_at - interval '31 minutes' WHERE request_id = $1`, [id]);
+      const stuck = (await findStuckApprovingRequests(chicago, new Date())).find((r) => r.requestId === id);
+      expect(stuck?.ageMinutes).toBe(31);
+      expect((await readApprovingFacts(id, db))!.olderThan30).toBe(true);
+    } finally {
+      await chicago.end();
+    }
   });
 });
