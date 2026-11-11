@@ -15,7 +15,7 @@
  * lookup must never be the reason the email does not go out.
  */
 
-import crypto from "crypto";
+import { alertCrmSigningRefused, clearCrmSigningRefusal, crmV2Headers } from "./crm-signing-v2";
 
 /**
  * Ids per request. Mirrors the CRM's own cap on POST /api/internal/deals/current-values
@@ -51,6 +51,8 @@ export interface CrmCurrentValueDeps {
   timeoutMs?: number;
   /** Injected in tests so a deliberate failure does not spam the suite output. */
   logger?: (message: string) => void;
+  /** The clock the v2 signature timestamp reads (SIGNING-HARDENING r1). Injected in tests. */
+  now?: () => Date;
 }
 
 /**
@@ -89,7 +91,16 @@ export async function fetchCrmCurrentDealAmounts(
   const requested = unique.slice(0, CRM_CURRENT_VALUES_MAX_DEAL_IDS);
 
   const rawBody = JSON.stringify({ dealIds: requested });
-  const signature = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+  const url = `${baseUrl}/api/internal/deals/current-values`;
+  // SyncHub → CRM v2 signing (server/crm-signing-v2.ts): a secret under 32 bytes or a non-https base (localhost /
+  // 127.0.0.1 excepted) refuses the send, with one alert; the report then shows stored amounts, as when unconfigured.
+  const signed = crmV2Headers({ url, rawBody, secret, signatureHeader: "x-rfp-request-signature", now: deps.now?.() });
+  if (!signed.ok) {
+    logger(`[rfp-reports] CRM current-value lookup refused before sending (${signed.reason}); rendering stored amounts only`);
+    await alertCrmSigningRefused("deals_current_values", signed);
+    return empty;
+  }
+  clearCrmSigningRefusal("deals_current_values");
   const doFetch = deps.fetchImpl ?? fetch;
 
   // One deadline covering the request, the response headers AND the body read. It is cleared in the
@@ -99,11 +110,11 @@ export async function fetchCrmCurrentDealAmounts(
   const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   try {
-    const response = await doFetch(`${baseUrl}/api/internal/deals/current-values`, {
+    const response = await doFetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-rfp-request-signature": signature,
+        ...signed.headers,
       },
       body: rawBody,
       signal: controller.signal,

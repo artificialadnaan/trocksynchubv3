@@ -8,10 +8,20 @@ vi.mock("../server/index.ts", () => ({
 }));
 // A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
 vi.mock("../server/log.ts", () => ({ log: logMock }));
+// SIGNING-HARDENING r1: a refused send raises ONE visible alert (server/crm-signing-v2.ts → rfp-core-alert).
+const signingAlertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
+vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: signingAlertMock }));
+/** ≥ 32 bytes: the SyncHub → CRM signing floor (BID_BOARD_SYNC_SECRET). Synthetic. */
+const BB_SECRET = "synthetic-bid-board-sync-secret-0123456789";
+/** The SyncHub → CRM v2 signature, computed independently of server/crm-signing-v2.ts. */
+function crmSigV2(path: string, ts: number, raw: string, key = BB_SECRET): string {
+  const bodyHash = crypto.createHash("sha256").update(raw).digest("hex");
+  return `sha256=${crypto.createHmac("sha256", key).update(`v2\nPOST\n${path}\n${ts}\n${bodyHash}`).digest("hex")}`;
+}
+const { resetCrmSigningRefusalsForTests } = await import("../server/crm-signing-v2.ts");
 
 const {
   buildBidBoardCrmPayload,
-  signBidBoardCrmPayload,
   computeBidBoardIdempotencyKey,
   deriveBidBoardStatusUrl,
   pushBidBoardRowsToCrm,
@@ -42,7 +52,9 @@ describe("Bid Board CRM ingestion push", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.CRM_BID_BOARD_SYNC_URL = INGEST_URL;
-    process.env.BID_BOARD_SYNC_SECRET = "shared-secret";
+    process.env.BID_BOARD_SYNC_SECRET = BB_SECRET;
+    signingAlertMock.mockReset();
+    resetCrmSigningRefusalsForTests();
   });
 
   it("builds the CRM payload with rows and provenance metadata", () => {
@@ -59,10 +71,39 @@ describe("Bid Board CRM ingestion push", () => {
     });
   });
 
-  it("signs payloads with sha256 HMAC compatible with CRM verification", () => {
-    const body = JSON.stringify({ rows: [] });
-    const signature = signBidBoardCrmPayload(body, "shared-secret");
-    expect(signature).toBe(`sha256=${crypto.createHmac("sha256", "shared-secret").update(body).digest("hex")}`);
+  it("(SIGNING-HARDENING r1) the push and its status probe carry the v2 x-bid-board-sync-signature, each over ITS OWN path", async () => {
+    const fetchImpl = vi.fn(async (url: string) => (url === STATUS_URL ? res(200, { status: "processing" }) : res(502))) as any;
+    await pushBidBoardRowsToCrm({ ...baseInput, fetchImpl, now: () => new Date(1767225600 * 1000) } as any);
+    const push = fetchImpl.mock.calls.find((c: any[]) => c[0] === INGEST_URL);
+    const probe = fetchImpl.mock.calls.find((c: any[]) => c[0] === STATUS_URL);
+    expect(push?.[1].headers["x-signature-version"]).toBe("2");
+    expect(push?.[1].headers["x-signature-timestamp"]).toBe("1767225600");
+    expect(push?.[1].headers["x-bid-board-sync-signature"]).toBe(crmSigV2("/api/bid-board-sync/ingest", 1767225600, push?.[1].body));
+    expect(probe?.[1].headers["x-signature-version"]).toBe("2");
+    expect(probe?.[1].headers["x-bid-board-sync-signature"]).toBe(crmSigV2("/api/bid-board-sync/ingest/status", 1767225600, probe?.[1].body));
+  });
+
+  it("(SIGNING-HARDENING r1) BID_BOARD_SYNC_SECRET under 32 bytes or an http CRM_BID_BOARD_SYNC_URL ⇒ nothing sent, skipped, ONE alert each; localhost / 127.0.0.1 allowed", async () => {
+    const fetchImpl = vi.fn(async () => res(202, { accepted: true, status: "queued" })) as any;
+    for (let i = 0; i < 2; i++) {
+      process.env.BID_BOARD_SYNC_SECRET = "s".repeat(31);
+      process.env.CRM_BID_BOARD_SYNC_URL = INGEST_URL;
+      expect(await pushBidBoardRowsToCrm({ ...baseInput, fetchImpl })).toMatchObject({ ok: false, attempts: 0, skipped: true });
+      process.env.BID_BOARD_SYNC_SECRET = BB_SECRET;
+      process.env.CRM_BID_BOARD_SYNC_URL = "http://crm.example.test/api/bid-board-sync/ingest";
+      expect(await pushBidBoardRowsToCrm({ ...baseInput, fetchImpl })).toMatchObject({ ok: false, attempts: 0, skipped: true });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([
+      ["crm_signing_refused", "bid_board_sync", "secret_short"],
+      ["crm_signing_refused", "bid_board_sync", "url_refused"],
+    ]);
+    for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
+      fetchImpl.mockClear();
+      process.env.CRM_BID_BOARD_SYNC_URL = `${base}/api/bid-board-sync/ingest`;
+      expect(await pushBidBoardRowsToCrm({ ...baseInput, fetchImpl }), base).toMatchObject({ ok: true, accepted: true });
+      expect(fetchImpl.mock.calls[0]?.[1].headers["x-signature-version"], base).toBe("2");
+    }
   });
 
   it("computes the same idempotency key the CRM derives from the raw body", () => {

@@ -24,8 +24,8 @@
 // SETTLING. 2xx: done. A deterministic CRM refusal (400/401/404/409/422): settled, and operators are alerted through
 // the existing push-alert path. Unreachable, 408/429/5xx, or this side unprovisioned: retried with a growing delay, and
 // given up — settled and alerted — once CRM_NOTIFY_HORIZON_MS has passed since Core answered.
-import crypto from "crypto";
 import { sql } from "drizzle-orm";
+import { alertCrmSigningRefused, clearCrmSigningRefusal, crmV2Headers } from "../crm-signing-v2";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex P1 on #128)
 import { CORE_REFUSAL_ERROR_PREFIX } from "./core-ingress-client";
@@ -82,7 +82,7 @@ export type CrmCallbackOutcome =
 /** POST the signed callback. Never throws: a transport failure is a retryable outcome. */
 export async function postCoreHandoffToCrm(
   payload: CoreHandoffCallbackPayload,
-  deps: { fetchImpl?: typeof fetchWithTimeout; secret?: string; targetUrl?: string | null } = {},
+  deps: { fetchImpl?: typeof fetchWithTimeout; secret?: string; targetUrl?: string | null; now?: () => Date } = {},
 ): Promise<CrmCallbackOutcome> {
   const secret = deps.secret ?? process.env.RFP_REQUEST_SYNC_SECRET;
   const targetUrl = deps.targetUrl === undefined ? buildCoreHandoffCallbackTargetUrl() : deps.targetUrl;
@@ -90,6 +90,14 @@ export async function postCoreHandoffToCrm(
     return { kind: "retryable", error: "TROCK_CRM_BASE_URL or RFP_REQUEST_SYNC_SECRET is not configured" };
   }
   const rawBody = JSON.stringify(payload);
+  // SyncHub → CRM v2 signing (server/crm-signing-v2.ts): a secret under 32 bytes or a non-https target (localhost /
+  // 127.0.0.1 excepted) refuses the send, with one alert, and takes the same retryable path as an unconfigured value.
+  const signed = crmV2Headers({ url: targetUrl, rawBody, secret, signatureHeader: "x-rfp-request-signature", now: deps.now?.() });
+  if (!signed.ok) {
+    await alertCrmSigningRefused("core_rfp_handoff", signed);
+    return { kind: "retryable", error: `CRM core-rfp-handoff callback refused before sending: ${signed.detail}` };
+  }
+  clearCrmSigningRefusal("core_rfp_handoff");
   // A caller-owned deadline: fetchWithTimeout's own timer stops when the HEADERS arrive, so it cannot bound a CRM that
   // answers and then stalls the body. Aborting (not abandoning the read) releases the connection.
   const deadline = new AbortController();
@@ -101,7 +109,7 @@ export async function postCoreHandoffToCrm(
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-rfp-request-signature": `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`,
+          ...signed.headers,
         },
         body: rawBody,
         // Never followed: a 307/308 replays the method, body AND signature header to wherever it points (an http:
@@ -290,7 +298,8 @@ export async function notifyCrmForRow(
     return "terminal";
   }
 
-  const outcome = await postCoreHandoffToCrm(notice, deps);
+  // deps.now is this module's ms clock (the retry schedule); the v2 signer takes a Date, so adapt it here.
+  const outcome = await postCoreHandoffToCrm(notice, { ...deps, now: deps.now ? () => new Date(deps.now!()) : undefined });
   if (outcome.kind === "sent") {
     await settle(id, parked, generation);
     await reportNoticeDelivered(notice, row);

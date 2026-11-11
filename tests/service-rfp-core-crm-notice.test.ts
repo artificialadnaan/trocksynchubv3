@@ -9,8 +9,12 @@ const alertMock = vi.hoisted(() => vi.fn(async () => ({ action: "alert_failure" 
 vi.mock("../server/db.ts", () => ({ db: { execute: dbExecuteMock } }));
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 vi.mock("../server/sync/service-rfp-core-alert.ts", () => ({ recordServiceRfpCrmNoticeOutcome: alertMock }));
+// SIGNING-HARDENING r1: a refused send raises ONE visible alert (server/crm-signing-v2.ts → rfp-core-alert).
+const signingAlertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
+vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: signingAlertMock }));
 
-const SECRET = "crm-callback-secret";
+/** ≥ 32 bytes: the SyncHub → CRM signing floor. Synthetic. */
+const SECRET = "synthetic-crm-callback-secret-0123456789";
 const TARGET = "https://crm.example.com/api/internal/core-rfp-handoff";
 const CRM_DEAL_ID = "9f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
 const REFUSED_AT = "2026-10-27T15:00:00.000Z";
@@ -64,18 +68,42 @@ async function load() {
 }
 
 describe("postCoreHandoffToCrm", () => {
-  it("POSTs the event signed with the shared HMAC over the exact bytes", async () => {
+  it("POSTs the event signed v2 (SIGNING-HARDENING r1) over the exact bytes and the requested path", async () => {
     const { postCoreHandoffToCrm } = await load();
     const fetchImpl = respond(200, JSON.stringify({ success: true }));
     const payload = { event: "refused" as const, office: "dallas", sourceDealId: CRM_DEAL_ID, rfpApprovalRequestId: 77, occurredAt: REFUSED_AT, attempt: 2, reason: "live_project" };
 
-    expect(await postCoreHandoffToCrm(payload, deps(fetchImpl))).toEqual({ kind: "sent", status: 200 });
+    expect(await postCoreHandoffToCrm(payload, deps(fetchImpl, { now: () => new Date(1767225600 * 1000) }))).toEqual({ kind: "sent", status: 200 });
     const [url, init] = fetchImpl.mock.calls[0] as any[];
     expect(url).toBe(TARGET);
     expect(JSON.parse(init.body)).toEqual(payload);
+    expect(init.headers["x-signature-version"]).toBe("2");
+    expect(init.headers["x-signature-timestamp"]).toBe("1767225600");
+    const bodyHash = crypto.createHash("sha256").update(init.body).digest("hex");
     expect(init.headers["x-rfp-request-signature"]).toBe(
-      `sha256=${crypto.createHmac("sha256", SECRET).update(init.body).digest("hex")}`,
+      `sha256=${crypto.createHmac("sha256", SECRET).update(`v2\nPOST\n/api/internal/core-rfp-handoff\n1767225600\n${bodyHash}`).digest("hex")}`,
     );
+  });
+
+  it("(SIGNING-HARDENING r1) a secret under 32 bytes or an http target ⇒ nothing sent, retryable (as unconfigured), ONE alert each; localhost / 127.0.0.1 allowed", async () => {
+    const { postCoreHandoffToCrm } = await load();
+    signingAlertMock.mockReset();
+    const fetchImpl = respond(200, JSON.stringify({ success: true }));
+    const payload = { event: "accepted" as const, office: "dallas", sourceDealId: CRM_DEAL_ID, rfpApprovalRequestId: 77, occurredAt: SENT_AT, attempt: 3 };
+    for (let i = 0; i < 2; i++) {
+      expect((await postCoreHandoffToCrm(payload, deps(fetchImpl, { secret: "s".repeat(31) }))).kind).toBe("retryable");
+      expect((await postCoreHandoffToCrm(payload, deps(fetchImpl, { targetUrl: "http://crm.example.test/api/internal/core-rfp-handoff" }))).kind).toBe("retryable");
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([
+      ["crm_signing_refused", "core_rfp_handoff", "secret_short"],
+      ["crm_signing_refused", "core_rfp_handoff", "url_refused"],
+    ]);
+    for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
+      fetchImpl.mockClear();
+      expect(await postCoreHandoffToCrm(payload, deps(fetchImpl, { targetUrl: `${base}/api/internal/core-rfp-handoff` })), base).toEqual({ kind: "sent", status: 200 });
+      expect((fetchImpl.mock.calls[0] as any[])[1].headers["x-signature-version"], base).toBe("2");
+    }
   });
 
   it("builds the CRM URL from TROCK_CRM_BASE_URL", async () => {

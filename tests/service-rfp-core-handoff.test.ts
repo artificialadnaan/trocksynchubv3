@@ -230,7 +230,7 @@ describe("service RFP → TROCK Core handoff", () => {
     process.env.CORE_INGRESS_BASE_URL = "https://core.example.com";
     process.env.SERVICE_RFP_INGRESS_SECRET_CURRENT = "s".repeat(32);
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
-    process.env.RFP_REQUEST_SYNC_SECRET = "secret";
+    process.env.RFP_REQUEST_SYNC_SECRET = "synthetic-rfp-request-sync-secret-0123456789"; // ≥ 32 bytes (SIGNING-HARDENING r1)
     // The CRM eligibility probe uses bare fetch (not fetchWithTimeout), so it is stubbed separately
     // and never lands in outboundCalls.
     vi.stubGlobal(

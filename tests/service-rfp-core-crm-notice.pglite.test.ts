@@ -21,7 +21,7 @@ const DDL = readFileSync(new URL("../migrations/0025_create_service_rfp_core_out
 const CRM_DEAL_ID = "9f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
 const deps = (status: number) => ({
   fetchImpl: vi.fn(async () => new Response("{}", { status })) as any,
-  secret: "crm-callback-secret",
+  secret: "synthetic-crm-callback-secret-0123456789", // ≥ 32 bytes: the SyncHub → CRM signing floor
   targetUrl: "https://crm.example.com/api/internal/core-rfp-handoff",
 });
 

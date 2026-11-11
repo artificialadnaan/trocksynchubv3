@@ -1,4 +1,9 @@
+import nodeCrypto from "crypto";
 import { describe, expect, it, vi } from "vitest";
+
+// SIGNING-HARDENING r1: a refused send raises ONE visible alert (server/crm-signing-v2.ts → rfp-core-alert).
+const signingAlertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
+vi.mock("../server/sync/rfp-core-alert", () => ({ raiseRfpCoreAlert: signingAlertMock }));
 
 // rfp-reports.ts imports ./db (throws without DATABASE_URL), ./storage, ./email-service.
 // Everything exercised here is pure or dependency-injected, so stub those out.
@@ -17,7 +22,13 @@ import {
 } from "../server/crm-deal-values";
 
 const CRM_BASE = "https://crm.example.com";
-const SECRET = "shared-secret";
+/** ≥ 32 bytes: the SyncHub → CRM signing floor (SIGNING-HARDENING r1). Synthetic. */
+const SECRET = "synthetic-shared-secret-0123456789abcdef";
+/** The SyncHub → CRM v2 signature, computed independently of server/crm-signing-v2.ts. */
+function crmSigV2(path: string, ts: number, raw: string, key = SECRET): string {
+  const bodyHash = nodeCrypto.createHash("sha256").update(raw).digest("hex");
+  return `sha256=${nodeCrypto.createHmac("sha256", key).update(`v2\nPOST\n${path}\n${ts}\n${bodyHash}`).digest("hex")}`;
+}
 
 /** A CRM-sourced RFP whose stored snapshot is blank — the production shape this work exists for. */
 function blankCrmRow(overrides: Partial<RfpReportRow> = {}): RfpReportRow {
@@ -215,19 +226,42 @@ describe("fetchCrmCurrentDealAmounts", () => {
     ...extra,
   });
 
-  it("signs the batch with the shared secret the CRM already verifies", async () => {
+  it("signs the batch v2 (SIGNING-HARDENING r1): the version + timestamp headers and the framed HMAC over the requested path", async () => {
     const fetchImpl = vi.fn(async () =>
       okResponse({ values: [{ dealId: "deal-a", amount: 1000 }], maxDealIds: 500 })
     );
 
-    const result = await fetchCrmCurrentDealAmounts(["deal-a"], deps(fetchImpl));
+    const result = await fetchCrmCurrentDealAmounts(["deal-a"], deps(fetchImpl, { now: () => new Date(1767225600 * 1000) }));
 
-    const [url, init] = fetchImpl.mock.calls[0];
+    const [url, init] = fetchImpl.mock.calls[0] as any[];
     expect(url).toBe(`${CRM_BASE}/api/internal/deals/current-values`);
     expect(init.method).toBe("POST");
-    expect(init.headers["x-rfp-request-signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(init.headers["x-signature-version"]).toBe("2");
+    expect(init.headers["x-signature-timestamp"]).toBe("1767225600");
+    expect(init.headers["x-rfp-request-signature"]).toBe(crmSigV2("/api/internal/deals/current-values", 1767225600, init.body));
     expect(JSON.parse(init.body)).toEqual({ dealIds: ["deal-a"] });
     expect(result.get("deal-a")).toBe(1000);
+  });
+
+  it("(SIGNING-HARDENING r1) a secret under 32 bytes or an http base ⇒ nothing sent, stored amounts, ONE alert each; localhost / 127.0.0.1 allowed", async () => {
+    (await import("../server/crm-signing-v2")).resetCrmSigningRefusalsForTests();
+    signingAlertMock.mockReset();
+    const fetchImpl = vi.fn(async () => okResponse({ values: [{ dealId: "deal-a", amount: 1000 }], maxDealIds: 500 }));
+    for (let i = 0; i < 2; i++) {
+      expect((await fetchCrmCurrentDealAmounts(["deal-a"], deps(fetchImpl, { secret: "s".repeat(31) }))).size).toBe(0);
+      expect((await fetchCrmCurrentDealAmounts(["deal-a"], deps(fetchImpl, { baseUrl: "http://crm.example.test" }))).size).toBe(0);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([
+      ["crm_signing_refused", "deals_current_values", "secret_short"],
+      ["crm_signing_refused", "deals_current_values", "url_refused"],
+    ]);
+    for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
+      fetchImpl.mockClear();
+      await fetchCrmCurrentDealAmounts(["deal-a"], deps(fetchImpl, { baseUrl: base }));
+      expect((fetchImpl.mock.calls[0] as any[])?.[0], base).toBe(`${base}/api/internal/deals/current-values`);
+      expect((fetchImpl.mock.calls[0] as any[])[1].headers["x-signature-version"], base).toBe("2");
+    }
   });
 
   it("drops `amount: null` — a deal the CRM knows but that is still worth nothing keeps its em-dash", async () => {

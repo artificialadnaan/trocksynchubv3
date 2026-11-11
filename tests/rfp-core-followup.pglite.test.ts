@@ -32,7 +32,10 @@ const DDL_0023 = readFileSync(new URL("../migrations/0023_create_bidboard_create
 const DDL_0027 = readFileSync(new URL("../migrations/0027_rfp_core_routing.sql", import.meta.url), "utf8");
 
 const SECRET = "synthetic-rfp-bid-create-secret-0123456789";
-const CRM_SECRET = "synthetic-crm-internal-secret";
+/** ≥ 32 bytes: the SyncHub → CRM signing floor (SIGNING-HARDENING r1). */
+const CRM_SECRET = "synthetic-crm-internal-secret-0123456789";
+/** A pinned clock for the v2 signature timestamp. */
+const SIGN_CLOCK = new Date(1767225600 * 1000);
 const CORE_BASE = "https://core.example.test";
 const CRM_BASE = "https://crm.example.test";
 const E4_URL = `${CRM_BASE}/api/internal/core-bid-created`;
@@ -145,7 +148,11 @@ const alertCodes = () => alertMock.mock.calls.map((c) => c[0]);
 const f1Errors = async () =>
   (await pg.query<any>(`SELECT payload FROM bidboard_callback_outbox WHERE payload->>'status' = 'failed' ORDER BY id`)).rows.map((r) => r.payload.error);
 const makeDue = () => pg.exec(`UPDATE rfp_core_followup_outbox SET next_attempt_at = NOW() - interval '1 second' WHERE status = 'pending'`);
-const crmSig = (raw: string) => `sha256=${crypto.createHmac("sha256", CRM_SECRET).update(raw).digest("hex")}`;
+/** The SyncHub → CRM v2 signature (SIGNING-HARDENING r1), computed independently of server/crm-signing-v2.ts. */
+const crmSigV2 = (path: string, ts: number, raw: string, key = CRM_SECRET) => {
+  const bodyHash = crypto.createHash("sha256").update(raw).digest("hex");
+  return `sha256=${crypto.createHmac("sha256", key).update(`v2\nPOST\n${path}\n${ts}\n${bodyHash}`).digest("hex")}`;
+};
 function framed(domain: string, path: string, body: string, key: string): string {
   const NUL = Buffer.from([0]);
   const pre = Buffer.concat([Buffer.from(domain), NUL, Buffer.from("POST"), NUL, Buffer.from(path), NUL, Buffer.from(body)]);
@@ -155,15 +162,18 @@ function framed(domain: string, path: string, body: string, key: string): string
 process.env.RFP_CORE_OFFICES = "dallas,atlanta"; // c6 rule (f): the fixtures' offices (dallas / atlanta) are listed, so Core routing is unchanged
 
 describe("E4 → E5 sequencing (§6 / §7)", () => {
-  it("E4 is POSTed to the CRM's core-bid-created with bid-board-created's HMAC over the raw body, redirect 'error', the stored strict body", async () => {
+  it("E4 is POSTed to the CRM's core-bid-created with the v2 signature (SIGNING-HARDENING r1) over its path, redirect 'error', the stored strict body", async () => {
     await seedSent();
     const fetchImpl = router();
-    await processRfpCoreFollowupOutbox({ fetchImpl });
+    await processRfpCoreFollowupOutbox({ fetchImpl, now: () => SIGN_CLOCK });
     expect(callsTo(fetchImpl, E4_URL)).toHaveLength(1);
     const init = callsTo(fetchImpl, E4_URL)[0]![1];
     expect(init.method).toBe("POST");
     expect(init.redirect).toBe("error");
-    expect(new Headers(init.headers).get("x-rfp-request-signature")).toBe(crmSig(init.body));
+    const headers = new Headers(init.headers);
+    expect(headers.get("x-signature-version")).toBe("2");
+    expect(headers.get("x-signature-timestamp")).toBe("1767225600");
+    expect(headers.get("x-rfp-request-signature")).toBe(crmSigV2("/api/internal/core-bid-created", 1767225600, init.body));
     expect(JSON.parse(init.body)).toEqual(E4_BODY);
   });
   it("E4 linked ⇒ done (sent, result linked) and ONE E5 core_confirm; E5 goes only after E4 answered, signed with the -linked domain", async () => {
@@ -370,12 +380,13 @@ describe("E5 never dead-letters (§7, b8 M3)", () => {
 
 describe("N1 notices (§10 wire shape)", () => {
   it("each kind is POSTed to /api/internal/rfp-core-notice with the strict 9 keys, the internal HMAC and the reason rules", async () => {
-    const seen: Array<{ raw: string; sig: string | null; rowId: number }> = [];
+    const seen: Array<{ raw: string; sig: string | null; version: string | null; ts: string | null; rowId: number }> = [];
     const capture = (fetchImpl: ReturnType<typeof router>) => async () => {
       for (const c of callsTo(fetchImpl, N1_URL)) {
         const b = JSON.parse(c[1].body);
         const row = (await byKind("crm_notice", b.kind))[0];
-        seen.push({ raw: c[1].body, sig: new Headers(c[1].headers).get("x-rfp-request-signature"), rowId: row?.id });
+        const h = new Headers(c[1].headers);
+        seen.push({ raw: c[1].body, sig: h.get("x-rfp-request-signature"), version: h.get("x-signature-version"), ts: h.get("x-signature-timestamp"), rowId: row?.id });
       }
     };
     const stale = router({ e4: () => json(200, { result: "stale" }) });
@@ -407,7 +418,9 @@ describe("N1 notices (§10 wire shape)", () => {
       expect(b, b.kind).toMatchObject({ sourceSystem: "trock_crm", sourceDealId: DEAL, sourceEventId: KEY, office: "dallas", coreBidId: BID });
       expect(Number.isFinite(Date.parse(b.occurredAt)), b.kind).toBe(true);
       expect(b.noticeId, b.kind).toBe(`rfp-core-notice:rfp_core_followup_outbox:${s.rowId}:${b.kind}`);
-      expect(s.sig, b.kind).toBe(crmSig(s.raw));
+      expect(s.version, b.kind).toBe("2");
+      expect(s.ts ?? "", b.kind).toMatch(/^\d+$/);
+      expect(s.sig, b.kind).toBe(crmSigV2("/api/internal/rfp-core-notice", Number(s.ts), s.raw));
     }
   });
   it("the noticeId is built once, stored, and every redelivery is byte-identical (503 then 200)", async () => {
@@ -569,6 +582,43 @@ describe("§12 drains by data, not by the setting (d9 ruling, r2); unconfigured"
       expect(fetchImpl, label).not.toHaveBeenCalled();
       expect((await byKind(kind))[0], label).toMatchObject({ status: "pending", attempt_count: 0 });
       expect(alertCodes(), label).toEqual(["rfp_core_unconfigured"]);
+    }
+  });
+});
+
+describe("SIGNING-HARDENING r1 on E4 / N1: the first-use floor and the https guard", () => {
+  it("a CRM secret under 32 bytes ⇒ E4 is not sent, the row stays pending, ONE alert", async () => {
+    await seedSent();
+    process.env.RFP_REQUEST_SYNC_SECRET = "s".repeat(31);
+    const fetchImpl = router();
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(await byKind("crm_link")).toMatchObject([{ status: "pending", attempt_count: 0 }]);
+    expect(alertCodes()).toEqual(["rfp_core_unconfigured"]);
+  });
+  it("TROCK_CRM_BASE_URL http://crm.example.test ⇒ E4 refused the same way: not sent, pending, ONE alert", async () => {
+    await seedSent();
+    process.env.TROCK_CRM_BASE_URL = "http://crm.example.test";
+    const fetchImpl = router();
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    await processRfpCoreFollowupOutbox({ fetchImpl });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(await byKind("crm_link")).toMatchObject([{ status: "pending", attempt_count: 0 }]);
+    expect(alertCodes()).toEqual(["rfp_core_unconfigured"]);
+  });
+  it("http://localhost:3001 and http://127.0.0.1:3001 are allowed: E4 is sent there, signed v2", async () => {
+    for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
+      await reset();
+      await seedSent();
+      process.env.TROCK_CRM_BASE_URL = base;
+      const fetchImpl = vi.fn(async (url: string, _init: any) =>
+        url.endsWith("/api/internal/core-bid-created") ? json(200, { result: "linked" }) : json(200, { confirmed: true }));
+      await processRfpCoreFollowupOutbox({ fetchImpl, now: () => SIGN_CLOCK });
+      expect(fetchImpl.mock.calls[0]?.[0], base).toBe(`${base}/api/internal/core-bid-created`);
+      const init = fetchImpl.mock.calls[0]![1];
+      expect(new Headers(init.headers).get("x-signature-version"), base).toBe("2");
+      expect(new Headers(init.headers).get("x-rfp-request-signature"), base).toBe(crmSigV2("/api/internal/core-bid-created", 1767225600, init.body));
     }
   });
 });

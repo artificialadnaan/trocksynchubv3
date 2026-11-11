@@ -51,6 +51,7 @@ import {
   rfpCoreNoticeId,
   type RfpCoreNoticeKind,
 } from "./rfp-core-wire";
+import { crmSecretUsable, crmUrlAllowed } from "../crm-signing-v2";
 import { lockRfpCreateDeal, readCoreCreateContext } from "./rfp-create-lock";
 import { operatorRedriveOf } from "./rfp-operator-redrive";
 import { rfpNonserviceDestinationSetting } from "./rfp-destination";
@@ -121,13 +122,16 @@ interface FollowupConfig {
 
 function followupConfig(env: NodeJS.ProcessEnv = process.env): FollowupConfig {
   const missing: string[] = [];
-  const crmSecret = env.RFP_REQUEST_SYNC_SECRET && env.RFP_REQUEST_SYNC_SECRET.trim() !== "" ? env.RFP_REQUEST_SYNC_SECRET : null;
-  const crmLinkUrl = buildCrmInternalTargetUrl(CRM_CORE_BID_CREATED_PATH, env.TROCK_CRM_BASE_URL);
-  const noticeUrl = buildCrmInternalTargetUrl(CRM_RFP_CORE_NOTICE_PATH, env.TROCK_CRM_BASE_URL);
+  // SIGNING-HARDENING r1 (first use, never boot): the CRM secret ≥ 32 bytes and an https CRM base (localhost / 127.0.0.1
+  // excepted); either short of that and E4 / N1 are not sent, exactly like an unset value.
+  const crmSecret = crmSecretUsable(env.RFP_REQUEST_SYNC_SECRET) ? env.RFP_REQUEST_SYNC_SECRET! : null;
+  const crmBaseOk = crmUrlAllowed(env.TROCK_CRM_BASE_URL);
+  const crmLinkUrl = crmBaseOk ? buildCrmInternalTargetUrl(CRM_CORE_BID_CREATED_PATH, env.TROCK_CRM_BASE_URL) : null;
+  const noticeUrl = crmBaseOk ? buildCrmInternalTargetUrl(CRM_RFP_CORE_NOTICE_PATH, env.TROCK_CRM_BASE_URL) : null;
   const coreSecret = resolveRfpBidCreateIngressSecret(env);
   const coreBase = validCoreIngressBase(env.CORE_INGRESS_BASE_URL);
-  if (!crmSecret) missing.push("RFP_REQUEST_SYNC_SECRET (unset): E4 / N1 are not sent");
-  if (!crmLinkUrl) missing.push("TROCK_CRM_BASE_URL (unset): E4 / N1 are not sent");
+  if (!crmSecret) missing.push("RFP_REQUEST_SYNC_SECRET (unset or shorter than 32 bytes): E4 / N1 are not sent");
+  if (!crmLinkUrl) missing.push("TROCK_CRM_BASE_URL (unset, or not https outside localhost / 127.0.0.1): E4 / N1 are not sent");
   if (!coreSecret) missing.push("RFP_BID_CREATE_INGRESS_SECRET_CURRENT (unset or shorter than 32 bytes): E5 is not sent");
   if (!coreBase) missing.push("CORE_INGRESS_BASE_URL (unset, not https, or carrying a query / fragment): E5 is not sent");
   const ready: FollowupKind[] = [];
@@ -224,7 +228,7 @@ async function send(row: any, ctx: any, config: FollowupConfig, deps: RfpCoreDra
   }
   // E4 / N1 are static: the stored body is sent as stored, so a redelivery is byte-identical.
   const targetUrl = kind === "crm_link" ? config.crmLinkUrl! : config.noticeUrl!;
-  return postCrmSigned({ targetUrl, rawBody: JSON.stringify(row.payload), secret: config.crmSecret! }, { fetchImpl: deps.fetchImpl });
+  return postCrmSigned({ targetUrl, rawBody: JSON.stringify(row.payload), secret: config.crmSecret! }, { fetchImpl: deps.fetchImpl, now: () => now });
 }
 
 /** Record one attempt's answer under the per-deal lock, only while the row is still OUR `sending` attempt. */

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbExecuteMock = vi.hoisted(() => vi.fn());
@@ -12,6 +13,16 @@ const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, 
 vi.mock("../server/db.ts", () => ({
   db: { execute: dbExecuteMock },
 }));
+// SIGNING-HARDENING r1: a refused send raises ONE visible alert (server/crm-signing-v2.ts → rfp-core-alert).
+const signingAlertMock = vi.hoisted(() => vi.fn(async (_code: string, _detail: Record<string, unknown>) => {}));
+vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: signingAlertMock }));
+/** ≥ 32 bytes: the SyncHub → CRM signing floor. Synthetic. */
+const CALLBACK_SECRET = "synthetic-callback-secret-0123456789abcdef";
+/** The SyncHub → CRM v2 signature, computed independently of server/crm-signing-v2.ts. */
+function crmSigV2(path: string, ts: number, raw: string, key = CALLBACK_SECRET): string {
+  const bodyHash = crypto.createHash("sha256").update(raw).digest("hex");
+  return `sha256=${crypto.createHmac("sha256", key).update(`v2\nPOST\n${path}\n${ts}\n${bodyHash}`).digest("hex")}`;
+}
 
 // S0b-2a: processRfpApproval's P3 claim (per-deal lock + Core footprint, CONTRACT v2.2 §10) runs on a real database with
 // 0027 applied (tests/rfp-approving-claim.pg.test.ts, tests/rfp-approval-p3.pg.test.ts). This file's database is a stub, so
@@ -119,10 +130,13 @@ function makeRequest(overrides: Partial<any> = {}) {
 }
 
 describe("BidBoard callback outbox worker", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     dbExecuteMock.mockReset();
-    process.env.RFP_REQUEST_SYNC_SECRET = "secret";
+    signingAlertMock.mockReset();
+    process.env.RFP_REQUEST_SYNC_SECRET = CALLBACK_SECRET;
+    delete process.env.TROCK_CRM_BASE_URL;
+    (await import("../server/crm-signing-v2.ts")).resetCrmSigningRefusalsForTests();
   });
 
   it("posts a pending callback and marks it sent", async () => {
@@ -132,14 +146,14 @@ describe("BidBoard callback outbox worker", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
     const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
 
-    const result = await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "secret" });
+    const result = await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: CALLBACK_SECRET });
 
     expect(result).toEqual({ processed: 1, sent: 1, failed: 0 });
     expect(fetchMock).toHaveBeenCalledWith(
       "https://crm.example.com/api/internal/bid-board-created",
       expect.objectContaining({
         method: "POST",
-        headers: expect.objectContaining({ "x-rfp-request-signature": expect.stringMatching(/^sha256=/) }),
+        headers: expect.objectContaining({ "x-rfp-request-signature": expect.stringMatching(/^sha256=/), "x-signature-version": "2" }),
       })
     );
     expect(JSON.stringify(dbExecuteMock.mock.calls)).toContain("status = 'sent'");
@@ -149,6 +163,7 @@ describe("BidBoard callback outbox worker", () => {
     dbExecuteMock
       .mockResolvedValueOnce([{ id: 1, attempt_count: 1, max_attempts: 5, payload: { sourceDealId: "crm-deal-1" }, target_url: "https://crm.example.com/api/internal/bid-board-created", rfp_approval_request_id: 77 }])
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] }) // tick 1's post-claim count of refused stored URLs (CodeRabbit 4536104336 on #130)
       .mockResolvedValueOnce([{ id: 1, attempt_count: 2, max_attempts: 5, payload: { sourceDealId: "crm-deal-1" }, target_url: "https://crm.example.com/api/internal/bid-board-created", rfp_approval_request_id: 77 }])
       .mockResolvedValue({ rows: [] });
     const fetchMock = vi.fn()
@@ -156,8 +171,9 @@ describe("BidBoard callback outbox worker", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ success: true }), { status: 200 }));
     const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
 
-    await expect(processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "secret" })).resolves.toMatchObject({ sent: 0, failed: 1 });
-    await expect(processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "secret" })).resolves.toMatchObject({ sent: 1, failed: 0 });
+    await expect(processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: CALLBACK_SECRET })).resolves.toMatchObject({ sent: 0, failed: 1 });
+    await expect(processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: CALLBACK_SECRET })).resolves.toMatchObject({ sent: 1, failed: 0 });
+    expect(fetchMock.mock.calls.map((c: any[]) => c[1].headers["x-signature-version"])).toEqual(["2", "2"]);
 
     const sqlText = JSON.stringify(dbExecuteMock.mock.calls);
     expect(sqlText).toContain("status = 'pending'");
@@ -171,10 +187,94 @@ describe("BidBoard callback outbox worker", () => {
     const fetchMock = vi.fn(async () => new Response("bad secret", { status: 401 }));
     const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
 
-    const result = await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "secret" });
+    const result = await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: CALLBACK_SECRET });
 
     expect(result).toMatchObject({ processed: 1, sent: 0, failed: 1 });
+    expect((fetchMock.mock.calls[0] as any[])[1].headers["x-signature-version"]).toBe("2");
     expect(JSON.stringify(dbExecuteMock.mock.calls)).toContain("status = 'dead'");
+  });
+
+  it("(SIGNING-HARDENING r1) a secret under 32 bytes ⇒ nothing claimed or sent, the rows unchanged, ONE alert across two ticks", async () => {
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]); // the due-row probe
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(dbExecuteMock.mock.calls)).not.toContain("attempt_count = attempt_count + 1");
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([["crm_signing_refused", "bidboard_callbacks", "secret_short"]]);
+  });
+
+  it("(SIGNING-HARDENING r1) TROCK_CRM_BASE_URL http://crm.example.test ⇒ refused the same way: nothing claimed or sent, ONE alert", async () => {
+    process.env.TROCK_CRM_BASE_URL = "http://crm.example.test";
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: CALLBACK_SECRET });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: CALLBACK_SECRET });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(dbExecuteMock.mock.calls)).not.toContain("attempt_count = attempt_count + 1");
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([["crm_signing_refused", "bidboard_callbacks", "url_refused"]]);
+  });
+
+  // CodeRabbit 4536104331 on #130 (a4 ruling): a refusal's alert key is kept only after a CONFIRMED delivery, so a failed first
+  // alert cannot silence every later refusal for that signer + reason. raiseRfpCoreAlert reports delivered (true) / not (false).
+  it("(CodeRabbit 4536104331) a failed first alert delivery ⇒ the next refusal raises the alert again", async () => {
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]); // the due-row probe
+    signingAlertMock.mockResolvedValueOnce(false as any).mockResolvedValue(true as any);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([
+      ["crm_signing_refused", "bidboard_callbacks", "secret_short"],
+      ["crm_signing_refused", "bidboard_callbacks", "secret_short"],
+    ]);
+  });
+
+  it("(guard, CodeRabbit 4536104331) after a DELIVERED alert a repeat refusal is deduped", async () => {
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]);
+    signingAlertMock.mockResolvedValue(true as any);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    expect(signingAlertMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("(guard, CodeRabbit 4536104331) an alert that throws never escapes the worker and never prints the secret", async () => {
+    const shortSecret = "synthetic-short-secret-f130";
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]);
+    signingAlertMock.mockRejectedValue(new Error("synthetic alert store down"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+      await expect(processBidBoardCallbackOutbox({ fetchImpl: vi.fn() as any, secret: shortSecret })).resolves.toEqual({ processed: 0, sent: 0, failed: 0 });
+      await expect(processBidBoardCallbackOutbox({ fetchImpl: vi.fn() as any, secret: shortSecret })).resolves.toEqual({ processed: 0, sent: 0, failed: 0 });
+      expect(JSON.stringify([...warn.mock.calls, ...error.mock.calls])).not.toContain(shortSecret);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it("(SIGNING-HARDENING r1) http://localhost:3001 and http://127.0.0.1:3001 are allowed: the callback is sent there, signed v2", async () => {
+    for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
+      vi.resetModules();
+      dbExecuteMock.mockReset();
+      process.env.TROCK_CRM_BASE_URL = base;
+      const row = { id: 1, attempt_count: 1, max_attempts: 5, payload: { sourceDealId: "crm-deal-1" }, target_url: `${base}/api/internal/bid-board-created`, rfp_approval_request_id: 77 };
+      dbExecuteMock.mockResolvedValueOnce([row]).mockResolvedValue({ rows: [] });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
+      const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+      const result = await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: CALLBACK_SECRET, now: () => new Date(1767225600 * 1000) } as any);
+      expect(result, base).toEqual({ processed: 1, sent: 1, failed: 0 });
+      const [url, init] = fetchMock.mock.calls[0] as any[];
+      expect(url, base).toBe(`${base}/api/internal/bid-board-created`);
+      expect(init.headers["x-signature-version"], base).toBe("2");
+      expect(init.headers["x-rfp-request-signature"], base).toBe(crmSigV2("/api/internal/bid-board-created", 1767225600, init.body));
+    }
   });
 });
 
@@ -188,7 +288,7 @@ describe("CRM-sourced RFP approval callback enqueue", () => {
     sendEmailMock.mockClear();
     createBidBoardMock.mockClear();
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
-    process.env.RFP_REQUEST_SYNC_SECRET = "secret";
+    process.env.RFP_REQUEST_SYNC_SECRET = CALLBACK_SECRET;
     approvalRequest.current = makeRequest();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ stage: "opportunity" }), { status: 200, headers: { "content-type": "application/json" } })));
   });
@@ -247,7 +347,7 @@ describe("CRM-sourced RFP decline callback enqueue", () => {
     auditRows.length = 0;
     enqueueCallbackShouldFail.current = false;
     process.env.TROCK_CRM_BASE_URL = "https://crm.example.com";
-    process.env.RFP_REQUEST_SYNC_SECRET = "secret";
+    process.env.RFP_REQUEST_SYNC_SECRET = CALLBACK_SECRET;
     approvalRequest.current = makeRequest({ sourceDealId: "550e8400-e29b-41d4-a716-446655440000" });
   });
 
@@ -295,7 +395,7 @@ describe("CRM-sourced RFP decline callback enqueue", () => {
       payload,
       target_url: "https://crm.example.com/api/internal/rfp-declined",
       rfp_approval_request_id: 77,
-    }, { fetchImpl: fetchMock as any, secret: "secret" });
+    }, { fetchImpl: fetchMock as any, secret: CALLBACK_SECRET, now: () => new Date(1767225600 * 1000) } as any);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://crm.example.com/api/internal/rfp-declined",
@@ -304,7 +404,9 @@ describe("CRM-sourced RFP decline callback enqueue", () => {
         body: JSON.stringify(payload),
         headers: expect.objectContaining({
           "content-type": "application/json",
-          "x-rfp-request-signature": expect.stringMatching(/^sha256=[a-f0-9]{64}$/),
+          "x-rfp-request-signature": crmSigV2("/api/internal/rfp-declined", 1767225600, JSON.stringify(payload)),
+          "x-signature-version": "2",
+          "x-signature-timestamp": "1767225600",
         }),
       })
     );

@@ -42,13 +42,17 @@ export type RfpCoreAlertCode =
   | "rfp_operator_redrive_applied"
   | "rfp_requeue_applied"
   // S1b r2 (d9 Q2): a CRM re-post of a re-driven approval, answered as a no-op replay.
-  | "redrive_repost_replayed";
+  | "redrive_repost_replayed"
+  // SIGNING-HARDENING r1: a SyncHub → CRM send refused at first use (secret < 32 bytes, or a non-https CRM URL).
+  | "crm_signing_refused";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
 /** Standing / repeating conditions: their repeats fall under the re-alert window instead of each mailing again. */
 const WINDOWED_RFP_CORE_ALERT_CODES: ReadonlySet<RfpCoreAlertCode> = new Set<RfpCoreAlertCode>(["core_tables_missing", "core_footprint_check_failed"]);
 
-export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<string, unknown>): Promise<void> {
+/** Resolves true only on a CONFIRMED delivery (the alert email was sent); false when it was not, nothing is configured, or the
+ * push threw (CodeRabbit 4536104331 on #130: a caller's dedupe must never trust a failed send). Never throws. */
+export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<string, unknown>): Promise<boolean> {
   let summary = "";
   try {
     summary = JSON.stringify(detail);
@@ -62,7 +66,7 @@ export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<s
   }
   try {
     const { recordPushOutcomeAndMaybeAlert, escapeHtml } = await import("./bidboard-crm-alert");
-    await recordPushOutcomeAndMaybeAlert(
+    const outcome = await recordPushOutcomeAndMaybeAlert(
       {
         pushResult: { ok: false, attempts: 1, error: `${code}: ${summary}`, rejected: true },
         officeSlug: `${RFP_CORE_ALERT_NAMESPACE}${code}`,
@@ -81,11 +85,13 @@ export async function raiseRfpCoreAlert(code: RfpCoreAlertCode, detail: Record<s
         }),
       },
     );
+    return (outcome as { sent?: boolean } | undefined)?.sent === true;
   } catch (err) {
     try {
       log(`[rfp-core] alert delivery failed for ${code}: ${(err as Error)?.message ?? err}`, "rfp-core");
     } catch {
       /* swallow */
     }
+    return false;
   }
 }
