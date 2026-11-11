@@ -640,4 +640,30 @@ describe("POST /api/rfp-requests", () => {
       expect(response.body.message).toContain("RFP_REQUEST_SYNC_SECRET not configured");
     });
   });
+
+  // F-181 (d9 11-11): the builder now marks a fault (`fault: true`) for the HubSpot webhook path only. This route's status and
+  // body stay exactly as they were for a fault, and the template read moves before the insert, so a fault leaves no pending row.
+  it("(guard) F-181: a review-email template fault answers exactly as before: 500 {success:false, error, message}, no fault key", async () => {
+    const { storage } = await import("../server/storage.ts");
+    (storage.getEmailTemplate as any).mockRejectedValueOnce(new Error("synthetic template read failure"));
+    await withServer(async (baseUrl) => {
+      const response = await postRfpRequest(baseUrl, requestBody());
+      expect(response.status).toBe(500);
+      expect(response.body).toEqual({ success: false, error: "Internal Server Error", message: "synthetic template read failure" });
+    });
+  });
+
+  it("F-181: after a template fault no pending row is left, so the CRM's retry creates once and sends exactly ONE review email", async () => {
+    const { storage } = await import("../server/storage.ts");
+    (storage.getEmailTemplate as any).mockRejectedValueOnce(new Error("synthetic template read failure"));
+    await withServer(async (baseUrl) => {
+      const first = await postRfpRequest(baseUrl, requestBody());
+      expect(first.status).toBe(500);
+      expect(rfpRows).toHaveLength(0);
+      const retry = await postRfpRequest(baseUrl, requestBody());
+      expect(retry.status).toBe(201);
+      expect(rfpRows).toHaveLength(1);
+      expect(sendEmailMock).toHaveBeenCalledTimes(1);
+    });
+  });
 });
