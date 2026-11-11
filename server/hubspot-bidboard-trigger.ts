@@ -39,6 +39,7 @@
 
 import { storage } from "./storage";
 import { createBidBoardProjectFromDeal } from "./playwright/bidboard";
+import { lockRfpCreateDeal, readCoreFootprint } from "./sync/rfp-create-lock";
 
 // Configuration for which HubSpot stages trigger BidBoard project creation
 // and which initial BidBoard stage to use
@@ -72,6 +73,24 @@ async function getTriggerStages(): Promise<TriggerStageConfig[]> {
     console.log("[hubspot-bidboard] Using default trigger stages");
   }
   return DEFAULT_TRIGGER_STAGES;
+}
+
+// RFP Phase 2 (CONTRACT v2.2 §10, path P4): the per-deal lock + the Core footprint check before the Playwright create, like
+// every create path. Core rows exist only for trock_crm deals, so for a HubSpot deal this never holds in practice; the check
+// is uniform anyway. A footprint ⇒ no create + an alert (cross_destination_hold). db and the alert are imported lazily: db
+// throws without DATABASE_URL, and the alert module pulls in the server log.
+async function readCoreFootprintUnderLock(dealId: string): Promise<string[]> {
+  const { db } = await import("./db");
+  let footprint: string[] = [];
+  await (db as any).transaction(async (tx: any) => {
+    await lockRfpCreateDeal(tx, dealId);
+    footprint = await readCoreFootprint(tx, "hubspot", dealId);
+  });
+  if (footprint.length > 0) {
+    const { raiseRfpCoreAlert } = await import("./sync/rfp-core-alert");
+    await raiseRfpCoreAlert("cross_destination_hold", { sourceSystem: "hubspot", sourceDealId: dealId, heldDestination: "procore", footprint });
+  }
+  return footprint;
 }
 
 async function isTriggerEnabled(): Promise<boolean> {
@@ -112,6 +131,23 @@ export async function processDealStageChange(
   if (existingMapping?.bidboardProjectId) {
     console.log(`[hubspot-bidboard] Deal ${dealId} already has BidBoard project ${existingMapping.bidboardProjectId}`);
     return { triggered: false, reason: "bidboard_project_already_exists" };
+  }
+
+  let coreFootprint: string[];
+  try {
+    coreFootprint = await readCoreFootprintUnderLock(dealId);
+  } catch (err: any) {
+    // CodeRabbit 4534112615 (d9 option A): a check that cannot run is not "no footprint". Fail closed (no create) and say so
+    // visibly: the webhook would otherwise log the rejection and mark the event processed (F-181 owns that path).
+    const error = err?.message || String(err);
+    console.error(`[hubspot-bidboard] Deal ${dealId}: the Core footprint check failed (${error}); the Procore create is NOT run`);
+    const { raiseRfpCoreAlert } = await import("./sync/rfp-core-alert");
+    await raiseRfpCoreAlert("core_preflight_error", { sourceSystem: "hubspot", sourceDealId: dealId, stage: newStageId, error });
+    return { triggered: false, reason: "core_footprint_check_failed" };
+  }
+  if (coreFootprint.length > 0) {
+    console.log(`[hubspot-bidboard] Deal ${dealId} has a Core Bid Board footprint; the Procore create is held (cross_destination_hold)`);
+    return { triggered: false, reason: "cross_destination_hold" };
   }
 
   console.log(`[hubspot-bidboard] Deal ${dealId} moved to ${triggerConfig.hubspotStageLabel}, creating BidBoard project in "${triggerConfig.bidboardStage}" with document sync`);
@@ -157,6 +193,10 @@ export async function triggerBidBoardCreationForDeal(
       success: false,
       error: `Deal already linked to BidBoard project ${existingMapping.bidboardProjectId}`,
     };
+  }
+
+  if ((await readCoreFootprintUnderLock(dealId)).length > 0) {
+    return { success: false, error: "cross_destination_hold: this deal already has a Core Bid Board footprint" };
   }
 
   const result = await createBidBoardProjectFromDeal(dealId, bidboardStage, options);

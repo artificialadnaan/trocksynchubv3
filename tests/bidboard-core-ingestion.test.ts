@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const logMock = vi.hoisted(() => vi.fn());
 vi.mock("../server/index.ts", () => ({ log: logMock }));
+// A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
+vi.mock("../server/log.ts", () => ({ log: logMock }));
 
 const { BID_BOARD_EXPORT_CONTRACT_VERSION, pushBidBoardRowsToCore, resolveCoreBidBoardExportConfig } = await import(
   "../server/sync/bidboard-core-ingestion.ts"
@@ -96,5 +98,17 @@ describe("the Bid Board export's Core target (trock-core #1836)", () => {
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://core.example.com/webhooks/synchub/atlanta/bid-board-export/v1");
     expect(JSON.parse(String(init.body)).office_slug).toBe("atlanta");
+  });
+});
+
+describe("harness: the log spy sees log() from both server/log and server/index (positive control for this file's log assertions)", () => {
+  it("a line logged through either module reaches the spy", async () => {
+    const viaLog = await import("../server/log.ts");
+    const viaIndex = await import("../server/index.ts");
+    viaLog.log("a3-harness-control-log", "test");
+    viaIndex.log("a3-harness-control-index", "test");
+    const seen = logMock.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(seen).toContain("a3-harness-control-log");
+    expect(seen).toContain("a3-harness-control-index");
   });
 });

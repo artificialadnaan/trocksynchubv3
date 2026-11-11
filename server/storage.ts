@@ -488,7 +488,7 @@ export interface IStorage {
   getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined>;
   getLatestRfpApprovalRequestBySourceDeal(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
-  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined>;
+  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>, opts?: { expectedStatus?: string }): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
   createRfpApprovalEdit(data: InsertRfpApprovalEdit): Promise<RfpApprovalEdit>;
   getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
@@ -2265,8 +2265,17 @@ export class DatabaseStorage implements IStorage {
     );
   }
 
-  async updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>): Promise<RfpApprovalRequest | undefined> {
-    const [result] = await db.update(rfpApprovalRequests).set(data).where(eq(rfpApprovalRequests.id, id)).returning();
+  async updateRfpApprovalRequest(
+    id: number,
+    data: Partial<InsertRfpApprovalRequest>,
+    opts: { expectedStatus?: string } = {},
+  ): Promise<RfpApprovalRequest | undefined> {
+    // opts.expectedStatus (CodeRabbit 4534112622): write only while the row still has the status the caller read, so a
+    // concurrent claim (pending → approving) makes this a no-op (undefined) instead of being overwritten.
+    const where = opts.expectedStatus === undefined
+      ? eq(rfpApprovalRequests.id, id)
+      : and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, opts.expectedStatus));
+    const [result] = await db.update(rfpApprovalRequests).set(data).where(where).returning();
     return result;
   }
 
@@ -2364,11 +2373,13 @@ export class DatabaseStorage implements IStorage {
     callbackData?: InsertBidboardCallbackOutbox | null,
   ): Promise<RfpApprovalRequest | undefined> {
     return db.transaction(async (tx) => {
+      // Only a still-PENDING request is declined (S0b-2a, d9 5b): a decline that read `pending` just before the email path
+      // flipped the row to `approving` must not overwrite it. No row updated ⇒ undefined, and no declined callback.
       const [updated] = await tx.update(rfpApprovalRequests)
         .set(declineData)
-        .where(eq(rfpApprovalRequests.id, id))
+        .where(and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, 'pending')))
         .returning();
-      if (callbackData) {
+      if (updated && callbackData) {
         await tx.insert(bidboardCallbackOutbox)
           .values(callbackData)
           .onConflictDoNothing({ target: bidboardCallbackOutbox.rfpApprovalRequestId });

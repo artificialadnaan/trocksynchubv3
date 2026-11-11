@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 
 export interface BidBoardCreatedCallbackPayload {
   // 'created' on a successful Bid Board project creation; 'failed' when the (override)
@@ -28,7 +28,8 @@ const BACKOFF_INTERVALS = ["30 seconds", "2 minutes", "10 minutes", "30 minutes"
 let callbackWorkerTimer: ReturnType<typeof setInterval> | null = null;
 let callbackWorkerRunning = false;
 
-function signPayload(rawBody: string, secret: string): string {
+/** The CRM internal-route HMAC (x-rfp-request-signature): reused by the RFP Phase 2 E4 / N1 posts (rfp-core-http.ts). */
+export function signPayload(rawBody: string, secret: string): string {
   return `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
 }
 

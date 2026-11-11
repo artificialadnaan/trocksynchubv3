@@ -37,6 +37,7 @@
  * @module procore
  */
 
+import { AsyncLocalStorage } from 'async_hooks';
 import { storage } from './storage';
 import { pool } from './db';
 import type { PoolClient, QueryConfig } from 'pg';
@@ -87,6 +88,23 @@ let refreshPromise: Promise<string> | null = null;
 const DEFAULT_MIN_VALIDITY_MS = 60_000;
 
 /**
+ * S0b-2b (successor ec69 residual; d9): work run inside withoutProcoreTokenRenewal() never renews the Procore token, however
+ * long it runs. getAccessToken() hands out the STORED token while it has minValidityMs left and otherwise throws, and the
+ * locked refresh refuses before it reads the config or takes the lock. Only the stuck-request recreate uses it (its create
+ * step has no overall timeout). Outside the scope nothing changes.
+ */
+const procoreRenewalOff = new AsyncLocalStorage<{ reason: string }>();
+
+export function withoutProcoreTokenRenewal<T>(reason: string, fn: () => Promise<T>): Promise<T> {
+  return procoreRenewalOff.run({ reason }, fn);
+}
+
+function refuseIfRenewalOff(): void {
+  const off = procoreRenewalOff.getStore();
+  if (off) throw new Error(`Procore token renewal is off for ${off.reason}: the stored token is too short and was not renewed`);
+}
+
+/**
  * A valid Procore access token, refreshed first (under the cross-replica lock) when it has less than
  * `minValidityMs` left. The default keeps the historical 60 s threshold; Core's token read asks for 5 minutes.
  */
@@ -103,6 +121,7 @@ export async function getAccessToken(opts: { minValidityMs?: number } = {}): Pro
   const needsRefresh =
     expiresAtMs === null || Number.isNaN(expiresAtMs) ? Boolean(token.refreshToken) : expiresAtMs < Date.now() + minValidityMs;
   if (needsRefresh) {
+    refuseIfRenewalOff();
     if (token.refreshToken) {
       return await refreshAccessToken(token.refreshToken, minValidityMs);
     }
@@ -269,6 +288,7 @@ export async function refreshProcoreAccessTokenUnderLock(
   callerRefreshToken: string,
   minValidityMs: number = DEFAULT_MIN_VALIDITY_MS,
 ): Promise<string> {
+  refuseIfRenewalOff();
   // Read before taking a connection + the lock, so no second pool connection is needed while the lock is held.
   const config = await getProcoreConfig();
   // Set once Procore has answered: from then on the old refresh token is SPENT, so failing to persist the new pair

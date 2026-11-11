@@ -23,6 +23,8 @@ const m = vi.hoisted(() => ({
 }));
 
 vi.mock("../server/index", () => ({ log: m.log }));
+// A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
+vi.mock("../server/log.ts", () => ({ log: m.log }));
 vi.mock("../server/storage", () => ({ storage: { hasSuccessfulBidboardStageSyncRun: vi.fn(async () => true) } }));
 vi.mock("../server/playwright/bidboard-export", () => ({ exportBidBoardProjectList: m.exportList }));
 vi.mock("../server/sync/bidboard-stage-sync", () => ({
@@ -151,5 +153,17 @@ describe("BIDBOARD_STAGE_SYNC_EXPORT_ONLY", () => {
     const { runBidBoardStageSync } = await import("../server/sync/index");
     await runBidBoardStageSync({ dryRun: true });
     expect(m.pushCrm).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("harness: the log spy sees log() from both server/log and server/index (positive control for this file's log assertions)", () => {
+  it("a line logged through either module reaches the spy", async () => {
+    const viaLog = await import("../server/log.ts");
+    const viaIndex = await import("../server/index.ts");
+    viaLog.log("a3-harness-control-log", "test");
+    viaIndex.log("a3-harness-control-index", "test");
+    const seen = m.log.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(seen).toContain("a3-harness-control-log");
+    expect(seen).toContain("a3-harness-control-index");
   });
 });

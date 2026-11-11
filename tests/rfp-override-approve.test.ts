@@ -16,6 +16,15 @@ const createBidBoardMock = vi.hoisted(() => vi.fn(async () => ({ success: true, 
 
 vi.mock("../server/db.ts", () => ({ db: { execute: vi.fn() } }));
 
+// S0b-2a: processRfpApproval's P3 claim (per-deal lock + Core footprint, CONTRACT v2.2 §10) runs on a real database with
+// 0027 applied (tests/rfp-approving-claim.pg.test.ts, tests/rfp-approval-p3.pg.test.ts). This file's database is a stub, so
+// the claim reports 0027 absent ("legacy") and today's path runs, exactly as on a database without 0027.
+vi.mock("../server/sync/rfp-approving.ts", () => ({
+  RFP_APPROVING_STATUS: "approving",
+  claimRfpRequestForCreate: vi.fn(async () => ({ outcome: "legacy" })),
+  markRfpApprovingSubmitted: vi.fn(async () => {}),
+}));
+
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestByToken: vi.fn(async () => approvalRequest.current),

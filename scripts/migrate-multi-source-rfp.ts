@@ -10,6 +10,11 @@
  * All migrations are idempotent and additive. Migrations with unique index 
  * creation include explicit RAISE EXCEPTION preflight blocks that will halt 
  * if existing data would violate the new constraints.
+ *
+ * SCOPE GUARD (RFP Phase 2, a4): this runner covers 0013a-0023 ONLY and refuses any file numbered 0024 or later.
+ * 0027 (RFP routing) is applied by psql per the S0 deploy checklist, after its pre-apply collision read and before any
+ * `db:push`; it must never ride this runner. Re-running this runner is safe for 0027's objects (0021 recreates only its
+ * own idx_rfp_approval_pending_* names).
  */
 import pg from "pg";
 import { readFileSync } from "fs";
@@ -23,7 +28,11 @@ const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
+const RUNNER_LAST_MIGRATION = 23;
 async function runSqlFile(filename: string) {
+  if (!(parseInt(filename, 10) <= RUNNER_LAST_MIGRATION)) {
+    throw new Error(`${filename} is outside this runner's scope (0013a-0023): 0027 is applied by psql per the S0 deploy checklist (pre-apply collision read first)`);
+  }
   const path = join(migrationsDir, filename);
   const sql = readFileSync(path, "utf-8");
   console.log(`  → ${filename}`);
@@ -36,6 +45,7 @@ async function main() {
     throw new Error("DATABASE_URL must be set");
   }
   console.log("Running multi-source RFP migrations (0013a, 0015-0023)...");
+  console.log("  (0027 is applied by psql per the S0 deploy checklist (pre-apply collision read first); not by this runner)");
   await runSqlFile("0013a_dedupe_bidboard_project_id.sql");
   await runSqlFile("0015_add_source_identity_to_rfp_and_sync_mappings.sql");
   await runSqlFile("0016_relax_hubspot_deal_id_nullable.sql");

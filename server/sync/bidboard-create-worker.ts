@@ -7,6 +7,22 @@ import { buildSourceDealUrl, checkRfpApprovalSourceEligibility, normalizedDealDa
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 import { buildBidBoardCreatedCallbackTargetUrl } from "./bidboard-callback-worker";
 import type { CreateFromRfpInput } from "../routes/rfp-requests";
+import {
+  RFP_HELD_CROSS_DESTINATION_STATUS,
+  RFP_HELD_DESTINATION_CHANGED_STATUS,
+  RFP_ROUTED_CORE_STATUS,
+  rfpCoreOfficesSetting,
+  rfpNonserviceDestinationSetting,
+  routeRfpCreate,
+  type RfpDestination,
+  type RouteInput,
+} from "./rfp-destination";
+import { preflightRfpCoreTables, preflightRfpCoreTablesOrThrow, type RfpCoreTablesState } from "./rfp-core-preflight";
+import { raiseRfpCoreAlert, type RfpCoreAlertCode } from "./rfp-core-alert";
+import { lockRfpCreateDeal, readCoreFootprint, readProcoreFootprint } from "./rfp-create-lock";
+import { RFP_APPROVING_STATUS } from "./rfp-approving";
+import { coreCreateRearmSet, coreFollowupRearmSet } from "./rfp-core-rearm";
+import { operatorRedriveOf } from "./rfp-operator-redrive";
 
 // Durable command outbox for create-from-rfp (findings V1-V4). See shared/schema.ts bidboardCreateOutbox.
 // The endpoint persists a command before its 202; this SERIAL worker (one create at a time, matching the global
@@ -48,15 +64,31 @@ export class UnconfirmedCreateError extends Error {
   }
 }
 
-async function getDb() {
-  return (await import("../db")).db;
+// The db module is resolved ONCE and every caller shares that promise. In production Node caches the module anyway, so this is
+// behaviour-neutral; it removes a same-tick race in which two concurrent dynamic imports could get past a test's module mock
+// and reach the real db (S0b-1 r2 / r3). A failed import (no DATABASE_URL) is not memoised: the next call imports again.
+let dbModulePromise: Promise<any> | null = null;
+function loadDbModule(): Promise<any> {
+  if (!dbModulePromise) {
+    dbModulePromise = import("../db").catch((err) => {
+      dbModulePromise = null;
+      throw err;
+    });
+  }
+  return dbModulePromise;
 }
 
-// Persist a create command (called by the endpoint BEFORE its 202 — finding V3). Idempotent on source_event_id:
+async function getDb() {
+  return (await loadDbModule()).db;
+}
+
+// The Procore create-command enqueue (finding V3: persisted BEFORE the endpoint's 202). Idempotent on source_event_id:
 // a duplicate delivery is a no-op; a previously FAILED command is re-queued (the CRM's rep-driven retry re-POSTs
 // the same source_event_id, so DO NOTHING would otherwise strand the retry).
-export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
-  const db = await getDb();
+// The Procore create-command enqueue (the atomic insert / re-queue / supersede CTE). With stamp = null it is the EXACT
+// pre-Phase-2 statement (0027 not applied yet); with a stamp it also writes the four 0027 stamp columns on INSERT. The
+// ON CONFLICT re-queue never touches them: a stamp is written once, at first arrival (CONTRACT v2.2 §2).
+async function runProcoreEnqueueCte(db: any, input: CreateFromRfpInput, stamp: ProcoreStamp | null): Promise<void> {
   // finding (atomic enqueue+supersede): the INSERT and the same-deal supersede run as ONE statement via a
   // data-modifying CTE. Two separate statements leave a window where the INSERT has committed but the supersede
   // hasn't run yet, during which a worker tick (this or another instance) can claim the older pending row (flip it
@@ -75,10 +107,10 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
   await db.execute(sql`
     WITH upsert AS (
     INSERT INTO bidboard_create_outbox
-      (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at)
+      (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at${stamp ? sql`, destination, destination_setting, approval_kind, stamped_at` : sql``})
     VALUES (
       ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId},
-      ${input.deal.projectNumber ?? null}, ${JSON.stringify(input)}::jsonb, 'pending', NOW(), NOW()
+      ${input.deal.projectNumber ?? null}, ${JSON.stringify(input)}::jsonb, 'pending', NOW(), NOW()${stamp ? sql`, 'procore', ${stamp.setting}, ${stamp.kind}, NOW()` : sql``}
     )
     ON CONFLICT (source_event_id) DO UPDATE
       -- finding Y4: refresh the stored payload + project_number + source fields on re-queue. A rep who corrected
@@ -204,6 +236,332 @@ export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): P
   `);
 }
 
+// ── RFP Phase 2: the destination stamp (CONTRACT v2.2 §2, §10, §11) ──────────────────────────────────────────────
+type ProcoreStamp = { setting: string | null; kind: string | null };
+
+/** In flight on the Procore side: a re-post is not a re-attempt, so the row continues on its stamp (§11). */
+const PROCORE_IN_FLIGHT = new Set(["processing", "reclaiming", "needs_manual"]);
+/**
+ * Terminal Procore outcomes a cross-flip re-post must NOT turn into held: 'done' means a Procore project exists (the re-post
+ * is the CRM's callback-recovery retry, and an F1 'failed' would contradict it); 'superseded' is a retired round. Both keep
+ * today's re-queue statement (recovery / no-op). The per-deal footprint (S0b) covers a Procore project vs a core route.
+ */
+const PROCORE_TERMINAL_KEEP = new Set(["done", "superseded"]);
+/** A core create not yet sent that a matching re-post may re-arm (§2 RE-ARM; never from an in-flight status). */
+const CORE_REARMABLE = new Set(["failed", "dead", "refused"]);
+
+function approvalKindOf(input: CreateFromRfpInput): string | null {
+  const k = (input as any).approvalKind;
+  return k === "vote" || k === "override" ? k : null;
+}
+
+function routeInputOf(input: CreateFromRfpInput, approvalKind: string | null): RouteInput {
+  return {
+    ingress: "create-from-rfp",
+    sourceSystem: input.sourceSystem,
+    decision: (input as any).decision ?? null,
+    approvalKind,
+    office: (input as any).office ?? null,
+    deal: { projectNumber: input.deal?.projectNumber ?? null, projectType: input.deal?.projectType ?? null },
+  };
+}
+
+export type AlertList = Array<[RfpCoreAlertCode, Record<string, unknown>]>;
+
+function firstRow(res: any): any | undefined {
+  return (Array.isArray(res) ? res : (res?.rows ?? []))[0];
+}
+
+/** F1 (§10): the existing failed callback to the CRM, written INSIDE the caller's transaction, reason code VERBATIM in `error`. */
+export async function enqueueF1InTx(tx: any, input: CreateFromRfpInput, reason: string): Promise<void> {
+  const targetUrl = buildBidBoardCreatedCallbackTargetUrl();
+  if (!targetUrl) throw new Error("TROCK_CRM_BASE_URL not configured; cannot enqueue the RFP routing F1 failed callback");
+  const procoreCompanyId = await resolveProcoreCompanyIdForCallback();
+  const payload = {
+    status: "failed" as const,
+    sourceDealId: input.sourceDealId,
+    projectNumber: input.deal?.projectNumber,
+    procoreCompanyId,
+    error: reason,
+    createdAt: new Date().toISOString(),
+  };
+  await tx.execute(sql`
+    DELETE FROM bidboard_callback_outbox
+     WHERE source_system = ${input.sourceSystem}
+       AND source_deal_id = ${input.sourceDealId}
+       AND rfp_approval_request_id IS NULL
+       AND status = 'pending'
+       AND payload->>'status' = 'failed'
+       AND payload->>'createdAt' IS NOT NULL
+       AND (payload->>'createdAt')::timestamptz <= ${payload.createdAt}::timestamptz
+  `);
+  await tx.execute(sql`
+    INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status)
+    VALUES (${input.sourceSystem}, ${input.sourceDealId}, NULL, ${JSON.stringify(payload)}::jsonb, ${targetUrl}, 'pending')
+  `);
+}
+
+/** §10 cross-destination hold, inside the caller's transaction: F1 'cross_destination_hold' now, the alert after commit. */
+export async function holdCrossDestination(
+  tx: any, input: CreateFromRfpInput, heldDestination: RfpDestination, footprint: string[], alerts: AlertList,
+): Promise<void> {
+  await enqueueF1InTx(tx, input, "cross_destination_hold");
+  alerts.push(["cross_destination_hold", { heldDestination, footprint }]);
+}
+
+/**
+ * Persist a create-from-rfp command (before the route's 202). RFP Phase 2 (CONTRACT v2.2 §2): the destination is stamped
+ * ONCE at first arrival and every later re-post of the same sourceEventId reads it:
+ *   - 0027 not applied: ROUTE procore ⇒ today's statement, unchanged; ROUTE core ⇒ HOLD (throw ⇒ 500; the CRM retries) + alert;
+ *   - first arrival: procore ⇒ today's CTE + the stamp columns; core ⇒ a routed_core command row + ONE pending rfp_core_create_outbox
+ *     row, in one transaction (an older still-pending Procore round for the deal is superseded, as today);
+ *   - re-attempt: a NON-NULL kind conflict ⇒ refused + alert; a NULL stored kind is ADOPTED once; then stamp ≠ ROUTE NOW ⇒ HELD
+ *     (held_destination_changed + alert + F1) unless the row is in flight (§11); stamp = ROUTE NOW ⇒ procore: today's re-queue;
+ *     core: RE-ARM failed / dead / refused ⇒ pending, or, once sent, only a dead E4 / E5 follow-up (never E2, never link_refused).
+ * Everything runs under ONE per-deal advisory lock `rfp_create:<sourceDealId>` (xact-scoped), and each create checks the
+ * OTHER destination's footprint under it (§10): found ⇒ held_cross_destination + alert + F1, never a second record.
+ */
+export async function enqueueBidboardCreateCommand(input: CreateFromRfpInput): Promise<void> {
+  const db = await getDb();
+  const setting = rfpNonserviceDestinationSetting();
+  const coreOffices = rfpCoreOfficesSetting();
+  const kind = approvalKindOf(input);
+  const route = routeRfpCreate(routeInputOf(input, kind), setting, coreOffices);
+  const ids = { sourceSystem: input.sourceSystem, sourceDealId: input.sourceDealId, sourceEventId: input.sourceEventId };
+  // ROUTE core: the strict probe. An errored query is NOT "missing" (d9 hardening): alert with the real error and rethrow (the
+  // route answers 500, the CRM retries). ROUTE procore keeps the lenient probe, so today's enqueue is unchanged.
+  let tables: RfpCoreTablesState;
+  if (route === "core") {
+    try {
+      tables = await preflightRfpCoreTablesOrThrow(db as any);
+    } catch (err) {
+      await raiseRfpCoreAlert("core_preflight_error", { ...ids, error: String((err as Error)?.message ?? err) });
+      throw err;
+    }
+  } else {
+    tables = await preflightRfpCoreTables(db as any);
+  }
+  if (tables !== "present") {
+    if (route === "core") {
+      await raiseRfpCoreAlert("core_tables_missing", { ...ids, preflight: tables });
+      throw new Error(`RFP core tables missing (0027 not applied, preflight=${tables}): refusing to route an eligible vote; HOLD, no Procore fallback`);
+    }
+    await runProcoreEnqueueCte(db, input, null);
+    return;
+  }
+  const alerts: AlertList = [];
+  await db.transaction(async (tx: any) => {
+    await lockRfpCreateDeal(tx, input.sourceDealId);
+    const existing = firstRow(await tx.execute(sql`
+      SELECT * FROM bidboard_create_outbox WHERE source_event_id = ${input.sourceEventId} FOR UPDATE
+    `));
+    if (!existing) {
+      await stampFirstArrival(tx, input, route, setting ?? null, kind, alerts);
+      return;
+    }
+    await handleReattempt(tx, input, existing, setting, coreOffices, kind, alerts);
+  });
+  for (const [code, detail] of alerts) await raiseRfpCoreAlert(code, { ...ids, ...detail });
+}
+
+async function stampFirstArrival(
+  tx: any, input: CreateFromRfpInput, route: RfpDestination, setting: string | null, kind: string | null, alerts: AlertList,
+): Promise<void> {
+  if (route === "procore") {
+    const core = await readCoreFootprint(tx, input.sourceSystem, input.sourceDealId);
+    if (core.length > 0) {
+      await tx.execute(sql`
+        INSERT INTO bidboard_create_outbox
+          (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at,
+           processed_at, last_error, destination, destination_setting, approval_kind, stamped_at)
+        VALUES (${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null},
+                ${JSON.stringify(input)}::jsonb, ${RFP_HELD_CROSS_DESTINATION_STATUS}, NOW(), NOW(), NOW(), 'cross_destination_hold',
+                'procore', ${setting}, ${kind}, NOW())
+      `);
+      await holdCrossDestination(tx, input, "procore", core, alerts);
+      return;
+    }
+    await runProcoreEnqueueCte(tx, input, { setting, kind });
+    return;
+  }
+  const procore = await readProcoreFootprint(tx, input.sourceSystem, input.sourceDealId);
+  const inserted = firstRow(await tx.execute(sql`
+    INSERT INTO bidboard_create_outbox
+      (source_system, source_deal_id, source_event_id, project_number, payload, status, next_attempt_at, created_at,
+       destination, destination_setting, approval_kind, stamped_at)
+    VALUES (${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null},
+            ${JSON.stringify(input)}::jsonb, ${RFP_ROUTED_CORE_STATUS}, NOW(), NOW(), 'core', ${setting}, ${kind}, NOW())
+    RETURNING id
+  `));
+  // An older still-pending round for the deal (either destination) is retired, as today's enqueue does for Procore.
+  await tx.execute(sql`
+    UPDATE bidboard_create_outbox
+       SET status = 'superseded', processed_at = NOW(),
+           last_error = 'superseded by a newer create command for the same source deal'
+     WHERE source_system = ${input.sourceSystem} AND source_deal_id = ${input.sourceDealId}
+       AND status = 'pending' AND id < ${inserted.id}
+  `);
+  // A still-live Core create for the deal (pending / sending, another round) trips the per-deal partial unique index: the
+  // insert throws, the whole transaction rolls back and the CRM retries. The per-deal footprint rules are S0b (§10).
+  // A Procore footprint for the deal ⇒ the Core row is written HELD (no E2 is ever sent from it); the command stays routed.
+  const coreStatus = procore.length > 0 ? RFP_HELD_CROSS_DESTINATION_STATUS : "pending";
+  await tx.execute(sql`
+    INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
+    VALUES (${inserted.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null}, ${coreStatus})
+  `);
+  if (procore.length > 0) await holdCrossDestination(tx, input, "core", procore, alerts);
+}
+
+async function handleReattempt(
+  tx: any, input: CreateFromRfpInput, existing: any, setting: string | undefined, coreOffices: ReadonlySet<string>, kind: string | null,
+  alerts: AlertList,
+): Promise<void> {
+  const stored: string | null = existing.approval_kind ?? null;
+  if (stored && kind && stored !== kind) {
+    alerts.push(["approval_kind_conflict", { stored, received: kind, commandId: existing.id }]);
+    return; // refused: never re-stamped, nothing refreshed
+  }
+  // d9 Q2 (S1b r2): this approval was re-driven to Core by the operator CLI (its Procore create is `done`, and its event has
+  // an operatorRedrive Core row). A CRM re-post is a NO-OP REPLAY: the route answers the same 202 the done branch answers,
+  // and NOTHING is re-queued, re-stamped, adopted or refreshed (the done branch's callback-recovery re-queue would put the
+  // command back to pending, the Procore claim would then hold it on the Core footprint, and the re-drive row would lose its
+  // footprint skip). ONE alert.
+  if (existing.destination === "procore" && existing.status === "done") {
+    const core = firstRow(await tx.execute(sql`
+      SELECT id, status, payload FROM rfp_core_create_outbox
+       WHERE source_system = ${input.sourceSystem} AND source_event_id = ${input.sourceEventId}
+    `));
+    const redrive = core ? operatorRedriveOf(core.payload) : null;
+    if (core && redrive) {
+      alerts.push(["redrive_repost_replayed", { commandId: existing.id, coreId: core.id, coreStatus: core.status, go: redrive.go }]);
+      return;
+    }
+  }
+  const effectiveKind = stored ?? kind;
+  if (!stored && kind) {
+    await tx.execute(sql`UPDATE bidboard_create_outbox SET approval_kind = ${kind} WHERE id = ${existing.id} AND approval_kind IS NULL`);
+  }
+  const routeNow = routeRfpCreate(routeInputOf(input, effectiveKind), setting, coreOffices);
+  if (PROCORE_IN_FLIGHT.has(existing.status)) return; // §11: continues on its stamp
+  if (existing.status === RFP_HELD_DESTINATION_CHANGED_STATUS) return; // already held: a person resolves it
+  if (existing.status === RFP_HELD_CROSS_DESTINATION_STATUS) return; // held across destinations: a person resolves it
+  if (existing.destination === "procore" && PROCORE_TERMINAL_KEEP.has(existing.status)) {
+    await runProcoreEnqueueCte(tx, input, { setting: setting ?? null, kind: effectiveKind });
+    return;
+  }
+  if (existing.destination !== routeNow) {
+    await tx.execute(sql`
+      UPDATE bidboard_create_outbox
+         SET status = ${RFP_HELD_DESTINATION_CHANGED_STATUS}, processed_at = NOW(), last_error = 'destination_changed_hold'
+       WHERE id = ${existing.id}
+    `);
+    await enqueueF1InTx(tx, input, "destination_changed_hold");
+    alerts.push(["destination_changed_hold", { stamped: existing.destination, routeNow, commandId: existing.id }]);
+    return;
+  }
+  if (existing.destination === "procore") {
+    const core = await readCoreFootprint(tx, input.sourceSystem, input.sourceDealId);
+    if (core.length > 0) {
+      await tx.execute(sql`
+        UPDATE bidboard_create_outbox
+           SET status = ${RFP_HELD_CROSS_DESTINATION_STATUS}, processed_at = NOW(), last_error = 'cross_destination_hold'
+         WHERE id = ${existing.id}
+      `);
+      await holdCrossDestination(tx, input, "procore", core, alerts);
+      return;
+    }
+    await runProcoreEnqueueCte(tx, input, { setting: setting ?? null, kind: effectiveKind });
+    return;
+  }
+  // core, stamp = ROUTE NOW
+  if (existing.source_deal_id !== input.sourceDealId) {
+    alerts.push(["source_event_reused", { storedDealId: existing.source_deal_id, commandId: existing.id }]);
+    return;
+  }
+  const core = firstRow(await tx.execute(sql`
+    SELECT * FROM rfp_core_create_outbox
+     WHERE source_system = ${input.sourceSystem} AND source_event_id = ${input.sourceEventId} FOR UPDATE
+  `));
+  if (!core || CORE_REARMABLE.has(core.status)) {
+    const procore = await readProcoreFootprint(tx, input.sourceSystem, input.sourceDealId);
+    if (procore.length > 0) {
+      if (core) {
+        await tx.execute(sql`
+          UPDATE rfp_core_create_outbox SET status = ${RFP_HELD_CROSS_DESTINATION_STATUS}, last_error = 'cross_destination_hold'
+           WHERE id = ${core.id}
+        `);
+      } else {
+        await tx.execute(sql`
+          INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
+          VALUES (${existing.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null},
+                  ${RFP_HELD_CROSS_DESTINATION_STATUS})
+          ON CONFLICT DO NOTHING
+        `);
+      }
+      await holdCrossDestination(tx, input, "core", procore, alerts);
+      return;
+    }
+  }
+  if (!core) {
+    await tx.execute(sql`
+      INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status)
+      VALUES (${existing.id}, ${input.sourceSystem}, ${input.sourceDealId}, ${input.sourceEventId}, ${input.deal.projectNumber ?? null}, 'pending')
+      ON CONFLICT DO NOTHING
+    `);
+    return;
+  }
+  if (CORE_REARMABLE.has(core.status)) {
+    await tx.execute(sql`UPDATE bidboard_create_outbox SET payload = ${JSON.stringify(input)}::jsonb WHERE id = ${existing.id}`);
+    await tx.execute(sql`
+      UPDATE rfp_core_create_outbox SET ${coreCreateRearmSet(input.deal.projectNumber ?? null)} WHERE id = ${core.id}
+    `);
+    // S1a (owner: every re-arm is VISIBLE): the rep's re-post put a not-yet-sent Core create back on the E2 schedule.
+    alerts.push(["core_create_rearmed", { coreId: core.id, from: core.status, refusalReason: core.refusal_reason ?? null }]);
+    return;
+  }
+  if (core.status === "sent") {
+    // Core created the bid: NEVER re-send E2. Re-arm a dead E4 / E5 follow-up only (the rep's Retry after a dead link);
+    // a link_refused E4 is never re-armed (a person resolves it).
+    const rearmed = await tx.execute(sql`
+      UPDATE rfp_core_followup_outbox SET ${coreFollowupRearmSet()}
+       WHERE create_id = ${core.id} AND kind IN ('crm_link', 'core_confirm') AND status = 'dead'
+      RETURNING id, kind
+    `);
+    // S1a: each re-armed follow-up is VISIBLE (owner requirement).
+    for (const f of (Array.isArray(rearmed) ? rearmed : (rearmed?.rows ?? []))) {
+      alerts.push(["core_followup_rearmed", { coreId: core.id, followupId: f.id, kind: f.kind }]);
+    }
+  }
+  // pending / sending: in flight, nothing to do
+}
+
+/** P2 (§10): true ⇒ the claimed command was held (held_cross_destination + F1 in one transaction, alert after). */
+async function holdClaimedOnCoreFootprint(row: any): Promise<boolean> {
+  const db = await getDb();
+  // Strict: an errored probe throws (never "no footprint"), so Playwright cannot run unchecked (d9 hardening).
+  if ((await preflightRfpCoreTablesOrThrow(db as any)) !== "present") return false; // no Core table ⇒ no Core footprint
+  const sourceSystem = String(row.source_system);
+  const sourceDealId = String(row.source_deal_id);
+  const input = { ...((row.payload ?? {}) as any), sourceSystem, sourceDealId } as CreateFromRfpInput;
+  let footprint: string[] = [];
+  await db.transaction(async (tx: any) => {
+    await lockRfpCreateDeal(tx, sourceDealId);
+    footprint = await readCoreFootprint(tx, sourceSystem, sourceDealId);
+    if (footprint.length === 0) return;
+    await tx.execute(sql`
+      UPDATE bidboard_create_outbox
+         SET status = ${RFP_HELD_CROSS_DESTINATION_STATUS}, processed_at = NOW(), last_error = 'cross_destination_hold'
+       WHERE id = ${row.id}
+    `);
+    await enqueueF1InTx(tx, input, "cross_destination_hold");
+  });
+  if (footprint.length === 0) return false;
+  await raiseRfpCoreAlert("cross_destination_hold", {
+    sourceSystem, sourceDealId, sourceEventId: row.source_event_id, commandId: row.id, heldDestination: "procore", footprint,
+  });
+  return true;
+}
+
 // Claim ONE pending/retryable command at a time (serial → satisfies the same-project-number ordering V1 needs +
 // keeps at most one Playwright create in flight, matching withBrowserLock). FOR UPDATE SKIP LOCKED so overlapping
 // ticks can't double-claim. Also RE-CLAIMS a stale 'processing' row (finding X3): if the worker crashed after
@@ -227,6 +585,10 @@ export async function claimNextBidboardCreateCommand(excludeIds: Iterable<number
   // ids come from row.id (DB serial) — coerce to finite integers, so raw interpolation carries no injection risk.
   const excluded = Array.from(excludeIds, Number).filter((n) => Number.isInteger(n));
   const excludeClause = excluded.length > 0 ? sql`AND id NOT IN (${sql.raw(excluded.join(","))})` : sql``;
+  // RFP Phase 2 (CONTRACT v2.2 §2): never claim a core-stamped command, whatever its status. Only once 0027 exists (the
+  // column does not before); until then every row is a Procore row and the claim is today's statement.
+  const destinationClause =
+    (await preflightRfpCoreTablesOrThrow(db as any)) === "present" ? sql`AND destination = 'procore'` : sql``; // errored ⇒ throw, nothing claimed
   const result = await db.execute(sql`
     UPDATE bidboard_create_outbox
        SET status = 'processing', last_attempt_at = NOW(), attempt_count = attempt_count + 1
@@ -267,6 +629,7 @@ export async function claimNextBidboardCreateCommand(excludeIds: Iterable<number
           -- the pass runs — otherwise a long pass burns all its max_attempts in one go. This is duration-independent
           -- (unlike a time-based backoff); the row is re-claimable on the NEXT tick's pass (fresh exclusion set).
           ${excludeClause}
+          ${destinationClause}
         -- finding: drain by the immutable serial id (arrival order), NOT created_at. created_at is REFRESHED to
         -- NOW() when a still-pending/failed command is re-queued (Y4), which would reorder the FIFO drain and let a
         -- later-arrived same-project-number command create/link the project first while the corrected original then
@@ -381,6 +744,39 @@ async function markReclaiming(id: number, bidboardProjectId: string, proposalId:
 // Park it at 'needs_manual': NOT claimed by claimNext (no auto re-drain → no duplicate), NOT supersedable (not
 // 'pending'), NO callback (never tell the CRM it failed when a project may exist). A human resolves it — matching
 // the override-approve path's indeterminate handling.
+/** CodeRabbit 4534600249: consecutive post-claim footprint-check failures before a row is parked needs_manual. */
+export const CORE_HOLD_CHECK_MAX_FAILURES = 3;
+
+/** The reclaim reset of a failed footprint check, carrying the consecutive-failure count in the payload. */
+async function recordCoreHoldCheckFailure(id: number, failures: number, note: string): Promise<boolean> {
+  const db = await getDb();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await db.execute(sql`
+        UPDATE bidboard_create_outbox
+           SET attempt_count = 0, last_error = ${note},
+               payload = jsonb_set(payload, '{__coreHoldCheckFailures}', to_jsonb(${failures}::int))
+         WHERE id = ${id}
+      `);
+      return true;
+    } catch { /* retry a transient blip */ }
+  }
+  return false;
+}
+
+/**
+ * Codex 4534861795 on #129: only CONSECUTIVE failures count, so a check that ran clears the carried count. Best effort: if the
+ * clear can't land, the next failure counts on from the old value and parks sooner (the safe direction); never a create.
+ */
+async function clearCoreHoldCheckFailures(id: number): Promise<void> {
+  try {
+    const db = await getDb();
+    await db.execute(sql`UPDATE bidboard_create_outbox SET payload = payload - '__coreHoldCheckFailures' WHERE id = ${id}`);
+  } catch (err: any) {
+    log(`[bidboard-create] Command ${id}: could not clear the core-footprint failure count (${err?.message || err}); the next failure counts on from it`, "sync");
+  }
+}
+
 async function markNeedsManual(id: number, note: string, bidboardProjectId?: string): Promise<void> {
   const db = await getDb();
   if (bidboardProjectId) {
@@ -699,9 +1095,12 @@ export async function performCreateFromRfpVote(input: CreateFromRfpInput, callba
   const inFlightApproval =
     (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "pending"))
     ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_OVERRIDE_APPROVING_STATUS))
+    // S0b-2a: an `approving` request (the email path mid-create) is in flight exactly like override_approving.
+    ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, RFP_APPROVING_STATUS))
     ?? (await storage.getRfpApprovalRequestByProjectNumberAndStatus(projectNumber, "approved"))
     ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, "pending"))
     ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_OVERRIDE_APPROVING_STATUS))
+    ?? (await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, RFP_APPROVING_STATUS))
     // finding X6: also block an already-APPROVED RFP for the SAME source deal. If this deal was approved earlier
     // with project number A and a later vote arrives with a revised number B, createBidBoardProjectFromDeal would
     // adopt the existing source-deal mapping and send a 'created' callback for B pointing at A's old project.
@@ -893,7 +1292,7 @@ async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboa
     const byEvent = await storage.getRfpApprovalRequestBySourceEventId(input.sourceSystem, input.sourceEventId);
     const ownRequest = byEvent && byEvent.sourceDealId === input.sourceDealId ? byEvent : undefined;
     const latest = ownRequest ? undefined : await storage.getLatestRfpApprovalRequestBySourceDeal(input.sourceSystem, input.sourceDealId);
-    if (latest && (latest.status === "pending" || latest.status === RFP_OVERRIDE_APPROVING_STATUS)) {
+    if (latest && (latest.status === "pending" || latest.status === RFP_OVERRIDE_APPROVING_STATUS || latest.status === RFP_APPROVING_STATUS)) {
       log(`[bidboard-create] Adopted service deal ${input.sourceDealId} has RFP request ${latest.id} still ${latest.status}; its approval hands off to Core, skipping here`, "sync");
       return;
     }
@@ -1126,7 +1525,7 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
   let lockClient: { query: (text: string, params?: any[]) => Promise<any>; release: (err?: any) => void } | null = null;
   let locked = false;
   try {
-    const dbModule: any = await import("../db");
+    const dbModule: any = await loadDbModule();
     if (dbModule.pool?.connect) {
       lockClient = await dbModule.pool.connect();
       // Parameterized (not interpolated) even though CREATE_WORKER_LOCK_KEY is a constant — keeps the raw-SQL clean.
@@ -1170,6 +1569,59 @@ export async function processBidboardCreateOutbox(deps: { performImpl?: typeof p
         // sibling-recovery guard, so an unreconciled row can't duplicate the project. Breaking here would let this
         // low-id row (re-claimed first every tick) starve ALL later commands — including unrelated deals — until it
         // is manually resolved. Continue so unrelated commands drain.
+        continue;
+      }
+
+      // RFP Phase 2 (CONTRACT v2.2 §10, path P2): the claim made this command's footprint visible ('processing'). Under the
+      // per-deal lock, a Core footprint for the deal HOLDS it before Playwright: a PENDING procore row is not a Procore
+      // footprint, so a core vote may have been routed after this row was queued (d9 iv).
+      let heldOnCore = false;
+      try {
+        heldOnCore = await holdClaimedOnCoreFootprint(row);
+      } catch (holdErr: any) {
+        // CodeRabbit 4529556641: the claim made this row 'processing' and spent an attempt. A failed check (an errored probe,
+        // the transaction, or an F1 that can't be queued) must not strand it there. Nothing was created, so reset the attempt
+        // budget and leave it for the stale reclaim to re-check, as the other recoverable paths below do; if even that can't
+        // land, surface it 'needs_manual'.
+        const message = holdErr?.message || String(holdErr);
+        // CodeRabbit 4534600249: visible and bounded. Every failure raises the (re-alert-windowed) core_footprint_check_failed;
+        // after CORE_HOLD_CHECK_MAX_FAILURES consecutive failures the row is parked needs_manual with its own alert instead
+        // of resetting the attempt budget forever. The count rides in the payload, like __recoveredProjectId.
+        const failures = (Number((row.payload as any)?.__coreHoldCheckFailures) || 0) + 1;
+        await raiseRfpCoreAlert("core_footprint_check_failed", {
+          commandId: row.id, sourceSystem: row.source_system, sourceDealId: row.source_deal_id, failures, error: message,
+        });
+        if (failures >= CORE_HOLD_CHECK_MAX_FAILURES) {
+          log(`[bidboard-create] Command ${row.id} core-footprint check failed ${failures} times in a row (${message}); parked needs_manual`, "sync");
+          let parked = false;
+          for (let attempt = 1; attempt <= 3 && !parked; attempt++) {
+            try { await markNeedsManual(row.id, `core-footprint check failed ${failures} consecutive times before the create; needs manual resolution: ${message}`); parked = true; }
+            catch { /* retry a transient blip */ }
+          }
+          await raiseRfpCoreAlert("core_footprint_check_needs_manual", {
+            commandId: row.id, sourceSystem: row.source_system, sourceDealId: row.source_deal_id, failures, error: message, parked,
+          });
+          if (!parked) log(`[bidboard-create] CRITICAL: Command ${row.id} could NOT be parked needs_manual after ${failures} failed core-footprint checks; manual check needed for deal ${input.sourceDealId}`, "sync");
+          processed += 1;
+          continue;
+        }
+        log(`[bidboard-create] Command ${row.id} core-footprint check failed before the create (${message}); leaving 'processing' for reclaim (${failures} of ${CORE_HOLD_CHECK_MAX_FAILURES})`, "sync");
+        const reset = await recordCoreHoldCheckFailure(row.id, failures, `core-footprint check failed before the create (${failures} of ${CORE_HOLD_CHECK_MAX_FAILURES}); pending reclaim: ${message}`);
+        if (!reset) {
+          let surfaced = false;
+          for (let attempt = 1; attempt <= 3 && !surfaced; attempt++) {
+            try { await markNeedsManual(row.id, `core-footprint check failed and the reclaim reset could not land; needs manual resolution: ${message}`); surfaced = true; }
+            catch { /* retry a transient blip */ }
+          }
+          if (!surfaced) log(`[bidboard-create] CRITICAL: Command ${row.id} core-footprint check failed and it could NOT be reset for reclaim or surfaced needs_manual; manual check needed for deal ${input.sourceDealId}`, "sync");
+        }
+        processed += 1;
+        continue;
+      }
+      // Codex 4534861795 on #129: the check ran, so a carried failure count is no longer consecutive. Zero ⇒ no write.
+      if (Number((row.payload as any)?.__coreHoldCheckFailures) > 0) await clearCoreHoldCheckFailures(row.id);
+      if (heldOnCore) {
+        processed += 1;
         continue;
       }
 

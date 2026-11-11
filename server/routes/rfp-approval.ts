@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { storage } from "../storage";
+import { RFP_APPROVING_LABEL } from "@shared/rfp-status-display";
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import {
   buildExpiredRfpMessage,
@@ -477,8 +478,16 @@ export function registerRfpApprovalRoutes(app: Express) {
       return res.status(410).send(renderRfpPage('Link Expired', `<p>${buildExpiredRfpMessage(request)}</p>`));
     }
     if (request.status !== 'pending') {
+      // `approving` = the Bid Board create is running (S0b-2b; d9 Q10): it reads as such, never "declined". The other
+      // non-declined statuses (an override in progress, held, cancelled) are not "declined" either.
       const statusMsg = request.status === 'approved'
         ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>`
+        : request.status === 'approving'
+        ? `<p>This RFP was approved and its Bid Board project is being created: <strong>${RFP_APPROVING_LABEL}</strong></p>`
+        : request.status === 'override_approving'
+        ? `<p>An override approval of this RFP is in progress.</p>`
+        : request.status === 'held_cross_destination' || request.status === 'cancelled_source_ineligible'
+        ? `<p>This RFP is no longer open for review (status: <strong>${request.status}</strong>).</p>`
         : `<p>This RFP was <strong>declined</strong> by ${request.declinedBy || 'a reviewer'}.</p>`;
       return res.send(renderRfpPage('Already Processed', statusMsg));
     }
@@ -670,6 +679,8 @@ export function registerRfpApprovalRoutes(app: Express) {
 
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
+    // S0b-2a (runbook r5 §2): a create in progress can't be declined through the review link.
+    if (request.status === 'approving') return res.status(409).json({ success: false, error: 'Request already approving' });
     if (isRfpApprovalRequestExpired(request)) {
       const message = buildExpiredRfpMessage(request);
       await auditRouteAttempt(request, 'rfp_decline_attempt', 'expired', declinerEmail, 'Token expired');
@@ -704,7 +715,7 @@ export function registerRfpApprovalRoutes(app: Express) {
 
     const { processRfpDecline } = await import('../rfp-approval');
     const result = await processRfpDecline(token, declinerEmail);
-    res.json(result);
+    res.status(result.statusCode ?? 200).json(result);
   }));
 
   // Reset an approval request back to pending (admin endpoint for retrying failed BidBoard creation)
@@ -712,14 +723,35 @@ export function registerRfpApprovalRoutes(app: Express) {
     const { token } = req.params as { token: string };
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
-    await storage.updateRfpApprovalRequest(request.id, {
+    // S0b-2a (runbook r5 §2; d9 5a): never re-open a create in progress or a cross-destination hold through a link.
+    if (request.status === 'approving' || request.status === 'held_cross_destination') {
+      return res.status(409).json({ success: false, error: `Request ${request.id} is ${request.status}; it cannot be reset` });
+    }
+    const wasOverrideApproving = request.status === 'override_approving';
+    // CodeRabbit 4534112622: the write is conditional on the status read above, so an approval that claims the row in between
+    // (pending → approving) is never flipped back; that reset answers 409 instead.
+    const reset = await storage.updateRfpApprovalRequest(request.id, {
       status: 'pending',
       approvedBy: null,
       approvedAt: null,
       declinedBy: null,
       declinedAt: null,
       bidboardProjectId: null,
-    });
+    }, { expectedStatus: request.status });
+    if (!reset) {
+      return res.status(409).json({ success: false, error: `Request ${request.id} changed while it was being reset; it cannot be reset` });
+    }
+    if (wasOverrideApproving) {
+      // Today's only recovery for a stuck override stays allowed (I1), but loudly: the override being reset may already have
+      // created a project, so the alert carries the deal's footprint for a person to check (d9 5a).
+      const identity = sourceIdentityForRouteAudit(request);
+      const { describeOverrideResetFootprint } = await import('../sync/rfp-approving');
+      const footprint = await describeOverrideResetFootprint(identity.sourceSystem, identity.sourceDealId);
+      const { raiseRfpCoreAlert } = await import('../sync/rfp-core-alert');
+      await raiseRfpCoreAlert('rfp_request_override_reset', {
+        requestId: request.id, sourceSystem: identity.sourceSystem, sourceDealId: identity.sourceDealId, ...footprint,
+      });
+    }
     res.json({ success: true, message: `Request ${request.id} reset to pending. Token: ${token}` });
   }));
 }

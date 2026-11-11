@@ -11,7 +11,7 @@
 // also catches the case where SyncHub itself is down.
 import { pool } from "../db";
 import { sendEmail } from "../email-service";
-import { log } from "../index";
+import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex P1 on #128)
 
 export type PushAlertState = "ok" | "failing";
 export type PushAlertAction = "alert_failure" | "alert_recovered" | "none";

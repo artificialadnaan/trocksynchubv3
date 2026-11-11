@@ -2,9 +2,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
 
+// A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
+const playwrightLogSpy = vi.hoisted(() => vi.fn());
 vi.mock("../server/index.ts", () => ({
-  log: vi.fn(),
+  log: playwrightLogSpy,
 }));
+vi.mock("../server/log.ts", () => ({ log: playwrightLogSpy }));
 
 vi.mock("../server/storage.ts", () => ({
   storage: {
@@ -163,5 +166,17 @@ describe("BidBoard Playwright transition selectors", () => {
 
     expect(matched).toBeNull();
     expect(page.clicks).toEqual([]);
+  });
+});
+
+describe("harness: the log spy sees log() from both server/log and server/index (positive control for this file's log assertions)", () => {
+  it("a line logged through either module reaches the spy", async () => {
+    const viaLog = await import("../server/log.ts");
+    const viaIndex = await import("../server/index.ts");
+    viaLog.log("a3-harness-control-log", "test");
+    viaIndex.log("a3-harness-control-index", "test");
+    const seen = playwrightLogSpy.mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(seen).toContain("a3-harness-control-log");
+    expect(seen).toContain("a3-harness-control-index");
   });
 });

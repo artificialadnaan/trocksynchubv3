@@ -53,9 +53,11 @@ import { startWebhookRetryScheduler } from "../cron/webhookRetryScheduler";
 import { startAlertScheduler } from "../cron/alertScheduler";
 import { startBidBoardCallbackWorker } from "../sync/bidboard-callback-worker";
 import { startBidboardCreateWorker } from "../sync/bidboard-create-worker";
+import { startRfpCoreWorkers } from "../sync/rfp-core-worker";
 import { startServiceRfpCoreOutboxWorker } from "../sync/service-rfp-core-outbox";
 import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
 import { startPendingRfpDigestScheduler } from "../cron/pendingRfpDigestScheduler";
+import { startRfpApprovingStuckScheduler } from "../cron/rfpApprovingStuckScheduler";
 
 const PgSession = connectPgSimple(session);
 
@@ -134,11 +136,15 @@ export async function registerRoutes(
   startAlertScheduler();
   startBidBoardCallbackWorker();
   startBidboardCreateWorker();
+  // RFP Phase 2 (S1a): the E2 sender + the E4 / E5 / N1 follow-ups. Drains already core-stamped rows under any
+  // RFP_NONSERVICE_DESTINATION (§12); nothing to send until the first core stamp.
+  startRfpCoreWorkers();
   // Drains service-RFP rows Core could not accept inline. A tick with an empty queue is one indexed
   // read, so this stays harmless while the ingress is unprovisioned.
   startServiceRfpCoreOutboxWorker();
   startTrockCrmRelayScheduler();
   startPendingRfpDigestScheduler();
+  startRfpApprovingStuckScheduler();
 
   // Initialize polling systems from saved config
   initPolling().catch((err: any) => {

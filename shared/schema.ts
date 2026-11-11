@@ -58,7 +58,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique, uniqueIndex, uuid, time } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, boolean, timestamp, jsonb, serial, numeric, index, unique, uniqueIndex, uuid, time, check, foreignKey } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -1048,6 +1048,9 @@ export const rfpApprovalRequests = pgTable("rfp_approval_requests", {
   uniqueIndex("idx_rfp_approval_pending_source_deal").on(table.sourceSystem, table.sourceDealId).where(sql`status IN ('pending', 'override_approving')`),
   uniqueIndex("idx_rfp_approval_pending_project_number").on(table.projectNumber).where(sql`status IN ('pending', 'override_approving') AND project_number IS NOT NULL AND project_number != ''`),
   index("idx_rfp_approval_project_number").on(table.projectNumber),
+  // 0027 (S0b-2a): the WIDER live-request indexes, so a new request can't race in while one is `approving`. 0021's two stay.
+  uniqueIndex("idx_rfp_approval_live_source_deal").on(table.sourceSystem, table.sourceDealId).where(sql`status IN ('pending', 'approving', 'override_approving')`),
+  uniqueIndex("idx_rfp_approval_live_project_number").on(table.projectNumber).where(sql`status IN ('pending', 'approving', 'override_approving') AND project_number IS NOT NULL AND project_number != ''`),
 ]);
 export const insertRfpApprovalRequestSchema = createInsertSchema(rfpApprovalRequests).omit({ id: true, createdAt: true });
 export type InsertRfpApprovalRequest = z.infer<typeof insertRfpApprovalRequestSchema>;
@@ -1062,6 +1065,21 @@ export type RfpRequestStatus = typeof RFP_REQUEST_STATUSES[number];
 // to 'declined' (known failure). An override orphaned by a crash stays here — a safe, indeterminate
 // state (a project may exist) that requires manual resolution rather than an unsafe auto-retry.
 export const RFP_OVERRIDE_APPROVING_STATUS = 'override_approving' as const;
+
+// 0027 (S0b-2a; runbook r5): the email path's create-in-progress record. The `approving` STATUS lives on the request row; its
+// timestamps live here (not as request columns, which every drizzle request read would select before 0027 is applied).
+// started_at = the flip; submit_at = committed before createBidBoardProject starts (NULL ⇒ the create never started). Raw SQL only.
+export const rfpApprovalApproving = pgTable("rfp_approval_approving", {
+  requestId: integer("request_id").primaryKey().references(() => rfpApprovalRequests.id),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
+  submitAt: timestamp("submit_at"),
+  // S0b-2b (d9 QA): the original approval's inputs, recorded at the flip, for the resolve CLI's `recreate`.
+  approvedBy: text("approved_by"),
+  editedFields: jsonb("edited_fields"),
+  approvedAttachments: jsonb("approved_attachments"),
+  force: boolean("force"),
+  hubspotDoneAt: timestamp("hubspot_done_at"),
+});
 
 export const rfpApprovalEdits = pgTable("rfp_approval_edits", {
   id: serial("id").primaryKey(),
@@ -1127,13 +1145,77 @@ export const bidboardCreateOutbox = pgTable("bidboard_create_outbox", {
   nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   processedAt: timestamp("processed_at"),
+  // RFP Phase 2 (0027): the destination STAMP, set once at first arrival (CONTRACT v2.2 §2). Declared here because
+  // `npm run db:push` (drizzle-kit push --force) drops anything schema.ts does not declare (tests/rfp-phase2-schema-parity).
+  destination: text("destination").notNull().default("procore"),
+  destinationSetting: text("destination_setting"),
+  approvalKind: text("approval_kind"),
+  stampedAt: timestamp("stamped_at"),
 }, (table) => [
   uniqueIndex("idx_bidboard_create_outbox_source_event").on(table.sourceEventId),
   index("idx_bidboard_create_outbox_pending").on(table.status, table.nextAttemptAt).where(sql`status = 'pending'`),
+  check("bidboard_create_outbox_destination_check", sql`destination IN ('procore', 'core')`),
+  check("bidboard_create_outbox_approval_kind_check", sql`approval_kind IS NULL OR approval_kind IN ('vote', 'override')`),
 ]);
 export const insertBidboardCreateOutboxSchema = createInsertSchema(bidboardCreateOutbox).omit({ id: true, createdAt: true, processedAt: true });
 export type InsertBidboardCreateOutbox = z.infer<typeof insertBidboardCreateOutboxSchema>;
 export type BidboardCreateOutbox = typeof bidboardCreateOutbox.$inferSelect;
+
+// RFP Phase 2 (0027, CONTRACT v2.2 §2 / §10): E2 (SyncHub → Core create), byte-aligned with migrations/0027 so
+// `drizzle-kit push --force` never drops it (tests/rfp-phase2-schema-parity). Read and written by raw SQL only.
+export const rfpCoreCreateOutbox = pgTable("rfp_core_create_outbox", {
+  id: serial("id").primaryKey(),
+  commandId: integer("command_id").notNull(),
+  sourceSystem: text("source_system").notNull(),
+  sourceDealId: text("source_deal_id").notNull(),
+  sourceEventId: text("source_event_id").notNull(),
+  projectNumber: text("project_number"),
+  payload: jsonb("payload"),
+  status: text("status").notNull().default("pending"),
+  refusalReason: text("refusal_reason"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(6),
+  e2EverSent: boolean("e2_ever_sent").notNull().default(false),
+  lastError: text("last_error"),
+  lastStatusCode: integer("last_status_code"),
+  coreBidId: text("core_bid_id"),
+  coreCreatedAt: timestamp("core_created_at", { withTimezone: true }),
+  warnings: jsonb("warnings"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  sentAt: timestamp("sent_at"),
+}, (table) => [
+  foreignKey({ name: "rfp_core_create_outbox_command_id_fkey", columns: [table.commandId], foreignColumns: [bidboardCreateOutbox.id] }),
+  uniqueIndex("idx_rfp_core_create_outbox_event").on(table.sourceSystem, table.sourceEventId),
+  uniqueIndex("idx_rfp_core_create_outbox_live_deal").on(table.sourceSystem, table.sourceDealId).where(sql`status IN ('pending', 'sending')`),
+  index("idx_rfp_core_create_outbox_due").on(table.status, table.nextAttemptAt).where(sql`status = 'pending'`),
+]);
+
+// RFP Phase 2 (0027): E4 / E5 / N1 follow-ups of a created Core bid. Raw SQL only; declared for push parity.
+export const rfpCoreFollowupOutbox = pgTable("rfp_core_followup_outbox", {
+  id: serial("id").primaryKey(),
+  createId: integer("create_id").notNull(),
+  kind: text("kind").notNull(),
+  noticeKind: text("notice_kind").notNull().default(""),
+  noticeId: text("notice_id"),
+  payload: jsonb("payload").notNull(),
+  status: text("status").notNull().default("pending"),
+  result: text("result"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(6),
+  lastError: text("last_error"),
+  lastStatusCode: integer("last_status_code"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  sentAt: timestamp("sent_at"),
+}, (table) => [
+  foreignKey({ name: "rfp_core_followup_outbox_create_id_fkey", columns: [table.createId], foreignColumns: [rfpCoreCreateOutbox.id] }),
+  check("rfp_core_followup_outbox_kind_check", sql`kind IN ('crm_link', 'core_confirm', 'crm_notice')`),
+  uniqueIndex("idx_rfp_core_followup_outbox_kind").on(table.createId, table.kind, table.noticeKind),
+  index("idx_rfp_core_followup_outbox_due").on(table.status, table.nextAttemptAt).where(sql`status = 'pending'`),
+]);
 
 // Durable outbound outbox for the approved-service-RFP handoff to TROCK Core, shaped like
 // bidboard_callback_outbox (per-row target_url, backoff, dead-lettering) — NOT like
