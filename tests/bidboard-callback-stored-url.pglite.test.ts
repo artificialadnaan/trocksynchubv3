@@ -18,6 +18,12 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
 
 const SECRET = "synthetic-callback-secret-0123456789abcdef"; // >= 32 bytes, synthetic
+const VALID_URL = "https://crm-sales.ops-example.test/api/internal/bid-board-created";
+/** The only rows where the claim's SQL admits a URL that crmUrlAllowed refuses (a4 ADDENDUM-3 (A)). Synthetic hosts. */
+const SQL_ADMITS_TS_REFUSES = [
+  "https://999.0.0.1/api/internal/bid-board-created",
+  "https://crm.example.com:99999/api/internal/bid-board-created",
+];
 const DDL = `
   CREATE TABLE bidboard_callback_outbox (
     id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL, rfp_approval_request_id integer,
@@ -81,6 +87,10 @@ describe("CodeRabbit 4536104336 on #130: a stored target_url the v2 URL rule ref
       ["ftp://crm.example.com/api/internal/bid-board-created", false, false],
       ["", false, false],
       [null, false, false],
+      // Codex 4536463189 (a4 ADDENDUM-3 (A)): the declared gap. The SQL admits these https shapes, the URL parser refuses them
+      // (an invalid IPv4 host; a port above 65535), so the worker RELEASES them after the claim and remembers the pair.
+      [SQL_ADMITS_TS_REFUSES[0], false, true],
+      [SQL_ADMITS_TS_REFUSES[1], false, true],
     ];
     const got: Array<[string | null, boolean, boolean]> = [];
     for (const [url] of cases) {
@@ -89,7 +99,9 @@ describe("CodeRabbit 4536104336 on #130: a stored target_url the v2 URL rule ref
       got.push([url, crmUrlAllowed(url), rows[0].admitted === true]);
     }
     expect(got).toEqual(cases);
-    for (const [url, ts, sqlAdmits] of got) if (sqlAdmits) expect([url, ts]).toEqual([url, true]);
+    for (const [url, ts, sqlAdmits] of got) {
+      if (sqlAdmits && !SQL_ADMITS_TS_REFUSES.includes(url as string)) expect([url, ts]).toEqual([url, true]);
+    }
   });
 
   it("refused stored URLs (non-local http, the 127x0x0x1 near miss) are NOT claimed: unchanged byte for byte, ONE alert across two ticks; the valid rows in the same pass are sent", async () => {
@@ -127,5 +139,77 @@ describe("CodeRabbit 4536104336 on #130: a stored target_url the v2 URL rule ref
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await rowState(5)).toEqual(before);
     expect(alertMock.mock.calls.filter((c) => c[0] === "crm_signing_refused")).toHaveLength(1);
+  });
+});
+
+// Codex 4536463189 on #130 (a4 ADDENDUM-2 / -3). Released rows were claimed again on the next tick: with >= `limit` of them the
+// oldest due, every tick re-claimed the same rows and a later valid callback never went out. The worker now remembers each
+// released (id, stored target_url) pair in-process and the claim skips a row while BOTH still match. Stored rows stay byte for
+// byte. Each case uses its own ids, so pairs remembered by an earlier case never match.
+describe("Codex 4536463189 on #130: released URL refusals never starve later callbacks", () => {
+  const refusals = () => alertMock.mock.calls.filter((c) => c[0] === "crm_signing_refused");
+
+  it("Codex repro: 5 released rows the oldest due + 1 valid row: the valid row is SENT within 2 ticks, the 5 stay unchanged, ONE alert", async () => {
+    for (const id of [11, 12, 13, 14, 15]) await insertDue(id, SQL_ADMITS_TS_REFUSES[id % 2]);
+    await insertDue(16, VALID_URL);
+    const before = await Promise.all([11, 12, 13, 14, 15].map(rowState));
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    expect(fetchMock.mock.calls.map((c: any[]) => String(c[0]))).toEqual([VALID_URL]);
+    expect((await rowState(16)).status).toBe("sent");
+    expect(await Promise.all([11, 12, 13, 14, 15].map(rowState))).toEqual(before);
+    expect(refusals()).toHaveLength(1);
+    expect(refusals()[0][1]).toMatchObject({ reason: "url_refused" });
+  });
+
+  it("(guard) the remembered rows keep the stored-URL alert armed: a later refused row raises no second alert, nothing changes", async () => {
+    for (const id of [31, 32, 33, 34, 35]) await insertDue(id, SQL_ADMITS_TS_REFUSES[0]);
+    const before = await Promise.all([31, 32, 33, 34, 35].map(rowState));
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    await insertDue(36, "http://crm.example.test/api/internal/bid-board-created");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await Promise.all([31, 32, 33, 34, 35].map(rowState))).toEqual(before);
+    expect(refusals()).toHaveLength(1);
+  });
+
+  it("(guard, a4 ADDENDUM-3 (B)) a remembered row whose stored target_url is rewritten to a valid URL is SENT on the next tick", async () => {
+    for (const id of [41, 42, 43, 44, 45]) await insertDue(id, SQL_ADMITS_TS_REFUSES[0]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    const before = await Promise.all([42, 43, 44, 45].map(rowState));
+    // The shape of rfp-approving's hold upsert (ON CONFLICT ... SET target_url = EXCLUDED.target_url, status = 'pending'):
+    // the same row id now carries the corrected URL.
+    await pg.query(`UPDATE bidboard_callback_outbox SET target_url = $1, status = 'pending' WHERE id = 41`, [VALID_URL]);
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    expect(fetchMock.mock.calls.map((c: any[]) => String(c[0]))).toEqual([VALID_URL]);
+    expect((await rowState(41)).status).toBe("sent");
+    expect(await Promise.all([42, 43, 44, 45].map(rowState))).toEqual(before);
+  });
+
+  // Runs LAST: vi.resetModules() is the restart, so every later import in this file gets fresh in-process state.
+  it("restart: the remembered pairs reset, the 5 released rows are found again, and the valid row is SENT within ceil(5 / 5) + 1 ticks", async () => {
+    for (const id of [21, 22, 23, 24, 25]) await insertDue(id, SQL_ADMITS_TS_REFUSES[id % 2]);
+    await insertDue(26, VALID_URL);
+    const before = await Promise.all([21, 22, 23, 24, 25].map(rowState));
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const first = await import("../server/sync/bidboard-callback-worker.ts");
+    await first.processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    vi.resetModules();
+    const restarted = await import("../server/sync/bidboard-callback-worker.ts");
+    expect(restarted).not.toBe(first);
+    await restarted.processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    await restarted.processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: SECRET });
+    expect(fetchMock.mock.calls.map((c: any[]) => String(c[0]))).toEqual([VALID_URL]);
+    expect((await rowState(26)).status).toBe("sent");
+    expect(await Promise.all([21, 22, 23, 24, 25].map(rowState))).toEqual(before);
+    // The alert dedupe is in-process too: ONE alert per process lifetime.
+    expect(refusals()).toHaveLength(2);
   });
 });
