@@ -216,6 +216,48 @@ describe("BidBoard callback outbox worker", () => {
     expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([["crm_signing_refused", "bidboard_callbacks", "url_refused"]]);
   });
 
+  // CodeRabbit 4536104331 on #130 (a4 ruling): a refusal's alert key is kept only after a CONFIRMED delivery, so a failed first
+  // alert cannot silence every later refusal for that signer + reason. raiseRfpCoreAlert reports delivered (true) / not (false).
+  it("(CodeRabbit 4536104331) a failed first alert delivery ⇒ the next refusal raises the alert again", async () => {
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]); // the due-row probe
+    signingAlertMock.mockResolvedValueOnce(false as any).mockResolvedValue(true as any);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    expect(signingAlertMock.mock.calls.map((c) => [c[0], c[1].signer, c[1].reason])).toEqual([
+      ["crm_signing_refused", "bidboard_callbacks", "secret_short"],
+      ["crm_signing_refused", "bidboard_callbacks", "secret_short"],
+    ]);
+  });
+
+  it("(guard, CodeRabbit 4536104331) after a DELIVERED alert a repeat refusal is deduped", async () => {
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]);
+    signingAlertMock.mockResolvedValue(true as any);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    await processBidBoardCallbackOutbox({ fetchImpl: fetchMock as any, secret: "s".repeat(31) });
+    expect(signingAlertMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("(guard, CodeRabbit 4536104331) an alert that throws never escapes the worker and never prints the secret", async () => {
+    const shortSecret = "synthetic-short-secret-f130";
+    dbExecuteMock.mockResolvedValue([{ id: 1 }]);
+    signingAlertMock.mockRejectedValue(new Error("synthetic alert store down"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { processBidBoardCallbackOutbox } = await import("../server/sync/bidboard-callback-worker.ts");
+      await expect(processBidBoardCallbackOutbox({ fetchImpl: vi.fn() as any, secret: shortSecret })).resolves.toEqual({ processed: 0, sent: 0, failed: 0 });
+      await expect(processBidBoardCallbackOutbox({ fetchImpl: vi.fn() as any, secret: shortSecret })).resolves.toEqual({ processed: 0, sent: 0, failed: 0 });
+      expect(JSON.stringify([...warn.mock.calls, ...error.mock.calls])).not.toContain(shortSecret);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
   it("(SIGNING-HARDENING r1) http://localhost:3001 and http://127.0.0.1:3001 are allowed: the callback is sent there, signed v2", async () => {
     for (const base of ["http://localhost:3001", "http://127.0.0.1:3001"]) {
       vi.resetModules();
