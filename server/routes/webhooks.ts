@@ -8,6 +8,16 @@ import { processHubspotWebhookForProcore } from "../hubspot-procore-sync";
 import { mapProcoreStageToHubspot, resolveHubspotStageId, findOrCreateMappingByProjectNumber, getTerminalStageGuard } from "../procore-hubspot-sync";
 import { handleProcoreProjectWebhook } from "../webhooks/procore-webhook";
 import { evaluateWebhookPortfolioPhase2Gate, getWebhookMigrationModeConfig, isMigrationMode, logWebhookSuppressedAction } from "../webhooks/migration-mode";
+import {
+  MANUAL_PREFIX,
+  REPLAYABLE_PREFIX,
+  hubspotObjectType,
+  isHubspotDealStageEvent,
+  raiseHubspotStageTriggerAlert,
+  rfpRequestFaultMessage,
+  stageTriggerFailure,
+  stageTriggerThrowMessage,
+} from "../webhooks/stage-trigger";
 import { recordWebhookRoleEvent } from "./settings";
 import { markProjectWebhookUpdated } from "../procore-rate-limiter";
 import { asyncHandler } from "../lib/async-handler";
@@ -110,7 +120,7 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
 
         let hubspotProcessingError: string | null = null;
         const eventType = event.subscriptionType || event.eventType || "";
-        const objectType = event.objectType || (eventType.startsWith("deal.") ? "deal" : eventType.startsWith("contact.") ? "contact" : eventType.startsWith("company.") ? "company" : "");
+        const objectType = hubspotObjectType(event); // the same rule the replay uses (F-181)
         const objectId = String(event.objectId || "");
 
         // Capture previous stage BEFORE deal sync overwrites it (HubSpot has already updated the deal; our DB still has old stage)
@@ -175,15 +185,32 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
                 const { createRfpApprovalRequest } = await import("../rfp-approval");
                 const result = await createRfpApprovalRequest(objectId);
                 console.log(`[hubspot-webhook] RFP approval request for deal ${objectId}: ${result.success ? 'created' : result.error}`);
+                // F-181: a fault (never a refusal) fails the webhook, replayably: the request is dedupe-safe on replay.
+                if (!result.success && result.fault) {
+                  hubspotProcessingError = rfpRequestFaultMessage(objectId, result.error);
+                  await raiseHubspotStageTriggerAlert("rfp_request_fault", { dealId: objectId, stage: newValue, webhookLogId: webhookLog.id, error: result.error || "unknown error" });
+                }
               } catch (rfpErr: any) {
                 console.error(`[hubspot-webhook] RFP approval error for deal ${objectId}:`, rfpErr.message);
+                hubspotProcessingError = rfpRequestFaultMessage(objectId, rfpErr?.message);
+                await raiseHubspotStageTriggerAlert("rfp_request_fault", { dealId: objectId, stage: newValue, webhookLogId: webhookLog.id, error: rfpErr?.message ?? String(rfpErr) });
               }
             } else {
               try {
                 const { processDealStageChange } = await import("../hubspot-bidboard-trigger");
-                await processDealStageChange(objectId, newValue);
+                // F-181: a failure fails the webhook (internal only: HubSpot still gets 200) instead of vanishing.
+                const stageFailure = stageTriggerFailure(objectId, await processDealStageChange(objectId, newValue));
+                if (stageFailure) {
+                  console.error(`[hubspot-bidboard] Stage change failed for deal ${objectId}: ${stageFailure.errorMessage}`);
+                  hubspotProcessingError = stageFailure.errorMessage;
+                  if (stageFailure.alert) {
+                    await raiseHubspotStageTriggerAlert("stage_trigger_failed", { dealId: objectId, stage: newValue, webhookLogId: webhookLog.id, error: stageFailure.errorMessage });
+                  }
+                }
               } catch (stageErr: any) {
                 console.error(`[hubspot-bidboard] Stage change error for deal ${objectId}:`, stageErr.message);
+                hubspotProcessingError = stageTriggerThrowMessage(objectId, stageErr);
+                await raiseHubspotStageTriggerAlert("stage_trigger_failed", { dealId: objectId, stage: newValue, webhookLogId: webhookLog.id, error: stageErr?.message ?? String(stageErr) });
               }
             }
             // Send deal stage change email to assigned deal members (deal owner)
@@ -1396,6 +1423,16 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
     if (log.status !== "failed") return res.status(400).json({ error: `Webhook is in '${log.status}' status, only 'failed' webhooks can be replayed` });
     if (!log.payload) return res.status(400).json({ error: "No payload stored for this webhook" });
     if (log.retryCount >= log.maxRetries) return res.status(400).json({ error: `Max retries (${log.maxRetries}) exceeded` });
+    // F-181: a failed HubSpot deal-stage event replays ONLY when its failure was recorded as replayable (no Procore project can
+    // exist). "manual:" or no prefix (fail closed) is refused here, before the row is touched. Other webhook kinds: as before.
+    if (log.source === "hubspot" && isHubspotDealStageEvent(log.payload)) {
+      if (typeof log.errorMessage !== "string" || !log.errorMessage.startsWith(REPLAYABLE_PREFIX)) {
+        return res.status(400).json({ error: `${MANUAL_PREFIX}this stage-change webhook is not replayable; resolve it by hand (${log.errorMessage || "no failure class recorded"})` });
+      }
+      if (await isHubspotRfpStage(String((log.payload as any).propertyValue || "")) && process.env.HUBSPOT_RFP_TRIGGER_ENABLED === "false") {
+        return res.status(400).json({ error: "HubSpot RFP trigger is disabled (HUBSPOT_RFP_TRIGGER_ENABLED=false); not replayed" });
+      }
+    }
 
     // Increment retry count and reset to processing
     await storage.updateWebhookLog(id, {
@@ -1405,19 +1442,27 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
     });
 
     // Re-process based on source
+    let replayNote: string | null = null;
     try {
       if (log.source === "hubspot") {
         const event = log.payload as any;
         const eventType = event.subscriptionType || event.eventType || "";
-        const objectType = event.objectType || "";
+        const objectType = hubspotObjectType(event); // F-181: v3 events carry no objectType; was `event.objectType || ""`
         const objectId = String(event.objectId || "");
 
         if (objectType === "deal") {
           try { await processHubspotWebhookForProcore(eventType, objectType, objectId); } catch (e) { console.error('[webhook] processHubspotWebhookForProcore failed during replay:', (e as Error).message); }
+          // Codex 4535379047 on #131: the refresh's result is kept; it returns {success:false} on failure rather than throwing.
+          let refresh: { success: boolean; error?: string } = { success: false, error: "no refresh result" };
           try {
             const { syncSingleHubSpotDeal } = await import("../hubspot");
-            await syncSingleHubSpotDeal(objectId);
-          } catch (e) { console.error('[webhook] syncSingleHubSpotDeal failed during replay:', (e as Error).message); }
+            refresh = (await syncSingleHubSpotDeal(objectId)) ?? refresh;
+          } catch (e) {
+            console.error('[webhook] syncSingleHubSpotDeal failed during replay:', (e as Error).message);
+            refresh = { success: false, error: (e as Error).message };
+          }
+          // F-181: re-run the stage trigger (never the stage-change email). Throws, with its replay class, if it fails again.
+          if (isHubspotDealStageEvent(event)) replayNote = await replayHubspotStageTrigger(objectId, String(event.propertyValue || ""), refresh);
         }
       } else if (log.source === "procore") {
         const event = log.payload as any;
@@ -1438,10 +1483,50 @@ export function registerWebhookRoutes(app: Express, requireAuth?: RequestHandler
       }
 
       await storage.updateWebhookLog(id, { status: "processed", processedAt: new Date(), errorMessage: null });
-      res.json({ success: true, message: "Webhook replayed successfully" });
+      res.json({ success: true, message: replayNote ? `Webhook replayed: ${replayNote}` : "Webhook replayed successfully" });
     } catch (replayErr: any) {
       await storage.updateWebhookLog(id, { status: "failed", errorMessage: replayErr.message, processedAt: new Date() });
       res.status(500).json({ success: false, error: replayErr.message });
     }
   }));
+}
+
+/** F-181: the live handler's RFP-stage rule (a resolved stage name or a stage id containing "rfp"). */
+async function isHubspotRfpStage(newValue: string): Promise<boolean> {
+  const resolved = await resolveHubspotStageId(newValue);
+  return (resolved?.stageName || newValue).toLowerCase().includes("rfp") || newValue.toLowerCase().includes("rfp");
+}
+
+/**
+ * F-181: replay a failed HubSpot deal-stage trigger, only while the deal (as the replay's own deal sync just refreshed it) is
+ * still at the event's stage: a late replay must not create a project, or a request and its approver email, for a deal that
+ * moved on (Codex 4535379041: the check covers BOTH branches). A refresh that did not succeed leaves the stage unverified, so
+ * nothing runs and the row stays failed + replayable (Codex 4535379047). The RFP stage re-runs createRfpApprovalRequest
+ * (dedupe-safe: a pending request returns its token, so the approvers still get exactly one email); any other stage re-runs
+ * processDealStageChange. Returns a note for the response, or throws with the failure's replay class.
+ */
+async function replayHubspotStageTrigger(dealId: string, newValue: string, refresh: { success: boolean; error?: string }): Promise<string | null> {
+  if (!refresh.success) {
+    throw new Error(`${REPLAYABLE_PREFIX}the deal's current stage could not be verified (HubSpot refresh failed: ${refresh.error || "unknown error"}); the stage trigger was not re-run`);
+  }
+  const deal = await storage.getHubspotDealByHubspotId(dealId);
+  if (!deal || String(deal.dealStage ?? "").toLowerCase() !== newValue.toLowerCase()) {
+    return `stage moved on (now ${deal?.dealStageName || deal?.dealStage || "unknown"}); the stage trigger was not re-run`;
+  }
+  if (await isHubspotRfpStage(newValue)) {
+    const { createRfpApprovalRequest } = await import("../rfp-approval");
+    const result = await createRfpApprovalRequest(dealId);
+    if (!result.success && result.fault) throw new Error(rfpRequestFaultMessage(dealId, result.error));
+    return null;
+  }
+  const { processDealStageChange } = await import("../hubspot-bidboard-trigger");
+  let outcome: Awaited<ReturnType<typeof processDealStageChange>>;
+  try {
+    outcome = await processDealStageChange(dealId, newValue);
+  } catch (err: any) {
+    throw new Error(stageTriggerThrowMessage(dealId, err));
+  }
+  const failure = stageTriggerFailure(dealId, outcome);
+  if (failure) throw new Error(failure.errorMessage);
+  return null;
 }

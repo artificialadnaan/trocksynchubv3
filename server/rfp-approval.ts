@@ -124,7 +124,8 @@ export type CreateRfpApprovalRequestResult =
         status: string;
       };
     }
-  | { success: false; statusCode?: number; error: string };
+  // F-181: `fault` marks a caught exception (a HubSpot / DB / template read failure), never a refusal; the CRM route does not surface it.
+  | { success: false; statusCode?: number; error: string; fault?: true };
 
 
 export async function buildSourceDealUrl(sourceSystem: SourceSystem, sourceDealId: string): Promise<string | null> {
@@ -927,18 +928,24 @@ export function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: 
   };
 }
 
-async function sendRfpReviewEmails(params: {
-  requestId: number;
+type PreparedRfpReviewEmails = { recipients: string[]; subject: string; htmlBody: string };
+
+/**
+ * F-181: every read the review email needs (the template, the recipients) and its render, run BEFORE the request is inserted.
+ * A fault here leaves no row, so a retry / webhook replay creates the request and sends once; after the insert only the
+ * per-recipient sends (each in its own try) and the audit write remain, and both come after the email went out.
+ */
+async function prepareRfpReviewEmails(params: {
   token: string;
   input: NormalizedRfpRequestInput;
   dealData: Record<string, any>;
   ownerName: string;
   sourceDealUrl: string | null;
-}): Promise<string[]> {
+}): Promise<PreparedRfpReviewEmails> {
   const template = await storage.getEmailTemplate('rfp_review');
   if (!template || !template.enabled) {
     log('[rfp-approval] RFP review email template is disabled', 'rfp');
-    return [];
+    return { recipients: [], subject: '', htmlBody: '' };
   }
 
   const appUrl = process.env.APP_URL || 'http://localhost:5000';
@@ -1067,6 +1074,14 @@ async function sendRfpReviewEmails(params: {
   const effectiveProjectType = resolveEffectiveRfpProjectType(params.dealData);
   const rfpRecipients = await getRfpReviewRecipients(effectiveProjectType, params.input.sourceSystem);
   console.log(`[rfp-approval] Project type: ${effectiveProjectType || 'none'}, recipients: ${rfpRecipients.join(', ')}`);
+  return { recipients: rfpRecipients, subject, htmlBody };
+}
+
+async function sendRfpReviewEmails(
+  prepared: PreparedRfpReviewEmails,
+  params: { token: string; input: NormalizedRfpRequestInput },
+): Promise<string[]> {
+  const { recipients: rfpRecipients, subject, htmlBody } = prepared;
   for (const recipient of rfpRecipients) {
     try {
       const result = await sendEmail({
@@ -1203,6 +1218,13 @@ export async function createRfpApprovalRequestFromNormalizedInput(
       ownerEmail: rawOwnerInfo.ownerEmail || '',
     };
     const dealData = normalizedDealData(input, ownerInfo, sourceDealUrl);
+    const reviewEmails = await prepareRfpReviewEmails({
+      token,
+      input,
+      dealData,
+      ownerName: ownerInfo.ownerName || '',
+      sourceDealUrl,
+    });
 
     let created;
     try {
@@ -1241,14 +1263,7 @@ export async function createRfpApprovalRequestFromNormalizedInput(
       throw error;
     }
 
-    const rfpRecipients = await sendRfpReviewEmails({
-      requestId: created.id,
-      token,
-      input,
-      dealData,
-      ownerName: ownerInfo.ownerName || '',
-      sourceDealUrl,
-    });
+    const rfpRecipients = await sendRfpReviewEmails(reviewEmails, { token, input });
 
     await storage.createAuditLog({
       action: 'rfp_approval_request_created',
@@ -1269,7 +1284,7 @@ export async function createRfpApprovalRequestFromNormalizedInput(
     return { success: true, requestId: created.id, token, status: created.status };
   } catch (e: any) {
     console.error(`[rfp-approval] Error creating normalized approval request for ${input.sourceSystem} deal ${input.sourceDealId}:`, e.message);
-    return { success: false, error: e.message };
+    return { success: false, error: e.message, fault: true };
   }
 }
 
@@ -1319,7 +1334,7 @@ export async function buildNormalizedRfpRequestFromHubSpotDeal(
 
 export async function createRfpApprovalRequest(
   hubspotDealId: string
-): Promise<{ success: boolean; token?: string; error?: string }> {
+): Promise<{ success: boolean; token?: string; error?: string; fault?: true }> {
   try {
     // S0b-2a: an `approving` request (mid-create) blocks a new one exactly like a pending one.
     const existing = (await storage.getRfpApprovalRequestByDealId(hubspotDealId))
@@ -1334,10 +1349,12 @@ export async function createRfpApprovalRequest(
     if (result.success) {
       return { success: true, token: result.token };
     }
+    // F-181: a fault (not a refusal) is passed through, so the HubSpot webhook marks it failed and replayable.
+    if ('fault' in result && result.fault) return { success: false, error: result.error, fault: true };
     return { success: false, error: 'error' in result ? result.error : result.message };
   } catch (e: any) {
     console.error(`[rfp-approval] Error creating approval request for deal ${hubspotDealId}:`, e.message);
-    return { success: false, error: e.message };
+    return { success: false, error: e.message, fault: true };
   }
 }
 

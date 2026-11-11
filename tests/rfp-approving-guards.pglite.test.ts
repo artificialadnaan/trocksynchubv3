@@ -68,6 +68,12 @@ const DDL = `
     sent_at timestamp
   );
   CREATE UNIQUE INDEX idx_bidboard_callback_outbox_rfp_request ON bidboard_callback_outbox(rfp_approval_request_id);
+  -- F-181: the review-email template read now runs before the insert (prod has this table); empty = no template = no email.
+  CREATE TABLE email_templates (
+    id serial PRIMARY KEY, template_key text NOT NULL UNIQUE, name text NOT NULL, description text, subject text NOT NULL,
+    body_html text NOT NULL, enabled boolean NOT NULL DEFAULT true, variables jsonb, created_at timestamp DEFAULT now(),
+    updated_at timestamp DEFAULT now()
+  );
 `;
 const migration = (file: string) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
 
