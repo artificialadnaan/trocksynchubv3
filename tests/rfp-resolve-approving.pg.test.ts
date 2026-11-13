@@ -57,6 +57,7 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 
 const { storage } = await import("../server/storage.ts");
 const { processRfpApproval, finaliseApprovingFound, recreateApprovingRequest } = await import("../server/rfp-approval.ts");
+const { PROCORE_CREATE_RETIRED_ERROR } = await import("../server/sync/procore-create-retired.ts");
 const { parseResolveArgs, dryRunResolveApproving, applyResolveApproving } = await import("../server/sync/rfp-resolve-approving.ts");
 const { runRfpApprovingStuckSweep, RFP_APPROVING_STUCK_KEY_PREFIX } = await import("../server/sync/rfp-approving-stuck.ts");
 
@@ -550,34 +551,19 @@ describe.skipIf(!BASE_URL)("--apply", () => {
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it("recreate (B), HubSpot-sourced: ONE create with exactly the recorded inputs and NO HubSpot write (create step only); the row ends approved; one audit row", async () => {
+  // Procore project creation is retired (owner 2026-11-13, b0cb0c4f): --resolution recreate refuses with the retirement message,
+  // calls no create and no HubSpot write, records the attempt, and leaves the request approving for a person.
+  it("recreate (B) is RETIRED: refused with the retirement message, no create, no HubSpot write; the row stays approving; the attempt is recorded", async () => {
     const { id } = await seed({ system: "hubspot", recorded: { edited_fields: { dealname: "Synthetic Resolve Deal (edited)" } } });
     const res = await applyResolveApproving({ id, apply: true, resolution: "recreate" }, deps(procoreStub({})).d as any);
-    expect(res.applied).toBe(true);
-    expect(createMock).toHaveBeenCalledTimes(1);
-    const args = createMock.mock.calls[0][0];
-    expect(args).toMatchObject({ sourceSystem: "hubspot", sourceDealId: HS_DEAL });
-    expect(args.options.editedFieldsOverride).toMatchObject({ dealname: "Synthetic Resolve Deal (edited)" });
+    expect(res).toMatchObject({ applied: false, refused: PROCORE_CREATE_RETIRED_ERROR });
+    expect(createMock).not.toHaveBeenCalled();
     expect(hubspotUpdateMock).not.toHaveBeenCalled();
     expect(hubspotStageMock).not.toHaveBeenCalled();
     const after = await writable();
-    expect(after.requests).toEqual([{ id, status: "approved", bidboard_project_id: "900333", approved_by: APPROVER }]);
-    expect(after.audit).toEqual([{ action: "rfp_resolve_approving" }]);
-  });
-
-  it.each([
-    ["fails", () => createMock.mockResolvedValueOnce({ success: false, error: "Synthetic BidBoard failure" })],
-    ["is unconfirmed", () => createMock.mockResolvedValueOnce({ success: false, error: "Could not confirm project creation" })],
-    ["throws", () => createMock.mockRejectedValueOnce(new Error("Synthetic Playwright crash"))],
-  ])("recreate whose create %s ⇒ the request STAYS approving with no project and the error is returned, so it can be resolved again (CodeRabbit 4529556627)", async (_label, arrange) => {
-    const { id } = await seed({ system: "hubspot" });
-    arrange();
-    const res = await recreateApprovingRequest(id);
-    expect(res.success).toBe(false);
-    expect(createMock).toHaveBeenCalledTimes(1);
-    const after = await writable();
     expect(after.requests).toEqual([{ id, status: "approving", bidboard_project_id: null, approved_by: null }]);
     expect(after.mappings).toEqual([]);
+    expect(after.audit).toEqual([{ action: "rfp_resolve_approving" }]);
   });
 
   it("storage's request update with an expectedStatus writes nothing when the row moved on (the reset's compare-and-set; CodeRabbit 4534112622)", async () => {
@@ -598,120 +584,28 @@ describe.skipIf(!BASE_URL)("--apply", () => {
   });
 });
 
-describe.skipIf(!BASE_URL)("recreateApprovingRequest guards (the create step under the lock; d9 QA (b) / (c))", () => {
-  it("the inputs not recorded ⇒ refused 'original approval inputs not recorded'; no create; the row stays approving", async () => {
+describe.skipIf(!BASE_URL)("recreateApprovingRequest is retired with Procore project creation", () => {
+  it("refuses with the retirement message whatever the row (inputs missing, steps not done, an upload, a Procore or Core footprint): no create, the row stays approving", async () => {
     const { id } = await seed({ recorded: { approved_by: null } });
-    const res = await recreateApprovingRequest(id);
-    expect(res).toMatchObject({ success: false, error: expect.stringMatching(/original approval inputs not recorded/) });
-    expect(createMock).not.toHaveBeenCalled();
-    expect((await writable()).requests[0].status).toBe("approving");
-  });
-
-  it("hubspot_done_at NULL ⇒ refused; no create", async () => {
-    const { id } = await seed({ hubspotDone: false });
-    expect(await recreateApprovingRequest(id)).toMatchObject({ success: false, error: expect.stringMatching(/pre-create steps/) });
-    expect(createMock).not.toHaveBeenCalled();
-  });
-
-  it("a recorded UPLOADED attachment (its bytes are gone) ⇒ refused; no create", async () => {
-    const { id } = await seed({ recorded: { approved_attachments: { override: [{ name: "synthetic-upload.pdf", _new: true }] } } });
-    expect(await recreateApprovingRequest(id)).toMatchObject({ success: false, error: expect.stringMatching(/uploaded attachment/) });
-    expect(createMock).not.toHaveBeenCalled();
-  });
-
-  it("a Procore footprint that appeared after the dry-run (a sync mapping) ⇒ refused under the lock; no create", async () => {
-    const { id } = await seed();
     await sql(`INSERT INTO sync_mappings (source_system, source_deal_id, bidboard_project_id) VALUES ('trock_crm', $1, '900228')`, [DEAL]);
-    expect(await recreateApprovingRequest(id)).toMatchObject({ success: false, error: expect.stringMatching(/footprint/) });
+    expect(await recreateApprovingRequest(id)).toEqual({ success: false, error: PROCORE_CREATE_RETIRED_ERROR });
     expect(createMock).not.toHaveBeenCalled();
     expect((await writable()).requests[0].status).toBe("approving");
-  });
-
-  it("a Core footprint ⇒ no create; the request is held_cross_destination (as on the normal path)", async () => {
-    const { id } = await seed();
-    const cmd = await sql(
-      `INSERT INTO bidboard_create_outbox (source_system, source_deal_id, source_event_id, project_number, payload, status, destination)
-       VALUES ('trock_crm', $1, 'synthetic-evt-3', $2, '{}'::jsonb, 'routed_core', 'core') RETURNING id`,
-      [DEAL, NUMBER],
-    );
-    await sql(
-      `INSERT INTO rfp_core_create_outbox (command_id, source_system, source_deal_id, source_event_id, project_number, status, e2_ever_sent)
-       VALUES ($1, 'trock_crm', $2, 'synthetic-evt-3', $3, 'sent', true)`,
-      [cmd.rows[0].id, DEAL, NUMBER],
-    );
-    expect((await recreateApprovingRequest(id)).success).toBe(false);
-    expect(createMock).not.toHaveBeenCalled();
-    expect((await writable()).requests[0].status).toBe("held_cross_destination");
   });
 });
 
-describe.skipIf(!BASE_URL)("processRfpApproval records the original approval's inputs with the claim (d9 QA (a))", () => {
-  const sideRow = async (id: number) =>
-    (await sql(`SELECT approved_by, edited_fields, approved_attachments, force, hubspot_done_at IS NOT NULL AS hubspot_done FROM rfp_approval_approving WHERE request_id = $1`, [id])).rows[0];
-
-  it("email path: approved_by, edited_fields, approved_attachments {override:null}, force false and hubspot_done_at are set by the time the create starts", async () => {
+describe.skipIf(!BASE_URL)("an approval writes no claim row now that there is no Procore create to guard", () => {
+  it("an email approval goes pending → approved with its inputs on the request itself; no rfp_approval_approving row; no create", async () => {
     const { id, token } = await seed({ status: "pending", minutesAgo: null, dealData: { dealname: NAME, project_number: NUMBER, project_types: "2" } });
-    let seen: any;
-    createMock.mockImplementationOnce(async () => {
-      seen = await sideRow(id);
-      return { success: true, projectId: "900334" };
-    });
-    await processRfpApproval(token, { dealname: "Synthetic Resolve Deal (edited)" }, APPROVER);
-    expect(seen).toEqual({
-      approved_by: APPROVER,
-      edited_fields: { dealname: "Synthetic Resolve Deal (edited)" },
-      approved_attachments: { override: null },
-      force: false,
-      hubspot_done: true,
-    });
-  });
-
-  it("an attachments override is recorded by name / url, an uploaded file as _new (no bytes)", async () => {
-    const { id, token } = await seed({ status: "pending", minutesAgo: null, dealData: { dealname: NAME, project_number: NUMBER, project_types: "2" } });
-    let seen: any;
-    createMock.mockImplementationOnce(async () => {
-      seen = await sideRow(id);
-      return { success: true, projectId: "900335" };
-    });
-    await processRfpApproval(token, {}, APPROVER, {
+    const res = await processRfpApproval(token, { dealname: "Synthetic Resolve Deal (edited)" }, APPROVER, {
       attachmentsOverride: [{ name: "synthetic-a.pdf", url: "https://files.example.test/synthetic-a.pdf" }] as any,
-      newFiles: [{ originalname: "synthetic-new.pdf", buffer: Buffer.from("synthetic"), mimetype: "application/pdf", size: 9 }] as any,
     });
-    expect(seen?.approved_attachments).toEqual({
-      override: [
-        { name: "synthetic-a.pdf", url: "https://files.example.test/synthetic-a.pdf", _new: false },
-        { name: "synthetic-new.pdf", _new: true },
-      ],
-    });
-  });
-
-  it("a HubSpot field update that FAILS ⇒ hubspot_done_at stays NULL (recreate will refuse); the create itself proceeds as today", async () => {
-    const r = await sql(
-      `INSERT INTO rfp_approval_requests (source_system, source_deal_id, project_number, hubspot_deal_id, token, token_expires_at, status, deal_data)
-       VALUES ('hubspot', '910000008', $1, '910000008', 'synthetic-resolve-hs-token', now() + interval '7 days', 'pending', $2::jsonb) RETURNING id`,
-      [NUMBER, JSON.stringify({ dealname: NAME, project_number: NUMBER, project_types: "2" })],
-    );
-    const id = r.rows[0].id as number;
-    hubspotUpdateMock.mockResolvedValue({ success: false, message: "synthetic failure" });
-    let seen: any;
-    createMock.mockImplementationOnce(async () => {
-      seen = await sideRow(id);
-      return { success: true, projectId: "900336" };
-    });
-    await processRfpApproval("synthetic-resolve-hs-token", { dealname: "Synthetic Resolve Deal (edited)" }, APPROVER);
-    expect(createMock).toHaveBeenCalledTimes(1);
-    expect(seen).toMatchObject({ approved_by: APPROVER, hubspot_done: false });
-  });
-
-  it("override path (force): force true is recorded", async () => {
-    const { id, token } = await seed({ status: "override_approving", minutesAgo: null, dealData: { dealname: NAME, project_number: NUMBER, project_types: "2" } });
-    let seen: any;
-    createMock.mockImplementationOnce(async () => {
-      seen = await sideRow(id);
-      return { success: true, projectId: "900337" };
-    });
-    await processRfpApproval(token, {}, APPROVER, { force: true });
-    expect(seen).toMatchObject({ approved_by: APPROVER, force: true });
+    expect(res).toEqual({ success: true });
+    expect(createMock).not.toHaveBeenCalled();
+    const row = (await sql(`SELECT status, approved_by, edited_fields, approved_attachments FROM rfp_approval_requests WHERE id = $1`, [id])).rows[0];
+    expect(row).toMatchObject({ status: "approved", approved_by: APPROVER, edited_fields: { dealname: "Synthetic Resolve Deal (edited)" } });
+    expect(row.approved_attachments).toEqual([{ name: "synthetic-a.pdf", url: "https://files.example.test/synthetic-a.pdf", _new: false }]);
+    expect((await sql(`SELECT count(*)::int AS n FROM rfp_approval_approving WHERE request_id = $1`, [id])).rows[0].n).toBe(0);
   });
 });
 
@@ -741,13 +635,13 @@ describe.skipIf(!BASE_URL)("recreate needs a stored token that outlives the crea
     expect(renewCalls()).toBe(renewalsBefore);
   });
 
-  it("above the threshold ⇒ recreate proceeds: ONE create, the row ends approved, 0 renewals", async () => {
+  it("above the threshold ⇒ recreate is still refused (retired): no create, the row stays approving, 0 renewals", async () => {
     const { id } = await seed({ system: "hubspot" });
     const renewalsBefore = renewCalls();
     const res = await applyResolveApproving({ id, apply: true, resolution: "recreate" }, deps(procoreStub({}), tokenLeft(40 * 60_000)).d as any);
-    expect(res.applied).toBe(true);
-    expect(createMock).toHaveBeenCalledTimes(1);
-    expect((await writable()).requests).toEqual([{ id, status: "approved", bidboard_project_id: "900333", approved_by: APPROVER }]);
+    expect(res).toMatchObject({ applied: false, refused: PROCORE_CREATE_RETIRED_ERROR });
+    expect(createMock).not.toHaveBeenCalled();
+    expect((await writable()).requests).toEqual([{ id, status: "approving", bidboard_project_id: null, approved_by: null }]);
     expect(renewCalls()).toBe(renewalsBefore);
   });
 

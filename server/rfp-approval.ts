@@ -1761,35 +1761,14 @@ export async function finaliseApprovingFound(
 }
 
 /**
- * Runbook r5 §3B (`recreate`; d9 QA), for scripts/rfp-resolve-approving.ts only: re-enter the CREATE STEP once, under the deal
- * lock (lock → the footprint check, excluding this request's own `approving` row → Playwright), with exactly the inputs the
- * original approval recorded on rfp_approval_approving. No HubSpot writes: the pre-create steps already ran (hubspot_done_at).
- * Refuses when an input is not recorded ("original approval inputs not recorded"), when hubspot_done_at is NULL, or on any
- * footprint. The row stays `approving` until the create's normal end.
+ * RETIRED with Procore project creation (owner 2026-11-13, b0cb0c4f): the resolver's `--resolution recreate` used to replay a stuck
+ * request's Procore create. There is nothing left to create, so it refuses, writes nothing and calls no Procore path; a stuck
+ * `approving` request is resolved `found` against an existing project, or its job is handed to Core by a person.
  */
 export async function recreateApprovingRequest(
-  requestId: number,
+  _requestId: number,
 ): Promise<{ success: boolean; error?: string; bidboardProjectId?: string }> {
-  try {
-    const { readApprovingFacts, approvingRecreateRefusal } = await import('./sync/rfp-approving');
-    const facts = await readApprovingFacts(requestId);
-    if (!facts) return { success: false, error: 'Approval request not found' };
-    // Checked here for a clear answer, and again under the lock by the re-claim.
-    const refusal = approvingRecreateRefusal(facts);
-    if (refusal || !facts.recorded) return { success: false, error: `Recreate refused: ${refusal ?? 'original approval inputs not recorded'}` };
-    const override = facts.recorded.approvedAttachments?.override ?? null;
-    const options = override ? { attachmentsOverride: override.map((a) => ({ name: a.name, url: a.url })) } : undefined;
-    const editedFields = Object.fromEntries(Object.entries(facts.recorded.editedFields).map(([k, v]) => [k, String(v)]));
-    const approvedBy = facts.recorded.approvedBy;
-    // The create step has no overall timeout, so it runs with Procore token renewal OFF: a stored token that runs short
-    // fails the step closed instead of renewing (successor ec69 residual; the resolver's 35-min floor gates the start).
-    const { withoutProcoreTokenRenewal } = await import('./procore');
-    return await withoutProcoreTokenRenewal(`the recreate of RFP request ${requestId}`, () =>
-      processRfpApproval(facts.token, editedFields, approvedBy, options, { requestId }),
-    );
-  } catch (e: any) {
-    return { success: false, error: e?.message ?? String(e) };
-  }
+  return { success: false, error: PROCORE_CREATE_RETIRED_ERROR };
 }
 
 export async function processRfpDecline(
