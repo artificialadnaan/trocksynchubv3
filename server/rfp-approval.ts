@@ -1648,6 +1648,11 @@ export async function processRfpApproval(
         requestId: request.id, sourceSystem: identity.sourceSystem, sourceDealId, projectNumber: finalProjectNumber,
       });
       crmStep = { name: 'T-Rock Core service card', success: false, detail: 'NOT handed to Core: re-drive needed' };
+    } else if (isService && (coreHandoff?.status === 'failed' || coreHandoff?.status === 'dead')) {
+      // A REFUSED handoff (the payload failed Core's contract, a terminal Core refusal, or a delivery that gave up) has no card
+      // for Core to confirm either. Its own delivery alert has already fired (reportDelivery, terminal), so this only keeps
+      // the email from saying it reached Core (CodeRabbit on #136; a4 a4023987).
+      crmStep = { name: 'T-Rock Core service card', success: false, detail: 'NOT handed to Core: Core refused the job — correct the deal, then re-drive' };
     } else if (isService) {
       let told = false;
       if (identity.sourceSystem === 'trock_crm') {

@@ -108,6 +108,22 @@ describe("processRfpApproval with Procore project creation retired", () => {
     expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
   });
 
+  it.each(["failed", "dead"] as const)("CodeRabbit on #136: a REFUSED Core handoff (%s) stays approved and the email says it was NOT handed to Core", async (status) => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
+    vi.mocked(handOffServiceRfpApprovalToCore).mockResolvedValueOnce({ status });
+
+    const result = await processRfpApproval("synthetic-token-70", {}, "approver@example.test");
+
+    expect(result).toEqual({ success: true });
+    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(70, expect.objectContaining({ status: "approved" }), { expectedStatus: "pending" });
+    // The refusal's own delivery alert has already fired in the outbox; no second alert, and no CRM 'approved'.
+    expect(raiseRfpCoreAlert).not.toHaveBeenCalled();
+    expect(enqueueRfpApprovedCallbackIfCoreConfirmed).not.toHaveBeenCalled();
+    const html = String((vi.mocked(sendEmail).mock.calls.at(-1)?.[0] as any)?.htmlBody ?? "");
+    expect(html).toContain("NOT handed to Core: Core refused the job — correct the deal, then re-drive");
+    expect(html).not.toContain("Handed to Core; the CRM is told");
+  });
+
   it("keeps the estimator the approver selected: recorded on the request and handed to Core with the job", async () => {
     vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
 
