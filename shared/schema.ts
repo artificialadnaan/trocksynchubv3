@@ -1066,6 +1066,11 @@ export type RfpRequestStatus = typeof RFP_REQUEST_STATUSES[number];
 // state (a project may exist) that requires manual resolution rather than an unsafe auto-retry.
 export const RFP_OVERRIDE_APPROVING_STATUS = 'override_approving' as const;
 
+// A pending request whose review link expired, superseded by a new request for the same source deal or project number
+// (REQ 939, 2026-11-13). Nothing could approve or decline it any more (both refuse an expired link); leaving it 'pending'
+// made every re-send collide with it. Terminal: no route reads or moves an 'expired' row.
+export const RFP_EXPIRED_STATUS = 'expired' as const;
+
 // 0027 (S0b-2a; runbook r5): the email path's create-in-progress record. The `approving` STATUS lives on the request row; its
 // timestamps live here (not as request columns, which every drizzle request read would select before 0027 is applied).
 // started_at = the flip; submit_at = committed before createBidBoardProject starts (NULL ⇒ the create never started). Raw SQL only.

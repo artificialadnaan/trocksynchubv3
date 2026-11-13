@@ -1153,6 +1153,25 @@ function buildSourceDealPendingConflictResult(sourceSystem: string, sourceDealId
   };
 }
 
+/**
+ * REQ 939 (2026-11-13): a pending request whose review link has EXPIRED is dead (approve and decline both refuse it, and the
+ * digest drops it), yet its 'pending' status refused every re-send for the same project number or source deal: the
+ * collision check below and the idx_rfp_approval_pending_* indexes. A new request now supersedes it (pending → expired). The
+ * expiry test here only skips a pointless write; the conditional UPDATE in storage is the authority (still pending AND still
+ * expired at write time). A live pending request, and a legacy one with no expiry, still collide exactly as before.
+ */
+async function supersedeExpiredPendingRequests(input: NormalizedRfpRequestInput): Promise<void> {
+  const byProjectNumber = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending');
+  const bySourceDeal = await storage.getRfpApprovalRequestBySourceDealAndStatus(input.sourceSystem, input.sourceDealId, 'pending');
+  for (const request of [byProjectNumber, bySourceDeal]) {
+    if (!request || !isRfpApprovalRequestExpired(request)) continue;
+    const superseded = await storage.supersedeExpiredPendingRfpApprovalRequest(request.id);
+    if (superseded) {
+      log(`[rfp-approval] Request ${request.id} (link expired) superseded by a new request for ${input.sourceSystem} deal ${input.sourceDealId}`, 'rfp');
+    }
+  }
+}
+
 export async function createRfpApprovalRequestFromNormalizedInput(
   input: NormalizedRfpRequestInput
 ): Promise<CreateRfpApprovalRequestResult> {
@@ -1167,6 +1186,8 @@ export async function createRfpApprovalRequestFromNormalizedInput(
         idempotent: true,
       };
     }
+
+    await supersedeExpiredPendingRequests(input);
 
     const pendingConflict = await storage.getRfpApprovalRequestByProjectNumberAndStatus(input.deal.projectNumber, 'pending');
     if (pendingConflict) {
