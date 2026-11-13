@@ -46,6 +46,7 @@ import { randomDelay, takeScreenshot, withBrowserLock, withRetry, waitForNavigat
 // Static import is safe: bidboard-notes-flag has no imports of its own, so it cannot close the cycle
 // that forces bidboard-notes itself to be loaded dynamically at the call site.
 import { isBidBoardNotesEnabled } from "./bidboard-notes-flag";
+import { PROCORE_CREATE_RETIRED_ERROR, procoreCreateRetired } from "../sync/procore-create-retired";
 import { log } from "../log"; // never "../index": that boots the server, and the operator CLIs import this (Codex 4534051215 on #127)
 import { storage, type SourceSystem } from "../storage";
 
@@ -2173,6 +2174,9 @@ export async function createBidBoardProjectFromDeal(
   initialStage: string = "Estimate in Progress",
   options: CreateBidBoardProjectFromDealOptions = { syncDocuments: true }
 ): Promise<CreateBidBoardProjectFromDealResult> {
+  // Procore project creation is retired (owner 2026-11-13): refuse before the browser lock, a login or any Procore call.
+  // Every caller already handles { success:false } as a create that did not happen (no project id, nothing to adopt).
+  if (procoreCreateRetired()) return { success: false, error: PROCORE_CREATE_RETIRED_ERROR, beforeSubmit: true };
   return withBrowserLock("create-bidboard-project-from-deal", async () => {
     const args = typeof dealIdOrArgs === "string"
       ? {

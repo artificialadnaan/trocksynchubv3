@@ -23,6 +23,7 @@ import { randomDelay, takeScreenshot } from "./browser";
 import { log } from "../index";
 import { storage } from "../storage";
 import { handlePortfolioCreateGate, defaultResolverDeps } from "../portfolio-existence-resolver";
+import { PROCORE_CREATE_RETIRED_ERROR, procoreCreateRetired } from "../sync/procore-create-retired";
 import * as path from "path";
 import * as fs from "fs/promises";
 
@@ -1202,6 +1203,9 @@ export async function runPhase1BidBoardActions(
     // ── Step 2: Click ellipsis → Add to Portfolio ─────────────
     const step2Start = Date.now();
     try {
+      // "Add to Portfolio" CREATES a Procore portfolio project, and Procore project creation is retired (owner
+      // 2026-11-13). A project already in Portfolio (the branch above) still runs the rest of the automation.
+      if (procoreCreateRetired()) throw new Error(PROCORE_CREATE_RETIRED_ERROR);
       await page.keyboard.press("Escape");
       await randomDelay(500, 1000);
 

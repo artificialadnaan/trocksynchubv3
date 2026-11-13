@@ -32,11 +32,15 @@ import {
 import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox';
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
 import { RFP_APPROVING_STATUS } from './sync/rfp-approving';
-import type { ApprovingRecreateClaim } from './sync/rfp-approving';
+import { PROCORE_CREATE_RETIRED_ERROR } from './sync/procore-create-retired';
+import { enqueueRfpApprovedCallbackIfCoreConfirmed } from './sync/rfp-approved-callback';
 
 const RFP_ADMIN_EMAIL = 'adnaan.iqbal@gmail.com';
 const DEFAULT_HUBSPOT_PORTAL_ID = '45644695';
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** A non-service RFP approved by link has no T-Rock Core route, and Procore project creation is retired (owner 2026-11-13). */
+const NO_CORE_ROUTE_ERROR =
+  'Approved, but no project record was created: a non-service RFP approved by link has no T-Rock Core route, and Procore project creation is retired. Create the job in T-Rock Core.';
 
 export interface NormalizedRfpRequestInput {
   sourceSystem: 'hubspot' | 'trock_crm';
@@ -1384,22 +1388,6 @@ export interface RfpApprovalAttachmentOptions {
   newFiles: Array<{ buffer: Buffer; originalname: string; mimetype?: string; size?: number }>;
 }
 
-/**
- * The approval's attachment choice as the claim records it (S0b-2b, d9 QA (a)): null = no override (the deal's own files);
- * else the kept files by name / url, as the create step builds them, and each UPLOADED file by name only, `_new` (its bytes
- * are temporary, so recreate refuses a row that has one).
- */
-function recordedAttachmentsOverride(
-  options?: Partial<RfpApprovalAttachmentOptions>,
-): Array<{ name: string; url?: string; _new: boolean }> | null {
-  if (!options || !Array.isArray(options.attachmentsOverride)) return null;
-  const kept = options.attachmentsOverride
-    .filter((a) => !a._new && a.url)
-    .map((a) => ({ name: a.name || 'attachment', url: a.url, _new: false }));
-  const uploaded = (options.newFiles || []).map((f) => ({ name: f.originalname || 'attachment', _new: true }));
-  return [...kept, ...uploaded];
-}
-
 export async function processRfpApproval(
   token: string,
   editedFields: Record<string, string>,
@@ -1594,10 +1582,9 @@ export async function processRfpApproval(
       project_types: finalProjectTypeDigit,
     };
 
-    // Tell TROCK Core about the service job BEFORE the multi-minute Procore automation, so the card is
-    // in the service estimating lane immediately. FAIL-OPEN by construction: this never throws and its
-    // result is deliberately not branched on — a Core outage leaves a queued outbox row and the
-    // Procore create proceeds exactly as it did before.
+    // Tell TROCK Core about the service job: its card IS the job now that Procore project creation is retired. FAIL-OPEN
+    // by construction: this never throws and its result is not branched on. A Core outage leaves a queued outbox row
+    // (retried, and visible on the health dashboard), and the CRM is told 'approved' only once Core confirms the card.
     if (isService && !resume) {
       await handOffServiceRfpApprovalToCore({
         sourceSystem: identity.sourceSystem,
@@ -1610,271 +1597,61 @@ export async function processRfpApproval(
       });
     }
 
-    // RFP Phase 2 (CONTRACT v2.2 §10, path P3; d9 S0b-2a rulings): the DECISION + CLAIM, in ONE short locked transaction right
-    // before the Playwright create. Nothing is held across the HubSpot / CRM calls above. The email path flips pending → approving
-    // (the create-in-progress footprint); the override path must still be override_approving. A Core footprint for the deal holds
-    // the request (held_cross_destination + F1, alert), never a second record. 0027 absent ⇒ today's path; an errored probe ⇒
-    // fail closed (the row stays as it was, nothing is created, the alert names the real error).
-    const approvingModule = await import('./sync/rfp-approving');
-    // Read reclaimApprovingForRecreate ONLY on a replay: tests that mock this module with the legacy claim don't define it.
-    const { claimRfpRequestForCreate, markRfpApprovingSubmitted } = approvingModule;
-    const holdCallbackData = await buildBidBoardFailedCallbackData({
-      request,
-      sourceDealId,
-      projectNumber: finalProjectNumber,
-      error: 'cross_destination_hold',
-    });
-    const claimIds = { requestId: request.id, sourceSystem: identity.sourceSystem, sourceDealId };
-    let claim: ApprovingRecreateClaim;
-    try {
-      claim = resume
-        ? await approvingModule.reclaimApprovingForRecreate({
-            ...claimIds,
-            holdCallback: holdCallbackData ? { targetUrl: holdCallbackData.targetUrl, payload: holdCallbackData.payload } : null,
-          })
-        : await claimRfpRequestForCreate({
-        ...claimIds,
-        force,
-        holdCallback: holdCallbackData ? { targetUrl: holdCallbackData.targetUrl, payload: holdCallbackData.payload } : null,
-        recorded: {
-          approvedBy: approverEmail,
-          editedFields,
-          approvedAttachments: { override: recordedAttachmentsOverride(options) },
-          force,
-          hubspotDoneAt: preCreateStepsOk ? new Date() : null,
-        },
-      });
-    } catch (claimErr: any) {
-      const { raiseRfpCoreAlert } = await import('./sync/rfp-core-alert');
-      await raiseRfpCoreAlert('core_preflight_error', { ...claimIds, error: String(claimErr?.message ?? claimErr) });
-      return { success: false, error: `RFP create check failed (${claimErr?.message ?? claimErr}); nothing was created` };
-    }
-    if (claim.outcome === 'not_claimable') {
-      return { success: false, error: `Request already ${claim.status}` };
-    }
-    if (claim.outcome === 'refused') {
-      return { success: false, error: claim.error };
-    }
-    if (claim.outcome === 'held_cross_destination') {
-      const { raiseRfpCoreAlert } = await import('./sync/rfp-core-alert');
-      await raiseRfpCoreAlert('cross_destination_hold', { ...claimIds, heldDestination: 'procore', footprint: claim.footprint });
-      return { success: false, error: 'cross_destination_hold: this deal already has a Core Bid Board footprint' };
-    }
-    // The submit evidence (runbook r5): committed before createBidBoardProject starts; only for a claimed row.
-    const beforeCreate = claim.outcome === 'claimed' ? () => markRfpApprovingSubmitted(request.id) : undefined;
+    // PROCORE PROJECT CREATION IS RETIRED (owner 2026-11-13, b0cb0c4f; a4 afa14cfd). The approval no longer claims, creates
+    // or waits on a Procore Bid Board project:
+    //   - a SERVICE RFP's job is the Core card handed off above; the CRM is told the RFP is approved once Core confirms that
+    //     card (rfp-approved-callback.ts: here, when Core already has, or in markSent when it answers later);
+    //   - a NON-service RFP approved here has no Core destination on this path (Core's Bid Board takes CRM-vote approvals
+    //     only, rfp-destination.ts rule (c)), so a CRM request gets a FAILED callback that says so: visible and actionable
+    //     in the CRM, never a silent 'approved';
+    //   - a resolver replay (resume) of a request stuck `approving` has nothing left to create.
+    if (resume) return { success: false, error: PROCORE_CREATE_RETIRED_ERROR };
 
-    const TEMP_DIR = process.env.TEMP_DIR || '.playwright-temp';
-    const tempPaths: string[] = [];
-    let attachmentsToSync: Array<{ name: string; url?: string; localPath?: string; type?: string; size?: number }> | undefined;
-    if (options && Array.isArray(options.attachmentsOverride)) {
-      attachmentsToSync = [];
-      for (const a of options.attachmentsOverride) {
-        if (a._new) continue;
-        if (a.url) attachmentsToSync.push({ name: a.name || 'attachment', url: a.url });
-      }
-      for (let i = 0; i < (options.newFiles || []).length; i++) {
-        const f = options.newFiles![i];
-        await fs.mkdir(TEMP_DIR, { recursive: true });
-        const tmpPath = path.join(TEMP_DIR, `rfp-new-${randomUUID()}-${(f.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`);
-        await fs.writeFile(tmpPath, f.buffer);
-        tempPaths.push(tmpPath);
-        attachmentsToSync.push({ name: f.originalname || 'attachment', localPath: tmpPath, type: f.mimetype, size: f.size });
-      }
-      if (tempPaths.length > 0) {
-        log(`[rfp-approval] Stored ${tempPaths.length} new attachment(s) temporarily until BidBoard upload completes`, 'rfp');
-      }
+    // Files added at approval used to ride the Procore create (and its HubSpot copy); nothing stores them now, so they are
+    // named on the request and in the status email rather than silently dropped.
+    const newFileNames = (options?.newFiles || []).map((f) => f.originalname || 'attachment');
+    const approvedAttachmentsForStorage = [
+      ...(options?.attachmentsOverride || []).filter((a) => !a._new && a.url).map((a) => ({ name: a.name || 'attachment', url: a.url, _new: false })),
+      ...newFileNames.map((name) => ({ name, _new: true, notStored: true })),
+    ];
+    if (newFileNames.length > 0) {
+      log(`[rfp-approval] Request ${request.id}: ${newFileNames.length} file(s) added at approval were not stored (Procore creation retired)`, 'rfp');
     }
 
-    let bidboardProjectId: string | undefined;
-    let bidboardFailed = false;
-    let bidboardError: string | undefined;
-    try {
-      const { createBidBoardProjectFromDeal } = await import('./playwright/bidboard');
-      const bidboardStage = isService ? 'Service – Estimating' : 'Estimate in Progress';
-      const bbResult = await createBidBoardProjectFromDeal({
-        sourceSystem: identity.sourceSystem,
-        sourceDealId,
-        bidboardStage,
-        normalizedDealData: identity.sourceSystem === 'trock_crm' ? dealData : undefined,
-        options: {
-          syncDocuments: true,
-          attachmentsOverride: attachmentsToSync,
-          projectNumberOverride: finalProjectNumber || editedFields.project_number || (dealData.project_number as string) || undefined,
-          editedFieldsOverride,
-          proposalId: (editedFields.proposal_id || dealData.proposalId) as string | undefined,
-          beforeCreate,
-        },
-      });
-      if (bbResult.success && bbResult.projectId) {
-        bidboardProjectId = bbResult.projectId;
-        log(`[rfp-approval] BidBoard project created: ${bidboardProjectId} for deal ${sourceDealId}`, 'rfp');
-
-        // Upload _new attachments to HubSpot and associate with deal (BidBoard upload succeeded)
-        const newAttachments = (attachmentsToSync || []).filter((a) => a.localPath);
-        for (const att of newAttachments) {
-          if (!att.localPath || !att.name) continue;
-          try {
-            if (hubspotDealId) {
-              await uploadFileToHubSpotAndAttachToDeal(att.localPath, att.name, hubspotDealId);
-              log(`[rfp-approval] Uploaded ${att.name} to HubSpot and attached to deal ${hubspotDealId}`, 'rfp');
-            }
-          } catch (hubErr: any) {
-            console.error(`[rfp-approval] Failed to upload ${att.name} to HubSpot:`, hubErr.message);
-          }
-        }
-      } else {
-        bidboardFailed = true;
-        bidboardError = bbResult.error;
-        console.error(`[rfp-approval] Source updated successfully but BidBoard creation failed for deal ${sourceDealId}: ${bbResult.error}`);
-      }
-    } catch (bbErr: any) {
-      bidboardFailed = true;
-      bidboardError = bbErr?.message;
-      console.error(`[rfp-approval] BidBoard creation error for deal ${sourceDealId}:`, bbErr.message);
-    } finally {
-      // Temp files are only deleted AFTER createBidBoardProjectFromDeal completes (including document sync).
-      // This ensures attachments remain available until they have been uploaded to BidBoard.
-      for (const p of tempPaths) {
-        try { await fs.unlink(p); } catch { /* ignore */ }
-      }
-      if (tempPaths.length > 0) {
-        log(`[rfp-approval] Cleaned up ${tempPaths.length} temporary attachment file(s)`, 'rfp');
-      }
-    }
-
-    if (bidboardFailed && force && !bidboardProjectId) {
-      // OVERRIDE path failure with no CONFIRMED project. createBidBoardProjectFromDeal clicks Create
-      // and can then return { success:false } ("Could not confirm project creation") or throw on a
-      // post-create step — either way a project MAY already exist. We therefore cannot safely auto-retry:
-      // leave the request claimed ('override_approving'), which the override route will not re-run, so a
-      // retry can't create a second project. Notify the CRM with a 'failed' callback (the override did
-      // not confirm success — verify in Procore). A human resolves the final state manually (approve with
-      // the real project id, or re-decline once confirmed there is no project). We do NOT mark approved.
-      const failureCallbackData = await buildBidBoardFailedCallbackData({
-        request,
-        sourceDealId,
-        projectNumber: finalProjectNumber,
-        error: bidboardError,
-      });
-      const enqueueCallback = (storage as any).enqueueBidboardCallback;
-      if (failureCallbackData && typeof enqueueCallback === 'function') {
-        await enqueueCallback.call(storage, failureCallbackData);
-      }
-
-      await storage.createAuditLog({
-        action: 'rfp_override_approval_failed',
-        entityType: 'deal',
-        entityId: sourceDealId,
-        source: 'rfp-approval',
-        status: 'failed',
-        details: {
-          token,
-          approvedBy: approverEmail,
-          error: bidboardError || null,
-          ...buildRfpAuditDetails(request, 'override_failed', approverEmail, bidboardError),
-        },
-      });
-
-      await sendRfpApprovalStatusEmail({
-        dealName: (editedFields.dealname && String(editedFields.dealname).trim()) || dealData.dealname || 'Unknown Deal',
-        hubspotDealId: hubspotDealId || sourceDealId,
-        projectNumber: finalProjectNumber,
-        approverEmail,
-        bidboardProjectId: undefined,
-        bidboardFailed: true,
-        steps: [
-          { name: 'Override Approval', success: false, detail: `BidBoard creation did not confirm a project; held for manual review. ${bidboardError || ''}`.trim() },
-          { name: 'BidBoard Project Created', success: false, detail: 'Not confirmed — verify in Procore before retrying' },
-        ],
-      });
-
-      log(`[rfp-approval] Override-approve BidBoard creation unconfirmed for deal ${sourceDealId}; left claimed (override_approving) for manual resolution: ${bidboardError || 'unknown error'}`, 'rfp');
-      return {
-        success: false,
-        error: bidboardError || 'BidBoard project creation did not confirm during override approval; held for manual resolution.',
-      };
-    }
-
-    if (bidboardFailed && resume) {
-      // S0b-2b recreate (CodeRabbit 4529556627): a failed, unconfirmed ("Could not confirm project creation") or thrown create
-      // on resume leaves the request `approving`. A project MAY exist, and `approved` with no project would end it: the
-      // stuck sweep would call it resolved, and the resolver's found / recreate both require `approving`. The stuck alert
-      // keeps firing and a person resolves it with the resolver.
-      log(`[rfp-approval] Recreate of RFP request ${resume.requestId}: BidBoard creation did not complete; left approving for the resolver: ${bidboardError || 'unknown error'}`, 'rfp');
-      return { success: false, error: bidboardError || 'BidBoard creation did not complete' };
-    }
-
-    if (bidboardFailed) {
-      // HubSpot was already updated (stage, fields). Mark as approved.
-      // NOTE: reaching here implies bidboardProjectId is unset — createBidBoardProject only sets
-      // projectId together with success=true, so a Playwright failure never carries a project id
-      // (the `bidboardProjectId ? …` arms below are defensive). The force path with no project id
-      // returned above; the genuine partial case (project created, post-steps failed) is success=true
-      // and is handled by the success path below, which clears the decline and enqueues 'created'.
-      await storage.updateRfpApprovalRequest(request.id, {
-        status: 'approved',
-        editedFields: changedFields,
-        approvedBy: approverEmail,
-        approvedAt: new Date(),
-        bidboardProjectId: bidboardProjectId || null,
-      });
-
-      await sendRfpApprovalStatusEmail({
-        dealName: (editedFields.dealname && String(editedFields.dealname).trim()) || dealData.dealname || 'Unknown Deal',
-        hubspotDealId: hubspotDealId || sourceDealId,
-        projectNumber: finalProjectNumber,
-        approverEmail,
-        bidboardProjectId,
-        bidboardFailed: true,
-        steps: [
-          { name: 'Source Deal Updated', success: true, detail: `Stage: ${hubspotDealId ? targetStageName : 'unchanged'}, Fields: ${Object.keys(changedFields).length} changed` },
-          { name: 'BidBoard Project Created', success: !!bidboardProjectId, detail: bidboardProjectId ? `ID: ${bidboardProjectId} (created but post-creation steps failed)` : 'Failed — project was not created' },
-          { name: 'Sync Mapping', success: false, detail: 'Skipped due to BidBoard failure' },
-          { name: 'Document Sync', success: false, detail: 'Skipped due to BidBoard failure' },
-        ],
-      });
-
-      if (bidboardProjectId) {
-        return { success: true, bidboardProjectId };
-      }
-      return {
-        success: false,
-        error: 'HubSpot updated but BidBoard project creation failed. Please check BidBoard manually.',
-        bidboardProjectId,
-      };
-    }
-
-    const approvedAttachmentsForStorage = (attachmentsToSync || []).map(a => ({
-      name: a.name,
-      url: a.url || undefined,
-      _new: !!a.localPath,
-    }));
-
-    const approvalData = {
+    const approvedAt = new Date();
+    // Written only while the row still has the status read above (pending; the override's claimed status), so a concurrent
+    // decline or a second approval of the same link makes this a no-op instead of a second approval.
+    const approved = await storage.updateRfpApprovalRequest(request.id, {
       status: 'approved',
       editedFields: changedFields,
       approvedAttachments: approvedAttachmentsForStorage,
       approvedBy: approverEmail,
-      approvedAt: new Date(),
-      bidboardProjectId: bidboardProjectId || null,
-      // Override-approve clears the prior decline so reporting can't show both an approved and a
-      // rejected decision for the same request (the route's claim deleted any stale callback row).
+      approvedAt,
+      bidboardProjectId: null,
+      // Override-approve clears the prior decline so reporting can't show both an approved and a rejected decision.
       ...(force ? { declinedBy: null, declinedAt: null } : {}),
-    };
-    const callbackData = await buildBidBoardCreatedCallbackData({
-      request,
-      sourceDealId,
-      bidboardProjectId,
-      projectNumber: finalProjectNumber,
-    });
-    const approveWithCallback = (storage as any).approveRfpApprovalRequestWithOptionalCallback;
-    if (typeof approveWithCallback === 'function') {
-      await approveWithCallback.call(storage, request.id, approvalData, callbackData);
+    }, { expectedStatus: request.status });
+    if (!approved) {
+      return { success: false, error: `Request ${request.id} changed while it was being approved`, statusCode: 409 };
+    }
+
+    let crmStep: RfpStatusStep;
+    if (isService) {
+      const told = identity.sourceSystem === 'trock_crm' ? await enqueueRfpApprovedCallbackIfCoreConfirmed(request.id) : false;
+      crmStep = {
+        name: 'T-Rock Core service card',
+        success: true,
+        detail: told ? 'Core confirmed the card; the CRM is told the RFP is approved' : 'Handed to Core; the CRM is told when Core confirms the card',
+      };
     } else {
-      await storage.updateRfpApprovalRequest(request.id, approvalData);
-      if (callbackData && typeof (storage as any).enqueueBidboardCallback === 'function') {
-        await (storage as any).enqueueBidboardCallback(callbackData);
-      }
+      const failedCallback = await buildBidBoardFailedCallbackData({
+        request,
+        sourceDealId,
+        projectNumber: finalProjectNumber,
+        error: NO_CORE_ROUTE_ERROR,
+      });
+      if (failedCallback) await storage.enqueueBidboardCallback(failedCallback);
+      crmStep = { name: 'T-Rock Core record', success: false, detail: NO_CORE_ROUTE_ERROR };
     }
 
     await storage.createAuditLog({
@@ -1882,7 +1659,7 @@ export async function processRfpApproval(
       entityType: 'deal',
       entityId: sourceDealId,
       source: 'rfp-approval',
-      status: 'success',
+      status: isService ? 'success' : 'failed',
       details: {
         token,
         approvedBy: approverEmail,
@@ -1890,28 +1667,27 @@ export async function processRfpApproval(
         approvedAttachments: approvedAttachmentsForStorage,
         projectType: finalProjectTypeDigit,
         targetStage: targetStageName,
-        bidboardProjectId,
+        procoreCreate: 'retired',
         ...buildRfpAuditDetails(request, 'approved', approverEmail),
       },
     });
 
-    // Send detailed status email to admin
     await sendRfpApprovalStatusEmail({
       dealName: (editedFields.dealname && String(editedFields.dealname).trim()) || dealData.dealname || 'Unknown Deal',
       hubspotDealId: hubspotDealId || sourceDealId,
       projectNumber: finalProjectNumber,
       approverEmail,
-      bidboardProjectId,
       bidboardFailed: false,
       steps: [
         { name: 'Source Deal Updated', success: true, detail: `Stage: ${hubspotDealId ? targetStageName : 'unchanged'}, Fields: ${Object.keys(changedFields).length} changed` },
-        { name: 'BidBoard Project Created', success: !!bidboardProjectId, detail: bidboardProjectId ? `ID: ${bidboardProjectId}` : 'Not created' },
-        { name: 'Sync Mapping', success: !!bidboardProjectId, detail: bidboardProjectId ? `Deal ${sourceDealId} → BidBoard ${bidboardProjectId}` : 'Skipped' },
-        { name: 'Document Sync', success: true, detail: `${(attachmentsToSync || []).length} attachment(s)` },
+        crmStep,
+        ...(newFileNames.length > 0
+          ? [{ name: 'Files added at approval', success: false, detail: `${newFileNames.length} file(s) were not stored: Procore project creation is retired` }]
+          : []),
       ],
     });
 
-    return { success: true, bidboardProjectId };
+    return { success: true };
   } catch (e: any) {
     console.error(`[rfp-approval] Error processing approval for token ${token}:`, e.message);
     return { success: false, error: e.message };

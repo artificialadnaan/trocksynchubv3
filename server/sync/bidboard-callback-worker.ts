@@ -14,15 +14,19 @@ import {
 export interface BidBoardCreatedCallbackPayload {
   // 'created' on a successful Bid Board project creation; 'failed' when the (override)
   // Playwright creation failed and the request was left re-tryable. Optional for backward
-  // compatibility — an absent status is treated as 'created' by consumers.
-  status?: "created" | "failed";
+  // compatibility — an absent status is treated as 'created' by consumers. 'approved' (Procore
+  // creation retired, 2026-11-13): a service RFP's Core card was confirmed; no Procore field
+  // (rfp-approved-callback.ts builds it in SQL with approvedAt + coreBidId).
+  status?: "created" | "failed" | "approved";
   sourceDealId: string;
   rfpApprovalRequestId: number;
   bidboardProjectId?: string; // present on 'created'; absent on 'failed'
   projectNumber?: string;
   procoreCompanyId?: string; // best-effort on 'failed'
   error?: string; // present on 'failed'
-  createdAt: string;
+  createdAt?: string; // absent on 'approved'
+  approvedAt?: string; // 'approved' only
+  coreBidId?: string; // 'approved' only
 }
 
 export interface RfpDeclinedCallbackPayload {
