@@ -92,7 +92,7 @@ import {
   bidboardAutomationLogs, type BidboardAutomationLog,
   manualReviewQueue, type ManualReviewQueue, type InsertManualReviewQueue,
   closeoutSurveys, type CloseoutSurvey, type InsertCloseoutSurvey,
-  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest, RFP_OVERRIDE_APPROVING_STATUS,
+  rfpApprovalRequests, type RfpApprovalRequest, type InsertRfpApprovalRequest, RFP_OVERRIDE_APPROVING_STATUS, RFP_EXPIRED_STATUS,
   rfpApprovalEdits, type RfpApprovalEdit, type InsertRfpApprovalEdit,
   bidboardCallbackOutbox, type BidboardCallbackOutbox, type InsertBidboardCallbackOutbox,
   rfpChangeLog, type RfpChangeLog, type InsertRfpChangeLog,
@@ -489,6 +489,7 @@ export interface IStorage {
   getLatestRfpApprovalRequestBySourceDeal(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
   updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>, opts?: { expectedStatus?: string }): Promise<RfpApprovalRequest | undefined>;
+  supersedeExpiredPendingRfpApprovalRequest(id: number): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
   createRfpApprovalEdit(data: InsertRfpApprovalEdit): Promise<RfpApprovalEdit>;
   getRfpApprovalEdits(rfpApprovalRequestId: number): Promise<RfpApprovalEdit[]>;
@@ -2276,6 +2277,21 @@ export class DatabaseStorage implements IStorage {
       ? eq(rfpApprovalRequests.id, id)
       : and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, opts.expectedStatus));
     const [result] = await db.update(rfpApprovalRequests).set(data).where(where).returning();
+    return result;
+  }
+
+  // REQ 939: pending → expired, written only while the row is STILL pending and its link has STILL expired, so a claim that
+  // moved it on, or a link extended meanwhile, makes this a no-op (undefined). token_expires_at is a UTC wall-clock timestamp
+  // (drizzle writes toISOString); a legacy row with no expiry never compares true, so it never expires.
+  async supersedeExpiredPendingRfpApprovalRequest(id: number): Promise<RfpApprovalRequest | undefined> {
+    const [result] = await db.update(rfpApprovalRequests)
+      .set({ status: RFP_EXPIRED_STATUS })
+      .where(and(
+        eq(rfpApprovalRequests.id, id),
+        eq(rfpApprovalRequests.status, 'pending'),
+        sql`${rfpApprovalRequests.tokenExpiresAt} < (now() AT TIME ZONE 'UTC')`,
+      ))
+      .returning();
     return result;
   }
 
