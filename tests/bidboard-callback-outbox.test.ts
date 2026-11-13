@@ -293,28 +293,17 @@ describe("CRM-sourced RFP approval callback enqueue", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ stage: "opportunity" }), { status: 200, headers: { "content-type": "application/json" } })));
   });
 
-  it("enqueues one callback when a CRM-sourced RFP creates a BidBoard project", async () => {
+  // Procore project creation is retired (owner 2026-11-13, b0cb0c4f): no approval creates a Bid Board project, so none enqueues a
+  // 'created'. A SERVICE approval's CRM completion is the 'approved' callback, enqueued once Core confirms its card
+  // (rfp-approved-callback.ts, through the outbox's own statement, not this storage mock); a NON-service one gets a 'failed'.
+  it("a CRM-sourced SERVICE approval enqueues no 'created' callback and calls no Procore create", async () => {
     const { processRfpApproval } = await import("../server/rfp-approval.ts");
 
     const result = await processRfpApproval("token-1", {}, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-    expect(callbackRows).toHaveLength(1);
-    expect(callbackRows[0]).toMatchObject({
-      sourceSystem: "trock_crm",
-      sourceDealId: "crm-deal-1",
-      rfpApprovalRequestId: 77,
-      targetUrl: "https://crm.example.com/api/internal/bid-board-created",
-      status: "pending",
-      maxAttempts: 5,
-    });
-    expect(callbackRows[0].payload).toMatchObject({
-      sourceDealId: "crm-deal-1",
-      rfpApprovalRequestId: 77,
-      bidboardProjectId: "BB-123",
-      projectNumber: "DFW-4-12345-aa",
-      procoreCompanyId: "598134325683880",
-    });
+    expect(result).toEqual({ success: true });
+    expect(createBidBoardMock).not.toHaveBeenCalled();
+    expect(callbackRows).toHaveLength(0);
   });
 
   it("does not enqueue a callback for HubSpot-sourced approvals", async () => {
@@ -323,19 +312,26 @@ describe("CRM-sourced RFP approval callback enqueue", () => {
 
     const result = await processRfpApproval("token-1", {}, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+    expect(result).toEqual({ success: true });
     expect(callbackRows).toHaveLength(0);
   });
 
-  it("does not enqueue duplicate callbacks when the storage transaction handles the same approval twice", async () => {
+  it("a CRM-sourced NON-service approval enqueues a 'failed' callback (no Core route), one per request across a re-approval", async () => {
+    approvalRequest.current = makeRequest({
+      projectNumber: "DFW-2-12345-aa",
+      dealData: { dealname: "CRM RFP", project_number: "DFW-2-12345-aa", project_types: "2" },
+    });
     const { processRfpApproval } = await import("../server/rfp-approval.ts");
 
     await processRfpApproval("token-1", {}, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
     approvalRequest.current = { ...approvalRequest.current, status: "pending" };
     await processRfpApproval("token-1", {}, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
+    expect(createBidBoardMock).not.toHaveBeenCalled();
     const uniqueByRequest = new Map(callbackRows.map((row) => [row.rfpApprovalRequestId, row]));
     expect(uniqueByRequest.size).toBe(1);
+    expect(callbackRows[0].payload).toMatchObject({ status: "failed", rfpApprovalRequestId: 77, sourceDealId: "crm-deal-1" });
+    expect(callbackRows[0].payload.error).toMatch(/no T-Rock Core route/);
   });
 });
 

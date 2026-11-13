@@ -669,7 +669,7 @@ describe("service RFP → TROCK Core handoff", () => {
       const result = await runApproval();
 
       expect(result).toEqual({ success: true });
-      // Core is told FIRST, then Procore — the ordering the whole feature exists for.
+      // Core is told; nothing goes to Procore (project creation retired, owner 2026-11-13).
       expect(outboundCalls).toEqual(["core"]);
       expect(executedSql()).not.toContain("office_unmapped");
       // …and it is delivered to the one tenant, addressed by that tenant's ingress path.

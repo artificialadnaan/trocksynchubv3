@@ -149,8 +149,11 @@ describe("withoutProcoreTokenRenewal (the recreate's create step never renews; e
       }
     }
     // procore.ts: the refresh's doc comment + its one POST; oauth.ts: the admin callback's authorization_code exchange (an inbound
-    // HTTP route, not a renewal); procore-token-read.ts: a comment. A new site fails here and must be reviewed against the scope.
-    expect(found).toEqual({ "server/procore.ts": 2, "server/routes/oauth.ts": 1, "server/routes/procore-token-read.ts": 1 });
+    // HTTP route, not a renewal); procore-token-read.ts: a comment; procore-token-keepalive.ts (#133): two doc comments (it renews
+    // only through procore.ts's locked refresh). A new site fails here and must be reviewed against the scope.
+    expect(found).toEqual({
+      "server/procore.ts": 2, "server/procore-token-keepalive.ts": 2, "server/routes/oauth.ts": 1, "server/routes/procore-token-read.ts": 1,
+    });
     const src = readFileSync(new URL("../server/procore.ts", import.meta.url), "utf8");
     const start = src.indexOf("export async function refreshProcoreAccessTokenUnderLock(");
     expect(start).toBeGreaterThan(-1);

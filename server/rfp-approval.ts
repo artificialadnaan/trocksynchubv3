@@ -1658,7 +1658,14 @@ export async function processRfpApproval(
         projectNumber: finalProjectNumber,
         error: NO_CORE_ROUTE_ERROR,
       });
-      if (failedCallback) await storage.enqueueBidboardCallback(failedCallback);
+      if (failedCallback) {
+        try {
+          await storage.enqueueBidboardCallback(failedCallback);
+        } catch (callbackErr: any) {
+          // The approval stands; the CRM still shows the RFP pending, and its own queue surfaces it for a person.
+          log(`[rfp-approval] Request ${request.id}: the CRM failed callback could not be enqueued: ${callbackErr?.message || callbackErr}`, 'rfp');
+        }
+      }
       crmStep = { name: 'T-Rock Core record', success: false, detail: NO_CORE_ROUTE_ERROR };
     }
 

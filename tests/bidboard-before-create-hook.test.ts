@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Procore project creation is retired (owner 2026-11-13): createBidBoardProjectFromDeal refuses at its first line. This suite tests
+// the retired machinery itself, so it switches the refusal off for its own assertions.
+vi.mock("../server/sync/procore-create-retired.ts", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  procoreCreateRetired: () => false,
+}));
+
 // S0b-2a (runbook r5; d9 Q1): createBidBoardProjectFromDeal takes a `beforeCreate` option and awaits it after the read-only
 // exact-number lookup, immediately BEFORE createProject (createBidBoardProject: login, navigation, any create click). The new
 // Bid Board UI creates an empty project at the Create dialog's Confirm and then auto-saves, so there is no single submit
