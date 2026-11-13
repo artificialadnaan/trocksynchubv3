@@ -19,6 +19,9 @@ const UNAUTHORIZED_APPROVER_MESSAGE =
 
 const inFlightApprovalTokens = new Set<string>();
 
+/** The statuses a review-link reset may move back to pending: an open request, and a stuck override (I1). Nothing finished. */
+const RESETTABLE_RFP_REQUEST_STATUSES: ReadonlySet<string> = new Set(['pending', 'override_approving']);
+
 // ── HTML helpers ──────────────────────────────────────────────────────────────
 
 function sourceIdentityForRouteAudit(request: any) {
@@ -718,13 +721,16 @@ export function registerRfpApprovalRoutes(app: Express) {
     res.status(result.statusCode ?? 200).json(result);
   }));
 
-  // Reset an approval request back to pending (admin endpoint for retrying failed BidBoard creation)
+  // Reset an approval request back to pending: today's only recovery for a stuck override (I1). The link carries no login.
   app.post("/api/rfp-approval/:token/reset", asyncHandler(async (req, res) => {
     const { token } = req.params as { token: string };
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
-    // S0b-2a (runbook r5 §2; d9 5a): never re-open a create in progress or a cross-destination hold through a link.
-    if (request.status === 'approving' || request.status === 'held_cross_destination') {
+    // ONLY an open request resets (a4 ruling fad15cdf, 2026-11-13): anyone holding an emailed or forwarded link could otherwise
+    // re-open a FINISHED decision (approved, declined, cancelled, expired) and re-run what follows it. An allow-list, so a status
+    // added later is refused until someone decides it may reset. S0b-2a (runbook r5 §2; d9 5a) already refused a create in
+    // progress (approving) and a cross-destination hold; both stay refused here.
+    if (!RESETTABLE_RFP_REQUEST_STATUSES.has(request.status)) {
       return res.status(409).json({ success: false, error: `Request ${request.id} is ${request.status}; it cannot be reset` });
     }
     const wasOverrideApproving = request.status === 'override_approving';

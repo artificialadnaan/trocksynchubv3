@@ -6,6 +6,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 // S0b-2a (runbook r5 §2; d9 rulings 5a / 5b): nobody re-opens a create in progress through a review link.
 //   - decline of an `approving` request ⇒ 409 (today it answers 200 {success:false});
 //   - reset of an `approving` or `held_cross_destination` request ⇒ 409, the row untouched;
+//   - reset of a FINISHED request (approved, declined, cancelled_source_ineligible, expired) ⇒ 409, the row untouched
+//     (a4 ruling fad15cdf: the link carries no login, so a finished decision never re-opens through it);
 //   - reset of an `override_approving` request STAYS ALLOWED (today's only recovery for a stuck override; I1) and raises
 //     rfp_request_override_reset carrying the row id, the deal and whether a sync mapping / create command exists for it,
 //     so a person can spot a reset whose override may already have created a project.
@@ -113,15 +115,24 @@ describe("reset route vs a create in progress", () => {
     expect(call, "rfp_request_override_reset was raised").toBeDefined();
     expect(call?.[1]).toMatchObject({ requestId: 7, sourceSystem: "trock_crm", sourceDealId: DEAL, syncMapping: true, createCommand: false });
   });
-  for (const status of ["approved", "declined", "pending"]) {
-    it(`reset of a ${status} request is unchanged: reset to pending, no alert (guard)`, async () => {
+  // a4 ruling fad15cdf (2026-11-13): the link carries no login, so a FINISHED decision never re-opens through it.
+  for (const status of ["approved", "declined", "cancelled_source_ineligible", "expired"]) {
+    it(`reset of a finished (${status}) request ⇒ 409; the row is untouched and nothing is raised`, async () => {
       reqState.current = request(status);
       const res = await post("reset");
-      expect(res.status).toBe(200);
-      expect(updateRequest).toHaveBeenCalledWith(7, expect.objectContaining({ status: "pending" }), { expectedStatus: status });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ success: false, error: `Request 7 is ${status}; it cannot be reset` });
+      expect(updateRequest).not.toHaveBeenCalled();
       expect(alertMock).not.toHaveBeenCalled();
     });
   }
+  it("reset of a pending request is unchanged: reset to pending, no alert (guard)", async () => {
+    reqState.current = request("pending");
+    const res = await post("reset");
+    expect(res.status).toBe(200);
+    expect(updateRequest).toHaveBeenCalledWith(7, expect.objectContaining({ status: "pending" }), { expectedStatus: "pending" });
+    expect(alertMock).not.toHaveBeenCalled();
+  });
   it("a request claimed `approving` between the reset's read and its write ⇒ 409: the write is conditional on the status it read (CodeRabbit 4534112622)", async () => {
     reqState.current = request("pending");
     updateRequest.mockResolvedValueOnce(undefined); // the conditional UPDATE matched no row: an approval claimed it meanwhile
