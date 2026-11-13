@@ -1,165 +1,141 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// S0b-2a: processRfpApproval's P3 claim (per-deal lock + Core footprint, CONTRACT v2.2 §10) runs on a real database with
-// 0027 applied (tests/rfp-approving-claim.pg.test.ts, tests/rfp-approval-p3.pg.test.ts). This file's database is a stub, so
-// the claim reports 0027 absent ("legacy") and today's path runs, exactly as on a database without 0027.
-vi.mock("../server/sync/rfp-approving.ts", () => ({
-  RFP_APPROVING_STATUS: "approving",
-  claimRfpRequestForCreate: vi.fn(async () => ({ outcome: "legacy" })),
-  markRfpApprovingSubmitted: vi.fn(async () => {}),
-}));
-
+// PROCORE PROJECT CREATION IS RETIRED (owner 2026-11-13, b0cb0c4f; a4 afa14cfd): processRfpApproval no longer claims, creates or
+// waits on a Procore Bid Board project. A service RFP completes on its T-Rock Core card (the handoff) and the CRM's `approved`
+// callback once Core confirms it; a non-service RFP approved by link has no Core route, so the CRM is told it FAILED. The
+// Procore create below is a stub that records calls and throws ("Procore unavailable"): every case expects it untouched.
+// Synthetic data only (I7).
+vi.mock("../server/sync/rfp-approving.ts", () => ({ RFP_APPROVING_STATUS: "approving" }));
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestByToken: vi.fn(),
     updateRfpApprovalRequest: vi.fn(),
     createAuditLog: vi.fn(),
+    enqueueBidboardCallback: vi.fn(),
+    getAutomationConfig: vi.fn(async () => null),
   },
 }));
-
 vi.mock("../server/hubspot.ts", () => ({
   getHubSpotClient: vi.fn(),
   getAccessToken: vi.fn(),
   getDealOwnerInfo: vi.fn(),
-  updateHubSpotDeal: vi.fn().mockResolvedValue({ success: true }),
-  updateHubSpotDealStage: vi.fn().mockResolvedValue({ success: true }),
-  syncSingleHubSpotDeal: vi.fn().mockResolvedValue(undefined),
+  updateHubSpotDeal: vi.fn(),
+  updateHubSpotDealStage: vi.fn(),
+  syncSingleHubSpotDeal: vi.fn(),
 }));
-
-vi.mock("../server/procore-hubspot-sync.ts", () => ({
-  resolveHubspotStageId: vi.fn().mockResolvedValue({ stageId: "stage-1", stageName: "Estimating" }),
+vi.mock("../server/procore-hubspot-sync.ts", () => ({ resolveHubspotStageId: vi.fn() }));
+vi.mock("../server/email-service.ts", () => ({ sendEmail: vi.fn(), renderTemplate: vi.fn(), GLOBAL_CC_RECIPIENTS: [] }));
+vi.mock("../server/index.ts", () => ({ log: vi.fn() }));
+vi.mock("../server/log.ts", () => ({ log: vi.fn() }));
+vi.mock("../server/playwright/browser.ts", () => ({ withBrowserLock: vi.fn() }));
+vi.mock("../server/playwright/bidboard.ts", () => ({ createBidBoardProjectFromDeal: vi.fn() }));
+vi.mock("../server/rfp-source-eligibility.ts", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  checkRfpApprovalSourceEligibility: vi.fn(async () => ({ eligible: true })),
 }));
-
-vi.mock("../server/email-service.ts", () => ({
-  sendEmail: vi.fn().mockResolvedValue(undefined),
-  renderTemplate: vi.fn(),
-  GLOBAL_CC_RECIPIENTS: [], // rfp-approval imports this; keep the partial mock complete
+vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
+  buildBidBoardCreatedCallbackTargetUrl: () => "https://crm.example.test/api/internal/bid-board-created",
+  buildRfpDeclinedCallbackTargetUrl: () => "https://crm.example.test/api/internal/rfp-declined",
 }));
+vi.mock("../server/sync/service-rfp-core-outbox.ts", () => ({ handOffServiceRfpApprovalToCore: vi.fn() }));
+vi.mock("../server/sync/rfp-approved-callback.ts", () => ({ enqueueRfpApprovedCallbackIfCoreConfirmed: vi.fn() }));
 
-vi.mock("../server/index.ts", () => ({
-  log: vi.fn(),
-}));
+const { storage } = await import("../server/storage.ts");
+const { withBrowserLock } = await import("../server/playwright/browser.ts");
+const { createBidBoardProjectFromDeal } = await import("../server/playwright/bidboard.ts");
+const { handOffServiceRfpApprovalToCore } = await import("../server/sync/service-rfp-core-outbox.ts");
+const { enqueueRfpApprovedCallbackIfCoreConfirmed } = await import("../server/sync/rfp-approved-callback.ts");
+const { processRfpApproval } = await import("../server/rfp-approval.ts");
+const { PROCORE_CREATE_RETIRED_ERROR } = await import("../server/sync/procore-create-retired.ts");
 
-vi.mock("../server/playwright/browser.ts", () => ({
-  withBrowserLock: vi.fn(),
-}));
+const DEAL = "00000000-0000-4000-8000-000000000070";
+function crmRequest(over: Record<string, unknown> = {}) {
+  return {
+    id: 70, status: "pending", sourceSystem: "trock_crm", sourceDealId: DEAL, projectNumber: "DFW-4-70070-aa", hubspotDealId: null,
+    tokenExpiresAt: new Date(Date.now() + 86_400_000),
+    dealData: { dealname: "Synthetic Service RFP", project_number: "DFW-4-70070-aa", project_types: "4" },
+    ...over,
+  };
+}
 
-vi.mock("../server/playwright/bidboard.ts", () => ({
-  createBidBoardProjectFromDeal: vi.fn().mockResolvedValue({
-    success: true,
-    projectId: "BB-123",
-    documentsUploaded: 0,
-    documentErrors: [],
-  }),
-}));
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(createBidBoardProjectFromDeal).mockRejectedValue(new Error("Procore unavailable"));
+  vi.mocked(storage.updateRfpApprovalRequest).mockImplementation(async (id: number, data: any) => ({ id, ...data }) as any);
+  vi.mocked(enqueueRfpApprovedCallbackIfCoreConfirmed).mockResolvedValue(true);
+});
 
-describe("processRfpApproval", () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  it("creates the BidBoard project without taking an extra browser lock", async () => {
-    const { storage } = await import("../server/storage.ts");
-    const { withBrowserLock } = await import("../server/playwright/browser.ts");
-    const { createBidBoardProjectFromDeal } = await import("../server/playwright/bidboard.ts");
-    const { updateHubSpotDeal, updateHubSpotDealStage } = await import("../server/hubspot.ts");
-    const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
-    const { processRfpApproval } = await import("../server/rfp-approval.ts");
-
-    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue({
-      id: 10,
-      status: "pending",
-      hubspotDealId: "321011207920",
-      dealData: {
-        dealname: "Test RFP",
-        project_number: "DFW-2-12345",
-        project_types: "2",
-        proposalId: "456",
-      },
-    } as any);
-    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true } as any);
-    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true } as any);
-    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-1", stageName: "Estimating" } as any);
-
-    const result = await processRfpApproval("token-123", {}, "approver@trockgc.com", {
-      attachmentsOverride: [],
-      newFiles: [],
-    });
-
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-    // The call uses the args-OBJECT form (createBidBoardProjectFromDeal's CreateBidBoardProjectFromDealArgs).
-    expect(createBidBoardProjectFromDeal).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceDealId: "321011207920",
-        bidboardStage: "Estimate in Progress",
-        options: expect.objectContaining({
-          syncDocuments: true,
-          attachmentsOverride: [],
-          proposalId: "456",
-        }),
-      }),
+describe("processRfpApproval with Procore project creation retired", () => {
+  // DFW and ATL are project-number PREFIXES in one shared system (owner 2026-11-13, dcd308cf): both take the same path.
+  it.each(["DFW-4-70070-aa", "ATL-4-70070-aa"])("a SERVICE approval (%s) with Procore unavailable completes on Core: approved, handed to Core, the CRM told, ZERO Procore creates", async (pn) => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(
+      crmRequest({ projectNumber: pn, dealData: { dealname: "Synthetic Service RFP", project_number: pn, project_types: "4" } }) as any,
     );
-    expect(withBrowserLock).not.toHaveBeenCalled();
+
+    const result = await processRfpApproval("synthetic-token-70", {}, "approver@example.test", { attachmentsOverride: [], newFiles: [] });
+
+    expect(result).toEqual({ success: true });
+    expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
+    expect(vi.mocked(withBrowserLock).mock.calls.length).toBe(0);
+    expect(handOffServiceRfpApprovalToCore).toHaveBeenCalledTimes(1);
+    expect(handOffServiceRfpApprovalToCore).toHaveBeenCalledWith(expect.objectContaining({ rfpRequestId: 70, sourceDealId: DEAL }));
+    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(
+      70,
+      expect.objectContaining({ status: "approved", approvedBy: "approver@example.test", bidboardProjectId: null }),
+      { expectedStatus: "pending" },
+    );
+    expect(enqueueRfpApprovedCallbackIfCoreConfirmed).toHaveBeenCalledWith(70);
+    expect(storage.enqueueBidboardCallback).not.toHaveBeenCalled();
   });
 
-  it("forwards the CRM activity log to the create for a HUBSPOT-sourced request too", async () => {
-    // normalizedDealData is passed only for trock_crm, so a hubspot request carrying crmActivityLog
-    // would have it persisted in deal_data and then silently dropped before the create — "accepted but
-    // unused". editedFieldsOverride is passed for BOTH source systems, so it travels there instead.
-    const { storage } = await import("../server/storage.ts");
-    const { createBidBoardProjectFromDeal } = await import("../server/playwright/bidboard.ts");
-    const { updateHubSpotDeal, updateHubSpotDealStage } = await import("../server/hubspot.ts");
-    const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
-    const { processRfpApproval } = await import("../server/rfp-approval.ts");
+  it("keeps the estimator the approver selected: recorded on the request and handed to Core with the job", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
 
-    const activityLog = "CRM Activity Log — DFW-2-12345 (as of Aug 17, 2026)\n\nAug 14 · Call · Jane Rep";
-    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue({
-      id: 11,
-      status: "pending",
-      sourceSystem: "hubspot",
-      hubspotDealId: "321011207920",
-      dealData: {
-        dealname: "Test RFP",
-        project_number: "DFW-2-12345",
-        project_types: "2",
-        crm_activity_log: activityLog,
-      },
-    } as any);
-    vi.mocked(createBidBoardProjectFromDeal).mockResolvedValue({ success: true, projectId: "BB-124" } as any);
-    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true } as any);
-    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true } as any);
-    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-1", stageName: "Estimating" } as any);
+    const result = await processRfpApproval("synthetic-token-70", { estimator: "Synthetic Estimator" }, "approver@example.test");
 
-    await processRfpApproval("token-124", {}, "approver@trockgc.com");
-
-    // The call uses the args-OBJECT form: ({ sourceSystem, sourceDealId, bidboardStage, options }).
-    const args = vi.mocked(createBidBoardProjectFromDeal).mock.calls.at(-1)?.[0] as any;
-    expect(args.options.editedFieldsOverride.crm_activity_log).toBe(activityLog);
-    // normalizedDealData stays trock_crm-only — this is the path that makes hubspot work.
-    expect(args.normalizedDealData).toBeUndefined();
+    expect(result).toEqual({ success: true });
+    const written = vi.mocked(storage.updateRfpApprovalRequest).mock.calls.at(-1)?.[1] as any;
+    expect(written.editedFields).toEqual({ estimator: "Synthetic Estimator" });
+    const handed = vi.mocked(handOffServiceRfpApprovalToCore).mock.calls.at(-1)?.[0] as any;
+    expect(handed.editedFieldsOverride.estimator).toBe("Synthetic Estimator");
+    expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
   });
 
-  it("omits crm_activity_log entirely when the request carries none", async () => {
-    const { storage } = await import("../server/storage.ts");
-    const { createBidBoardProjectFromDeal } = await import("../server/playwright/bidboard.ts");
-    const { updateHubSpotDeal, updateHubSpotDealStage } = await import("../server/hubspot.ts");
-    const { resolveHubspotStageId } = await import("../server/procore-hubspot-sync.ts");
-    const { processRfpApproval } = await import("../server/rfp-approval.ts");
+  it("a NON-service approval by link has no Core route: approved, the CRM is told it FAILED and why, no Procore create", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(
+      crmRequest({ projectNumber: "DFW-2-70071-aa", dealData: { dealname: "Synthetic Non-Service RFP", project_number: "DFW-2-70071-aa", project_types: "2" } }) as any,
+    );
 
-    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue({
-      id: 12,
-      status: "pending",
-      hubspotDealId: "321011207920",
-      dealData: { dealname: "Test RFP", project_number: "DFW-2-12345", project_types: "2" },
-    } as any);
-    vi.mocked(createBidBoardProjectFromDeal).mockResolvedValue({ success: true, projectId: "BB-125" } as any);
-    vi.mocked(updateHubSpotDeal).mockResolvedValue({ success: true } as any);
-    vi.mocked(updateHubSpotDealStage).mockResolvedValue({ success: true } as any);
-    vi.mocked(resolveHubspotStageId).mockResolvedValue({ stageId: "stage-1", stageName: "Estimating" } as any);
+    const result = await processRfpApproval("synthetic-token-71", {}, "approver@example.test");
 
-    await processRfpApproval("token-125", {}, "approver@trockgc.com");
+    expect(result).toEqual({ success: true });
+    expect(handOffServiceRfpApprovalToCore).not.toHaveBeenCalled();
+    expect(enqueueRfpApprovedCallbackIfCoreConfirmed).not.toHaveBeenCalled();
+    const callback = vi.mocked(storage.enqueueBidboardCallback).mock.calls.at(-1)?.[0] as any;
+    expect(callback.rfpApprovalRequestId).toBe(70);
+    expect(callback.payload.status).toBe("failed");
+    expect(callback.payload.error).toMatch(/no T-Rock Core route/);
+    expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
+  });
 
-    const args = vi.mocked(createBidBoardProjectFromDeal).mock.calls.at(-1)?.[0] as any;
-    expect("crm_activity_log" in args.options.editedFieldsOverride).toBe(false);
+  it("a resolver replay (resume) of a request stuck `approving` has nothing left to create: refused, nothing written", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest({ status: "approving" }) as any);
+
+    const result = await processRfpApproval("synthetic-token-70", {}, "resolver@example.test", undefined, { requestId: 70 });
+
+    expect(result).toEqual({ success: false, error: PROCORE_CREATE_RETIRED_ERROR });
+    expect(storage.updateRfpApprovalRequest).not.toHaveBeenCalled();
+    expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
+  });
+
+  it("a request changed between the read and the write (a concurrent decline) is not approved twice: 409, the CRM is not told", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
+    vi.mocked(storage.updateRfpApprovalRequest).mockResolvedValue(undefined as any);
+
+    const result = await processRfpApproval("synthetic-token-70", {}, "approver@example.test");
+
+    expect(result).toMatchObject({ success: false, statusCode: 409 });
+    expect(enqueueRfpApprovedCallbackIfCoreConfirmed).not.toHaveBeenCalled();
+    expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
   });
 });

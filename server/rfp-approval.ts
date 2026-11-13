@@ -1637,7 +1637,15 @@ export async function processRfpApproval(
 
     let crmStep: RfpStatusStep;
     if (isService) {
-      const told = identity.sourceSystem === 'trock_crm' ? await enqueueRfpApprovedCallbackIfCoreConfirmed(request.id) : false;
+      let told = false;
+      if (identity.sourceSystem === 'trock_crm') {
+        try {
+          told = await enqueueRfpApprovedCallbackIfCoreConfirmed(request.id);
+        } catch (callbackErr: any) {
+          // The approval stands; a callback lost here is found by the reconcile (approved, Core confirmed, no callback).
+          log(`[rfp-approval] Request ${request.id}: the CRM approved callback could not be enqueued: ${callbackErr?.message || callbackErr}`, 'rfp');
+        }
+      }
       crmStep = {
         name: 'T-Rock Core service card',
         success: true,

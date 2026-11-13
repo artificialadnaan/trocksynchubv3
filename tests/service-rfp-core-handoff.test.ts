@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The Core handoff and the Playwright create are BOTH driven from processRfpApproval, so the harness
+// The Core handoff is driven from processRfpApproval (the Procore create is retired, owner 2026-11-13: the Playwright mock below
+// must never be called), so the harness
 // mirrors tests/bidboard-callback-outbox.test.ts: the whole DB layer is a single `db.execute` spy and
 // every outbound edge (Core POST, Procore create, alert email) is a mock we can order and inspect.
 const dbExecuteMock = vi.hoisted(() => vi.fn());
@@ -103,9 +104,8 @@ vi.mock("../server/sync/bidboard-crm-alert.ts", () => ({
   realertMinutesFromEnv: () => 60,
 }));
 
-// A pass-through spy, not a stub: the real handoff still runs. It exists only so the "one source of
-// truth" test can assert REFERENCE equality between the object Core is built from and the object
-// Playwright is handed — equal values would still pass if the two were rebuilt independently.
+// A pass-through spy, not a stub: the real handoff still runs. It exists so a test can read the exact input the
+// approval handed to Core (the Procore create that once shared it is retired).
 const handoffInputs = vi.hoisted(() => [] as any[]);
 vi.mock("../server/sync/service-rfp-core-outbox.ts", async (importOriginal) => {
   const actual = await importOriginal<any>();
@@ -244,11 +244,11 @@ describe("service RFP → TROCK Core handoff", () => {
     );
   });
 
-  it("POSTs the job to Core BEFORE the Procore Playwright create", async () => {
+  it("POSTs the job to Core and never calls Procore (Procore project creation is retired)", async () => {
     const result = await runApproval();
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-    expect(outboundCalls).toEqual(["core", "playwright"]);
+    expect(result).toEqual({ success: true });
+    expect(outboundCalls).toEqual(["core"]);
   });
 
   it("signs the exact bytes it sends, with the domain-separated Core header", async () => {
@@ -502,7 +502,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
     await runApproval();
 
-    expect(outboundCalls).toEqual(["playwright"]);
+    expect(outboundCalls).toEqual([]);
     expect(executedSql()).not.toContain("service_rfp_core_outbox");
   });
 
@@ -512,14 +512,14 @@ describe("service RFP → TROCK Core handoff", () => {
     expect(vi.mocked(coreFetchMock).mock.calls.at(-1)?.[2]).toBe(5_000);
   });
 
-  describe("fail-open — a Core problem never blocks the Procore create", () => {
-    it("leaves the row PENDING and still runs Playwright when Core is unreachable", async () => {
+  describe("fail-open — a Core problem never blocks the approval (and nothing goes to Procore)", () => {
+    it("leaves the row PENDING and the approval still completes when Core is unreachable", async () => {
       coreFetchMock.mockRejectedValue(new Error("connect ECONNREFUSED 10.0.0.4:443"));
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual(["core"]);
       expect(executedSql()).toContain("status = 'pending'");
       // Asserted on the UPDATE statements only. The INSERT's ON CONFLICT predicate legitimately mentions
       // `status = 'failed'` — it is the guard that lets a corrected re-approval replace a never-sent
@@ -530,31 +530,31 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(updateStatements()).not.toContain("status = 'failed'");
     });
 
-    it("leaves the row PENDING and still runs Playwright on a Core 500", async () => {
+    it("leaves the row PENDING and the approval still completes on a Core 500", async () => {
       coreFetchMock.mockResolvedValue(new Response("boom", { status: 500 }));
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual(["core"]);
       expect(executedSql()).toContain("status = 'pending'");
       // UPDATEs only — see the note above: the INSERT's ON CONFLICT guard names 'failed' without setting it.
       expect(updateStatements()).not.toContain("status = 'failed'");
     });
 
-    it("leaves the row PENDING and still runs Playwright when the Core call times out", async () => {
+    it("leaves the row PENDING and the approval still completes when the Core call times out", async () => {
       coreFetchMock.mockRejectedValue(
         new Error("Request to https://core.example.com/webhooks/crm/dallas/service-rfp/v1 timed out after 5000ms"),
       );
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual(["core"]);
       expect(executedSql()).toContain("status = 'pending'");
     });
 
-    it("still runs Playwright when the ALERTER wedges, on a refusal", async () => {
+    it("the approval still completes when the ALERTER wedges, on a refusal", async () => {
       // The outbox row is durable before the alert is dispatched, so nothing about the record depends
       // on this promise — but the approval used to await it, unbounded, in front of the Procore create.
       // The alerter is three DB round-trips plus an SMTP send, none of it inside the Core POST's 5 s.
@@ -565,20 +565,20 @@ describe("service RFP → TROCK Core handoff", () => {
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual(["core"]);
       // The notification was still handed off — walking away from it does not cancel it.
       expect(alertCalls).toHaveLength(1);
     });
 
-    it("still runs Playwright when the ALERTER wedges on a SUCCESSFUL delivery", async () => {
+    it("the approval still completes when the ALERTER wedges on a SUCCESSFUL delivery", async () => {
       // The common case, and the one the recovery-reporting fix newly put an await in front of.
       alertGate.stalled = true;
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual(["core"]);
     });
 
     it("finishes a worker tick when the alerter wedges, instead of holding the drain lock", async () => {
@@ -599,13 +599,13 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(result).toMatchObject({ processed: 1, sent: 0, failed: 1 });
     });
 
-    it("still runs Playwright when the outbox insert itself throws", async () => {
+    it("the approval still completes when the outbox insert itself throws", async () => {
       dbExecuteMock.mockRejectedValue(new Error("deadlock detected"));
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual([]);
     });
   });
 
@@ -617,7 +617,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+      expect(result).toEqual({ success: true });
       // crm_notify_refused, not 'pending': the Core claim (status = 'pending') can never pick it up again. The CRM
       // notice drain settles it at 'failed' (tests/service-rfp-core-crm-notice.test.ts).
       expect(updateStatements()).toContain("status = 'crm_notify_refused'");
@@ -643,8 +643,8 @@ describe("service RFP → TROCK Core handoff", () => {
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual([]);
       // A terminal row exists carrying the reason — the refusal is visible, not dropped.
       expect(executedSql()).toContain("service_rfp_core_outbox");
       expect(executedSql()).toContain("source_system_unsupported");
@@ -668,9 +668,9 @@ describe("service RFP → TROCK Core handoff", () => {
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
+      expect(result).toEqual({ success: true });
       // Core is told FIRST, then Procore — the ordering the whole feature exists for.
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(outboundCalls).toEqual(["core"]);
       expect(executedSql()).not.toContain("office_unmapped");
       // …and it is delivered to the one tenant, addressed by that tenant's ingress path.
       const [url] = vi.mocked(coreFetchMock).mock.calls.at(-1) as any[];
@@ -682,8 +682,8 @@ describe("service RFP → TROCK Core handoff", () => {
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual([]);
       expect(executedSql()).toContain("missing_crm_identity");
       expect(alertCalls).toHaveLength(1);
     });
@@ -701,8 +701,8 @@ describe("service RFP → TROCK Core handoff", () => {
 
       const result = await runApproval();
 
-      expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-123" });
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(result).toEqual({ success: true });
+      expect(outboundCalls).toEqual(["core"]);
       expect(executedSql()).not.toContain("missing_required_field");
       // The KEY is present and explicitly null: Core's parser demands the exact key set.
       expect(corePostRawBody()).toContain('"primaryContact":null');
@@ -714,7 +714,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
       await runApproval();
 
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(outboundCalls).toEqual(["core"]);
       expect(corePostBody().primaryContact).toBeNull();
       expect(executedSql()).not.toContain("missing_required_field");
     });
@@ -724,7 +724,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
       await runApproval();
 
-      expect(outboundCalls).toEqual(["core", "playwright"]);
+      expect(outboundCalls).toEqual(["core"]);
       expect(corePostBody().primaryContact).toBeNull();
     });
 
@@ -743,7 +743,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
       await runApproval();
 
-      expect(outboundCalls).toEqual(["playwright"]);
+      expect(outboundCalls).toEqual([]);
       expect(executedSql()).toContain("missing_required_field");
       expect(executedSql()).toContain("contact name");
     });
@@ -753,7 +753,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
       await runApproval();
 
-      expect(outboundCalls).toEqual(["playwright"]);
+      expect(outboundCalls).toEqual([]);
       expect(executedSql()).toContain("missing_required_field");
       expect(executedSql()).toContain("company name");
       expect(executedSql()).not.toContain("contact email");
@@ -764,7 +764,7 @@ describe("service RFP → TROCK Core handoff", () => {
 
       await runApproval();
 
-      expect(outboundCalls).toEqual(["playwright"]);
+      expect(outboundCalls).toEqual([]);
       expect(executedSql()).toContain("missing_crm_identity");
       expect(executedSql()).toContain("non-canonical: property");
     });
@@ -777,10 +777,10 @@ describe("service RFP → TROCK Core handoff", () => {
 
     await runApproval();
 
-    expect(outboundCalls).toEqual(["playwright"]);
+    expect(outboundCalls).toEqual([]);
   });
 
-  it("builds the Core payload and the Playwright arguments from ONE hoisted value", async () => {
+  it("builds the Core payload from the approval's edits, and hands nothing to Procore", async () => {
     const { createBidBoardProjectFromDeal } = await import("../server/playwright/bidboard.ts");
 
     await runApproval({
@@ -789,20 +789,16 @@ describe("service RFP → TROCK Core handoff", () => {
       city: "Plano",
     });
 
-    const playwrightArgs = vi.mocked(createBidBoardProjectFromDeal).mock.calls.at(-1)?.[0] as any;
-    // Same OBJECT, not merely equal values — two independently rebuilt views could still agree here
-    // by accident and diverge on the next field someone adds.
-    expect(playwrightArgs.options.editedFieldsOverride).toBe(handoffInputs.at(-1).editedFieldsOverride);
-
-    const body = corePostBody();
-    expect(body.bid.title).toBe("Edited service title");
-    expect(body.company.name).toBe("Edited Facilities Co");
-    expect(body.property.address.city).toBe("Plano");
-    expect(playwrightArgs.options.editedFieldsOverride).toMatchObject({
+    expect(vi.mocked(createBidBoardProjectFromDeal)).not.toHaveBeenCalled();
+    expect(handoffInputs.at(-1).editedFieldsOverride).toMatchObject({
       dealname: "Edited service title",
       company_name: "Edited Facilities Co",
       city: "Plano",
     });
+    const body = corePostBody();
+    expect(body.bid.title).toBe("Edited service title");
+    expect(body.company.name).toBe("Edited Facilities Co");
+    expect(body.property.address.city).toBe("Plano");
   });
 
   it("re-stamps occurredAt when the worker drains a queued row, and never rewrites approvedAt", async () => {

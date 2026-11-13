@@ -16,8 +16,9 @@
  *   (c) RFP_NONSERVICE_DESTINATION=core. The Core receiver flag is NOT probed (d9 ruling 2): it is attested by the GO;
  *   (d) non-service (the effective type digit ≠ 4) and a CRM-format number (rfp-destination.ts, contract §2 (d) / (e));
  *   (office) d9 Q1: the stored E1 office (dallas | atlanta) or, where the E1 has none (an approval decided before CRM PR-B),
- *       `--office`, REQUIRED then; a given `--office` must EQUAL a stored one and match the number's prefix
- *       (DFW ⇒ dallas, ATL ⇒ atlanta); an attested office prints "attested by GO <id>";
+ *       `--office`, REQUIRED then; a given `--office` must EQUAL a stored one and be an office the Core path serves. It is the
+ *       CRM office that HOLDS the deal, NOT the number's prefix (owner dcd308cf: DFW / ATL are prefixes in one system); an
+ *       attested office prints "attested by GO <id>";
  *   (kind) d9 Q1: the stored approval kind (the command stamp, else E1's) or, where there is none, `--approval-kind vote`,
  *       REQUIRED then; a given one must EQUAL a stored one, and only a vote goes to Core (I1);
  *   (approval) d9 ruling A (S1b r3): the stored E1 `approval` block or, where the E1 has none (decided before PR-B),
@@ -71,7 +72,8 @@ export const REDRIVE_USAGE =
 export const PROCORE_TERMINAL_SUCCESS_STATUS = "done";
 /** A Core create row in one of these is live for its deal (§2 / REDRIVE-DESIGN.r2 §2 b). */
 export const LIVE_CORE_CREATE_STATUSES = ["pending", "sending", "sent", "held_cross_destination"] as const;
-/** d9 Q1: the office a CRM-format number's prefix names. */
+/** LEGACY (owner 2026-11-13, dcd308cf): the office a number's prefix was once assumed to name. No check uses it; a prefix is a
+ *  market in one shared system, not the CRM office that holds the deal. */
 export const NUMBER_PREFIX_OFFICE: Record<string, string> = { DFW: "dallas", ATL: "atlanta" };
 
 const DEAL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -355,7 +357,7 @@ function evaluate(f: RedriveFacts, args: RedriveArgs, env: NodeJS.ProcessEnv, ev
     detail: dProblems.length === 0 ? `non-service (type digit ${digit}), CRM-format number ${number}` : dProblems.join("; "),
   };
 
-  // (office) d9 Q1: the stored E1 office, or --office where the E1 has none; an --office must match the number's prefix.
+  // (office) d9 Q1: the stored E1 office, or --office where the E1 has none: the CRM office that HOLDS the deal, attested by the GO.
   const storedOffice = typeof payload.office === "string" && payload.office.trim() !== "" ? payload.office.trim() : null;
   const officeProblems: string[] = [];
   let office: string | null = null;
@@ -374,11 +376,11 @@ function evaluate(f: RedriveFacts, args: RedriveArgs, env: NodeJS.ProcessEnv, ev
     office = args.office;
     officeSource = `attested by GO ${args.go}`;
   }
-  if (c && args.office) {
-    const prefix = number ? (/^(DFW|ATL)-/.exec(number)?.[1] ?? null) : null;
-    const expected = prefix ? NUMBER_PREFIX_OFFICE[prefix] : null;
-    if (!expected) officeProblems.push(`--office ${args.office}: the project number ${JSON.stringify(number)} names no office`);
-    else if (expected !== args.office) officeProblems.push(`--office ${args.office} does not match the number's prefix (${prefix} ⇒ ${expected})`);
+  // NOT the number's prefix (owner 2026-11-13, dcd308cf): DFW / ATL are project-number PREFIXES in one shared system, so an
+  // ATL-numbered deal can sit in the CRM's dallas office, and the CRM answers the link callback only from the office that holds
+  // the deal. The old prefix rule (ATL ⇒ atlanta) was a legacy assumption; an --office need only be one the Core path serves.
+  if (c && args.office && !resolveRfpBidCreateOffice(args.office)) {
+    officeProblems.push(`--office ${args.office} is not served by the Core path (dallas | atlanta)`);
   }
   if (officeProblems.length > 0) office = null;
   const officeCheck: RfpCliCheck = {

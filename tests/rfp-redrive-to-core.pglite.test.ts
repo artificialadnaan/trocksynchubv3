@@ -447,20 +447,29 @@ describe("(Q1) --office / --approval-kind for an approval whose stored E1 lacks 
       expect(await counts(), label).toEqual(before);
     }
   });
-  it("an --office that does not match the number's prefix (DFW ⇒ dallas, ATL ⇒ atlanta) ⇒ refused", async () => {
+  // owner 2026-11-13 (dcd308cf): DFW / ATL are project-number PREFIXES in one shared system. The attested office is the CRM office
+  // that HOLDS the deal (the CRM answers the link callback only from there), so an ATL-numbered deal in the dallas office passes.
+  it("an --office is the CRM office that holds the deal, NOT the number's prefix: an ATL number in the dallas office passes the office check", async () => {
     const cases: Array<[string, any, string]> = [
-      ["DFW number, --office atlanta", e1PrePrb(), "atlanta"],
       ["ATL number, --office dallas", e1PrePrb({ projectNumber: "ATL-2-40002-syn" }), "dallas"],
+      ["DFW number, --office atlanta", e1PrePrb(), "atlanta"],
     ];
     for (const [label, input, office] of cases) {
       await reset();
       await seedProcore(input);
-      const before = await counts();
-      const { res, text } = await run(ARGS("--office", office, "--approval-kind", "vote", "--apply"));
-      expect(res.code, label).toBe(1);
-      expect(text, label).toContain("FAIL (office)");
-      expect(await counts(), label).toEqual(before);
+      const { text } = await run(ARGS("--office", office, "--approval-kind", "vote"));
+      expect(text, label).toContain(`PASS (office) office ${office} (attested by GO`);
+      expect(text, label).not.toContain("FAIL (office)");
     }
+  });
+  it("an --office the Core path does not serve is still refused before anything runs (bad arguments), nothing written", async () => {
+    await reset();
+    await seedProcore(e1PrePrb({ projectNumber: "ATL-2-40002-syn" }));
+    const before = await counts();
+    const { res, text } = await run(ARGS("--office", "houston", "--approval-kind", "vote", "--apply"));
+    expect(res.code).toBe(2);
+    expect(text).toContain("--office must be dallas or atlanta");
+    expect(await counts()).toEqual(before);
   });
   it("the S1 sender fills office / approvalKind from payload.operatorRedrive for a re-drive row whose E1 lacks them; E4 and N1 carry that office", async () => {
     const cmd = await seedProcore(e1PrePrb());

@@ -8,6 +8,9 @@
  *   (d) the effective type digit ≠ "4" (the number's digit wins, as the create worker derives it; service keeps its path);
  *   (e) the project number is CRM-format, matched exactly on the wire value;
  *   (f) the E1 office slug is in RFP_CORE_OFFICES (CONTRACT v2.4 c6 / c6.1), matched exactly on the wire value.
+ *       LEGACY IMPLEMENTATION DETAIL, not a business rule (owner 2026-11-13, dcd308cf): DFW and ATL are project-number
+ *       prefixes in ONE shared system, and every approved RFP reaches Core whatever its prefix. The CRM's office slugs
+ *       (dallas, atlanta) both feed Core's one office, and production lists both (RFP_CORE_OFFICES=dallas,atlanta).
  * Pure: no I/O. Evaluated at first arrival (the stamp) and again on every re-attempt (the HELD rule).
  */
 import { parseProjectTypeFromNumber } from "../constants";

@@ -57,6 +57,20 @@ async function buildAll() {
     external: externals,
     logLevel: "info",
   });
+
+  // The operator CLIs an a4 GO runs inside the deployed container, which ships no server/ source: bundled like the server, so
+  // `node dist/scripts/<name>.cjs …` runs the reviewed code itself (no hand-made bundle).
+  console.log("building operator scripts...");
+  await esbuild({
+    entryPoints: ["scripts/rfp-reconcile-approved-callbacks.ts", "scripts/rfp-redrive-to-core.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outdir: "dist/scripts",
+    outExtension: { ".js": ".cjs" },
+    external: externals,
+    logLevel: "info",
+  });
 }
 
 buildAll().catch((err) => {
