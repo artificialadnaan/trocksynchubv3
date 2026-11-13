@@ -1583,10 +1583,12 @@ export async function processRfpApproval(
     };
 
     // Tell TROCK Core about the service job: its card IS the job now that Procore project creation is retired. FAIL-OPEN
-    // by construction: this never throws and its result is not branched on. A Core outage leaves a queued outbox row
-    // (retried, and visible on the health dashboard), and the CRM is told 'approved' only once Core confirms the card.
+    // by construction: this never throws, and the approval goes on whatever it answers. A Core outage leaves a queued outbox
+    // row (retried, and visible on the health dashboard), and the CRM is told 'approved' only once Core confirms the card.
+    // Only a SKIPPED handoff (no outbox row) is branched on, below.
+    let coreHandoff: { status: string } | undefined;
     if (isService && !resume) {
-      await handOffServiceRfpApprovalToCore({
+      coreHandoff = await handOffServiceRfpApprovalToCore({
         sourceSystem: identity.sourceSystem,
         sourceDealId,
         rfpRequestId: request.id,
@@ -1636,7 +1638,17 @@ export async function processRfpApproval(
     }
 
     let crmStep: RfpStatusStep;
-    if (isService) {
+    if (isService && coreHandoff?.status === 'skipped') {
+      // A SKIPPED handoff (Core ingress not provisioned, or the outbox insert itself threw) left no outbox row: no Core job,
+      // nothing for the worker to retry, and no Core confirmation to tell the CRM. With Procore retired nothing else makes
+      // the job, so the gap is raised and the email says so. The approval stands (the source deal has already moved); the
+      // job reaches Core by a re-drive (CodeRabbit on #136; a4 e9effe02).
+      const { raiseRfpCoreAlert } = await import('./sync/rfp-core-alert');
+      await raiseRfpCoreAlert('service_handoff_skipped', {
+        requestId: request.id, sourceSystem: identity.sourceSystem, sourceDealId, projectNumber: finalProjectNumber,
+      });
+      crmStep = { name: 'T-Rock Core service card', success: false, detail: 'NOT handed to Core: re-drive needed' };
+    } else if (isService) {
       let told = false;
       if (identity.sourceSystem === 'trock_crm') {
         try {

@@ -39,12 +39,15 @@ vi.mock("../server/sync/bidboard-callback-worker.ts", () => ({
 }));
 vi.mock("../server/sync/service-rfp-core-outbox.ts", () => ({ handOffServiceRfpApprovalToCore: vi.fn() }));
 vi.mock("../server/sync/rfp-approved-callback.ts", () => ({ enqueueRfpApprovedCallbackIfCoreConfirmed: vi.fn() }));
+vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: vi.fn(async () => true) }));
 
 const { storage } = await import("../server/storage.ts");
 const { withBrowserLock } = await import("../server/playwright/browser.ts");
 const { createBidBoardProjectFromDeal } = await import("../server/playwright/bidboard.ts");
 const { handOffServiceRfpApprovalToCore } = await import("../server/sync/service-rfp-core-outbox.ts");
 const { enqueueRfpApprovedCallbackIfCoreConfirmed } = await import("../server/sync/rfp-approved-callback.ts");
+const { raiseRfpCoreAlert } = await import("../server/sync/rfp-core-alert.ts");
+const { sendEmail } = await import("../server/email-service.ts");
 const { processRfpApproval } = await import("../server/rfp-approval.ts");
 const { PROCORE_CREATE_RETIRED_ERROR } = await import("../server/sync/procore-create-retired.ts");
 
@@ -86,6 +89,23 @@ describe("processRfpApproval with Procore project creation retired", () => {
     );
     expect(enqueueRfpApprovedCallbackIfCoreConfirmed).toHaveBeenCalledWith(70);
     expect(storage.enqueueBidboardCallback).not.toHaveBeenCalled();
+  });
+
+  it("CodeRabbit on #136: a SKIPPED Core handoff (no outbox row) stays approved, raises the alert, and the email says a re-drive is needed", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
+    vi.mocked(handOffServiceRfpApprovalToCore).mockResolvedValueOnce({ status: "skipped" });
+
+    const result = await processRfpApproval("synthetic-token-70", {}, "approver@example.test");
+
+    expect(result).toEqual({ success: true });
+    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(70, expect.objectContaining({ status: "approved" }), { expectedStatus: "pending" });
+    expect(raiseRfpCoreAlert).toHaveBeenCalledWith("service_handoff_skipped", expect.objectContaining({ requestId: 70, sourceDealId: DEAL }));
+    // Core never confirmed a card, so the CRM is not told 'approved' (it waits on the re-drive).
+    expect(enqueueRfpApprovedCallbackIfCoreConfirmed).not.toHaveBeenCalled();
+    const html = String((vi.mocked(sendEmail).mock.calls.at(-1)?.[0] as any)?.htmlBody ?? "");
+    expect(html).toContain("NOT handed to Core: re-drive needed");
+    expect(html).not.toContain("Handed to Core; the CRM is told");
+    expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
   });
 
   it("keeps the estimator the approver selected: recorded on the request and handed to Core with the job", async () => {
