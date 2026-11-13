@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Procore project creation is retired (owner 2026-11-13): createBidBoardProjectFromDeal refuses at its first line. This suite tests
+// the retired machinery itself, so it switches the refusal off for its own assertions.
+vi.mock("../server/sync/procore-create-retired.ts", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  procoreCreateRetired: () => false,
+}));
+
 vi.mock("../server/db.ts", () => ({ db: {}, pool: {} }));
 
 vi.mock("../server/storage.ts", () => ({

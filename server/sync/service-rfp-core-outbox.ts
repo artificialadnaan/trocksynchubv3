@@ -585,7 +585,7 @@ async function insertOutboxRow(input: {
  */
 async function markSent(id: number, status: number, bidId: string | null): Promise<void> {
   const db = await getDb();
-  await db.execute(sql`
+  const updated = rowsOf(await db.execute(sql`
     UPDATE service_rfp_core_outbox
        SET status = 'crm_notify_accepted',
            next_attempt_at = NOW(),
@@ -595,7 +595,20 @@ async function markSent(id: number, status: number, bidId: string | null): Promi
            core_bid_id = ${bidId},
            last_error = NULL
      WHERE id = ${id}
-  `);
+    RETURNING rfp_request_id
+  `));
+  // Core confirmed the card: the CRM's RFP is complete (Procore creation retired, owner 2026-11-13). Idempotent, and a
+  // request the approval has not recorded yet is told by the approval itself (rfp-approved-callback.ts).
+  const requestId = Number(updated[0]?.rfp_request_id);
+  if (bidId && Number.isSafeInteger(requestId) && requestId > 0) {
+    try {
+      const { enqueueRfpApprovedCallbackIfCoreConfirmed } = await import("./rfp-approved-callback");
+      await enqueueRfpApprovedCallbackIfCoreConfirmed(requestId, { db });
+    } catch (error: any) {
+      // The handoff itself landed; a lost callback is found by the reconcile (approved, Core confirmed, no callback).
+      log(`[service-rfp-core] Row ${id}: the CRM approved callback could not be enqueued: ${error?.message || error}`, "sync");
+    }
+  }
 }
 
 /**

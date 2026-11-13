@@ -4,13 +4,13 @@ import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { PgDialect } from "drizzle-orm/pg-core";
 
-// CONTRACT v2.2 §10, S0b-2a, END TO END through processRfpApproval (path P3) on REAL postgres with the REAL storage SQL:
-//   - the email path flips pending → approving under the per-deal lock in one short transaction right before Playwright, and
-//     the lock is never held across the HubSpot calls (d9 Q2 condition);
-//   - Playwright gets a beforeCreate hook that commits rfp_approval_approving.submit_at before the create starts (runbook r5);
-//   - a Core footprint ⇒ no Playwright, held_cross_destination, F1, alert; a double click creates once; an errored preflight
-//     fails closed; 0027 absent ⇒ today's path (d9 green test);
-//   - a decline that read `pending` just before the flip loses with 409 instead of overwriting `approving` (d9 5b).
+// processRfpApproval END TO END on REAL postgres with the REAL storage SQL, now that PROCORE PROJECT CREATION IS RETIRED (owner
+// 2026-11-13, b0cb0c4f). The S0b-2a claim that guarded the Procore create (pending → approving, the beforeCreate submit record,
+// the Core-footprint hold) is gone with the create: an approval goes pending → approved in ONE conditional write, so
+//   - it never passes through 'approving', writes no rfp_approval_approving row and calls no Procore create;
+//   - a double click approves once (the second write matches nothing: 409);
+//   - a decline that lands first wins (the approval's write matches nothing: 409, the CRM is not told);
+//   - a Core footprint no longer holds it (there is no second destination to protect); 0027 absent changes nothing.
 // REAL postgres (the runner's throwaway postgres:18, DATABASE_URL), one fresh database per run plus one WITHOUT 0027. LIVE=1
 // without DATABASE_URL FAILS here; it never skips. The environment's DATABASE_URL points at an unroutable sentinel, so an
 // un-mocked db import fails loudly. Synthetic data only (I7).
@@ -204,158 +204,68 @@ async function lockIsFree(dealId: string): Promise<boolean> {
   }
 }
 
-describe.skipIf(!BASE_URL)("processRfpApproval email path (V3) on real PG", () => {
-  it("when the Playwright create starts, the row is already approving and rfp_approval_approving.started_at is set", async () => {
+describe.skipIf(!BASE_URL)("processRfpApproval on real PG with Procore project creation retired", () => {
+  it("an approval goes pending → approved directly: no 'approving', no claim row, no Procore create; a non-service CRM request gets ONE 'failed' (no Core route)", async () => {
     const { id, token } = await insertRequest("pending");
-    let seen: unknown = null;
-    createMock.mockImplementationOnce(async () => {
-      seen = { status: await requestStatus(id), side: await approvingRow(id) };
-      return { success: true, projectId: "900111" };
-    });
-    await processRfpApproval(token, {}, APPROVER);
-    expect(seen).toEqual({ status: "approving", side: { started: true, submitted: false } });
-  });
-  it("Playwright gets a beforeCreate hook; once it returns, another session reads submit_at set (committed before the create)", async () => {
-    const { id, token } = await insertRequest("pending");
-    let hookType = "missing";
-    let submittedAfterHook: unknown = null;
-    createMock.mockImplementationOnce(async (args: any) => {
-      const hook = args?.options?.beforeCreate;
-      hookType = typeof hook;
-      if (typeof hook === "function") {
-        await hook();
-        submittedAfterHook = (await approvingRow(id))?.submitted ?? null;
-      }
-      return { success: true, projectId: "900111" };
-    });
+
     const result = await processRfpApproval(token, {}, APPROVER);
-    expect(hookType).toBe("function");
-    expect(submittedAfterHook).toBe(true);
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "900111" });
+
+    expect(result).toEqual({ success: true });
     expect(await requestStatus(id)).toBe("approved");
-  });
-  for (const [when, hookFirst, submitted] of [["before", false, false], ["after", true, true]] as const) {
-    it(`a create that never returns ${when} the hook (a crash) leaves the row approving with submit_at ${submitted ? "set" : "NULL"}`, async () => {
-      const { id, token } = await insertRequest("pending");
-      let entered = false;
-      let release: ((v: unknown) => void) | undefined;
-      createMock.mockImplementationOnce(async (args: any) => {
-        const hook = args?.options?.beforeCreate;
-        if (hookFirst && typeof hook === "function") await hook();
-        entered = true;
-        return new Promise((r) => { release = r; });
-      });
-      const run = processRfpApproval(token, {}, APPROVER);
-      let state: unknown = null;
-      try {
-        await until(() => entered);
-        state = { status: await requestStatus(id), submitted: (await approvingRow(id))?.submitted ?? null };
-      } finally {
-        release?.({ success: false, error: "synthetic crash" });
-        await run;
-      }
-      expect(state).toEqual({ status: "approving", submitted });
-    });
-  }
-  it("a Core footprint for the deal ⇒ no Playwright; the request is held_cross_destination with an F1 and the alert", async () => {
-    await insertCore("core-key-1", "pending", false);
-    const { id, token } = await insertRequest("pending");
-    const result = await processRfpApproval(token, {}, APPROVER);
+    expect(await approvingRow(id)).toBeUndefined();
     expect(createMock).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/cross_destination_hold/);
-    expect(await requestStatus(id)).toBe("held_cross_destination");
-    expect(await holdCallbacks(id)).toEqual(["cross_destination_hold"]);
-    expect(alertCodes()).toContain("cross_destination_hold");
+    const callbacks = await holdCallbacks(id);
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]).toMatch(/no T-Rock Core route/);
   });
-  it("a double click (two approvals of one token at once) ⇒ exactly one Playwright create; the other reads 'Request already approving'", async () => {
-    const { token } = await insertRequest("pending");
-    // The create is HELD until the losing call has returned, so the loser deterministically meets the in-flight row (green1 showed
-    // an instant mock lets the winner approve first, and the loser then reads "approved").
-    let release: ((v: unknown) => void) | undefined;
-    createMock.mockImplementationOnce(() => new Promise((r) => { release = r; }));
-    const calls = [processRfpApproval(token, {}, APPROVER), processRfpApproval(token, {}, APPROVER)];
-    await Promise.race(calls);
-    release?.({ success: true, projectId: "900111" });
-    const results = await Promise.all(calls);
-    expect(createMock).toHaveBeenCalledTimes(1);
-    expect(results).toContainEqual({ success: false, error: "Request already approving" });
-  });
-  it("the deal lock is free while the HubSpot update runs (nothing held across the network call; d9 Q2 guard)", async () => {
-    const { token } = await insertRequest("pending", { system: "hubspot" });
-    let releaseHubspot: ((v: unknown) => void) | undefined;
-    let hubspotEntered = false;
-    hubspotUpdateMock.mockImplementationOnce(() => {
-      hubspotEntered = true;
-      return new Promise((r) => { releaseHubspot = r; });
-    });
-    const run = processRfpApproval(token, { dealname: "Synthetic Deal (edited)" }, APPROVER);
-    let freeDuringHubspot: boolean | null = null;
-    try {
-      await until(() => hubspotEntered);
-      freeDuringHubspot = await lockIsFree(HS_DEAL);
-    } finally {
-      releaseHubspot?.({ success: true });
-      await run;
-    }
-    expect(hubspotEntered).toBe(true);
-    expect(freeDuringHubspot).toBe(true);
-    expect(hubspotUpdateMock.mock.invocationCallOrder[0]).toBeLessThan(createMock.mock.invocationCallOrder[0]);
-  });
-  it("a preflight that ERRORS ⇒ no Playwright; the request stays pending; the alert names the error (core_preflight_error), never core_tables_missing", async () => {
+
+  it("a double click (two approvals of one token at once) approves ONCE: the other is refused, one CRM callback, no Procore create", async () => {
     const { id, token } = await insertRequest("pending");
-    dbHolder.db = new Proxy(mainDb, {
-      get(target, prop) {
-        if (prop === "execute") {
-          return async (q: any) => {
-            if (/to_regclass/.test(new PgDialect().sqlToQuery(q).sql)) throw new Error("synthetic preflight failure");
-            return target.execute(q);
-          };
-        }
-        const value = Reflect.get(target, prop, target);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-    const result = await processRfpApproval(token, {}, APPROVER);
+
+    const results = await Promise.all([processRfpApproval(token, {}, APPROVER), processRfpApproval(token, {}, APPROVER)]);
+
+    expect(results.filter((r) => r.success)).toHaveLength(1);
+    expect(results.filter((r) => !r.success)).toHaveLength(1);
+    expect(await requestStatus(id)).toBe("approved");
+    expect(await holdCallbacks(id)).toHaveLength(1);
     expect(createMock).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(await requestStatus(id)).toBe("pending");
-    expect(alertCodes()).toContain("core_preflight_error");
-    expect(alertCodes()).not.toContain("core_tables_missing");
-    expect(JSON.stringify(alertMock.mock.calls)).toMatch(/synthetic preflight failure/);
   });
-  it("0027 absent ⇒ today's path: one Playwright create, the request approved, no error (d9 green test; guard)", async () => {
-    const { id, token } = await insertRequest("pending", { p: pool27less });
+
+  it("a decline that lands before the approval's write wins: 409, the row stays declined, the CRM is not told", async () => {
+    const { id, token } = await insertRequest("pending");
+    const pendingRead = await storage.getRfpApprovalRequestByToken(token);
+    await sql(`UPDATE rfp_approval_requests SET status = 'declined', declined_by = 'other@example.test', declined_at = now() WHERE id = $1`, [id]);
+    // The approval read the row while it was still pending (the race), then a decline committed.
+    vi.spyOn(storage, "getRfpApprovalRequestByToken").mockResolvedValueOnce(pendingRead as any);
+
+    const result = await processRfpApproval(token, {}, APPROVER);
+
+    expect(result).toMatchObject({ success: false, statusCode: 409 });
+    expect(await requestStatus(id)).toBe("declined");
+    expect(await holdCallbacks(id)).toHaveLength(0);
+  });
+
+  it("a Core footprint for the deal no longer holds an approval: approved, no hold, no cross-destination alert, no Procore create", async () => {
+    await insertCore("crm:rfp-vote:approved:synthetic-round-1", "sent", true);
+    const { id, token } = await insertRequest("pending");
+
+    const result = await processRfpApproval(token, {}, APPROVER);
+
+    expect(result).toEqual({ success: true });
+    expect(await requestStatus(id)).toBe("approved");
+    expect(alertCodes()).not.toContain("cross_destination_hold");
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("0027 absent ⇒ the same path: approved, no error (the claim tables are never read)", async () => {
     dbHolder.pool = pool27less;
     dbHolder.db = db27less;
+    const { id, token } = await insertRequest("pending", { p: pool27less });
+
     const result = await processRfpApproval(token, {}, APPROVER);
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "900111" });
-    expect(createMock).toHaveBeenCalledTimes(1);
+
+    expect(result).toEqual({ success: true });
     expect(await requestStatus(id, pool27less)).toBe("approved");
-  });
-});
-
-describe.skipIf(!BASE_URL)("processRfpApproval override path (force) on real PG", () => {
-  it("a Core footprint ⇒ no Playwright; the override is held_cross_destination with an F1 and the alert", async () => {
-    await insertCore("core-key-1", "sent", true);
-    const { id, token } = await insertRequest("override_approving");
-    const result = await processRfpApproval(token, {}, APPROVER, { force: true });
     expect(createMock).not.toHaveBeenCalled();
-    expect(result.success).toBe(false);
-    expect(await requestStatus(id)).toBe("held_cross_destination");
-    expect(await holdCallbacks(id)).toEqual(["cross_destination_hold"]);
-    expect(alertCodes()).toContain("cross_destination_hold");
-  });
-});
-
-describe.skipIf(!BASE_URL)("processRfpDecline vs the flip (d9 5b)", () => {
-  it("a decline that read pending just before the flip loses: 409 'Request already approving', the row stays approving", async () => {
-    const { id, token } = await insertRequest("pending");
-    const stale = await storage.getRfpApprovalRequestByToken(token);
-    await sql(`UPDATE rfp_approval_requests SET status = 'approving' WHERE id = $1`, [id]);
-    vi.spyOn(storage, "getRfpApprovalRequestByToken").mockResolvedValueOnce(stale as any);
-    const result = await processRfpDecline(token, APPROVER);
-    expect(await requestStatus(id)).toBe("approving");
-    expect(result).toMatchObject({ success: false, error: "Request already approving", statusCode: 409 });
   });
 });

@@ -295,6 +295,38 @@ describe("RFP approve/decline route authorization", () => {
     });
   });
 
+  // Owner 2026-11-13 (aee05169): with Procore project creation retired nothing stores a file added at approval, so files are
+  // never accepted and then reported lost. The page offers no upload; a stale page that sends one is refused up front.
+  it("refuses files added at approval with 400 and the CRM direction, before anything is accepted or queued", async () => {
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "cburling@trockgc.com");
+      form.append("editedFields", JSON.stringify({}));
+      form.append("newFiles", new Blob(["synthetic file body"], { type: "text/plain" }), "synthetic-scope.txt");
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+      const body = await response.json();
+
+      expect(response.status).toBe(400);
+      expect(body).toMatchObject({ success: false, error: "files_not_accepted" });
+      expect(body.message).toContain("Attach them to the deal in the CRM");
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("the review page offers no upload: it directs the reviewer to the CRM deal, and the approve button no longer promises a Bid Board project", async () => {
+    requestRow.current = makeRequest({ sourceSystem: "trock_crm", sourceDealId: "00000000-0000-4000-8000-000000000042", hubspotDealId: null });
+    await withApp(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/rfp-review/tok-authz`);
+      const html = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(html).not.toContain('type="file"');
+      expect(html).toContain("Need to add files? Attach them to the T Rock CRM deal. You can approve without them.");
+      expect(html).toContain(">Approve</button>");
+      expect(html).not.toContain("Create BidBoard Project");
+    });
+  });
+
   it("allows an authorized decliner through to processRfpDecline", async () => {
     authorize.mockResolvedValue(true);
     await withApp(async (baseUrl) => {

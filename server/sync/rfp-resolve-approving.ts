@@ -323,7 +323,7 @@ export async function dryRunResolveApproving(requestId: number, deps: ResolveDep
   }
   report.decision = "B_recreate";
   out("VERDICT not_found_no_submit: zero hits and the create never started");
-  out(`DECISION B: --apply --resolution recreate (its own a4 GO naming request ${requestId})`);
+  out(`DECISION B: no Procore project exists, and recreate is RETIRED (Procore project creation, owner 2026-11-13): no write; a person hands request ${requestId}'s job to T-Rock Core`);
   return report;
 }
 

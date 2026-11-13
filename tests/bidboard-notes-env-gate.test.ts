@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Procore project creation is retired (owner 2026-11-13): createBidBoardProjectFromDeal refuses at its first line. This suite tests
+// the retired machinery itself, so it switches the refusal off for its own assertions.
+vi.mock("../server/sync/procore-create-retired.ts", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  procoreCreateRetired: () => false,
+}));
+
 // BIDBOARD_NOTES_ENABLED is a kill switch, default OFF, for the CRM activity-note step inside
 // createBidBoardProjectFromDeal.
 //

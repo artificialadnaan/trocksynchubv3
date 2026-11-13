@@ -44,7 +44,10 @@ export type RfpCoreAlertCode =
   // S1b r2 (d9 Q2): a CRM re-post of a re-driven approval, answered as a no-op replay.
   | "redrive_repost_replayed"
   // SIGNING-HARDENING r1: a SyncHub → CRM send refused at first use (secret < 32 bytes, or a non-https CRM URL).
-  | "crm_signing_refused";
+  | "crm_signing_refused"
+  // Procore creation retired (#136): an approved service RFP whose Core handoff was skipped (no outbox row, so no job and no
+  // retry). It needs a re-drive.
+  | "service_handoff_skipped";
 
 export const RFP_CORE_ALERT_NAMESPACE = "rfp-core:";
 /** Standing / repeating conditions: their repeats fall under the re-alert window instead of each mailing again. */

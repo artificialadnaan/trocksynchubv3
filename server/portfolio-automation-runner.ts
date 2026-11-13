@@ -8,6 +8,7 @@
 
 import { storage } from "./storage";
 import { sendEmail } from "./email-service";
+import { isProcoreCreateRetiredError } from "./sync/procore-create-retired";
 import { log } from "./index";
 import type {
   PortfolioAutomationResult,
@@ -235,6 +236,9 @@ export async function runPhase1WithRetry(
       `[portfolio-runner] Phase 1 attempt ${attempt} failed at step "${failedStep}": ${result.error ?? "unknown"}`,
       "playwright"
     );
+
+    // Procore project creation is retired: the refusal is not transient, so a retry would only repeat it.
+    if (isProcoreCreateRetiredError(result.error)) break;
 
     if (attempt < MAX_RETRIES) {
       const delayMs =

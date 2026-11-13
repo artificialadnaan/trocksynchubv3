@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Procore project creation is retired (owner 2026-11-13): createBidBoardProjectFromDeal refuses at its first line. This suite tests
+// the retired machinery itself, so it switches the refusal off for its own assertions.
+vi.mock("../server/sync/procore-create-retired.ts", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  procoreCreateRetired: () => false,
+}));
+
 // The CRM activity note is posted by createBidBoardProjectFromDeal and is FAIL-OPEN: creating the
 // project is the critical path, a note is not. These tests pin two things:
 //

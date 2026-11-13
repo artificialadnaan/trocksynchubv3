@@ -177,8 +177,9 @@ describe("RFP source eligibility check", () => {
 
     const result = await processRfpApproval("token-1", {}, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
-    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ success: true });
+    // Procore project creation is retired (owner 2026-11-13): an approval never calls Procore.
+    expect(createBidBoardMock).not.toHaveBeenCalled();
   });
 
   it("uses edited dealname in the post-approval status email", async () => {
@@ -192,7 +193,7 @@ describe("RFP source eligibility check", () => {
 
     const result = await processRfpApproval("token-1", { dealname: "test" }, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
+    expect(result).toEqual({ success: true });
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       subject: expect.stringContaining("test"),
       htmlBody: expect.stringContaining(">test<"),
@@ -206,7 +207,7 @@ describe("RFP source eligibility check", () => {
 
     const result = await processRfpApproval("token-1", editedFields, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
+    expect(result).toEqual({ success: true });
     expect(sendEmailMock).toHaveBeenCalledWith(expect.objectContaining({
       subject: expect.stringContaining("Source Deal"),
       htmlBody: expect.stringContaining(">Source Deal<"),
@@ -294,8 +295,9 @@ describe("RFP source eligibility check", () => {
 
     const result = await processRfpApproval("token-1", {}, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
-    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ success: true });
+    // Procore project creation is retired (owner 2026-11-13): an approval never calls Procore.
+    expect(createBidBoardMock).not.toHaveBeenCalled();
     expect(global.fetch).toHaveBeenCalledWith(
       "https://crm.example.com/api/internal/deals/eligibility-check",
       expect.objectContaining({
@@ -384,8 +386,9 @@ describe("RFP source eligibility check", () => {
 
     const result = await processRfpApproval("token-1", {}, "approver@trockgc.com", { attachmentsOverride: [], newFiles: [] });
 
-    expect(result).toMatchObject({ success: true, bidboardProjectId: "BB-1" });
-    expect(createBidBoardMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ success: true });
+    // Procore project creation is retired (owner 2026-11-13): an approval never calls Procore.
+    expect(createBidBoardMock).not.toHaveBeenCalled();
   });
 
   // Codex round 3 on SyncHub #114, simplified per the churn rule: EVERY eligibility check has one fail-open deadline,

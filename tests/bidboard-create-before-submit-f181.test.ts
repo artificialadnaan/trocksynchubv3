@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Procore project creation is retired (owner 2026-11-13): createBidBoardProjectFromDeal refuses at its first line. This suite tests
+// the retired machinery itself, so it switches the refusal off for its own assertions.
+vi.mock("../server/sync/procore-create-retired.ts", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  procoreCreateRetired: () => false,
+}));
+
 // F-181 (d9 + a4 11-11): a failed HubSpot stage trigger may be REPLAYED only on positive evidence that no Procore project can
 // exist: the create failed before any create control was clicked. The new Bid Board UI creates an empty project at the Create
 // dialog's Confirm and auto-saves, so the line is the FIRST create click (bidboard.ts :1143 new UI / :1177 legacy). The create

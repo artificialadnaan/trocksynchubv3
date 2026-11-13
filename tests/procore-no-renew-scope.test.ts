@@ -149,8 +149,11 @@ describe("withoutProcoreTokenRenewal (the recreate's create step never renews; e
       }
     }
     // procore.ts: the refresh's doc comment + its one POST; oauth.ts: the admin callback's authorization_code exchange (an inbound
-    // HTTP route, not a renewal); procore-token-read.ts: a comment. A new site fails here and must be reviewed against the scope.
-    expect(found).toEqual({ "server/procore.ts": 2, "server/routes/oauth.ts": 1, "server/routes/procore-token-read.ts": 1 });
+    // HTTP route, not a renewal); procore-token-read.ts: a comment; procore-token-keepalive.ts (#133): two doc comments (it renews
+    // only through procore.ts's locked refresh). A new site fails here and must be reviewed against the scope.
+    expect(found).toEqual({
+      "server/procore.ts": 2, "server/procore-token-keepalive.ts": 2, "server/routes/oauth.ts": 1, "server/routes/procore-token-read.ts": 1,
+    });
     const src = readFileSync(new URL("../server/procore.ts", import.meta.url), "utf8");
     const start = src.indexOf("export async function refreshProcoreAccessTokenUnderLock(");
     expect(start).toBeGreaterThan(-1);
@@ -165,15 +168,15 @@ describe("withoutProcoreTokenRenewal (the recreate's create step never renews; e
     expect(cb.slice(at, at + 120)).toMatch(/grant_type: "authorization_code"/);
   });
 
-  it("source pin: recreateApprovingRequest runs the create step (processRfpApproval) inside withoutProcoreTokenRenewal", () => {
+  // Procore project creation is retired (owner 2026-11-13, b0cb0c4f): the recreate has no create step left to run, so it can't
+  // renew a token. rfp-resolve-approving.pg runs the refusal itself.
+  it("source pin: recreateApprovingRequest is retired: it runs no create step (processRfpApproval) at all", () => {
     const approval = readFileSync(new URL("../server/rfp-approval.ts", import.meta.url), "utf8");
     const start = approval.indexOf("export async function recreateApprovingRequest");
     expect(start).toBeGreaterThan(-1);
     const end = approval.indexOf("\nexport ", start + 1);
     const body = approval.slice(start, end === -1 ? undefined : end);
-    const scope = body.indexOf("withoutProcoreTokenRenewal(");
-    expect(scope).toBeGreaterThan(-1);
-    expect(body.indexOf("processRfpApproval(", scope)).toBeGreaterThan(scope);
-    expect(body.slice(0, scope)).not.toMatch(/processRfpApproval\(/);
+    expect(body).toContain("PROCORE_CREATE_RETIRED_ERROR");
+    expect(body).not.toMatch(/processRfpApproval\(/);
   });
 });

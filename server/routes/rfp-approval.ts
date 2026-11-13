@@ -262,14 +262,9 @@ async function renderRfpReviewPage(
         ${field('Notes', 'notes', d.notes, 'textarea')}
 
         <div class="section-title">Attachments</div>
-        <p class="attachments-intro">Attachments from the ${esc(source.label)} deal. Remove any you don't need and add additional files before approval.</p>
+        <p class="attachments-intro">Attachments from the ${esc(source.label)} deal. Remove any you don't need.</p>
         <div id="attachmentsList" class="attachments-list"></div>
-        <div class="add-attachments">
-          <label class="add-attachments-label">
-            <input type="file" id="newFiles" multiple accept="*/*" style="display:none">
-            <span class="btn btn-outline">+ Add Attachment</span>
-          </label>
-        </div>
+        <p class="attachments-intro" id="addFilesInCrm">Need to add files? Attach them to the ${esc(source.label)} deal. You can approve without them.</p>
         <input type="hidden" name="attachmentsOverride" id="attachmentsOverride">
 
         <div class="email-field">
@@ -278,7 +273,7 @@ async function renderRfpReviewPage(
         </div>
 
         <div class="actions">
-          <button type="button" class="btn btn-approve" id="approveBtn" onclick="submitApproval()">Approve &amp; Create BidBoard Project</button>
+          <button type="button" class="btn btn-approve" id="approveBtn" onclick="submitApproval()">Approve</button>
           <button type="button" class="btn btn-decline" id="declineBtn" onclick="submitDecline()">Decline</button>
         </div>
       </form>
@@ -296,8 +291,6 @@ async function renderRfpReviewPage(
   <script>
     const TOKEN = '${token}';
     const INITIAL_ATTACHMENTS = ${JSON.stringify((d.attachments || []).map((a: any) => ({ name: a.name, url: a.url, type: a.type, size: a.size })))};
-    const newFilesStore = [];
-
     function renderAttachments() {
       const list = document.getElementById('attachmentsList');
       const kept = INITIAL_ATTACHMENTS.filter((_, i) => !removedIndices.has(i));
@@ -307,30 +300,17 @@ async function renderRfpReviewPage(
           '<a href="' + (a.url || '#') + '" target="_blank">View</a>' +
           '<span class="remove-att" onclick="removeAttachment(' + origIdx + ')">Remove</span></div>';
       }).join('');
-      newFilesStore.forEach((f, i) => {
-        rows += '<div class="att-row att-new" data-new="' + i + '"><span>' + (f.name || '').replace(/</g, '&lt;') + '</span><span class="remove-att" onclick="removeNewFile(' + i + ')">Remove</span></div>';
-      });
       list.innerHTML = rows || '<p class="attachments-empty" style="color:#94a3b8;font-size:13px;">No attachments</p>';
       updateAttachmentsOverride();
     }
 
     const removedIndices = new Set();
     function removeAttachment(idx) { removedIndices.add(idx); renderAttachments(); }
-    function removeNewFile(idx) { newFilesStore.splice(idx, 1); renderAttachments(); }
 
     function updateAttachmentsOverride() {
       const kept = INITIAL_ATTACHMENTS.filter((_, i) => !removedIndices.has(i)).map(a => ({ name: a.name, url: a.url }));
-      const newInfos = newFilesStore.map(f => ({ name: f.name, _new: true }));
-      document.getElementById('attachmentsOverride').value = JSON.stringify([...kept, ...newInfos]);
+      document.getElementById('attachmentsOverride').value = JSON.stringify(kept);
     }
-
-    document.getElementById('newFiles').addEventListener('change', function() {
-      for (let i = 0; i < this.files.length; i++) {
-        newFilesStore.push({ file: this.files[i], name: this.files[i].name });
-      }
-      this.value = '';
-      renderAttachments();
-    });
 
     renderAttachments();
 
@@ -394,7 +374,6 @@ async function renderRfpReviewPage(
         fd.append('editedFields', JSON.stringify(getFormData()));
         fd.append('approverEmail', email);
         fd.append('attachmentsOverride', document.getElementById('attachmentsOverride').value);
-        newFilesStore.forEach((f, i) => fd.append('newFiles', f.file));
         const resp = await fetch('/api/rfp-approval/' + TOKEN + '/approve', {
           method: 'POST',
           body: fd,
@@ -407,7 +386,7 @@ async function renderRfpReviewPage(
           throw new Error(raw || ('Request failed with status ' + resp.status));
         }
         if (data.success) {
-          const message = data.message ? escapeHtml(data.message) : 'The deal has been updated in ${esc(source.label)} and a BidBoard project is being created in the background.';
+          const message = data.message ? escapeHtml(data.message) : 'The deal has been updated in ${esc(source.label)}, and the approval continues in the background.';
           showResult('<strong>Approved!</strong> ' + message + (data.bidboardProjectId ? ' BidBoard Project ID: ' + escapeHtml(data.bidboardProjectId) : ''), 'success');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
@@ -448,7 +427,7 @@ async function renderRfpReviewPage(
           throw new Error(raw || ('Request failed with status ' + resp.status));
         }
         if (data.success) {
-          showResult('This RFP has been <strong>declined</strong>. No BidBoard project will be created. The deal remains in ${esc(source.label)}.', 'declined');
+          showResult('This RFP has been <strong>declined</strong>. The deal remains in ${esc(source.label)}.', 'declined');
           document.getElementById('rfpForm').style.display = 'none';
         } else {
           // Prefer the friendly user-facing message (e.g. the unauthorized-approver guidance);
@@ -469,6 +448,10 @@ async function renderRfpReviewPage(
 }
 
 // ── Route registration ────────────────────────────────────────────────────────
+
+// Files added at approval have nowhere to go now (owner 2026-11-13, aee05169); the approve route refuses them with this.
+const ADD_FILES_IN_CRM_MESSAGE =
+  "Files can't be added at approval. Attach them to the deal in the CRM; you can approve without them.";
 
 export function registerRfpApprovalRoutes(app: Express) {
   // PUBLIC — no auth required
@@ -565,6 +548,12 @@ export function registerRfpApprovalRoutes(app: Express) {
           attachmentsOverride = typeof ao === 'string' ? JSON.parse(ao || '[]') : ao || [];
         } catch { /* fallback to empty */ }
         const newFiles = files.newFiles ? (Array.isArray(files.newFiles) ? files.newFiles : [files.newFiles]) : [];
+        // FILES CAN'T BE ADDED AT APPROVAL (owner 2026-11-13, aee05169): with Procore project creation retired nothing stores
+        // them, and a file must never be accepted and then reported lost. The page no longer offers the upload; a stale page
+        // that still sends files is refused here, before anything is accepted or queued.
+        if (newFiles.length > 0) {
+          return res.status(400).json({ success: false, error: 'files_not_accepted', message: ADD_FILES_IN_CRM_MESSAGE });
+        }
 
         const request = await storage.getRfpApprovalRequestByToken(token);
         if (!request) {
@@ -651,8 +640,8 @@ export function registerRfpApprovalRoutes(app: Express) {
           success: true,
           queued: true,
           message: request.sourceSystem === 'trock_crm'
-            ? 'The deal edits were logged for T Rock CRM write-back, and BidBoard project creation will continue in the background.'
-            : 'The deal is being updated in HubSpot now, and BidBoard project creation will continue in the background.',
+            ? 'The deal edits were logged for T Rock CRM write-back, and the approval continues in the background.'
+            : 'The deal is being updated in HubSpot now, and the approval continues in the background.',
         });
 
         setImmediate(async () => {
