@@ -57,10 +57,10 @@ async function request(n: number, opts: { status?: string; service?: boolean; ap
       opts.approved === false || status !== "approved" ? null : "2026-11-13 16:22:11.970", opts.procore ? "900111" : null],
   );
 }
-async function coreOutbox(n: number, status: string, coreBidId: string | null) {
+async function coreOutbox(n: number, status: string, coreBidId: string | null, sentNumber?: string) {
   await pg.query(
-    `INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, core_bid_id) VALUES ('trock_crm', $1, $2, $3, $4)`,
-    [deal(n), n, status, coreBidId],
+    `INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, core_bid_id, payload) VALUES ('trock_crm', $1, $2, $3, $4, $5::jsonb)`,
+    [deal(n), n, status, coreBidId, JSON.stringify(sentNumber === undefined ? {} : { deal: { id: deal(n), rfpProjectNumber: sentNumber } })],
   );
 }
 const callbacks = async () =>
@@ -118,6 +118,16 @@ describe("the CRM `approved` callback: approved request + Core-confirmed card, o
     const rows = await callbacks();
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("sent");
+  });
+
+  it("Codex P2 on #136: a type changed to service at approval tells the CRM the number Core recorded, and the reconcile finds it", async () => {
+    // The request's column keeps the non-service number it was sent with; the approval rewrote it to service for Core.
+    await request(943, { service: false });
+    await coreOutbox(943, "sent", "core-bid-943", "DFW-4-70943-aa");
+    const plan = await planApprovedCallbackReconcile();
+    expect(plan.willNotify).toEqual([943]);
+    expect(await enqueueRfpApprovedCallbackIfCoreConfirmed(943)).toBe(true);
+    expect((await callbacks())[0].payload.projectNumber).toBe("DFW-4-70943-aa");
   });
 
   it("never tells a HubSpot-era request (only CRM requests have a CRM to tell)", async () => {

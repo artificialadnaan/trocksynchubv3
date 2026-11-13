@@ -43,14 +43,16 @@ export async function enqueueRfpApprovedCallbackIfCoreConfirmed(
              'status', 'approved',
              'sourceDealId', r.source_deal_id,
              'rfpApprovalRequestId', r.id,
-             'projectNumber', r.project_number,
+             -- The number Core recorded (Codex P2 on #136): a type changed at approval rewrites the number sent to Core, and
+             -- the request's own column keeps the original.
+             'projectNumber', COALESCE(o.project_number, r.project_number),
              'coreBidId', o.core_bid_id,
              'approvedAt', to_char(r.approved_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
            ),
            ${targetUrl}, 'pending', 0, 5, NOW()
       FROM rfp_approval_requests r
       JOIN LATERAL (
-        SELECT core_bid_id FROM service_rfp_core_outbox o
+        SELECT core_bid_id, payload->'deal'->>'rfpProjectNumber' AS project_number FROM service_rfp_core_outbox o
          WHERE o.source_system = r.source_system AND o.source_deal_id = r.source_deal_id AND o.rfp_request_id = r.id
            AND o.status IN ('crm_notify_accepted', 'sent') AND o.core_bid_id IS NOT NULL
          ORDER BY o.id DESC LIMIT 1
@@ -93,7 +95,11 @@ export async function planApprovedCallbackReconcile(options: { db?: any } = {}):
   const db = options.db ?? (await getDb());
   const rows = rowsOf(await db.execute(sql`
     SELECT r.id, r.status,
-           (split_part(r.project_number, '-', 2) = '4') AS service,
+           -- A request handed to Core is a service RFP whatever its stored number says (a type changed at approval keeps the
+           -- original number in the column; Codex P2 on #136).
+           (split_part(r.project_number, '-', 2) = '4'
+             OR EXISTS (SELECT 1 FROM service_rfp_core_outbox h
+                         WHERE h.source_system = r.source_system AND h.source_deal_id = r.source_deal_id AND h.rfp_request_id = r.id)) AS service,
            EXISTS (SELECT 1 FROM service_rfp_core_outbox o
                     WHERE o.source_system = r.source_system AND o.source_deal_id = r.source_deal_id AND o.rfp_request_id = r.id
                       AND o.status IN ('crm_notify_accepted', 'sent') AND o.core_bid_id IS NOT NULL) AS core_confirmed,
