@@ -164,13 +164,16 @@ describe("processRfpApproval with Procore project creation retired", () => {
     expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
   });
 
-  it("a request changed between the read and the write (a concurrent decline) is not approved twice: 409, the CRM is not told", async () => {
+  it("a request changed between the read and the write (a concurrent decline) is not approved twice: 409, Core gets no job, the CRM is not told", async () => {
     vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
     vi.mocked(storage.updateRfpApprovalRequest).mockResolvedValue(undefined as any);
 
     const result = await processRfpApproval("synthetic-token-70", {}, "approver@example.test");
 
     expect(result).toMatchObject({ success: false, statusCode: 409 });
+    // The decline race (CodeRabbit on #136): the conditional approval is written BEFORE the Core handoff, so a decline that
+    // won the row stops the approval before Core is told anything.
+    expect(handOffServiceRfpApprovalToCore).not.toHaveBeenCalled();
     expect(enqueueRfpApprovedCallbackIfCoreConfirmed).not.toHaveBeenCalled();
     expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
   });

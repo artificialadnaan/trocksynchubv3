@@ -1582,26 +1582,9 @@ export async function processRfpApproval(
       project_types: finalProjectTypeDigit,
     };
 
-    // Tell TROCK Core about the service job: its card IS the job now that Procore project creation is retired. FAIL-OPEN
-    // by construction: this never throws, and the approval goes on whatever it answers. A Core outage leaves a queued outbox
-    // row (retried, and visible on the health dashboard), and the CRM is told 'approved' only once Core confirms the card.
-    // Only a SKIPPED handoff (no outbox row) is branched on, below.
-    let coreHandoff: { status: string } | undefined;
-    if (isService && !resume) {
-      coreHandoff = await handOffServiceRfpApprovalToCore({
-        sourceSystem: identity.sourceSystem,
-        sourceDealId,
-        rfpRequestId: request.id,
-        // The POST-rewrite number, so a type change made at approval time is the number Core records.
-        projectNumber: finalProjectNumber,
-        dealData,
-        editedFieldsOverride,
-      });
-    }
-
     // PROCORE PROJECT CREATION IS RETIRED (owner 2026-11-13, b0cb0c4f; a4 afa14cfd). The approval no longer claims, creates
     // or waits on a Procore Bid Board project:
-    //   - a SERVICE RFP's job is the Core card handed off above; the CRM is told the RFP is approved once Core confirms that
+    //   - a SERVICE RFP's job is the Core card handed off below; the CRM is told the RFP is approved once Core confirms that
     //     card (rfp-approved-callback.ts: here, when Core already has, or in markSent when it answers later);
     //   - a NON-service RFP approved here has no Core destination on this path (Core's Bid Board takes CRM-vote approvals
     //     only, rfp-destination.ts rule (c)), so a CRM request gets a FAILED callback that says so: visible and actionable
@@ -1635,6 +1618,24 @@ export async function processRfpApproval(
     }, { expectedStatus: request.status });
     if (!approved) {
       return { success: false, error: `Request ${request.id} changed while it was being approved`, statusCode: 409 };
+    }
+
+    // Tell TROCK Core about the service job: its card IS the job now that Procore project creation is retired. AFTER the
+    // conditional approval above (CodeRabbit on #136, the decline race): a decline that won the row stops here with a 409, so
+    // Core never gets a job for a declined RFP. FAIL-OPEN by construction: this never throws, and the approval stands whatever
+    // it answers. A Core outage leaves a queued outbox row (retried, and visible on the health dashboard), and the CRM is told
+    // 'approved' only once Core confirms the card. Only a skipped or refused handoff is branched on, below.
+    let coreHandoff: { status: string } | undefined;
+    if (isService && !resume) {
+      coreHandoff = await handOffServiceRfpApprovalToCore({
+        sourceSystem: identity.sourceSystem,
+        sourceDealId,
+        rfpRequestId: request.id,
+        // The POST-rewrite number, so a type change made at approval time is the number Core records.
+        projectNumber: finalProjectNumber,
+        dealData,
+        editedFieldsOverride,
+      });
     }
 
     let crmStep: RfpStatusStep;
