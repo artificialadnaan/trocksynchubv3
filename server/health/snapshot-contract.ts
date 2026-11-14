@@ -136,64 +136,160 @@ export function validateSnapshot(raw: unknown): { ok: true; snapshot: Snapshot }
 }
 
 /**
- * Reduce a stored error string to the contract's message_safe: email addresses, bearer credentials, JWT-shaped tokens,
- * credential fields and URL queries are cut, whitespace collapsed, and the result capped at 200 characters. Anything that
- * still trips the schema's guard is dropped (null) rather than sent; the error's code still carries the signal.
+ * Reduce a stored error string to the contract's message_safe: URL userinfo, email addresses, bearer / Basic credentials,
+ * JWT-shaped tokens, credential VALUES and URL queries are cut, an RFP review link's token segment is cut, whitespace is
+ * collapsed, and the result is capped at 200 characters. Anything that still trips the schema's guard, or still holds a
+ * credential key with its separator, is dropped (null); the error's code still carries the signal.
  *
- * A credential KEY loses its whole VALUE first (PR #139 review: the bare-name pass alone only renamed `"access_token"` and
- * left the token itself in place). The key words are the list Core and the CRM share, in any case, JSON-quoted, escaped-JSON
- * or bare, with the word ANYWHERE in the key: any suffix (session_id, api_key_2) and any prefix segments that end in `_` or
- * `-` (db_password, x-auth-token, my_api_key). The word must start the key or follow such a segment, so `spin=3` is not `pin`:
- * - `key=value`: a quoted value (escaped quotes included) or ONE bare token, so `token=abc retry` keeps " retry";
- * - `key: value` (header / JSON style): a quoted value, or a bare run to the next , ; } or the end, so
- *   `password: a b c` and `Authorization: Token short1` lose it all.
- * A `Basic <base64>` credential is cut like a bearer one. Plain text ("client secret expired") is left alone.
+ * Credential pairs (cleaner r3, d9's review of #139; the same design as Core and the CRM):
+ * - KEY: a run of key characters (letters, digits, _ . -) split into segments at _ . - and at camelCase boundaries
+ *   (refreshToken, AccountKey, Ocp-Apim-Subscription-Key, _password, connect.sid). It is a credential key when a segment
+ *   is a credential word (token, password, secret, key, sid, ...; a plural or a trailing number counts) or the whole run
+ *   holds a long one (jsessionid, hapikey). `code` counts only before "=" (an OAuth code), so `code: billing_x` stays.
+ *   A short word must be a whole segment, so spin= / design= / signal= stay plain.
+ * - SEPARATOR: ":", "=" or "=>", after up to 4 closing quotes / brackets / backticks (user[password]=, `token`=, \"key\":).
+ * - VALUE, cut whole: an escaped-JSON string (read in escape pairs, so a quote escaped deeper never ends it), a quoted
+ *   string, a [ ] / { } value to its matching close (nesting <= 4; unbalanced = the message is dropped), a Cookie /
+ *   Set-Cookie header to the end of its line, else ONE bare token after = / =>, or a run to , ; } or the line end after :.
+ * A ":" pair keeps its key (`password: [redacted]`); an "=" pair goes whole (`token=abc retry` -> `[redacted] retry`).
+ * Every quantifier is bounded and the value scan is a single pass, so the time is linear in the (2000-character) input.
  */
-const CREDENTIAL_KEY = String.raw`(?:[A-Za-z0-9]+[_-])*(?:access_token|refresh_token|id_token|client_secret|x-api-key|api[_-]?key|authorization|auth|passphrase|password|passwd|pass|pw|secret|credentials?|creds|token|otp|pin|jwt|session|cookie|signature|sig|private[_-]?key)[A-Za-z0-9_-]*`;
-/**
- * A value in double quotes, escaped-JSON quotes (\"…\") or single quotes; an unterminated one runs to the end. The
- * escaped-JSON form is read in whole escape pairs (\\ then its escaped character), so a quote escaped one level deeper
- * (\\\", a double-stringified body) never ends the value early (CodeRabbit on #139).
- */
-const QUOTED_VALUE = String.raw`\\"(?:\\\\(?:\\\\|\\"|[^\\])|\\[^\\"]|[^\\])*(?:\\")?|"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?`;
-// (?<![A-Za-z0-9_]): the key word starts a word, so "spin" or "client secret" never match "pin" / "secret".
-const KEY_COLON_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*:\s*(?:${QUOTED_VALUE}|[^,;}]*)`, "gi");
-const KEY_EQUALS_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*=\s*(?:${QUOTED_VALUE}|[^\s,;}&"'\\]*)`, "gi");
-/**
- * A credential key still followed by its separator and NOT by [redacted] after every pass: a value nested deeper than they
- * read. The renamed access / refresh token key ([credential field]) counts too, or a 3x-stringified token would pass.
- */
-const CREDENTIAL_LEFT_RE = new RegExp(
-  String.raw`(?:(?<![A-Za-z0-9_])(?:${CREDENTIAL_KEY})|\[credential field\])[\\"']*\s*[:=](?!\s*\[redacted\])`,
-  "i",
-);
+const SEGMENT_WORDS = new Set([
+  "token", "password", "passwd", "pwd", "pw", "pass", "passphrase", "secret", "credential", "credentials", "creds", "auth",
+  "authorization", "key", "apikey", "otp", "pin", "jwt", "session", "sessid", "sid", "cookie", "signature", "sig",
+]);
+/** Long words that make a credential key wherever they sit in it (all-lower / all-upper names have no segment breaks). */
+const RUN_WORDS = /token|password|passwd|passphrase|secret|credential|apikey|privatekey|accountkey|accesskey|sessionid|sessid/;
+const PAIR_RE = /(?<![A-Za-z0-9_.-])(\\?["'`]?)([A-Za-z0-9_.-]{1,80})[\]\\"'`)]{0,4}\s*(=>?|:)\s*/g;
+/** The fail-closed read: any number of closers, so a key nested deeper than the pair pass reads is still seen. */
+const LEFT_RE = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,80})[\]\\"'`)]*\s*(=>?|:)(?!\s*\[redacted\])/g;
+
+function isCredentialKey(key: string, sep: string): boolean {
+  if (RUN_WORDS.test(key.replace(/[_.-]/g, "").toLowerCase())) return true;
+  for (const part of key.split(/[_.-]+/)) {
+    const segments = part.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").split(" ");
+    for (const segment of segments) {
+      const w = segment.toLowerCase().replace(/\d+$/, "");
+      if (SEGMENT_WORDS.has(w) || (w.endsWith("s") && SEGMENT_WORDS.has(w.slice(0, -1)))) return true;
+      if (w === "code" && sep !== ":") return true;
+    }
+  }
+  return false;
+}
+
+/** The end of an escaped-JSON string whose opening \" ends at i, read in escape pairs; unterminated = the end. */
+function escapedStringEnd(s: string, i: number): number {
+  let j = i;
+  while (j < s.length) {
+    if (s[j] === "\\" && s[j + 1] === '"') return j + 2;
+    if (s[j] === "\\" && s[j + 1] === "\\") j += s[j + 2] === "\\" && (s[j + 3] === "\\" || s[j + 3] === '"') ? 4 : 3;
+    else j += s[j] === "\\" ? 2 : 1;
+  }
+  return s.length;
+}
+
+/** The end of a string quoted by q whose opening quote ends at i (backslash escapes skipped); unterminated = the end. */
+function quotedEnd(s: string, i: number, q: string): number {
+  for (let j = i; j < s.length; j++) {
+    if (s[j] === "\\") j++;
+    else if (s[j] === q) return j + 1;
+  }
+  return s.length;
+}
+
+/** The end of the [ ] / { } value opening at i, strings inside skipped; -1 when it does not close (or nests past 4). */
+function bracketEnd(s: string, i: number): number {
+  const want: string[] = [];
+  for (let j = i; j < s.length; j++) {
+    const c = s[j]!;
+    if (c === "\\" && s[j + 1] === '"') j = escapedStringEnd(s, j + 2) - 1;
+    else if (c === '"') j = quotedEnd(s, j + 1, '"') - 1;
+    else if (c === "[" || c === "{") {
+      want.push(c === "[" ? "]" : "}");
+      if (want.length > 4) return -1;
+    } else if (c === "]" || c === "}") {
+      if (want.pop() !== c) return -1;
+      if (want.length === 0) return j + 1;
+    }
+  }
+  return -1;
+}
+
+function valueEnd(s: string, i: number, key: string, sep: string): number {
+  const c = s[i];
+  if (c === undefined) return i;
+  if (sep === ":" && /^(?:set-)?cookie$/i.test(key)) {
+    const nl = s.slice(i).search(/[\r\n]/);
+    return nl < 0 ? s.length : i + nl;
+  }
+  if (c === "\\" && s[i + 1] === '"') return escapedStringEnd(s, i + 2);
+  if (c === '"' || c === "'" || c === "`") return quotedEnd(s, i + 1, c);
+  if (c === "[" || c === "{") return bracketEnd(s, i);
+  const stop = s.slice(i).search(sep === ":" ? /[,;}\r\n]/ : /[\s,;}&"'\\]/);
+  return stop < 0 ? s.length : i + stop;
+}
+
+/** Every credential pair's value cut; null when a value can't be bounded (an unclosed bracket) or a key is left behind. */
+function cutCredentials(s: string): string | null {
+  let out = "";
+  let at = 0;
+  PAIR_RE.lastIndex = 0;
+  for (let m = PAIR_RE.exec(s); m !== null; m = PAIR_RE.exec(s)) {
+    const [whole, quote, key, sep] = m as unknown as [string, string, string, string];
+    if (!isCredentialKey(key, sep)) {
+      PAIR_RE.lastIndex = m.index + whole.length;
+      continue;
+    }
+    const end = valueEnd(s, m.index + whole.length, key, sep);
+    if (end < 0) return null;
+    out += s.slice(at, m.index) + (sep === ":" ? `${quote}${key}${quote}: [redacted]` : "[redacted]");
+    at = end;
+    PAIR_RE.lastIndex = end;
+  }
+  out += s.slice(at);
+  LEFT_RE.lastIndex = 0;
+  for (let m = LEFT_RE.exec(out); m !== null; m = LEFT_RE.exec(out)) if (isCredentialKey(m[1]!, m[2]!)) return null;
+  return out;
+}
+
+/** A Basic credential is base64-looking (a digit, + / =, or mixed case); "basic authentication is disabled" is text. */
+function cutBasic(s: string): string {
+  return s.replace(/\bbasic\s+([A-Za-z0-9+/]{8,}={0,2})/gi, (all, b64: string) =>
+    /[0-9+/=]/.test(b64) || (/[a-z]/.test(b64) && /[A-Z]/.test(b64)) ? "[credential]" : all,
+  );
+}
 
 /**
- * The most of a raw message any pass sees. The key rule backtracks quadratically on long dash / underscore runs ("a-a-…":
- * 2K = 72 ms, 8K = 1.16 s, d6) and runs on the event loop, while the output is capped at 200 anyway. Core cuts the same.
+ * The most of a raw message any pass sees: the output is capped at 200 anyway, and a cut message drops its last, partial
+ * token (a split email or URL is not left half-redacted).
  */
 export const SAFE_MESSAGE_INPUT_MAX = 2000;
 
 export function safeMessage(raw: string | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
-  let s = raw
-    .slice(0, SAFE_MESSAGE_INPUT_MAX)
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
-    .replace(/\bbearer\s+\S+/gi, "[credential]")
-    .replace(/\bbasic\s+[A-Za-z0-9+/=]{8,}/gi, "[credential]")
-    .replace(/eyJ[A-Za-z0-9_.-]{10,}/g, "[token]")
-    .replace(KEY_COLON_RE, "$1$2$1: [redacted]")
-    // The whole pair goes: a kept `token=` would trip the guard and drop the message.
-    .replace(KEY_EQUALS_RE, "[redacted]")
+  let head = raw.slice(0, SAFE_MESSAGE_INPUT_MAX);
+  if (raw.length > SAFE_MESSAGE_INPUT_MAX) head = head.replace(/\S*$/, "");
+  const cut = cutCredentials(
+    cutBasic(
+      head
+        // URL userinfo before the email rule, which would otherwise keep the user and cut only "pass@host".
+        .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi, "$1")
+        .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+        .replace(/\bbearer\s+\S+/gi, "[credential]"),
+    ).replace(/eyJ[A-Za-z0-9_.-]{10,}/g, "[token]"),
+  );
+  if (cut === null) return null;
+  let s = cut
     // Anywhere in a key (my_access_token), so a kept key name can't trip the guard and drop the whole message.
     .replace(/(?:access|refresh)_token/gi, "[credential field]")
+    // An RFP review link's token segment never leaves (owner rule: no vote / approval link).
+    .replace(/\/rfp-review\/[^\s/?#]+/gi, "/rfp-review/[link]")
     .replace(/(https?:\/\/[^\s?]*)\?\S*/g, "$1")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (s.length > 200) s = `${s.slice(0, 199)}…`;
-  // Fail closed: a credential key the passes could not cut (a body stringified three times or more) drops the message.
-  if (s === "" || UNSAFE_TEXT_RE.test(s) || CREDENTIAL_LEFT_RE.test(s)) return null;
+  if (s === "" || UNSAFE_TEXT_RE.test(s)) return null;
   return s;
 }
 

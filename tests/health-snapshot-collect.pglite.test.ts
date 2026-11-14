@@ -531,6 +531,22 @@ describe("ADDENDUM-5: every failed item by stable id (owner e69e6f71)", () => {
     expect(checked.ok ? [] : checked.errors).toEqual([]);
   });
 
+  it("past the 1000 cap, failed_ids keeps the NEWEST 1000 (a new failure is never the one cut), listed lowest first; the total stays exact (d9)", async () => {
+    await clearApprovals();
+    await pg.exec(`
+      INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
+        SELECT g, 'trock_crm', 'deal-' || g, 'DFW-4-7' || g || '-aa', 'REVIEW-TOKEN-SEEDED-' || g, 'approved', '2026-11-14 01:00:00'
+        FROM generate_series(2001, 3002) g;
+      INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, attempt_count, core_bid_id, last_attempt_at, created_at, sent_at)
+        SELECT 'trock_crm', 'deal-' || g, g, 'failed', 1, NULL, now() - interval '1 hour', now() - interval '1 hour', NULL
+        FROM generate_series(2001, 3002) g;
+    `);
+    const handover = byKey(await collectSynchubSnapshot({ db, env: {} }))("synchub.rfp.service_handover");
+    expect(handover.failed_ids).toHaveLength(1000);
+    expect([handover.failed_ids![0], handover.failed_ids![999]]).toEqual(["2003", "3002"]);
+    expect(handover.extra.failed_total).toBe(1002);
+  });
+
   it("failed_ids is exactly the failing set: a resolved hand-off and a queued one are absent", async () => {
     await clearApprovals();
     await approvedWithHandoff(1101, "failed", null);

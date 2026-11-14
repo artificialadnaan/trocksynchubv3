@@ -83,13 +83,14 @@ async function one(q: Querier, query: SQL): Promise<any> {
 
 /**
  * ADDENDUM-5 (owner e69e6f71): the stable ids of EVERY failed item, the same ids as records[].id, so Core can alert on a new
- * failed id even when the total is flat. Capped at FAILED_IDS_MAX (lowest ids first); `total` is the true count, reported
- * beside it, so a truncated list can never pass for a complete one.
+ * failed id even when the total is flat. Capped at FAILED_IDS_MAX: the NEWEST ids are kept (a new failure is never the one
+ * cut, d9 on #139), listed lowest first; `total` is the true count, reported beside it, so a truncated list can never pass
+ * for a complete one.
  */
 async function failedIdSet(q: Querier, idQuery: SQL): Promise<{ ids: string[]; total: number }> {
   const found = await rows(
     q,
-    sql`SELECT id, (count(*) OVER ())::int AS total FROM (${idQuery}) failed ORDER BY id ASC LIMIT ${FAILED_IDS_MAX}`,
+    sql`SELECT id, total FROM (SELECT id, (count(*) OVER ())::int AS total FROM (${idQuery}) failed ORDER BY id DESC LIMIT ${FAILED_IDS_MAX}) newest ORDER BY id ASC`,
   );
   return { ids: found.map((r) => String(r.id)), total: found.length > 0 ? Number(found[0].total) : 0 };
 }

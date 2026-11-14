@@ -99,10 +99,14 @@ describe("safeMessage", () => {
     expect(safeMessage(JSON.stringify(JSON.stringify({ password: "val-bs\\", next: "ok" })))).toBe(
       '"{\\"password\\": [redacted],\\"next\\":\\"ok\\"}"',
     );
-    // Three levels: the passes cannot find the value's end, so the message is dropped; the error code still carries the signal.
-    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify({ password: 'p"val-deep' }))))).toBeNull();
-    // ...also when the key is the renamed token one ([credential field]), which the leftover check reads too (trockcrm-28).
-    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify({ refresh_token: 'p"val-tok' }))))).toBeNull();
+    // Three levels: the key's closers (\\\") are still within the pair pass's reach (r3), so the pair is cut in place.
+    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify({ password: 'p"val-deep' }))))).toBe(String.raw`"\"{\\\"password\": [redacted]}\""`);
+    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify({ refresh_token: 'p"val-tok' }))))).toBe(
+      String.raw`"\"{\\\"[credential field]\": [redacted]}\""`,
+    );
+    // Four levels: past the pair pass; the fail-closed read (any number of closers) drops the message. The error code stays.
+    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify(JSON.stringify({ password: 'p"val-deep' })))))).toBeNull();
+    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify(JSON.stringify({ refresh_token: 'p"val-tok' })))))).toBeNull();
   });
 
   it("keeps plain error text, caps at 200 characters, and maps nothing to null", () => {
@@ -114,33 +118,35 @@ describe("safeMessage", () => {
 });
 
 describe("safeMessage: the credential list Core and the CRM share (any case, any suffix, key=value and key: value)", () => {
+  // Exact outputs (d9 on #139: not.toContain could not tell a cut value from a dropped message).
   it.each([
-    ["auth=auth-value-01 retry", "auth-value-01"],
-    ["credentials: cred-value-02", "cred-value-02"],
-    ["credential: cred-value-03", "cred-value-03"],
-    ["creds=creds-value-04", "creds-value-04"],
-    ["pass=pass-value-05", "pass-value-05"],
-    ["pw=pw-value-06", "pw-value-06"],
-    ["passphrase=pp-value-07", "pp-value-07"],
-    ["session_id=sess-value-08", "sess-value-08"],
-    ["otp: 123456", "123456"],
-    ["pin=4321", "4321"],
-    ["jwt: abc.def.ghi", "abc.def.ghi"],
-    ["X-Api-Key: xak-value-12", "xak-value-12"],
-    ["api_key_2=ak2-value-13", "ak2-value-13"],
-    ["password: tail one two", "one two"],
-    ["Authorization: Token short1", "short1"],
-    ["Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"],
-    ['{\\"session\\":\\"esc-json-value-17\\"}', "esc-json-value-17"],
-    // The word anywhere in the key (prefix segments ending in _ or -), and signature / sig / private key.
-    ["db_password=dbpw-value-18 retry", "dbpw-value-18"],
-    ["x-auth-token: xat-value-19", "xat-value-19"],
-    ["my_api_key=myak-value-20", "myak-value-20"],
-    ["signature=sigval-value-21", "sigval-value-21"],
-    ["private_key=pk-value-22", "pk-value-22"],
-    ['{"my_access_token":"mat-value-23"}', "mat-value-23"],
-  ])("%s loses its value", (raw, value) => {
-    expect(safeMessage(raw) ?? "").not.toContain(value);
+    ["auth=auth-value-01 retry", "[redacted] retry"],
+    ["credentials: cred-value-02", "credentials: [redacted]"],
+    ["credential: cred-value-03", "credential: [redacted]"],
+    ["creds=creds-value-04", "[redacted]"],
+    ["pass=pass-value-05", "[redacted]"],
+    ["pw=pw-value-06", "[redacted]"],
+    ["passphrase=pp-value-07", "[redacted]"],
+    ["session_id=sess-value-08", "[redacted]"],
+    ["otp: 123456", "otp: [redacted]"],
+    ["pin=4321", "[redacted]"],
+    ["jwt: abc.def.ghi", "jwt: [redacted]"],
+    ["X-Api-Key: xak-value-12", "X-Api-Key: [redacted]"],
+    ["api_key_2=ak2-value-13", "[redacted]"],
+    ["password: tail one two", "password: [redacted]"],
+    ["Authorization: Token short1", "Authorization: [redacted]"],
+    ["Authorization: Basic dXNlcjpwYXNz", "Authorization: [redacted]"],
+    ['{\\"session\\":\\"esc-json-value-17\\"}', '{\\"session\\": [redacted]}'],
+    // The word anywhere in the key, and signature / sig / private key.
+    ["db_password=dbpw-value-18 retry", "[redacted] retry"],
+    ["x-auth-token: xat-value-19", "x-auth-token: [redacted]"],
+    ["my_api_key=myak-value-20", "[redacted]"],
+    ["signature=sigval-value-21", "[redacted]"],
+    ["sig=sig-value-21b", "[redacted]"],
+    ["private_key=pk-value-22", "[redacted]"],
+    ['{"my_access_token":"mat-value-23"}', '{"my_[credential field]": [redacted]}'],
+  ])("%s -> %s", (raw, out) => {
+    expect(safeMessage(raw)).toBe(out);
   });
 
   it("a key kept around its cut value never trips the guard (the message survives)", () => {
@@ -158,5 +164,58 @@ describe("safeMessage: the credential list Core and the CRM share (any case, any
     expect(safeMessage("Token has been expired or revoked.")).toBe("Token has been expired or revoked.");
     expect(safeMessage("spin=3 retries")).toBe("spin=3 retries");
     expect(safeMessage("design=v2 retries")).toBe("design=v2 retries");
+  });
+});
+
+describe("safeMessage cleaner r3 (d9's review of #139): every key / separator / value shape, exact outputs", () => {
+  it.each([
+    ["camelCase key", '{"error":"invalid_grant","refreshToken":"rt-value-30"}', '{"error":"invalid_grant","refreshToken": [redacted]}'],
+    ["leading _", "refresh failed _password=pw-value-31 retry", "refresh failed [redacted] retry"],
+    ["camelCase client secret", '{"clientSecret":"cs-value-32"}', '{"clientSecret": [redacted]}'],
+    ["camelCase access token", '{"accessToken":"at-value-33","ok":1}', '{"accessToken": [redacted],"ok":1}'],
+    ["Ruby / PHP =>", '{"password"=>"hunter-value-34"}', "{[redacted]}"],
+    ["array value", '{"tokens":["tok-value-35a","tok-value-35b"]}', '{"tokens": [redacted]}'],
+    ["object value", '{"credentials":{"user":"svc","key":"cred-value-36"}}', '{"credentials": [redacted]}'],
+    ["Cookie header", "Cookie: theme=dark; JSESSIONID=js-value-37", "Cookie: [redacted]"],
+    ["Set-Cookie header", "Set-Cookie: sid=sc-value-38; Path=/", "Set-Cookie: [redacted]"],
+    [
+      "Azure connection string",
+      "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=ak-value-39==;EndpointSuffix=core.example.test",
+      "DefaultEndpointsProtocol=https;AccountName=acct;[redacted];EndpointSuffix=core.example.test",
+    ],
+    ["SharedAccessKey", "SharedAccessKey=sak-value-40", "[redacted]"],
+    ["connect.sid", "connect.sid=s%3Asid-value-41", "[redacted]"],
+    ["Ocp-Apim-Subscription-Key", "Ocp-Apim-Subscription-Key: ocp-value-42", "Ocp-Apim-Subscription-Key: [redacted]"],
+    ["hapikey", "hapikey=hk-value-43", "[redacted]"],
+    ["bare key=", "key=k-value-44", "[redacted]"],
+    ["OAuth code=", "redirect failed code=code-value-45", "redirect failed [redacted]"],
+    ["JSESSIONID", "JSESSIONID=js-value-46", "[redacted]"],
+    ["PHPSESSID", "PHPSESSID=php-value-47", "[redacted]"],
+    ["bracketed key", "user[password]=pwb-value-48", "user[[redacted]"],
+    ["backtick key", "`token`=bt-value-49", "[redacted]"],
+    ["URL userinfo", "connect postgres://synchub:pg-value-50@db.internal.test:5432/db failed", "connect postgres://db.internal.test:5432/db failed"],
+    ["RFP review link", "see https://app.example.test/rfp-review/link-value-51 now", "see https://app.example.test/rfp-review/[link] now"],
+  ])("%s", (_name, raw, out) => {
+    expect(safeMessage(raw)).toBe(out);
+  });
+
+  it("a bracket value that never closes inside the read is not guessed at: the message is dropped", () => {
+    expect(safeMessage('{"tokens":["tok-value-52",["tok-value-53"')).toBeNull();
+  });
+
+  it("a cut message drops its partial last token, so a split email never half-survives", () => {
+    const out = safeMessage(`${"x".repeat(1975)} to jane.value-54@mail.example.test`);
+    expect(out ?? "").not.toContain("jane");
+    expect(out).toHaveLength(200);
+  });
+
+  it("words that only contain a short credential word stay plain, and so does an error code after a colon", () => {
+    expect(safeMessage("signal=SIGKILL")).toBe("signal=SIGKILL");
+    expect(safeMessage("ping: 12ms")).toBe("ping: 12ms");
+    expect(safeMessage("authority: login.example.test")).toBe("authority: login.example.test");
+    expect(safeMessage("refused code: billing_contact_not_set")).toBe("refused code: billing_contact_not_set");
+    expect(safeMessage("550 5.7.139 Authentication unsuccessful, basic authentication is disabled")).toBe(
+      "550 5.7.139 Authentication unsuccessful, basic authentication is disabled",
+    );
   });
 });
