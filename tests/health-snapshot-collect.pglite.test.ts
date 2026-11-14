@@ -215,7 +215,12 @@ describe("collectSynchubSnapshot", () => {
       last_auth_error: { code: "AADSTS50079", at: "2026-11-13T16:32:00.000Z", message_safe: "AADSTS50079: MFA enrolment required" },
     });
     expect(outlook.processing.last_success_at).not.toBeNull();
-    expect(outlook.extra).toEqual({ active: true, active_provider: "outlook", auth_ok_source: "mail_auth_health" });
+    expect(outlook.extra).toEqual({
+      active: true,
+      active_provider: "outlook",
+      auth_ok_source: "mail_auth_health",
+      send_times: "email_send_log_active_provider",
+    });
     expect(outlook.correction_url).toBe("https://synchub.example.test/settings");
 
     const gmail = row("synchub.mail.gmail");
@@ -245,7 +250,7 @@ describe("collectSynchubSnapshot", () => {
   it("RFP approvals: pending, the one never emailed, the link expiring within 48 h; ids only", async () => {
     const approvals = byKey(await collectSynchubSnapshot({ db, env: {} }))("synchub.rfp.approvals");
     expect(approvals.delivery[0]).toMatchObject({ pending: 2, failed_24h: null, exhausted: null });
-    expect(approvals.extra).toEqual({ no_email_sent: 1, expiring_48h: 1, expired_pending: 0 });
+    expect(approvals.extra).toEqual({ no_email_sent: 1, expiring_48h: 1, expired_pending: 0, approving: 0, held: 0 });
     expect(approvals.records).toEqual([
       { kind: "rfp_approval_request", id: "939", state: "pending", url: null },
       { kind: "rfp_approval_request", id: "940", state: "pending:no_email", url: null },
@@ -386,5 +391,112 @@ describe("collectSynchubSnapshot", () => {
     const row = byKey(snapshot);
     expect(row("synchub.procore.browser_login").extra).toEqual({ installed: false });
     expect(row("synchub.outbox.rfp_core_followup").delivery[0]).toMatchObject({ pending: null, failed_24h: null });
+  });
+});
+
+describe("d9's review of #139", () => {
+  const row = async () => byKey(await collectSynchubSnapshot({ db, env: {} }));
+  async function clearApprovals() {
+    await pg.exec(`DELETE FROM service_rfp_core_outbox; DELETE FROM bidboard_callback_outbox; DELETE FROM rfp_approval_requests WHERE status = 'approved';`);
+  }
+  async function approved(id: number, source: string, approvedAt: string) {
+    await pg.query(
+      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
+       VALUES ($1, $2, $3, $4, $5, 'approved', $6::timestamp)`,
+      [id, source, `deal-${id}`, `DFW-4-7${id}-aa`, `REVIEW-TOKEN-SEEDED-${id}`, approvedAt],
+    );
+  }
+  async function handoff(id: number, source: string, status: string, coreBidId: string | null) {
+    await pg.query(
+      `INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, attempt_count, core_bid_id, last_attempt_at, created_at, sent_at)
+       VALUES ($1, $2, $3, $4, 1, $5, now() - interval '1 hour', now() - interval '1 hour', CASE WHEN $5::text IS NULL THEN NULL ELSE now() - interval '1 hour' END)`,
+      [source, `deal-${id}`, id, status, coreBidId],
+    );
+  }
+
+  it("P2-1: a REFUSED hand-off is the service_handover leg's, never pending on the CRM callback leg (the enqueue's exact join)", async () => {
+    await clearApprovals();
+    await approved(962, "trock_crm", "2026-11-14 01:00:00");
+    await handoff(962, "trock_crm", "crm_notify_refused", null);
+    const r = await row();
+    expect(r("synchub.rfp.crm_callback").delivery[0].pending).toBe(0);
+    expect(r("synchub.rfp.service_handover").delivery[0].pending).toBe(1);
+    expect(r("synchub.rfp.service_handover").records).toEqual([{ kind: "rfp_approval_request", id: "962", state: "crm_notify_refused", url: null }]);
+  });
+
+  it("P2-2: a follow-up the CRM refused to link (link_refused) is a failure and a record", async () => {
+    await pg.query(
+      `INSERT INTO rfp_core_followup_outbox (id, create_id, kind, status, attempt_count, last_error, last_attempt_at, created_at)
+       VALUES (31, 1, 'crm_link', 'link_refused', 1, 'CRM 409 deal_claimed_by_other_bid', now() - interval '1 hour', now() - interval '2 hours')`,
+    );
+    const followup = (await row())("synchub.outbox.rfp_core_followup");
+    expect(followup.delivery[0].failed_24h).toBe(1);
+    expect(followup.delivery[0].pending).toBe(0);
+    expect(followup.records).toEqual([{ kind: "rfp_core_followup", id: "31", state: "link_refused", url: null }]);
+    expect(followup.processing.last_error).toMatchObject({ code: "link_refused" });
+  });
+
+  it("P2-2: a Core create held for a person (held_cross_destination) is a failure and a record", async () => {
+    await pg.query(
+      `INSERT INTO rfp_core_create_outbox (id, source_system, source_deal_id, source_event_id, status, attempt_count, last_error, last_attempt_at, created_at)
+       VALUES (41, 'trock_crm', 'deal-41', 'evt-41', 'held_cross_destination', 0, 'cross_destination_hold', now() - interval '30 minutes', now() - interval '30 minutes')`,
+    );
+    const create = (await row())("synchub.outbox.rfp_core_create");
+    expect(create.delivery[0].failed_24h).toBe(2); // the shared seed's dead row + this hold
+    expect(create.delivery[0].pending).toBe(0);
+    expect(create.records.map((r: any) => [r.id, r.state])).toEqual([["1", "dead"], ["41", "held_cross_destination"]]);
+  });
+
+  it("P3-2: a 'skipped' email is not an attempt: the mail times come from sent / failed rows only", async () => {
+    await pg.query(
+      `INSERT INTO email_send_log (template_key, recipient_email, subject, dedupe_key, status, sent_at)
+       VALUES ('stage_change', 'pm@example.test', 'Stage', 'stage:skipped', 'skipped', now() - interval '10 minutes')`,
+    );
+    const r = await row();
+    const delivery = r("synchub.mail.delivery");
+    expect(delivery.processing.last_attempt_at).toBe(delivery.processing.last_success_at); // the 'sent' row 1 h ago
+    expect(r("synchub.mail.outlook").processing.last_attempt_at).toBe(delivery.processing.last_success_at);
+  });
+
+  it("P3-3: requests mid-approval or held for a person are counted on the approvals row", async () => {
+    await pg.query(
+      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status) VALUES
+         (950, 'trock_crm', 'deal-950', 'DFW-4-70950-aa', 'REVIEW-TOKEN-SEEDED-950', 'approving'),
+         (951, 'trock_crm', 'deal-951', 'DFW-4-70951-aa', 'REVIEW-TOKEN-SEEDED-951', 'override_approving'),
+         (952, 'trock_crm', 'deal-952', 'DFW-4-70952-aa', 'REVIEW-TOKEN-SEEDED-952', 'held_cross_destination')`,
+    );
+    expect((await row())("synchub.rfp.approvals").extra).toMatchObject({ approving: 2, held: 1 });
+  });
+
+  it("P3-4: a HubSpot request with a confirmed hand-off is not on the CRM callback leg (trock_crm only)", async () => {
+    await clearApprovals();
+    await approved(964, "hubspot", "2026-11-14 01:00:00");
+    await handoff(964, "hubspot", "sent", "bid-964");
+    expect((await row())("synchub.rfp.crm_callback").delivery[0].pending).toBe(0);
+  });
+
+  it("P3-4: a delivered ('sent') callback is not pending and sets last_delivered_at", async () => {
+    await clearApprovals();
+    await approved(963, "trock_crm", "2026-11-14 01:00:00");
+    await handoff(963, "trock_crm", "sent", "bid-963");
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status, attempt_count, last_attempt_at, sent_at)
+       VALUES ('trock_crm', 'deal-963', 963, '{}'::jsonb, 'https://crm.example.test/api/internal/bid-board-created', 'sent', 1, '2026-11-14 01:05:00', '2026-11-14 01:05:00')`,
+    );
+    const callback = (await row())("synchub.rfp.crm_callback");
+    expect(callback.delivery[0]).toMatchObject({ pending: 0, last_delivered_at: "2026-11-14T01:05:00.000Z" });
+    expect(callback.records).toEqual([]);
+  });
+
+  it("P3-4: the relay's 'failed' (held for retry) is BOTH pending and a failure; 'abandoned' is a failure and exhausted, never pending", async () => {
+    await pg.query(
+      `INSERT INTO trockcrm_relay_outbox (procore_portfolio_project_id, project_number, payload, status, attempts, last_attempt_at, created_at) VALUES
+         ('pp-2', 'DFW-2-2-aa', '{}'::jsonb, 'failed', 3, now() - interval '1 hour', now() - interval '3 hours'),
+         ('pp-3', 'DFW-2-3-aa', '{}'::jsonb, 'abandoned', 20, now() - interval '2 hours', now() - interval '5 hours')`,
+    );
+    const relay = (await row())("synchub.relay.trockcrm");
+    // Pending and failures are separate fields: the retrying row is in both, the abandoned one only in failures.
+    expect(relay.delivery[0]).toMatchObject({ pending: 1, failed_24h: 2, failed_7d: 2, exhausted: 1 });
+    expect(relay.extra).toEqual({ "status.abandoned": 1, "status.failed": 1, "status.sent": 1 });
   });
 });

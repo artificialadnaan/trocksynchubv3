@@ -217,7 +217,7 @@ async function collectMail(q: Querier, env: NodeJS.ProcessEnv, installed: Record
         SELECT count(*) FILTER (WHERE status = 'failed' AND sent_at > NOW() - interval '24 hours')::int AS failed_24h,
                count(*) FILTER (WHERE status = 'failed' AND sent_at > NOW() - interval '7 days')::int AS failed_7d,
                count(*) FILTER (WHERE status = 'sent' AND sent_at > NOW() - interval '24 hours')::int AS sent_24h,
-               ${iso("max(sent_at)")} AS last_attempt_at,
+               ${iso("max(sent_at) FILTER (WHERE status IN ('sent', 'failed'))")} AS last_attempt_at,
                ${iso("max(sent_at) FILTER (WHERE status = 'sent')")} AS last_success_at
           FROM email_send_log
       `,
@@ -266,6 +266,8 @@ async function collectMail(q: Querier, env: NodeJS.ProcessEnv, installed: Record
       active,
       active_provider: activeProvider,
       auth_ok_source: recordedOk ? "mail_auth_health" : present ? "automation_config.updated_at" : null,
+      // Where processing's times come from: the send log, which doesn't record the provider (only the active one sends).
+      send_times: "email_send_log_active_provider",
     };
   }
 
@@ -330,6 +332,8 @@ async function collectApprovals(q: Querier, installed: Record<Table, boolean>): 
              count(*) FILTER (WHERE status = 'pending' AND token_expires_at > NOW() AND token_expires_at <= NOW() + interval '48 hours')::int AS expiring_48h,
              count(*) FILTER (WHERE status = 'pending' AND token_expires_at <= NOW())::int AS expired_pending,
              count(*) FILTER (WHERE status = 'pending' AND NOT ${emailed})::int AS no_email_sent,
+             count(*) FILTER (WHERE status IN ('approving', 'override_approving'))::int AS approving,
+             count(*) FILTER (WHERE status = 'held_cross_destination')::int AS held,
              ${iso("GREATEST(max(approved_at), max(declined_at))")} AS last_decided_at,
              ${iso("max(created_at)")} AS last_created_at
         FROM rfp_approval_requests r
@@ -348,7 +352,14 @@ async function collectApprovals(q: Querier, installed: Record<Table, boolean>): 
   ];
   c.processing.last_attempt_at = text(s.last_created_at);
   c.processing.last_success_at = text(s.last_decided_at);
-  c.extra = { no_email_sent: num(s.no_email_sent), expiring_48h: num(s.expiring_48h), expired_pending: num(s.expired_pending) };
+  // Requests mid-approval or held for a person are on no other row: counted here so they never drop out of sight.
+  c.extra = {
+    no_email_sent: num(s.no_email_sent),
+    expiring_48h: num(s.expiring_48h),
+    expired_pending: num(s.expired_pending),
+    approving: num(s.approving),
+    held: num(s.held),
+  };
   c.records = (
     await rows(
       q,
@@ -398,7 +409,8 @@ export const OUTBOXES: readonly OutboxSpec[] = [
     kind: "rfp_core_create",
     pending: ["pending", "sending"],
     delivered: ["sent"],
-    failed: ["failed", "dead", "refused"],
+    // held_cross_destination: the deal already has the other destination's footprint; a person resolves it.
+    failed: ["failed", "dead", "refused", "held_cross_destination"],
     attempts: "attempt_count",
     max: "max_attempts",
   },
@@ -412,7 +424,8 @@ export const OUTBOXES: readonly OutboxSpec[] = [
     kind: "rfp_core_followup",
     pending: ["pending", "sending"],
     delivered: ["sent"],
-    failed: ["failed", "dead", "orphan_stale"],
+    // link_refused: the CRM refused the link; never requeued, a person resolves it (rfp-requeue-dead.ts).
+    failed: ["failed", "dead", "orphan_stale", "link_refused"],
     attempts: "attempt_count",
     max: "max_attempts",
   },
@@ -717,10 +730,12 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
              WHERE b.rfp_approval_request_id = r.id ORDER BY b.id DESC LIMIT 1
           ) b ON TRUE
          WHERE r.source_system = 'trock_crm' AND r.status = 'approved' AND r.approved_at >= ${CRM_CALLBACK_SINCE}::timestamp
-           -- SERVICE RFPs only, by enqueueRfpApprovedCallbackIfCoreConfirmed's own join (sync/rfp-approved-callback.ts): a
-           -- non-service approval reaches the CRM through Core's bid link, so it is never pending here (d9, 11-14).
+           -- SERVICE RFPs whose Core card is CONFIRMED, by enqueueRfpApprovedCallbackIfCoreConfirmed's exact join
+           -- (sync/rfp-approved-callback.ts): only those are ever told 'approved'. A non-service approval reaches the CRM
+           -- through Core's bid link, and an unconfirmed hand-off is the service_handover leg's (d9, 11-14).
            AND EXISTS (SELECT 1 FROM service_rfp_core_outbox o
-                        WHERE o.source_system = r.source_system AND o.source_deal_id = r.source_deal_id AND o.rfp_request_id = r.id)
+                        WHERE o.source_system = r.source_system AND o.source_deal_id = r.source_deal_id AND o.rfp_request_id = r.id
+                          AND o.status IN ('crm_notify_accepted', 'sent') AND o.core_bid_id IS NOT NULL)
       )
     `;
     const s = await one(
