@@ -63,6 +63,13 @@ describe("SyncHub's zod mirror agrees with Core's golden fixtures", () => {
   });
 });
 
+describe("safeMessage input cap", () => {
+  it("cuts the raw input to SAFE_MESSAGE_INPUT_MAX = 2000 before any pass (the key rule is quadratic on long runs)", async () => {
+    const contract = await import("../server/health/snapshot-contract.ts");
+    expect((contract as Record<string, unknown>).SAFE_MESSAGE_INPUT_MAX).toBe(2000);
+  });
+});
+
 describe("safeMessage", () => {
   it("cuts email addresses, bearer credentials, JWT-shaped tokens, credential fields and URL queries", () => {
     expect(safeMessage("HTTP 409 test_data for someone@example.test")).toBe("HTTP 409 test_data for [email]");

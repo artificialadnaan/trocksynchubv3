@@ -156,9 +156,16 @@ const QUOTED_VALUE = String.raw`\\"(?:(?!\\").)*(?:\\")?|"(?:[^"\\]|\\.)*"?|'(?:
 const KEY_COLON_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*:\s*(?:${QUOTED_VALUE}|[^,;}]*)`, "gi");
 const KEY_EQUALS_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*=\s*(?:${QUOTED_VALUE}|[^\s,;}&"'\\]*)`, "gi");
 
+/**
+ * The most of a raw message any pass sees. The key rule backtracks quadratically on long dash / underscore runs ("a-a-…":
+ * 2K = 72 ms, 8K = 1.16 s, d6) and runs on the event loop, while the output is capped at 200 anyway. Core cuts the same.
+ */
+export const SAFE_MESSAGE_INPUT_MAX = 2000;
+
 export function safeMessage(raw: string | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
   let s = raw
+    .slice(0, SAFE_MESSAGE_INPUT_MAX)
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
     .replace(/\bbearer\s+\S+/gi, "[credential]")
