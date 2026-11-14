@@ -51,10 +51,12 @@ describe("the Procore Bid Board stage sync is retired", () => {
     const result = await runBidBoardStageSync(options as any);
 
     expect(result.errors).toEqual([BID_BOARD_STAGE_SYNC_RETIRED_ERROR]);
+    // A refused run FAILS (failed 1), so scripts/run-bidboard-stage-sync.ts (exit on failed > 0) exits non-zero for a cron / shell
+    // caller (CodeRabbit on #137); nothing else is counted.
     expect({ total: result.total, changed: result.changed, failed: result.failed, changes: result.changes }).toEqual({
       total: 0,
       changed: 0,
-      failed: 0,
+      failed: 1,
       changes: [],
     });
     expect(m.exportList).not.toHaveBeenCalled();
