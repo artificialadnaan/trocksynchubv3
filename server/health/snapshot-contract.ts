@@ -13,6 +13,13 @@ import { z } from "zod";
 
 export const SNAPSHOT_SCHEMA = "trock.integration-health.snapshot.v1";
 export const SNAPSHOT_SCHEMA_SHA256 = "53639e8d33f3cdc80ceb0808e154928ed709044aff27bca24dd4bc581d3311b5";
+/**
+ * Schema r2 (CONTRACT ADDENDUM-5, owner e69e6f71) = r1 + an optional per-connection `failed_ids`: the stable ids of every failed
+ * item (<= 1000), so Core can alert on a NEW failed id even when the total is flat. snapshot.v1.r2.schema.json is its byte copy;
+ * every r1 document is a valid r2 document. The mirror below is r2, and the route validates against it.
+ */
+export const SNAPSHOT_SCHEMA_R2_SHA256 = "cbad85ca3d669a410ff626a5bd0cfe4da05b59e085cdb0f00c8a712e4f5be869";
+export const FAILED_IDS_MAX = 1000;
 
 export const HEALTH_SYSTEMS = ["synchub", "crm", "expense", "core"] as const;
 export type HealthSystem = (typeof HEALTH_SYSTEMS)[number];
@@ -90,6 +97,7 @@ export const connectionSchema = z
       .strict(),
     delivery: z.array(delivery).max(2),
     records: z.array(record).max(20),
+    failed_ids: z.array(z.string().max(80).regex(CODE_RE)).max(FAILED_IDS_MAX).optional(),
     correction_url: safeUrlOrNull,
     extra: z
       .record(z.string().regex(/^[a-z0-9_.:-]{1,60}$/), extraValue)

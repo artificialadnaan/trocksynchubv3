@@ -262,7 +262,7 @@ describe("collectSynchubSnapshot", () => {
     const create = row("synchub.outbox.rfp_core_create");
     expect(create.delivery[0]).toMatchObject({ pending: 0, failed_24h: 1, failed_7d: 1, exhausted: 1, last_delivered_at: null });
     expect(create.processing.last_error).toMatchObject({ code: "dead", message_safe: "POST failed: [credential] rejected" });
-    expect(create.extra).toEqual({ "status.dead": 1 });
+    expect(create.extra).toEqual({ "status.dead": 1, failed_total: 1 });
     expect(create.records).toEqual([{ kind: "rfp_core_create", id: "1", state: "dead", url: null }]);
 
     const followup = row("synchub.outbox.rfp_core_followup");
@@ -346,7 +346,7 @@ describe("collectSynchubSnapshot", () => {
       const leg = await handover();
       expect(leg.delivery[0].pending).toBe(1);
       expect(leg.records).toEqual([{ kind: "rfp_approval_request", id: "980", state: "not_enqueued", url: null }]);
-      expect(leg.extra).toEqual({ not_enqueued: 1, since: "2026-08-31T18:13:20.711Z" });
+      expect(leg.extra).toEqual({ not_enqueued: 1, since: "2026-08-31T18:13:20.711Z", failed_total: 0 });
     });
 
     it("an approval written 1 ms before its own hand-off row (the earliest row, failed) is counted", async () => {
@@ -498,5 +498,70 @@ describe("d9's review of #139", () => {
     // Pending and failures are separate fields: the retrying row is in both, the abandoned one only in failures.
     expect(relay.delivery[0]).toMatchObject({ pending: 1, failed_24h: 2, failed_7d: 2, exhausted: 1 });
     expect(relay.extra).toEqual({ "status.abandoned": 1, "status.failed": 1, "status.sent": 1 });
+  });
+});
+
+describe("ADDENDUM-5: every failed item by stable id (owner e69e6f71)", () => {
+  async function clearApprovals() {
+    await pg.exec(`DELETE FROM service_rfp_core_outbox; DELETE FROM bidboard_callback_outbox; DELETE FROM rfp_approval_requests WHERE status = 'approved';`);
+  }
+  async function approvedWithHandoff(id: number, status: string, coreBidId: string | null) {
+    await pg.query(
+      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
+       VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', '2026-11-14 01:00:00')`,
+      [id, `deal-${id}`, `DFW-4-7${id}-aa`, `REVIEW-TOKEN-SEEDED-${id}`],
+    );
+    await pg.query(
+      `INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, attempt_count, core_bid_id, last_attempt_at, created_at, sent_at)
+       VALUES ('trock_crm', $1, $2, $3, 1, $4, now() - interval '1 hour', now() - interval '1 hour', CASE WHEN $4::text IS NULL THEN NULL ELSE now() - interval '1 hour' END)`,
+      [`deal-${id}`, id, status, coreBidId],
+    );
+  }
+
+  it("25 failed service hand-offs: failed_ids carries all 25 while records stays capped at 20; the snapshot validates (r2)", async () => {
+    await clearApprovals();
+    for (let id = 1001; id <= 1025; id++) await approvedWithHandoff(id, "failed", null);
+    const snapshot = await collectSynchubSnapshot({ db, env: {} });
+    const handover = byKey(snapshot)("synchub.rfp.service_handover");
+    expect(handover.failed_ids).toEqual(Array.from({ length: 25 }, (_, i) => String(1001 + i)));
+    expect(handover.records).toHaveLength(20);
+    expect(handover.extra.failed_total).toBe(25);
+    expect(handover.delivery[0].failed_24h).toBe(25);
+    const checked = validateSnapshot(snapshot);
+    expect(checked.ok ? [] : checked.errors).toEqual([]);
+  });
+
+  it("failed_ids is exactly the failing set: a resolved hand-off and a queued one are absent", async () => {
+    await clearApprovals();
+    await approvedWithHandoff(1101, "failed", null);
+    await approvedWithHandoff(1102, "sent", "bid-1102"); // resolved: Core confirmed the card
+    await approvedWithHandoff(1103, "pending", null); // queued, not failed
+    await approvedWithHandoff(1104, "dead", null);
+    // 1102's CRM callback died: it is on the callback leg's failing set, and only there.
+    await pg.query(
+      `INSERT INTO bidboard_callback_outbox (source_system, source_deal_id, rfp_approval_request_id, payload, target_url, status, attempt_count, last_attempt_at)
+       VALUES ('trock_crm', 'deal-1102', 1102, '{}'::jsonb, 'https://crm.example.test/api/internal/bid-board-created', 'dead', 5, now() - interval '30 minutes')`,
+    );
+    const row = byKey(await collectSynchubSnapshot({ db, env: {} }));
+    expect(row("synchub.rfp.service_handover").failed_ids).toEqual(["1101", "1104"]);
+    expect(row("synchub.rfp.service_handover").extra.failed_total).toBe(2);
+    expect(row("synchub.rfp.crm_callback").failed_ids).toEqual(["1102"]);
+  });
+
+  it("the create and follow-up failure sets list EVERY failed row id, an old one past the 7-day record window included", async () => {
+    await pg.query(
+      `INSERT INTO rfp_core_followup_outbox (id, create_id, kind, status, attempt_count, last_attempt_at, created_at) VALUES
+         (31, 1, 'crm_link', 'link_refused', 1, now() - interval '1 hour', now() - interval '2 hours'),
+         (32, 1, 'core_confirm', 'sent', 1, now() - interval '1 hour', now() - interval '2 hours'),
+         (33, 1, 'crm_notice', 'dead', 6, now() - interval '30 days', now() - interval '31 days')`,
+    );
+    const row = byKey(await collectSynchubSnapshot({ db, env: {} }));
+    const followup = row("synchub.outbox.rfp_core_followup");
+    expect(followup.failed_ids).toEqual(["31", "33"]);
+    expect(followup.extra.failed_total).toBe(2);
+    expect(followup.records.map((r: any) => r.id)).toEqual(["31"]);
+    expect(row("synchub.outbox.rfp_core_create").failed_ids).toEqual(["1"]);
+    // Rows that don't identify failures individually carry no failed_ids at all (r1-shaped).
+    expect(row("synchub.relay.trockcrm").failed_ids).toBeUndefined();
   });
 });

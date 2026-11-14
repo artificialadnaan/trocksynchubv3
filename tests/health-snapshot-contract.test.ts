@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 // server/health/snapshot.v1.schema.json is the same bytes T-Rock Core and the CRM carry (sha pinned here, CONTRACT
 // ADDENDUM-1); the golden fixtures are byte copies of Core S1's, the cases every producer's validator must agree on.
 
-const { snapshotSchema, validateSnapshot, safeMessage, SNAPSHOT_SCHEMA_SHA256 } = await import("../server/health/snapshot-contract.ts");
+const { snapshotSchema, validateSnapshot, safeMessage, SNAPSHOT_SCHEMA_SHA256, SNAPSHOT_SCHEMA_R2_SHA256 } = await import(
+  "../server/health/snapshot-contract.ts"
+);
 
 const read = (name: string) => readFileSync(new URL(`../server/health/${name}`, import.meta.url));
 const valid = JSON.parse(read("__fixtures__/snapshot.v1.valid.json").toString("utf8")) as unknown;
@@ -16,6 +18,25 @@ describe("snapshot.v1 file of record", () => {
   it("is byte-identical to the sealed contract schema (sha 53639e8d…)", () => {
     expect(SNAPSHOT_SCHEMA_SHA256).toBe("53639e8d33f3cdc80ceb0808e154928ed709044aff27bca24dd4bc581d3311b5");
     expect(createHash("sha256").update(read("snapshot.v1.schema.json")).digest("hex")).toBe(SNAPSHOT_SCHEMA_SHA256);
+  });
+});
+
+describe("snapshot.v1 r2 (ADDENDUM-5: r1 + an optional per-connection failed_ids)", () => {
+  it("r2 is byte-identical to the sealed file of record (sha cbad85ca…); r1 stays pinned above", () => {
+    expect(SNAPSHOT_SCHEMA_R2_SHA256).toBe("cbad85ca3d669a410ff626a5bd0cfe4da05b59e085cdb0f00c8a712e4f5be869");
+    expect(createHash("sha256").update(read("snapshot.v1.r2.schema.json")).digest("hex")).toBe(SNAPSHOT_SCHEMA_R2_SHA256);
+  });
+
+  it("the mirror (r2) accepts failed_ids of stable ids, and refuses more than 1000 or a malformed id", () => {
+    const withIds = (ids: unknown) => {
+      const doc = structuredClone(valid) as { connections: Array<Record<string, unknown>> };
+      doc.connections[0]!.failed_ids = ids;
+      return doc;
+    };
+    expect(validateSnapshot(withIds(["941", "dallas:1", "evt-41"])).ok).toBe(true);
+    expect(validateSnapshot(withIds(Array.from({ length: 1001 }, (_, i) => String(i)))).ok).toBe(false);
+    expect(validateSnapshot(withIds(["has space"])).ok).toBe(false);
+    expect(validateSnapshot(withIds(["x".repeat(81)])).ok).toBe(false);
   });
 });
 

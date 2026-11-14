@@ -1,5 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
+  FAILED_IDS_MAX,
   isoOrNull,
   safeCode,
   safeMessage,
@@ -78,6 +79,19 @@ async function rows(q: Querier, query: SQL): Promise<any[]> {
 
 async function one(q: Querier, query: SQL): Promise<any> {
   return (await rows(q, query))[0] ?? {};
+}
+
+/**
+ * ADDENDUM-5 (owner e69e6f71): the stable ids of EVERY failed item, the same ids as records[].id, so Core can alert on a new
+ * failed id even when the total is flat. Capped at FAILED_IDS_MAX (lowest ids first); `total` is the true count, reported
+ * beside it, so a truncated list can never pass for a complete one.
+ */
+async function failedIdSet(q: Querier, idQuery: SQL): Promise<{ ids: string[]; total: number }> {
+  const found = await rows(
+    q,
+    sql`SELECT id, (count(*) OVER ())::int AS total FROM (${idQuery}) failed ORDER BY id ASC LIMIT ${FAILED_IDS_MAX}`,
+  );
+  return { ids: found.map((r) => String(r.id)), total: found.length > 0 ? Number(found[0].total) : 0 };
 }
 
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
@@ -396,6 +410,8 @@ interface OutboxSpec {
   /** The attempts column and the ceiling (a column, or a number for an outbox without one). */
   attempts: string;
   max: string | number;
+  /** Whether its failures are individually identifiable (ADDENDUM-5): then every failed row id is reported. */
+  failedIds?: boolean;
 }
 
 export const OUTBOXES: readonly OutboxSpec[] = [
@@ -411,6 +427,7 @@ export const OUTBOXES: readonly OutboxSpec[] = [
     delivered: ["sent"],
     // held_cross_destination: the deal already has the other destination's footprint; a person resolves it.
     failed: ["failed", "dead", "refused", "held_cross_destination"],
+    failedIds: true,
     attempts: "attempt_count",
     max: "max_attempts",
   },
@@ -426,6 +443,7 @@ export const OUTBOXES: readonly OutboxSpec[] = [
     delivered: ["sent"],
     // link_refused: the CRM refused the link; never requeued, a person resolves it (rfp-requeue-dead.ts).
     failed: ["failed", "dead", "orphan_stale", "link_refused"],
+    failedIds: true,
     attempts: "attempt_count",
     max: "max_attempts",
   },
@@ -548,6 +566,12 @@ async function collectOutbox(q: Querier, spec: OutboxSpec, env: NodeJS.ProcessEn
       `,
     )
   ).map((r) => ({ kind: spec.kind, id: String(r.id), state: safeCode(r.status, "unknown"), url: null }));
+  if (spec.failedIds) {
+    // Every row still in a failure status, however old: it waits until a person or a re-arm moves it.
+    const failed = await failedIdSet(q, sql`SELECT id FROM ${t} WHERE status IN (${inList(spec.failed)})`);
+    c.failed_ids = failed.ids;
+    c.extra = { ...c.extra, failed_total: failed.total };
+  }
   return c;
 }
 
@@ -700,7 +724,10 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
       },
     ];
     handover.processing.last_success_at = text(s.last_delivered_at);
-    handover.extra = { not_enqueued: num(s.not_enqueued), since: SERVICE_HANDOFF_LIVE_AT };
+    // The failing set: unconfirmed requests whose hand-off reached a failure status (the failed_24h / 7d population, unwindowed).
+    const failed = await failedIdSet(q, sql`${legs} SELECT id FROM reqs WHERE NOT confirmed AND failed_at IS NOT NULL`);
+    handover.failed_ids = failed.ids;
+    handover.extra = { not_enqueued: num(s.not_enqueued), since: SERVICE_HANDOFF_LIVE_AT, failed_total: failed.total };
     handover.records = (
       await rows(
         q,
@@ -763,7 +790,10 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
       },
     ];
     callback.processing.last_success_at = text(s.last_delivered_at);
-    callback.extra = { not_enqueued: num(s.not_enqueued), since: CRM_CALLBACK_SINCE_ISO };
+    // The failing set: requests whose CRM callback failed or died (the failed_24h / 7d population, unwindowed).
+    const failed = await failedIdSet(q, sql`${legs} SELECT id FROM reqs WHERE failed_at IS NOT NULL`);
+    callback.failed_ids = failed.ids;
+    callback.extra = { not_enqueued: num(s.not_enqueued), since: CRM_CALLBACK_SINCE_ISO, failed_total: failed.total };
     callback.records = (
       await rows(
         q,
