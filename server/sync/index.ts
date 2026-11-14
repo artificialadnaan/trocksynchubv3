@@ -25,6 +25,7 @@ import {
 } from "./bidboard-stage-sync";
 import { pushBidBoardRowsToCrm } from "./bidboard-crm-ingestion";
 import { pushBidBoardRowsToCore } from "./bidboard-core-ingestion";
+import { BID_BOARD_STAGE_SYNC_RETIRED_ERROR, bidBoardStageSyncRetired } from "./procore-create-retired";
 import { recordPushOutcomeAndMaybeAlert } from "./bidboard-crm-alert";
 import { log } from "../index";
 import { storage } from "../storage";
@@ -112,6 +113,11 @@ export async function runBidBoardStageSync(
   // Marked FIRST, before anything fallible: an export-only run that fails part-way must still never be recorded as a
   // baseline (Codex P1 on #112).
   if (isBidBoardExportOnly()) result.exportOnly = true;
+  // Retired (procore-create-retired.ts): no export, no browser, no CRM or Core push, from any caller.
+  if (bidBoardStageSyncRetired()) {
+    result.errors.push(BID_BOARD_STAGE_SYNC_RETIRED_ERROR);
+    return result;
+  }
 
   if (forceExport) {
     try {
