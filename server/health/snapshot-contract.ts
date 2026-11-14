@@ -157,6 +157,8 @@ export function validateSnapshot(raw: unknown): { ok: true; snapshot: Snapshot }
 const SEGMENT_WORDS = new Set([
   "token", "password", "passwd", "pwd", "pw", "pass", "passphrase", "secret", "credential", "credentials", "creds", "auth",
   "authorization", "key", "apikey", "otp", "pin", "jwt", "session", "sessid", "sid", "cookie", "signature", "sig",
+  // r4 (d9 round 3): a bearer / ticket key is a credential key too (`bearer=…`, `{"bearer":…}`, `?ticket=…`).
+  "bearer", "ticket",
 ]);
 /** Long words that make a credential key wherever they sit in it (all-lower / all-upper names have no segment breaks). */
 const RUN_WORDS = /token|password|passwd|passphrase|secret|credential|apikey|privatekey|accountkey|accesskey|sessionid|sessid/;
@@ -218,14 +220,18 @@ function bracketEnd(s: string, i: number): number {
 function valueEnd(s: string, i: number, key: string, sep: string): number {
   const c = s[i];
   if (c === undefined) return i;
-  if (sep === ":" && /^(?:set-)?cookie$/i.test(key)) {
+  // A cookie header or cookie-named key, whatever its separator (`cookies: a=1; s=…`, `cookie=a=1; s=…`, `headers.cookie: …`; r4):
+  // every cookie in it may be a session, so the value is the rest of the line.
+  if (/(?:^|[_.-])(?:set-)?cookies?$/i.test(key)) {
     const nl = s.slice(i).search(/[\r\n]/);
     return nl < 0 ? s.length : i + nl;
   }
   if (c === "\\" && s[i + 1] === '"') return escapedStringEnd(s, i + 2);
   if (c === '"' || c === "'" || c === "`") return quotedEnd(s, i + 1, c);
   if (c === "[" || c === "{") return bracketEnd(s, i);
-  const stop = s.slice(i).search(sep === ":" ? /[,;}\r\n]/ : /[\s,;}&"'\\]/);
+  // After `:` a bare value runs to , ; } or the line end; after `=` / `=>` it is ONE token to whitespace, & or ; (r4, d9: a comma,
+  // brace, quote or backslash inside the token is still the credential's: `password=ab,SECRET`, `password=\\hunter2`).
+  const stop = s.slice(i).search(sep === ":" ? /[,;}\r\n]/ : /[\s&;]/);
   return stop < 0 ? s.length : i + stop;
 }
 
@@ -259,6 +265,42 @@ function cutBasic(s: string): string {
   );
 }
 
+/** The cleaner's own placeholders, neutralised before the residue read (they name a cut, not a credential). */
+const PLACEHOLDER_RE = /\/rfp-review\/\[link\]|\[(?:redacted|credential field|credential|token|email|link)\]/gi;
+/** A word run (a key or a word); the scan is one linear pass. */
+const RUN_RE = /[A-Za-z0-9_.-]+/g;
+/** A separator right after a run: up to 4 closers, then `:`, `=` or `=>`. */
+const SEP_AFTER_RE = /^[\]\\"'`)]{0,4}\s{0,4}(=>?|:)/;
+
+/**
+ * r4 (d6's ruling D6-RULING-139-CLEANER-FAIL-CLOSED, after d9's round 3): per-shape cutting does not converge, so after the passes
+ * the CLEANED text is read for residue and the whole message is dropped (null) when ANY of these is still there:
+ * (1) a credential word as a key segment: a run followed by a separator (`Bearer: x`, a kept `password: [redacted]`, an
+ *     80+-character key), or a multi-segment run holding one (`refreshToken`, `db_password`, `x-api-key`) with or without one;
+ *     a single prose word ("client secret expired", "Token has been expired") is not a key;
+ * (2)+(3) any scheme's userinfo, query or fragment (`scheme://…@`, `…?`, `…#`), raw or %2F / \/-encoded;
+ * (4) an rfp-review link in any form other than the cut `/rfp-review/[link]` (raw, %2F, \/, &#x2F;).
+ * The error code carries the signal; dropping a message costs little, leaking one costs a lot.
+ */
+function hasResidue(s: string): boolean {
+  const t = s.replace(PLACEHOLDER_RE, " ");
+  if (/rfp[-_ ]?review/i.test(t)) return true;
+  if (/[a-z][a-z0-9+.-]*:(?:\/\/|%2f%2f|\\\/\\\/)\S*?[@?#]/i.test(t)) return true;
+  RUN_RE.lastIndex = 0;
+  for (let m = RUN_RE.exec(t); m !== null; m = RUN_RE.exec(t)) {
+    const run = m[0].replace(/^[_.-]+|[_.-]+$/g, "");
+    if (run === "") continue;
+    const sep = SEP_AFTER_RE.exec(t.slice(m.index + m[0].length, m.index + m[0].length + 12));
+    if (sep && isCredentialKey(run, sep[1]!)) return true;
+    const segments = run.split(/[_.-]+/).flatMap((part) =>
+      part.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").split(" "),
+    );
+    // ":" so a bare `code` segment (status_code, error_code) is not read as `code=`; every other credential word still counts.
+    if (segments.filter((w) => w !== "").length >= 2 && isCredentialKey(run, ":")) return true;
+  }
+  return false;
+}
+
 /**
  * The most of a raw message any pass sees: the output is capped at 200 anyway, and a cut message drops its last, partial
  * token (a split email or URL is not left half-redacted).
@@ -288,6 +330,7 @@ export function safeMessage(raw: string | null | undefined): string | null {
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  if (hasResidue(s)) return null;
   if (s.length > 200) s = `${s.slice(0, 199)}…`;
   if (s === "" || UNSAFE_TEXT_RE.test(s)) return null;
   return s;
