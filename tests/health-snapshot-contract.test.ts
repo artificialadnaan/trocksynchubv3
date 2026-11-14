@@ -326,3 +326,43 @@ describe("safeMessage r4b (d6's ruling D6-RULING-139-R4-VALUE-SHAPE): a credenti
   // Stated limits (d9 report-only; d6): a SHORT value with no digit and one case after a bare credential word ("password hunter",
   // "token ABCDEFGH") reads as prose and stays. "Bearer token missing" -> "[credential] missing" is the Bearer pass, readable.
 });
+
+describe("safeMessage r4c (d6's ruling D6-RULING-139-R4C, d9's review at 2efa9b70): spaced punctuation, symbols, sentence ends", () => {
+  // d9's adv.r1.ts (ced1e1a1), verbatim: a credential word, then spaces and punctuation mixed (up to 12), then a value; the
+  // placeholder line; and a value with an internal symbol. Each drops.
+  it.each([
+    ["password -> hunter2"],
+    ["password - hunter2"],
+    ["password , hunter2"],
+    ["secret \u2013 hunter2"],
+    ["token | abc123def"],
+    ["password \u2192 hunter2"],
+    ["token - abc123def"],
+    ["auth failed password [redacted] hunter2"],
+    ["password p@ss!word"],
+  ])("%j drops to null", (raw) => {
+    expect(safeMessage(raw)).toBeNull();
+  });
+
+  // A credential word that ENDS a sentence is not followed by its value: the next sentence's capital stays readable.
+  it.each([
+    ["wrong password. Please retry."],
+    ["Invalid token. Please sign in again."],
+  ])("%j stays plain (sentence end)", (line) => {
+    expect(safeMessage(line)).toBe(line);
+  });
+
+  // d9's other real lines (they were plain before r4c too): r4c must not make them drop.
+  it.each([
+    ["password! Please retry"],
+    ["token expired. Re-authenticate"],
+    ["Token refresh failed: 401"],
+    ["HubSpot token refresh failed with status 401"],
+    ["Procore token expired; reconnect in Settings"],
+    ["secret rotation required"],
+    ["the password reset flow"],
+    ["token - expired"],
+  ])("%j stays plain", (line) => {
+    expect(safeMessage(line)).toBe(line);
+  });
+});

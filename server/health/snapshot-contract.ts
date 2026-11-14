@@ -288,10 +288,11 @@ function isCredentialWord(run: string): boolean {
   return SEGMENT_WORDS.has(w) || (w.endsWith("s") && SEGMENT_WORDS.has(w.slice(0, -1))) || w === "basic" || RUN_WORDS.test(w);
 }
 
-/** r4b (d6's ruling D6-RULING-139-R4-VALUE-SHAPE): a token that looks like a value, not prose: a digit, mixed case, or 16+ key characters. */
+/** r4b (d6's ruling D6-RULING-139-R4-VALUE-SHAPE): a token that looks like a value, not prose: a digit, mixed case, 16+ key characters, or
+ * (r4c) an internal symbol other than a letter, apostrophe or hyphen (`p@ss!word`). */
 function looksLikeValue(token: string): boolean {
   const v = token.replace(/^[(\[{'"`]+/, "").replace(/[.,;:!?)\]}'"`]+$/, "");
-  return /\d/.test(v) || (/[a-z]/.test(v) && /[A-Z]/.test(v)) || /^[A-Za-z0-9+/=_-]{16,}$/.test(v);
+  return /\d/.test(v) || (/[a-z]/.test(v) && /[A-Z]/.test(v)) || /^[A-Za-z0-9+/=_-]{16,}$/.test(v) || /[^A-Za-z'\u2019-]/.test(v);
 }
 
 function hasResidue(s: string): boolean {
@@ -307,10 +308,11 @@ function hasResidue(s: string): boolean {
     // r4b: a single credential word, whitespace (the text is collapsed to one space; tab / NBSP / newline included), then a
     // token shaped like a value (`password hunter2`, `token abc123def`, `Authorization Basic …`) leaves the value. Prose after it
     // ("client secret expired", "Token has been expired") stays; a misfire like `token 2 of 3` drops, the safe direction.
-    // ...also after up to 4 punctuation characters (d9's kit: `password,hunter2`, `(password) hunter2`, `"password" hunter2`, a
-    // fullwidth colon). Not after . ! ? (a new sentence may start with a capital) or ASCII : / = (the separator rule's).
-    const next = /(?:[^\sA-Za-z0-9.!?:=]{1,4} ?| )([^ ]{1,80})/y;
-    next.lastIndex = m.index + m[0].length;
+    // ...after spaces and punctuation, mixed, up to 12 (r4c, d9: `password,hunter2`, `(password) hunter2`, `password -> hunter2`,
+    // `token | abc123def`, a fullwidth colon); a trailing . _ - is not part of the word. Not . ! ? (a new sentence may start
+    // with a capital: `Invalid token. Please sign in again.` stays) or ASCII : / = (the separator rule's).
+    const next = /(?: |[^\sA-Za-z0-9.!?:=]){1,12}([^ ]{1,80})/y;
+    next.lastIndex = m.index + m[0].replace(/[_.-]+$/, "").length;
     const token = next.exec(t);
     if (token && isCredentialWord(run) && looksLikeValue(token[1]!)) return true;
     const segments = run.split(/[_.-]+/).flatMap((part) =>
