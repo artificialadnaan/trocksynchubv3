@@ -376,6 +376,8 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
   // The deal OWNER (the CRM resolves assigned rep -> HubSpot owner -> creator). Optional: anything that is
   // not an email is sent as null rather than refusing the approval over it.
   const rawOwnerEmail = wireString(input.dealData.ownerEmail, MAX.email)?.toLowerCase();
+  const rawEstimatorEmail = wireString(input.estimatorEmail, MAX.email)?.toLowerCase();
+  const estimatorEmail = rawEstimatorEmail && EMAIL_RE.test(rawEstimatorEmail) ? rawEstimatorEmail : null;
   const ownerEmail = rawOwnerEmail && EMAIL_RE.test(rawOwnerEmail) ? rawOwnerEmail : null;
   // Which CRM field that email came from (owner 2026-10-14): Core seats the card owner only from "assigned_rep".
   const ownerSource = ["assigned_rep", "hubspot", "creator"].includes(input.dealData.ownerSource) && ownerEmail
@@ -463,6 +465,7 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
         rfpProjectNumber,
         ownerEmail,
         ...(ownerSource ? { ownerSource } : {}),
+        ...(estimatorEmail ? { estimatorEmail } : {}),
       },
       // `billAddress` only when usable: absent, the company (and the whole body) is byte-for-byte what it was before.
       company: billAddress ? { id: companyId, name: companyName, billAddress } : { id: companyId, name: companyName },
@@ -868,7 +871,9 @@ export async function handOffServiceRfpApprovalToCore(
       return { status: "skipped" };
     }
 
-    const built = buildServiceRfpApprovedBody(input);
+    const estimatorEmail =
+      input.estimatorEmail !== undefined ? input.estimatorEmail : await resolveSelectedEstimatorEmail(input, deps.readEstimatorList);
+    const built = buildServiceRfpApprovedBody({ ...input, estimatorEmail });
     if (!built.ok) {
       // Terminal, and LOUD. Not a silent drop: the row records what was refused and why, and the
       // alert makes the gap visible while the manual creation door is still open.
