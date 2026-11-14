@@ -51,6 +51,20 @@ describe("safeMessage", () => {
     expect(safeMessage("POST https://crm.example.test/api/x?sig=abc failed")).toBe("POST https://crm.example.test/api/x failed");
   });
 
+  it.each(["access_token", "refresh_token", "password", "client_secret"])(
+    "a JSON %s key loses its whole VALUE, not just its name (PR #139 review)",
+    (key) => {
+      const out = safeMessage(`refresh failed: {"${key}":"opaque-value-${key}","x":1}`);
+      expect(out ?? "").not.toContain(`opaque-value-${key}`);
+    },
+  );
+
+  it("a quoted value with an escaped quote inside, and an unquoted numeric value, are cut whole", () => {
+    expect(safeMessage('{"password":"pa\\"ss-tail-value"}') ?? "").not.toContain("ss-tail-value");
+    expect(safeMessage('{"api_key": 123456789, "ok": true}') ?? "").not.toContain("123456789");
+    expect(safeMessage('{"Authorization":"Basic c2VjcmV0LXZhbHVl"}') ?? "").not.toContain("c2VjcmV0LXZhbHVl");
+  });
+
   it("keeps plain error text, caps at 200 characters, and maps nothing to null", () => {
     expect(safeMessage("AADSTS7000222: client secret expired")).toBe("AADSTS7000222: client secret expired");
     expect(safeMessage("x".repeat(300))).toHaveLength(200);

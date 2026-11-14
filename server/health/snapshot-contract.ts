@@ -131,7 +131,14 @@ export function validateSnapshot(raw: unknown): { ok: true; snapshot: Snapshot }
  * Reduce a stored error string to the contract's message_safe: email addresses, bearer credentials, JWT-shaped tokens,
  * credential fields and URL queries are cut, whitespace collapsed, and the result capped at 200 characters. Anything that
  * still trips the schema's guard is dropped (null) rather than sent; the error's code still carries the signal.
+ *
+ * A credential KEY (quoted or not, JSON `"access_token":"…"` or `password=…`) loses its whole VALUE first: a quoted value up
+ * to its closing quote (escaped quotes included), else the bare value. The later bare-name pass alone only renamed the key
+ * and left `{"[credential field]":"<the token>"}` passing the guard (PR #139 review).
  */
+const CREDENTIAL_PAIR_RE =
+  /(["']?)\b(access_token|refresh_token|id_token|password|client_secret|secret|api_key|authorization)\b\1\s*[:=]\s*("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s,;}&]*)/gi;
+
 export function safeMessage(raw: string | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
   let s = raw
@@ -139,6 +146,7 @@ export function safeMessage(raw: string | null | undefined): string | null {
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
     .replace(/\bbearer\s+\S+/gi, "[credential]")
     .replace(/eyJ[A-Za-z0-9_.-]{10,}/g, "[token]")
+    .replace(CREDENTIAL_PAIR_RE, "$1$2$1: [redacted]")
     .replace(/\b(?:access_token|refresh_token|token|secret|password)\s*[=:]\s*\S*/gi, "[redacted]")
     .replace(/\b(?:access_token|refresh_token)\b/gi, "[credential field]")
     .replace(/(https?:\/\/[^\s?]*)\?\S*/g, "$1")

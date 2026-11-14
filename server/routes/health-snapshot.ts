@@ -15,10 +15,16 @@
  * timestamp outside +-300 s -> 401 and nothing is read; any collection error, or more than 10 s -> 503, never a partial
  * snapshot. The collection is read-only (collect-synchub.ts). The body is written with res.send, not res.json: the /api
  * request logger in server/index.ts echoes every res.json body into the logs.
+ *
+ * ONE collection at a time per process (PR #139 review): a request arriving while one runs shares its result, so repeated
+ * polls can't stack transactions. The 10 s deadline covers the WHOLE collection (getting a connection included): when it
+ * passes, the leased connection is DESTROYED (pg release(true)), which ends the backend's statement too; a statement
+ * timeout alone caps each statement, not the run. The collection's own late rejection is caught, never unhandled.
  */
 import { createHash, createHmac, timingSafeEqual } from "crypto";
 import type { Express, Request, RequestHandler, Response } from "express";
 import { collectSynchubSnapshot } from "../health/collect-synchub";
+import type { Snapshot } from "../health/snapshot-contract";
 
 export const HEALTH_SNAPSHOT_PATH = "/api/internal/health/snapshot";
 export const HEALTH_READ_SECRET_CURRENT_ENV = "SYNCHUB_HEALTH_READ_SECRET_CURRENT";
@@ -95,11 +101,75 @@ function unavailable(res: Response, reason: string): void {
   sendJson(res, 503, { error: "snapshot_unavailable", reason });
 }
 
+/** A pooled connection held for one collection: its querier, and its release (destroy = drop it instead of pooling it). */
+export interface SnapshotLease {
+  db: any;
+  release(destroy: boolean): void;
+}
+
+/** One connection from the shared pool, wrapped for drizzle; its transaction runs on this client alone. */
+async function leaseFromPool(): Promise<SnapshotLease> {
+  const [{ pool }, { drizzle }] = await Promise.all([import("../db"), import("drizzle-orm/node-postgres")]);
+  const client = await pool.connect();
+  return { db: drizzle(client), release: (destroy) => client.release(destroy) };
+}
+
 export function createHealthSnapshotHandler(
-  deps: { collect?: typeof collectSynchubSnapshot; deadlineMs?: number } = {},
+  deps: {
+    collect?: (db: any) => Promise<Snapshot>;
+    acquire?: () => Promise<SnapshotLease>;
+    deadlineMs?: number;
+  } = {},
 ): RequestHandler {
-  const collect = deps.collect ?? collectSynchubSnapshot;
+  const collect = deps.collect ?? ((db: any) => collectSynchubSnapshot({ db }));
+  const acquire = deps.acquire ?? leaseFromPool;
   const deadlineMs = deps.deadlineMs ?? HEALTH_SNAPSHOT_DEADLINE_MS;
+  let inFlight: Promise<Snapshot> | null = null;
+
+  /** The running collection, or a new one: lease, collect, release; the deadline destroys the lease. */
+  function collectOnce(): Promise<Snapshot> {
+    if (inFlight) return inFlight;
+    const run = (async () => {
+      const held: { lease: SnapshotLease | null; expired: boolean } = { lease: null, expired: false };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          held.expired = true;
+          reject(new Error("deadline"));
+        }, deadlineMs);
+      });
+      const work = (async () => {
+        const lease = await acquire();
+        if (held.expired) {
+          // Leased after the deadline: never used, so it goes back to the pool as is.
+          lease.release(false);
+          throw new Error("deadline");
+        }
+        held.lease = lease;
+        return collect(lease.db);
+      })();
+      // Destroying the connection rejects the collection after the race is settled: caught here, never unhandled.
+      work.catch(() => undefined);
+      let failed = false;
+      try {
+        return await Promise.race([work, deadline]);
+      } catch (error) {
+        failed = true;
+        throw error;
+      } finally {
+        if (timer) clearTimeout(timer);
+        // A failed or overdue collection may still hold its connection mid-statement: destroy it rather than pool it.
+        held.lease?.release(failed);
+      }
+    })();
+    inFlight = run;
+    const clear = () => {
+      if (inFlight === run) inFlight = null;
+    };
+    run.then(clear, clear);
+    return run;
+  }
+
   return async (req, res) => {
     const secrets = getHealthReadSecrets();
     if (secrets.length === 0) {
@@ -119,18 +189,11 @@ export function createHealthSnapshotHandler(
       return;
     }
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const deadline = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("deadline")), deadlineMs);
-      });
-      const snapshot = await Promise.race([collect(), deadline]);
-      sendJson(res, 200, snapshot);
+      sendJson(res, 200, await collectOnce());
     } catch (error: any) {
       // The reason is a fixed word: an error message could carry table data.
       unavailable(res, error?.message === "deadline" ? "deadline" : "collection_failed");
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   };
 }

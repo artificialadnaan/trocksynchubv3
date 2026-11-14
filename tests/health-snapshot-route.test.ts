@@ -6,8 +6,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // SYNCHUB_HEALTH_READ_SECRET_CURRENT / _PREVIOUS (>= 32 bytes, fail closed). The collector is mocked here; its reads are
 // tested on PGlite (health-snapshot-collect.pglite.test.ts). Synthetic values only.
 
-const h = vi.hoisted(() => ({ collect: vi.fn() }));
+const h = vi.hoisted(() => ({ collect: vi.fn(), connect: vi.fn(), release: vi.fn() }));
 vi.mock("../server/health/collect-synchub.ts", () => ({ collectSynchubSnapshot: h.collect }));
+// The default lease: one client from the shared pool, wrapped for drizzle. Both faked; nothing connects.
+vi.mock("../server/db.ts", () => ({ pool: { connect: h.connect }, db: {} }));
+vi.mock("drizzle-orm/node-postgres", () => ({ drizzle: (client: unknown) => ({ client }) }));
 
 const { registerHealthSnapshotRoutes, createHealthSnapshotHandler, HEALTH_SNAPSHOT_PATH } = await import("../server/routes/health-snapshot.ts");
 
@@ -68,6 +71,8 @@ beforeEach(() => {
   vi.stubEnv("SYNCHUB_HEALTH_READ_SECRET_CURRENT", CURRENT);
   vi.stubEnv("SYNCHUB_HEALTH_READ_SECRET_PREVIOUS", PREVIOUS);
   h.collect.mockReset().mockResolvedValue(SNAPSHOT);
+  h.release.mockReset();
+  h.connect.mockReset().mockResolvedValue({ release: h.release });
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
@@ -145,5 +150,62 @@ describe("POST /api/internal/health/snapshot", () => {
     const { res, body } = await call(signed(), handler);
     expect(res.statusCode).toBe(503);
     expect(body).toEqual({ error: "snapshot_unavailable", reason: "deadline" });
+  });
+});
+
+describe("one collection at a time, and a deadline that frees its connection (PR #139 review)", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("two concurrent requests share ONE collection on ONE leased connection", async () => {
+    const pending = deferred<any>();
+    const collect = vi.fn(() => pending.promise);
+    const release = vi.fn();
+    const acquire = vi.fn(async () => ({ db: {}, release }));
+    const handler = createHealthSnapshotHandler({ collect, acquire, deadlineMs: 5_000 } as any);
+    const first = call(signed(), handler);
+    const second = call(signed(), handler);
+    await new Promise((r) => setTimeout(r, 10));
+    pending.resolve(SNAPSHOT);
+    const [a, b] = await Promise.all([first, second]);
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect([a.res.statusCode, b.res.statusCode]).toEqual([200, 200]);
+    expect(b.body).toEqual(SNAPSHOT);
+    expect(release.mock.calls).toEqual([[false]]);
+  });
+
+  it("past the deadline: 503, the connection is DESTROYED (its late rejection handled); the next request collects afresh", async () => {
+    // A statement that never returns until its connection is destroyed (pg rejects it with "Connection terminated").
+    const stuck = deferred<any>();
+    const releases: boolean[] = [];
+    const acquire = vi.fn(async () => ({
+      db: {},
+      release: (destroy: boolean) => {
+        releases.push(destroy);
+        if (destroy) stuck.reject(new Error("Connection terminated"));
+      },
+    }));
+    let runs = 0;
+    const collect = vi.fn(() => (++runs === 1 ? stuck.promise : Promise.resolve(SNAPSHOT)));
+    const handler = createHealthSnapshotHandler({ collect, acquire, deadlineMs: 30 } as any);
+
+    const first = await call(signed(), handler);
+    expect(first.res.statusCode).toBe(503);
+    expect(first.body).toEqual({ error: "snapshot_unavailable", reason: "deadline" });
+    expect(releases).toEqual([true]);
+
+    const second = await call(signed(), handler);
+    expect(second.res.statusCode).toBe(200);
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(collect).toHaveBeenCalledTimes(2);
+    expect(releases).toEqual([true, false]);
   });
 });
