@@ -93,3 +93,39 @@ describe("safeMessage", () => {
     expect(safeMessage("   ")).toBeNull();
   });
 });
+
+describe("safeMessage: the credential list Core and the CRM share (any case, any suffix, key=value and key: value)", () => {
+  it.each([
+    ["auth=auth-value-01 retry", "auth-value-01"],
+    ["credentials: cred-value-02", "cred-value-02"],
+    ["credential: cred-value-03", "cred-value-03"],
+    ["creds=creds-value-04", "creds-value-04"],
+    ["pass=pass-value-05", "pass-value-05"],
+    ["pw=pw-value-06", "pw-value-06"],
+    ["passphrase=pp-value-07", "pp-value-07"],
+    ["session_id=sess-value-08", "sess-value-08"],
+    ["otp: 123456", "123456"],
+    ["pin=4321", "4321"],
+    ["jwt: abc.def.ghi", "abc.def.ghi"],
+    ["X-Api-Key: xak-value-12", "xak-value-12"],
+    ["api_key_2=ak2-value-13", "ak2-value-13"],
+    ["password: tail one two", "one two"],
+    ["Authorization: Token short1", "short1"],
+    ["Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"],
+    ['{\\"session\\":\\"esc-json-value-17\\"}', "esc-json-value-17"],
+  ])("%s loses its value", (raw, value) => {
+    expect(safeMessage(raw) ?? "").not.toContain(value);
+  });
+
+  it("key=value cuts ONE bare token: the words after it stay", () => {
+    expect(safeMessage("refresh failed token=abc123 retry")).toBe("refresh failed [redacted] retry");
+    expect(safeMessage("token=abc retry")).toBe("[redacted] retry");
+  });
+
+  it("plain text that merely names a credential is left alone", () => {
+    expect(safeMessage("client secret expired")).toBe("client secret expired");
+    expect(safeMessage("AADSTS7000222: client secret expired")).toBe("AADSTS7000222: client secret expired");
+    expect(safeMessage("Token has been expired or revoked.")).toBe("Token has been expired or revoked.");
+    expect(safeMessage("spin=3 retries")).toBe("spin=3 retries");
+  });
+});

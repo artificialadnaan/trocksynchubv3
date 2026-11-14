@@ -140,12 +140,20 @@ export function validateSnapshot(raw: unknown): { ok: true; snapshot: Snapshot }
  * credential fields and URL queries are cut, whitespace collapsed, and the result capped at 200 characters. Anything that
  * still trips the schema's guard is dropped (null) rather than sent; the error's code still carries the signal.
  *
- * A credential KEY (quoted or not, JSON `"access_token":"…"` or `password=…`) loses its whole VALUE first: a quoted value up
- * to its closing quote (escaped quotes included), else the bare value. The later bare-name pass alone only renamed the key
- * and left `{"[credential field]":"<the token>"}` passing the guard (PR #139 review).
+ * A credential KEY loses its whole VALUE first (PR #139 review: the bare-name pass alone only renamed `"access_token"` and
+ * left the token itself in place). The key words are the list Core and the CRM share, in any case, JSON-quoted, escaped-JSON
+ * or bare, with any suffix after the word (session_id, api_key_2, auth_header):
+ * - `key=value`: a quoted value (escaped quotes included) or ONE bare token, so `token=abc retry` keeps " retry";
+ * - `key: value` (header / JSON style): a quoted value, or a bare run to the next , ; } or the end, so
+ *   `password: a b c` and `Authorization: Token short1` lose it all.
+ * A `Basic <base64>` credential is cut like a bearer one. Plain text ("client secret expired") is left alone.
  */
-const CREDENTIAL_PAIR_RE =
-  /(["']?)\b(access_token|refresh_token|id_token|password|client_secret|secret|api_key|authorization)\b\1\s*[:=]\s*("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s,;}&]*)/gi;
+const CREDENTIAL_KEY = String.raw`(?:access_token|refresh_token|id_token|client_secret|x-api-key|api[_-]?key|authorization|auth|passphrase|password|passwd|pass|pw|secret|credentials?|creds|token|otp|pin|jwt|session|cookie)[A-Za-z0-9_-]*`;
+/** A value in double quotes, escaped-JSON quotes (\"…\") or single quotes; an unterminated one runs to the end. */
+const QUOTED_VALUE = String.raw`\\"(?:(?!\\").)*(?:\\")?|"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?`;
+// (?<![A-Za-z0-9_]): the key word starts a word, so "spin" or "client secret" never match "pin" / "secret".
+const KEY_COLON_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*:\s*(?:${QUOTED_VALUE}|[^,;}]*)`, "gi");
+const KEY_EQUALS_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*=\s*(?:${QUOTED_VALUE}|[^\s,;}&"'\\]*)`, "gi");
 
 export function safeMessage(raw: string | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
@@ -153,9 +161,11 @@ export function safeMessage(raw: string | null | undefined): string | null {
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
     .replace(/\bbearer\s+\S+/gi, "[credential]")
+    .replace(/\bbasic\s+[A-Za-z0-9+/=]{8,}/gi, "[credential]")
     .replace(/eyJ[A-Za-z0-9_.-]{10,}/g, "[token]")
-    .replace(CREDENTIAL_PAIR_RE, "$1$2$1: [redacted]")
-    .replace(/\b(?:access_token|refresh_token|token|secret|password)\s*[=:]\s*\S*/gi, "[redacted]")
+    .replace(KEY_COLON_RE, "$1$2$1: [redacted]")
+    // The whole pair goes: a kept `token=` would trip the guard and drop the message.
+    .replace(KEY_EQUALS_RE, "[redacted]")
     .replace(/\b(?:access_token|refresh_token)\b/gi, "[credential field]")
     .replace(/(https?:\/\/[^\s?]*)\?\S*/g, "$1")
     .replace(/\s+/g, " ")
