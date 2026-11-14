@@ -39,6 +39,13 @@ const inList = (values: readonly string[]) => sql.join(values.map((v) => sql`${v
  */
 export const CRM_CALLBACK_SINCE = "2026-11-13 22:55:42";
 export const CRM_CALLBACK_SINCE_ISO = "2026-11-13T22:55:42.000Z";
+/**
+ * The first live service hand-off; #74 shipped it inert 2026-08-28 (no row while SERVICE_RFP_INGRESS_SECRET_CURRENT /
+ * CORE_INGRESS_BASE_URL were unset); provisioning turned it on (d9, 11-14). The service-handover leg counts approvals from
+ * here, never from the outbox's own rows: an empty outbox would hide every approval, and since #137 the approval is written
+ * before its hand-off row (before it, after), so the earliest row can post-date its own approval.
+ */
+export const SERVICE_HANDOFF_LIVE_AT = "2026-08-31T18:13:20.711Z";
 /** trockcrm-relay.ts MAX_ATTEMPTS. */
 export const RELAY_MAX_ATTEMPTS = 20;
 /** procore-token-keepalive.ts: every 10 minutes. */
@@ -637,11 +644,10 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
   );
 
   if (installed.rfp_approval_requests && installed.service_rfp_core_outbox) {
-    // From the hand-off outbox's first row: approvals before it could not have one.
+    // From the first live hand-off (SERVICE_HANDOFF_LIVE_AT): approvals before it could not have one.
     const match = sql.raw("o.source_system = r.source_system AND o.source_deal_id = r.source_deal_id AND o.rfp_request_id = r.id");
     const legs = sql`
-      WITH since AS (SELECT min(created_at) AS since_at FROM service_rfp_core_outbox),
-      reqs AS (
+      WITH reqs AS (
         SELECT r.id, r.approved_at,
                (SELECT o.status FROM service_rfp_core_outbox o WHERE ${match} ORDER BY o.id DESC LIMIT 1) AS leg_status,
                (SELECT max(o.sent_at) FROM service_rfp_core_outbox o
@@ -650,8 +656,9 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
                  WHERE ${match} AND o.status IN ('failed', 'dead', 'crm_notify_refused')) AS failed_at,
                EXISTS (SELECT 1 FROM service_rfp_core_outbox o
                         WHERE ${match} AND o.status IN ('sent', 'crm_notify_accepted') AND o.core_bid_id IS NOT NULL) AS confirmed
-          FROM rfp_approval_requests r, since
-         WHERE r.status = 'approved' AND r.approved_at IS NOT NULL AND since.since_at IS NOT NULL AND r.approved_at >= since.since_at
+          FROM rfp_approval_requests r
+         -- A Z-suffixed literal cast to timestamp keeps its UTC wall-clock, the stored columns' convention.
+         WHERE r.status = 'approved' AND r.approved_at IS NOT NULL AND r.approved_at >= ${SERVICE_HANDOFF_LIVE_AT}::timestamp
            AND (split_part(r.project_number, '-', 2) = '4' OR EXISTS (SELECT 1 FROM service_rfp_core_outbox o WHERE ${match}))
       )
     `;
@@ -664,8 +671,7 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
                count(*) FILTER (WHERE NOT confirmed AND failed_at > NOW() - interval '24 hours')::int AS failed_24h,
                count(*) FILTER (WHERE NOT confirmed AND failed_at > NOW() - interval '7 days')::int AS failed_7d,
                count(*) FILTER (WHERE NOT confirmed AND leg_status IS NULL)::int AS not_enqueued,
-               ${iso("max(confirmed_at)")} AS last_delivered_at,
-               (SELECT ${iso("since_at")} FROM since) AS since_iso
+               ${iso("max(confirmed_at)")} AS last_delivered_at
           FROM reqs
       `,
     );
@@ -681,7 +687,7 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
       },
     ];
     handover.processing.last_success_at = text(s.last_delivered_at);
-    handover.extra = { not_enqueued: num(s.not_enqueued), since: extraText(s.since_iso) };
+    handover.extra = { not_enqueued: num(s.not_enqueued), since: SERVICE_HANDOFF_LIVE_AT };
     handover.records = (
       await rows(
         q,

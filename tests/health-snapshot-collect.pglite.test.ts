@@ -321,6 +321,42 @@ describe("collectSynchubSnapshot", () => {
     });
   });
 
+  describe("the service hand-off leg counts from the first live hand-off, never from the outbox's own rows (Codex P2, d9 11-14)", () => {
+    /** A clean slate: the shared seed's approvals and hand-offs removed. */
+    async function clear() {
+      await pg.exec(`DELETE FROM service_rfp_core_outbox; DELETE FROM rfp_approval_requests WHERE status = 'approved';`);
+    }
+    async function approvedService(id: number, approvedAt: string) {
+      await pg.query(
+        `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
+         VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', $5::timestamp)`,
+        [id, `deal-${id}`, `DFW-4-7${id}-aa`, `REVIEW-TOKEN-SEEDED-${id}`, approvedAt],
+      );
+    }
+    const handover = async () => byKey(await collectSynchubSnapshot({ db, env: {} }))("synchub.rfp.service_handover");
+
+    it("an EMPTY hand-off outbox still counts the approved service RFP that never got a row (no false measured 0)", async () => {
+      await clear();
+      await approvedService(980, "2026-11-14 01:00:00");
+      const leg = await handover();
+      expect(leg.delivery[0].pending).toBe(1);
+      expect(leg.records).toEqual([{ kind: "rfp_approval_request", id: "980", state: "not_enqueued", url: null }]);
+      expect(leg.extra).toEqual({ not_enqueued: 1, since: "2026-08-31T18:13:20.711Z" });
+    });
+
+    it("an approval written 1 ms before its own hand-off row (the earliest row, failed) is counted", async () => {
+      await clear();
+      await approvedService(981, "2026-11-14 01:00:00.000");
+      await pg.query(
+        `INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, attempt_count, core_bid_id, last_error, last_attempt_at, created_at)
+         VALUES ('trock_crm', 'deal-981', 981, 'failed', 1, NULL, 'Core 400', '2026-11-14 01:00:00.001', '2026-11-14 01:00:00.001')`,
+      );
+      const leg = await handover();
+      expect(leg.delivery[0].pending).toBe(1);
+      expect(leg.records).toEqual([{ kind: "rfp_approval_request", id: "981", state: "failed", url: null }]);
+    });
+  });
+
   it("Procore: the token's presence and expiry (never the token); the failing browser sign-in with its reason", async () => {
     const row = byKey(await collectSynchubSnapshot({ db, env: {} }));
     const token = row("synchub.procore.token");
