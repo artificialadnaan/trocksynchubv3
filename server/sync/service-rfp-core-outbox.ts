@@ -312,6 +312,11 @@ export interface ServiceRfpHandoffInput {
    */
   editedFieldsOverride: Record<string, string>;
   approvedAt?: Date;
+  /**
+   * The email of the estimator the approval SELECTED (resolveSelectedEstimatorEmail). handOffServiceRfpApprovalToCore resolves it
+   * when a caller leaves it undefined; null means "no pick to send".
+   */
+  estimatorEmail?: string | null;
 }
 
 export type ServiceRfpBodyResult =
@@ -451,7 +456,14 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
       // `ownerEmail` is always PRESENT, null when absent. DEPLOY ORDER: Core must accept the key first.
       // `ownerSource` only when known: absent, the deal (and the whole body) is byte-for-byte what it was before. DEPLOY
       // ORDER: Core must accept the key first (trock-core v3/sb-rfp-owner).
-      deal: ownerSource ? { id: dealId, rfpProjectNumber, ownerEmail, ownerSource } : { id: dealId, rfpProjectNumber, ownerEmail },
+      // `estimatorEmail` (the approval's pick; Core #3675) only when resolved: absent, the deal (and the whole body) is byte-for-byte
+      // what it was before. DEPLOY ORDER: Core must accept the key first (#3675), or it refuses the body with a 400.
+      deal: {
+        id: dealId,
+        rfpProjectNumber,
+        ownerEmail,
+        ...(ownerSource ? { ownerSource } : {}),
+      },
       // `billAddress` only when usable: absent, the company (and the whole body) is byte-for-byte what it was before.
       company: billAddress ? { id: companyId, name: companyName, billAddress } : { id: companyId, name: companyName },
       // NULL, NOT OMITTED, when there is no usable email: Core's parser demands the exact key set, so the
@@ -803,9 +815,50 @@ export async function replayServiceRfpPayload(input: {
   }
 }
 
+export interface EstimatorListEntry {
+  name?: unknown;
+  email?: unknown;
+}
+
+async function readEstimatorList(): Promise<EstimatorListEntry[]> {
+  const { storage } = await import("../storage");
+  const config = await storage.getAutomationConfig("estimator_list");
+  const estimators = (config?.value as { estimators?: unknown } | undefined)?.estimators;
+  return Array.isArray(estimators) ? (estimators as EstimatorListEntry[]) : [];
+}
+
+/**
+ * THE ESTIMATOR THE APPROVAL SELECTED, as an email (estimator handoff phase B; Core #3675 seats it). The approval form's `estimator`
+ * is a NAME from automation_config 'estimator_list' ({name, email}); the effective value (an edit wins over the deal's) is matched
+ * EXACTLY by name. No pick, no match, or an unreadable list → null: the key is simply not sent, the card seats as before, and the
+ * handoff is never blocked. A no-match is logged without the name.
+ */
+export async function resolveSelectedEstimatorEmail(
+  input: ServiceRfpHandoffInput,
+  readList: () => Promise<EstimatorListEntry[]> = readEstimatorList,
+): Promise<string | null> {
+  const picked = effectiveField(input, "estimator");
+  const name = typeof picked === "string" ? picked.trim() : "";
+  if (!name) return null;
+  let list: EstimatorListEntry[];
+  try {
+    list = await readList();
+  } catch (error: any) {
+    log(`[service-rfp-core] RFP request ${input.rfpRequestId}: estimator_list unavailable (${error?.message || error}); the selected estimator is not sent`, "sync");
+    return null;
+  }
+  const hit = list.find((e) => typeof e?.name === "string" && e.name.trim() === name);
+  const email = typeof hit?.email === "string" ? hit.email.trim().toLowerCase() : "";
+  if (!email || email.length > MAX.email || !EMAIL_RE.test(email)) {
+    log(`[service-rfp-core] RFP request ${input.rfpRequestId}: the selected estimator has no estimator_list email; not sent`, "sync");
+    return null;
+  }
+  return email;
+}
+
 export async function handOffServiceRfpApprovalToCore(
   input: ServiceRfpHandoffInput,
-  deps: { fetchImpl?: typeof fetchWithTimeout; secret?: string } = {},
+  deps: { fetchImpl?: typeof fetchWithTimeout; secret?: string; readEstimatorList?: () => Promise<EstimatorListEntry[]> } = {},
 ): Promise<{ status: "skipped" | "sent" | "failed" | "pending" | "dead" | "duplicate" }> {
   try {
     const secret = deps.secret ?? resolveServiceRfpIngressSecret();
