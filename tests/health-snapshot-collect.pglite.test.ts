@@ -276,10 +276,49 @@ describe("collectSynchubSnapshot", () => {
     expect(handover.records).toEqual([{ kind: "rfp_approval_request", id: "942", state: "not_enqueued", url: null }]);
     expect(handover.extra.not_enqueued).toBe(1);
 
-    // 941: Core confirmed the card, but no CRM callback row exists — still pending on the CRM leg.
+    // 941: Core confirmed the card, but no CRM callback row exists — still pending on the CRM leg. 942 was never handed to
+    // Core, so it is not a service RFP this leg can see (service-only, d9 11-14).
     const callback = row("synchub.rfp.crm_callback");
-    expect(callback.delivery[0]).toMatchObject({ pending: 2, last_delivered_at: null });
-    expect(callback.records.map((r: any) => [r.id, r.state])).toEqual([["941", "not_enqueued"], ["942", "not_enqueued"]]);
+    expect(callback.delivery[0]).toMatchObject({ pending: 1, last_delivered_at: null });
+    expect(callback.records.map((r: any) => [r.id, r.state])).toEqual([["941", "not_enqueued"]]);
+  });
+
+  describe("the CRM `approved` callback leg (d9, 11-14)", () => {
+    /** Only the requests below: the shared seed's approvals and hand-offs are cleared first. */
+    async function only(requests: Array<{ id: number; approvedAt: string; service: boolean }>) {
+      await pg.exec(`DELETE FROM service_rfp_core_outbox; DELETE FROM rfp_approval_requests WHERE status = 'approved';`);
+      for (const r of requests) {
+        await pg.query(
+          `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
+           VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', $5::timestamp)`,
+          [r.id, `deal-${r.id}`, `DFW-${r.service ? 4 : 2}-7${r.id}-aa`, `REVIEW-TOKEN-SEEDED-${r.id}`, r.approvedAt],
+        );
+        if (r.service) {
+          await pg.query(
+            `INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, attempt_count, core_bid_id, last_attempt_at, created_at, sent_at)
+             VALUES ('trock_crm', $1, $2, 'sent', 1, $3, $4::timestamp, $4::timestamp, $4::timestamp)`,
+            [`deal-${r.id}`, r.id, `bid-${r.id}`, r.approvedAt],
+          );
+        }
+      }
+      return byKey(await collectSynchubSnapshot({ db, env: {} }))("synchub.rfp.crm_callback");
+    }
+
+    it("counts from #136's deploy instant (22:55:42Z): an approval one second before is the reconcile's, one second after is pending", async () => {
+      const callback = await only([
+        { id: 960, approvedAt: "2026-11-13 22:55:41", service: true },
+        { id: 961, approvedAt: "2026-11-13 22:55:43", service: true },
+      ]);
+      expect(callback.delivery[0].pending).toBe(1);
+      expect(callback.records.map((r: any) => r.id)).toEqual(["961"]);
+      expect(callback.extra.since).toBe("2026-11-13T22:55:42.000Z");
+    });
+
+    it("never counts a non-service approval: it reaches the CRM through Core's bid link", async () => {
+      const callback = await only([{ id: 970, approvedAt: "2026-11-13 23:30:00", service: false }]);
+      expect(callback.delivery[0].pending).toBe(0);
+      expect(callback.records).toEqual([]);
+    });
   });
 
   it("Procore: the token's presence and expiry (never the token); the failing browser sign-in with its reason", async () => {

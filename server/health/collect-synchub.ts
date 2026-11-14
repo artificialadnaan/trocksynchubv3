@@ -32,8 +32,13 @@ const iso = (col: string) => sql.raw(`to_char(${col}, '${ISO}')`);
 const isoTz = (col: string) => sql.raw(`to_char((${col}) AT TIME ZONE 'UTC', '${ISO}')`);
 const inList = (values: readonly string[]) => sql.join(values.map((v) => sql`${v}`), sql`, `);
 
-/** The `approved` CRM callback went live with #136 (Procore creation retired, owner 2026-11-13). */
-export const CRM_CALLBACK_SINCE = "2026-11-13 00:00:00";
+/**
+ * #136's DEPLOY INSTANT (2026-11-13T22:55:42Z, UTC wall-clock like the stored `timestamp` columns): from here the approval
+ * itself enqueues the CRM `approved` callback (d9, 11-14). A request approved before it is the reconcile's
+ * (scripts/rfp-reconcile-approved-callbacks.ts), never pending on this leg.
+ */
+export const CRM_CALLBACK_SINCE = "2026-11-13 22:55:42";
+export const CRM_CALLBACK_SINCE_ISO = "2026-11-13T22:55:42.000Z";
 /** trockcrm-relay.ts MAX_ATTEMPTS. */
 export const RELAY_MAX_ATTEMPTS = 20;
 /** procore-token-keepalive.ts: every 10 minutes. */
@@ -694,7 +699,7 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
     handover.extra = { installed: false };
   }
 
-  if (installed.rfp_approval_requests && installed.bidboard_callback_outbox) {
+  if (installed.rfp_approval_requests && installed.bidboard_callback_outbox && installed.service_rfp_core_outbox) {
     const legs = sql`
       WITH reqs AS (
         SELECT r.id, r.approved_at, b.status AS leg_status,
@@ -706,6 +711,10 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
              WHERE b.rfp_approval_request_id = r.id ORDER BY b.id DESC LIMIT 1
           ) b ON TRUE
          WHERE r.source_system = 'trock_crm' AND r.status = 'approved' AND r.approved_at >= ${CRM_CALLBACK_SINCE}::timestamp
+           -- SERVICE RFPs only, by enqueueRfpApprovedCallbackIfCoreConfirmed's own join (sync/rfp-approved-callback.ts): a
+           -- non-service approval reaches the CRM through Core's bid link, so it is never pending here (d9, 11-14).
+           AND EXISTS (SELECT 1 FROM service_rfp_core_outbox o
+                        WHERE o.source_system = r.source_system AND o.source_deal_id = r.source_deal_id AND o.rfp_request_id = r.id)
       )
     `;
     const s = await one(
@@ -733,7 +742,7 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
       },
     ];
     callback.processing.last_success_at = text(s.last_delivered_at);
-    callback.extra = { not_enqueued: num(s.not_enqueued), since: "2026-11-13T00:00:00.000Z" };
+    callback.extra = { not_enqueued: num(s.not_enqueued), since: CRM_CALLBACK_SINCE_ISO };
     callback.records = (
       await rows(
         q,
