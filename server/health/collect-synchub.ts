@@ -684,6 +684,14 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
   if (installed.rfp_approval_requests && installed.service_rfp_core_outbox) {
     // From the first live hand-off (SERVICE_HANDOFF_LIVE_AT): approvals before it could not have one.
     const match = sql.raw("o.source_system = r.source_system AND o.source_deal_id = r.source_deal_id AND o.rfp_request_id = r.id");
+    // A service RFP by the type its APPROVAL routed on: resolveEffectiveRfpProjectType(deal_data, edited) in SQL (Codex on #139). The
+    // approver's re-type is stored only in edited_fields (project_number is never rewritten on the row), then the number's digit
+    // read from deal_data as the resolver reads it, with PROJECT_NUMBER_PREFIX_RE (constants.ts:23; [0-9] = its ASCII \d), then
+    // deal_data.project_types, then '2'. An outbox row still marks one as service whatever its stored type.
+    const service = sql.raw(
+      "COALESCE(NULLIF(r.edited_fields->>'project_types', ''), substring(r.deal_data->>'project_number' from '^[A-Za-z]{2,4}-([0-9]+)-'), " +
+        "NULLIF(r.deal_data->>'project_types', ''), '2') = '4'",
+    );
     const legs = sql`
       WITH reqs AS (
         SELECT r.id, r.approved_at,
@@ -697,7 +705,7 @@ async function collectLegs(q: Querier, installed: Record<Table, boolean>): Promi
           FROM rfp_approval_requests r
          -- A Z-suffixed literal cast to timestamp keeps its UTC wall-clock, the stored columns' convention.
          WHERE r.status = 'approved' AND r.approved_at IS NOT NULL AND r.approved_at >= ${SERVICE_HANDOFF_LIVE_AT}::timestamp
-           AND (split_part(r.project_number, '-', 2) = '4' OR EXISTS (SELECT 1 FROM service_rfp_core_outbox o WHERE ${match}))
+           AND (${service} OR EXISTS (SELECT 1 FROM service_rfp_core_outbox o WHERE ${match}))
       )
     `;
     const s = await one(

@@ -24,7 +24,7 @@ const DDL = `
   CREATE TABLE rfp_approval_requests (
     id serial PRIMARY KEY, source_system text NOT NULL DEFAULT 'hubspot', source_deal_id text NOT NULL, project_number text,
     token text NOT NULL UNIQUE, token_expires_at timestamp, status text NOT NULL DEFAULT 'pending',
-    deal_data jsonb NOT NULL DEFAULT '{}'::jsonb, approved_at timestamp, declined_at timestamp, bidboard_project_id text,
+    deal_data jsonb NOT NULL DEFAULT '{}'::jsonb, edited_fields jsonb, approved_at timestamp, declined_at timestamp, bidboard_project_id text,
     created_at timestamp DEFAULT now()
   );
   CREATE TABLE rfp_core_create_outbox (
@@ -118,6 +118,8 @@ async function seed() {
        (942, 'trock_crm', 'deal-942', 'DFW-4-70942-aa', 'REVIEW-TOKEN-SEEDED-942', NULL, 'approved', now() - interval '2 hours', now() - interval '8 hours')`,
     [REVIEW_939, REVIEW_940],
   );
+  // deal_data carries the number, as normalizedDealData writes it at create (the collector reads the type from it).
+  await q(`UPDATE rfp_approval_requests SET deal_data = jsonb_build_object('project_number', project_number) WHERE id IN (939, 940, 941, 942)`);
   await q(
     `INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, attempt_count, core_bid_id, last_attempt_at, created_at, sent_at)
      VALUES ('trock_crm', 'deal-941', 941, 'sent', 1, 'bid-941', now() - interval '3 hours', now() - interval '4 hours', now() - interval '3 hours')`,
@@ -294,8 +296,8 @@ describe("collectSynchubSnapshot", () => {
       await pg.exec(`DELETE FROM service_rfp_core_outbox; DELETE FROM rfp_approval_requests WHERE status = 'approved';`);
       for (const r of requests) {
         await pg.query(
-          `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
-           VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', $5::timestamp)`,
+          `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at, deal_data)
+           VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', $5::timestamp, jsonb_build_object('project_number', $3::text))`,
           [r.id, `deal-${r.id}`, `DFW-${r.service ? 4 : 2}-7${r.id}-aa`, `REVIEW-TOKEN-SEEDED-${r.id}`, r.approvedAt],
         );
         if (r.service) {
@@ -333,8 +335,8 @@ describe("collectSynchubSnapshot", () => {
     }
     async function approvedService(id: number, approvedAt: string) {
       await pg.query(
-        `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
-         VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', $5::timestamp)`,
+        `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at, deal_data)
+         VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', $5::timestamp, jsonb_build_object('project_number', $3::text))`,
         [id, `deal-${id}`, `DFW-4-7${id}-aa`, `REVIEW-TOKEN-SEEDED-${id}`, approvedAt],
       );
     }
@@ -359,6 +361,59 @@ describe("collectSynchubSnapshot", () => {
       const leg = await handover();
       expect(leg.delivery[0].pending).toBe(1);
       expect(leg.records).toEqual([{ kind: "rfp_approval_request", id: "981", state: "failed", url: null }]);
+    });
+
+    // Codex on #139: the type the APPROVAL routed on (resolveEffectiveRfpProjectType), not the number the request row keeps. The
+    // approver's re-type is stored only in edited_fields; project_number is never rewritten.
+    async function approvedRetyped(id: number, numberType: string, editedType: string | null, dealType = numberType) {
+      const number = `DFW-${numberType}-7${id}-aa`;
+      await pg.query(
+        `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at, deal_data, edited_fields)
+         VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', '2026-11-14 01:00:00', $5::jsonb, $6::jsonb)`,
+        [
+          id,
+          `deal-${id}`,
+          number,
+          `REVIEW-TOKEN-SEEDED-${id}`,
+          JSON.stringify({ project_number: number, project_types: dealType }),
+          editedType === null ? null : JSON.stringify({ project_types: editedType }),
+        ],
+      );
+    }
+
+    it("a 2 -> 4 re-type whose hand-off never enqueued is a pending service hand-off", async () => {
+      await clear();
+      await approvedRetyped(990, "2", "4");
+      const leg = await handover();
+      expect(leg.delivery[0].pending).toBe(1);
+      expect(leg.records).toEqual([{ kind: "rfp_approval_request", id: "990", state: "not_enqueued", url: null }]);
+      expect(leg.extra.not_enqueued).toBe(1);
+    });
+
+    it("a 4 -> 2 re-type is not a service hand-off: never pending", async () => {
+      await clear();
+      await approvedRetyped(991, "4", "2");
+      const leg = await handover();
+      expect(leg.delivery[0].pending).toBe(0);
+      expect(leg.records).toEqual([]);
+      expect(leg.extra.not_enqueued).toBe(0);
+    });
+
+    it("a type-4 approval with no re-type still counts", async () => {
+      await clear();
+      await approvedRetyped(992, "4", null);
+      const leg = await handover();
+      expect(leg.delivery[0].pending).toBe(1);
+      expect(leg.extra.not_enqueued).toBe(1);
+    });
+
+    // Stated limit (ii), d6's ruling D6-RULING-139-HANDOVER-TYPE: a submitted type EQUAL to deal_data.project_types but not the
+    // number's digit is dropped from edited_fields, so the number's 4 wins and a non-service approval stays pending (the safe
+    // direction: a visible false alarm, never a missed hand-off).
+    it("stated limit (ii): deal_data says 2 and the number says 4, the 2 submitted is not stored, so it counts as pending", async () => {
+      await clear();
+      await approvedRetyped(993, "4", null, "2");
+      expect((await handover()).delivery[0].pending).toBe(1);
     });
   });
 
@@ -401,8 +456,8 @@ describe("d9's review of #139", () => {
   }
   async function approved(id: number, source: string, approvedAt: string) {
     await pg.query(
-      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
-       VALUES ($1, $2, $3, $4, $5, 'approved', $6::timestamp)`,
+      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at, deal_data)
+       VALUES ($1, $2, $3, $4, $5, 'approved', $6::timestamp, jsonb_build_object('project_number', $4::text))`,
       [id, source, `deal-${id}`, `DFW-4-7${id}-aa`, `REVIEW-TOKEN-SEEDED-${id}`, approvedAt],
     );
   }
@@ -460,10 +515,10 @@ describe("d9's review of #139", () => {
 
   it("P3-3: requests mid-approval or held for a person are counted on the approvals row", async () => {
     await pg.query(
-      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status) VALUES
-         (950, 'trock_crm', 'deal-950', 'DFW-4-70950-aa', 'REVIEW-TOKEN-SEEDED-950', 'approving'),
-         (951, 'trock_crm', 'deal-951', 'DFW-4-70951-aa', 'REVIEW-TOKEN-SEEDED-951', 'override_approving'),
-         (952, 'trock_crm', 'deal-952', 'DFW-4-70952-aa', 'REVIEW-TOKEN-SEEDED-952', 'held_cross_destination')`,
+      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, deal_data) VALUES
+         (950, 'trock_crm', 'deal-950', 'DFW-4-70950-aa', 'REVIEW-TOKEN-SEEDED-950', 'approving', '{"project_number":"DFW-4-70950-aa"}'),
+         (951, 'trock_crm', 'deal-951', 'DFW-4-70951-aa', 'REVIEW-TOKEN-SEEDED-951', 'override_approving', '{"project_number":"DFW-4-70951-aa"}'),
+         (952, 'trock_crm', 'deal-952', 'DFW-4-70952-aa', 'REVIEW-TOKEN-SEEDED-952', 'held_cross_destination', '{"project_number":"DFW-4-70952-aa"}')`,
     );
     expect((await row())("synchub.rfp.approvals").extra).toMatchObject({ approving: 2, held: 1 });
   });
@@ -507,8 +562,8 @@ describe("ADDENDUM-5: every failed item by stable id (owner e69e6f71)", () => {
   }
   async function approvedWithHandoff(id: number, status: string, coreBidId: string | null) {
     await pg.query(
-      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
-       VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', '2026-11-14 01:00:00')`,
+      `INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at, deal_data)
+       VALUES ($1, 'trock_crm', $2, $3, $4, 'approved', '2026-11-14 01:00:00', jsonb_build_object('project_number', $3::text))`,
       [id, `deal-${id}`, `DFW-4-7${id}-aa`, `REVIEW-TOKEN-SEEDED-${id}`],
     );
     await pg.query(
@@ -534,8 +589,9 @@ describe("ADDENDUM-5: every failed item by stable id (owner e69e6f71)", () => {
   it("past the 1000 cap, failed_ids keeps the NEWEST 1000 (a new failure is never the one cut), listed lowest first; the total stays exact (d9)", async () => {
     await clearApprovals();
     await pg.exec(`
-      INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at)
-        SELECT g, 'trock_crm', 'deal-' || g, 'DFW-4-7' || g || '-aa', 'REVIEW-TOKEN-SEEDED-' || g, 'approved', '2026-11-14 01:00:00'
+      INSERT INTO rfp_approval_requests (id, source_system, source_deal_id, project_number, token, status, approved_at, deal_data)
+        SELECT g, 'trock_crm', 'deal-' || g, 'DFW-4-7' || g || '-aa', 'REVIEW-TOKEN-SEEDED-' || g, 'approved', '2026-11-14 01:00:00',
+               jsonb_build_object('project_number', 'DFW-4-7' || g || '-aa')
         FROM generate_series(2001, 3002) g;
       INSERT INTO service_rfp_core_outbox (source_system, source_deal_id, rfp_request_id, status, attempt_count, core_bid_id, last_attempt_at, created_at, sent_at)
         SELECT 'trock_crm', 'deal-' || g, g, 'failed', 1, NULL, now() - interval '1 hour', now() - interval '1 hour', NULL
