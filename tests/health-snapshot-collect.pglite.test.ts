@@ -231,6 +231,24 @@ describe("collectSynchubSnapshot", () => {
     expect(gmail.extra.active).toBe(false);
   });
 
+  it("Gmail: the GMAIL_ACCESS_TOKEN fallback gmail.ts sends with is a present credential, by presence only (Codex on #139)", async () => {
+    // No gmail_oauth row is seeded: gmail.ts getAccessToken / getGmailConnectionStatus then use the environment token.
+    const GMAIL_ENV_AT = "SEEDED-GMAIL-ENV-TOKEN-7c1e";
+    const snapshot = await collectSynchubSnapshot({ db, env: { GMAIL_ACCESS_TOKEN: GMAIL_ENV_AT } });
+    const gmail = byKey(snapshot)("synchub.mail.gmail");
+    // An env token has no write time and no recorded refresh: present, with no OK time claimed from a row that isn't there.
+    expect(gmail.connection).toEqual({ credential_present: true, expires_at: null, last_auth_ok_at: null, last_auth_error: null });
+    expect(gmail.extra.auth_ok_source).toBeNull();
+    expect(JSON.stringify(snapshot)).not.toContain(GMAIL_ENV_AT);
+    // Outlook has no environment fallback: unchanged.
+    expect(byKey(snapshot)("synchub.mail.outlook").connection.credential_present).toBe(true);
+  });
+
+  it("Gmail: an empty GMAIL_ACCESS_TOKEN is no credential, the same truthiness gmail.ts uses", async () => {
+    const gmail = byKey(await collectSynchubSnapshot({ db, env: { GMAIL_ACCESS_TOKEN: "" } }))("synchub.mail.gmail");
+    expect(gmail.connection.credential_present).toBe(false);
+  });
+
   it("mail delivery: failures counted, no queue reported as null (not 0), the error sanitised", async () => {
     const delivery = byKey(await collectSynchubSnapshot({ db, env: {} }))("synchub.mail.delivery");
     expect(delivery.delivery).toEqual([

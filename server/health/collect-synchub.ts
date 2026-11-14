@@ -256,19 +256,25 @@ async function collectMail(q: Querier, env: NodeJS.ProcessEnv, installed: Record
     );
   }
 
-  for (const [connection, key, provider] of [
-    [outlook, "microsoft_oauth", "outlook"],
-    [gmail, "gmail_oauth", "gmail"],
+  // gmail.ts getAccessToken / getGmailConnectionStatus fall back to GMAIL_ACCESS_TOKEN when there is no gmail_oauth token, and
+  // getEmailConfig counts that as a connected sender: a set (non-empty) variable is a present credential too. Presence only;
+  // the value is never read into the snapshot. Outlook has no environment fallback.
+  const gmailEnvToken = Boolean(env.GMAIL_ACCESS_TOKEN);
+  for (const [connection, key, provider, envToken] of [
+    [outlook, "microsoft_oauth", "outlook", false],
+    [gmail, "gmail_oauth", "gmail", gmailEnvToken],
   ] as const) {
     const row = config.get(key);
-    const present = row ? row.credential_present === true : installed.automation_config ? false : null;
+    const rowPresent = row?.credential_present === true;
+    const present = rowPresent || envToken ? true : installed.automation_config ? false : null;
     const record = (health[provider] ?? {}) as { last_ok_at?: unknown; last_error?: unknown };
     const recordedOk = isoOrNull(typeof record.last_ok_at === "string" ? record.last_ok_at : null);
     connection.connection = {
       credential_present: present,
       expires_at: row?.expires_ms === null || row?.expires_ms === undefined ? null : isoOrNull(Number(row.expires_ms)),
-      // ADDENDUM-1 #1: the recorded refresh success; before the first record, the token row's own write time.
-      last_auth_ok_at: recordedOk ?? (present ? isoOrNull(row?.updated_at) : null),
+      // ADDENDUM-1 #1: the recorded refresh success; before the first record, the token row's own write time (an env token
+      // has no write time, so it reports none).
+      last_auth_ok_at: recordedOk ?? (rowPresent ? isoOrNull(row?.updated_at) : null),
       last_auth_error: storedError(record.last_error),
     };
     const active = activeProvider === provider;
@@ -280,7 +286,7 @@ async function collectMail(q: Querier, env: NodeJS.ProcessEnv, installed: Record
     connection.extra = {
       active,
       active_provider: activeProvider,
-      auth_ok_source: recordedOk ? "mail_auth_health" : present ? "automation_config.updated_at" : null,
+      auth_ok_source: recordedOk ? "mail_auth_health" : rowPresent ? "automation_config.updated_at" : null,
       // Where processing's times come from: the send log, which doesn't record the provider (only the active one sends).
       send_times: "email_send_log_active_provider",
     };
