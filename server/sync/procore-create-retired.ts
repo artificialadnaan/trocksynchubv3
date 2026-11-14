@@ -24,3 +24,17 @@ export function procoreCreateRetired(): boolean {
 export function isProcoreCreateRetiredError(error: unknown): boolean {
   return typeof error === "string" && error.startsWith("Procore project creation is retired");
 }
+
+/**
+ * THE PROCORE BID BOARD STAGE SYNC IS RETIRED (Fable, 2026-11-14, on the owner's Procore retirement): T-Rock Core owns the Bid
+ * Board and its stages. runBidBoardStageSync used to export Procore's Bid Board (Playwright) and push every row to the CRM ingest
+ * and Core's ingest; its Settings switch (off since 11-11) stopped only the timer, so a manual "Sync Now" still ran it. It now
+ * returns at its first line with this error, before any export, browser or push, whichever route calls it.
+ */
+export const BID_BOARD_STAGE_SYNC_RETIRED_ERROR =
+  "The Procore Bid Board stage sync is retired: T-Rock Core owns the Bid Board. Nothing was exported or pushed.";
+
+/** Always true in the product; a function only so the suites that test the stage-sync logic itself can stub it off. */
+export function bidBoardStageSyncRetired(): boolean {
+  return true;
+}

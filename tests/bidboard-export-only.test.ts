@@ -22,6 +22,12 @@ const m = vi.hoisted(() => ({
   stat: vi.fn(async (_p: string) => ({ mtime: new Date() })),
 }));
 
+// The Procore Bid Board stage sync is retired (runBidBoardStageSync returns at its first line). This suite tests the retired
+// machinery itself, so it switches the refusal off for its own assertions.
+vi.mock("../server/sync/procore-create-retired.ts", async (importOriginal) => ({
+  ...(await importOriginal<any>()),
+  bidBoardStageSyncRetired: () => false,
+}));
 vi.mock("../server/index", () => ({ log: m.log }));
 // A3 harness (a4 11-11): modules may import log() from the side-effect-free server/log.ts instead of server/index.ts; both reach the same spy.
 vi.mock("../server/log.ts", () => ({ log: m.log }));
