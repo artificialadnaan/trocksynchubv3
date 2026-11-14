@@ -251,6 +251,75 @@ describe("service RFP → TROCK Core handoff", () => {
     expect(outboundCalls).toEqual(["core"]);
   });
 
+  // Estimator handoff phase B (owner 40584c0f; Core #3675 seats it): the approval's estimator pick is a NAME from estimator_list; the
+  // handoff resolves it EXACTLY to that entry's email and sends deal.estimatorEmail. Without a resolvable pick the key is absent.
+  describe("the selected estimator (deal.estimatorEmail)", () => {
+    const LIST = { value: { estimators: [
+      { name: "Synthetic Estimator", email: "Synthetic.Estimator@Example.test" },
+      { name: "Other Estimator", email: "other.estimator@example.test" },
+    ] } };
+    async function withEstimatorList() {
+      const { storage } = await import("../server/storage.ts");
+      vi.mocked(storage.getAutomationConfig).mockImplementation(async (key: string) =>
+        key === "estimator_list" ? (LIST as any) : key === "procore_config" ? ({ value: { companyId: "598134325683880" } } as any) : null,
+      );
+    }
+
+    it("an approval that picks an estimator sends that person's estimator_list email (lowercased) to Core", async () => {
+      await withEstimatorList();
+      const result = await runApproval({ estimator: "Synthetic Estimator" });
+
+      expect(result).toEqual({ success: true });
+      expect(corePostBody().deal.estimatorEmail).toBe("synthetic.estimator@example.test");
+    });
+
+    it("no pick, or a name not in estimator_list, sends NO estimatorEmail key: the deal is exactly today's", async () => {
+      await withEstimatorList();
+      await runApproval();
+      const noPick = corePostBody().deal;
+      expect(Object.keys(noPick)).toEqual(["id", "rfpProjectNumber", "ownerEmail", ...(noPick.ownerSource ? ["ownerSource"] : [])]);
+
+      coreFetchMock.mockClear();
+      approvalRequest.current = makeRequest();
+      await runApproval({ estimator: "Not A Listed Name" });
+      expect("estimatorEmail" in corePostBody().deal).toBe(false);
+    });
+
+    it("resolveSelectedEstimatorEmail: an edit beats the deal's pick, the match is exact, an unreadable list sends nothing", async () => {
+      const { resolveSelectedEstimatorEmail } = await import("../server/sync/service-rfp-core-outbox.ts");
+      const read = vi.fn(async () => LIST.value.estimators);
+      const base = { sourceSystem: "trock_crm", sourceDealId: CRM_DEAL_ID, rfpRequestId: 7, projectNumber: "DFW-4-12345-aa" };
+      const dealPick = { ...base, dealData: { estimator: "Other Estimator" }, editedFieldsOverride: {} };
+      expect(await resolveSelectedEstimatorEmail(dealPick as any, read)).toBe("other.estimator@example.test");
+      const edited = { ...base, dealData: { estimator: "Other Estimator" }, editedFieldsOverride: { estimator: "Synthetic Estimator" } };
+      expect(await resolveSelectedEstimatorEmail(edited as any, read)).toBe("synthetic.estimator@example.test");
+      const caseOff = { ...base, dealData: { estimator: "synthetic estimator" }, editedFieldsOverride: {} };
+      expect(await resolveSelectedEstimatorEmail(caseOff as any, read)).toBeNull();
+      const none = { ...base, dealData: {}, editedFieldsOverride: {} };
+      read.mockClear();
+      expect(await resolveSelectedEstimatorEmail(none as any, read)).toBeNull();
+      expect(read).not.toHaveBeenCalled();
+      const broken = vi.fn(async () => { throw new Error("synthetic config read failure"); });
+      expect(await resolveSelectedEstimatorEmail(dealPick as any, broken)).toBeNull();
+    });
+
+    it("buildServiceRfpApprovedBody: the key only when it is a usable email, and the body is byte-identical without it", async () => {
+      const { buildServiceRfpApprovedBody } = await import("../server/sync/service-rfp-core-outbox.ts");
+      await runApproval();
+      const handed = handoffInputs.at(-1);
+      const at = new Date("2026-11-14T00:00:00.000Z");
+      const without = buildServiceRfpApprovedBody({ ...handed, approvedAt: at, estimatorEmail: undefined }) as any;
+      const asNull = buildServiceRfpApprovedBody({ ...handed, approvedAt: at, estimatorEmail: null }) as any;
+      const bad = buildServiceRfpApprovedBody({ ...handed, approvedAt: at, estimatorEmail: "not-an-email" }) as any;
+      const withIt = buildServiceRfpApprovedBody({ ...handed, approvedAt: at, estimatorEmail: "Synthetic.Estimator@Example.test" }) as any;
+      expect(without.ok && asNull.ok && bad.ok && withIt.ok).toBe(true);
+      expect(JSON.stringify(asNull.body)).toBe(JSON.stringify(without.body));
+      expect(JSON.stringify(bad.body)).toBe(JSON.stringify(without.body));
+      expect(withIt.body.deal.estimatorEmail).toBe("synthetic.estimator@example.test");
+      expect({ ...withIt.body, deal: { ...withIt.body.deal, estimatorEmail: undefined } }).toEqual({ ...without.body, deal: { ...without.body.deal, estimatorEmail: undefined } });
+    });
+  });
+
   it("signs the exact bytes it sends, with the domain-separated Core header", async () => {
     await runApproval();
 
