@@ -269,3 +269,60 @@ describe("safeMessage r4 (d6's ruling after d9's round 3): fail closed on residu
     expect(safeMessage(sentence)).toBe(sentence);
   });
 });
+
+describe("safeMessage r4b (d6's ruling D6-RULING-139-R4-VALUE-SHAPE): a credential word, whitespace, then a value", () => {
+  // d9's sets, VERBATIM from lanes/rfp-routing/synchub-deploy/139-r4-probes/SETS-FOR-EE.json (0712a3f3; synthetic values): his 7
+  // probes as run, the documented misfire, the ruling's extra shapes, and the punctuation forms his kit reported. Each drops.
+  it.each([
+    ["auth failed password hunter2 retry"],
+    ["auth failed token abc123def"],
+    ["Token abc123def rejected"],
+    ["client secret hunter2XYZ rejected"],
+    ["bad apikey ABCD1234EFGH"],
+    ["password\thunter2"],
+    ["Authorization Basic hunterhunter"],
+    ["token 2 of 3"],
+    ["password hunterhunterhunter"],
+    ["password\nHunter"],
+    ["secret\u00a0hunter2"],
+    ["Authorization: Basic dXNlcjpwYXNz=="],
+    ["password,hunter2"],
+    ["(password) hunter2"],
+    ["\"password\" hunter2"],
+  ])("%j drops to null", (raw) => {
+    expect(safeMessage(raw)).toBeNull();
+  });
+
+  // A Basic / Bearer value the earlier passes already cut: nothing of it is left, so the message keeps its readable rest.
+  it.each([
+    ["Authorization Basic dXNlcjpwYXNz", "Authorization [credential]"],
+    ["bearer abcdefghijklmnop", "[credential]"],
+  ])("%j -> %j", (raw, out) => {
+    expect(safeMessage(raw)).toBe(out);
+  });
+
+  // d9's 11 must-stay-readable lines and his real-message extras: prose after a credential word stays, so over-breadth fails here.
+  it.each([
+    ["client secret expired"],
+    ["Token has been expired or revoked."],
+    ["AADSTS700082: The refresh token has expired due to inactivity."],
+    ["AADSTS7000222: The provided client secret keys for app are expired."],
+    ["token expired"],
+    ["worker exited signal=SIGKILL"],
+    ["Response code: 500"],
+    ["ping: ok"],
+    ["authority: login.microsoftonline.com"],
+    ["5.7.139 Authentication unsuccessful, the user credentials were incorrect."],
+    ["connect failed https://api.example.com/x"],
+    ["AADSTS7000215: Invalid client secret provided. Ensure the secret being sent in the request is the client secret value, not the client secret ID, for a secret added to app."],
+    ["Authorization has been denied for this request."],
+    ["Basic authentication is disabled for this tenant"],
+    ["password authentication failed for user"],
+    ["password must be at least 8 characters"],
+    ["Access token has expired or is not yet valid."],
+  ])("%j stays plain", (line) => {
+    expect(safeMessage(line)).toBe(line);
+  });
+  // Stated limits (d9 report-only; d6): a SHORT value with no digit and one case after a bare credential word ("password hunter",
+  // "token ABCDEFGH") reads as prose and stays. "Bearer token missing" -> "[credential] missing" is the Bearer pass, readable.
+});

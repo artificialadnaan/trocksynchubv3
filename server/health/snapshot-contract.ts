@@ -282,6 +282,18 @@ const SEP_AFTER_RE = /^[\]\\"'`)]{0,4}\s{0,4}(=>?|:)/;
  * (4) an rfp-review link in any form other than the cut `/rfp-review/[link]` (raw, %2F, \/, &#x2F;).
  * The error code carries the signal; dropping a message costs little, leaking one costs a lot.
  */
+/** A single credential word (not a key run): the segment list, a plural of one, `basic`, or a long credential word. `code` is not one. */
+function isCredentialWord(run: string): boolean {
+  const w = run.toLowerCase();
+  return SEGMENT_WORDS.has(w) || (w.endsWith("s") && SEGMENT_WORDS.has(w.slice(0, -1))) || w === "basic" || RUN_WORDS.test(w);
+}
+
+/** r4b (d6's ruling D6-RULING-139-R4-VALUE-SHAPE): a token that looks like a value, not prose: a digit, mixed case, or 16+ key characters. */
+function looksLikeValue(token: string): boolean {
+  const v = token.replace(/^[(\[{'"`]+/, "").replace(/[.,;:!?)\]}'"`]+$/, "");
+  return /\d/.test(v) || (/[a-z]/.test(v) && /[A-Z]/.test(v)) || /^[A-Za-z0-9+/=_-]{16,}$/.test(v);
+}
+
 function hasResidue(s: string): boolean {
   const t = s.replace(PLACEHOLDER_RE, " ");
   if (/rfp[-_ ]?review/i.test(t)) return true;
@@ -292,6 +304,15 @@ function hasResidue(s: string): boolean {
     if (run === "") continue;
     const sep = SEP_AFTER_RE.exec(t.slice(m.index + m[0].length, m.index + m[0].length + 12));
     if (sep && isCredentialKey(run, sep[1]!)) return true;
+    // r4b: a single credential word, whitespace (the text is collapsed to one space; tab / NBSP / newline included), then a
+    // token shaped like a value (`password hunter2`, `token abc123def`, `Authorization Basic …`) leaves the value. Prose after it
+    // ("client secret expired", "Token has been expired") stays; a misfire like `token 2 of 3` drops, the safe direction.
+    // ...also after up to 4 punctuation characters (d9's kit: `password,hunter2`, `(password) hunter2`, `"password" hunter2`, a
+    // fullwidth colon). Not after . ! ? (a new sentence may start with a capital) or ASCII : / = (the separator rule's).
+    const next = /(?:[^\sA-Za-z0-9.!?:=]{1,4} ?| )([^ ]{1,80})/y;
+    next.lastIndex = m.index + m[0].length;
+    const token = next.exec(t);
+    if (token && isCredentialWord(run) && looksLikeValue(token[1]!)) return true;
     const segments = run.split(/[_.-]+/).flatMap((part) =>
       part.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").split(" "),
     );
