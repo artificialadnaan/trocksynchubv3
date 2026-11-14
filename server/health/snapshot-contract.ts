@@ -150,11 +150,23 @@ export function validateSnapshot(raw: unknown): { ok: true; snapshot: Snapshot }
  * A `Basic <base64>` credential is cut like a bearer one. Plain text ("client secret expired") is left alone.
  */
 const CREDENTIAL_KEY = String.raw`(?:[A-Za-z0-9]+[_-])*(?:access_token|refresh_token|id_token|client_secret|x-api-key|api[_-]?key|authorization|auth|passphrase|password|passwd|pass|pw|secret|credentials?|creds|token|otp|pin|jwt|session|cookie|signature|sig|private[_-]?key)[A-Za-z0-9_-]*`;
-/** A value in double quotes, escaped-JSON quotes (\"…\") or single quotes; an unterminated one runs to the end. */
-const QUOTED_VALUE = String.raw`\\"(?:(?!\\").)*(?:\\")?|"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?`;
+/**
+ * A value in double quotes, escaped-JSON quotes (\"…\") or single quotes; an unterminated one runs to the end. The
+ * escaped-JSON form is read in whole escape pairs (\\ then its escaped character), so a quote escaped one level deeper
+ * (\\\", a double-stringified body) never ends the value early (CodeRabbit on #139).
+ */
+const QUOTED_VALUE = String.raw`\\"(?:\\\\(?:\\\\|\\"|[^\\])|\\[^\\"]|[^\\])*(?:\\")?|"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?`;
 // (?<![A-Za-z0-9_]): the key word starts a word, so "spin" or "client secret" never match "pin" / "secret".
 const KEY_COLON_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*:\s*(?:${QUOTED_VALUE}|[^,;}]*)`, "gi");
 const KEY_EQUALS_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(\\?["']?)(${CREDENTIAL_KEY})\1\s*=\s*(?:${QUOTED_VALUE}|[^\s,;}&"'\\]*)`, "gi");
+/**
+ * A credential key still followed by its separator and NOT by [redacted] after every pass: a value nested deeper than they
+ * read. The renamed access / refresh token key ([credential field]) counts too, or a 3x-stringified token would pass.
+ */
+const CREDENTIAL_LEFT_RE = new RegExp(
+  String.raw`(?:(?<![A-Za-z0-9_])(?:${CREDENTIAL_KEY})|\[credential field\])[\\"']*\s*[:=](?!\s*\[redacted\])`,
+  "i",
+);
 
 /**
  * The most of a raw message any pass sees. The key rule backtracks quadratically on long dash / underscore runs ("a-a-…":
@@ -180,7 +192,8 @@ export function safeMessage(raw: string | null | undefined): string | null {
     .replace(/\s+/g, " ")
     .trim();
   if (s.length > 200) s = `${s.slice(0, 199)}…`;
-  if (s === "" || UNSAFE_TEXT_RE.test(s)) return null;
+  // Fail closed: a credential key the passes could not cut (a body stringified three times or more) drops the message.
+  if (s === "" || UNSAFE_TEXT_RE.test(s) || CREDENTIAL_LEFT_RE.test(s)) return null;
   return s;
 }
 

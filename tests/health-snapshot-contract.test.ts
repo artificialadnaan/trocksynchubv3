@@ -93,6 +93,18 @@ describe("safeMessage", () => {
     expect(safeMessage('{"Authorization":"Basic c2VjcmV0LXZhbHVl"}') ?? "").not.toContain("c2VjcmV0LXZhbHVl");
   });
 
+  it("reads an escaped-JSON value in whole escape pairs, and drops a value nested deeper than it can read (CodeRabbit)", () => {
+    // A double-stringified body: the quote escaped one level deeper must not end the value and leave its tail.
+    expect(safeMessage(JSON.stringify(JSON.stringify({ password: 'prefix"val-nested' })))).toBe('"{\\"password\\": [redacted]}"');
+    expect(safeMessage(JSON.stringify(JSON.stringify({ password: "val-bs\\", next: "ok" })))).toBe(
+      '"{\\"password\\": [redacted],\\"next\\":\\"ok\\"}"',
+    );
+    // Three levels: the passes cannot find the value's end, so the message is dropped; the error code still carries the signal.
+    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify({ password: 'p"val-deep' }))))).toBeNull();
+    // ...also when the key is the renamed token one ([credential field]), which the leftover check reads too (trockcrm-28).
+    expect(safeMessage(JSON.stringify(JSON.stringify(JSON.stringify({ refresh_token: 'p"val-tok' }))))).toBeNull();
+  });
+
   it("keeps plain error text, caps at 200 characters, and maps nothing to null", () => {
     expect(safeMessage("AADSTS7000222: client secret expired")).toBe("AADSTS7000222: client secret expired");
     expect(safeMessage("x".repeat(300))).toHaveLength(200);
