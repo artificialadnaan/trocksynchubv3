@@ -142,13 +142,14 @@ export function validateSnapshot(raw: unknown): { ok: true; snapshot: Snapshot }
  *
  * A credential KEY loses its whole VALUE first (PR #139 review: the bare-name pass alone only renamed `"access_token"` and
  * left the token itself in place). The key words are the list Core and the CRM share, in any case, JSON-quoted, escaped-JSON
- * or bare, with any suffix after the word (session_id, api_key_2, auth_header):
+ * or bare, with the word ANYWHERE in the key: any suffix (session_id, api_key_2) and any prefix segments that end in `_` or
+ * `-` (db_password, x-auth-token, my_api_key). The word must start the key or follow such a segment, so `spin=3` is not `pin`:
  * - `key=value`: a quoted value (escaped quotes included) or ONE bare token, so `token=abc retry` keeps " retry";
  * - `key: value` (header / JSON style): a quoted value, or a bare run to the next , ; } or the end, so
  *   `password: a b c` and `Authorization: Token short1` lose it all.
  * A `Basic <base64>` credential is cut like a bearer one. Plain text ("client secret expired") is left alone.
  */
-const CREDENTIAL_KEY = String.raw`(?:access_token|refresh_token|id_token|client_secret|x-api-key|api[_-]?key|authorization|auth|passphrase|password|passwd|pass|pw|secret|credentials?|creds|token|otp|pin|jwt|session|cookie)[A-Za-z0-9_-]*`;
+const CREDENTIAL_KEY = String.raw`(?:[A-Za-z0-9]+[_-])*(?:access_token|refresh_token|id_token|client_secret|x-api-key|api[_-]?key|authorization|auth|passphrase|password|passwd|pass|pw|secret|credentials?|creds|token|otp|pin|jwt|session|cookie|signature|sig|private[_-]?key)[A-Za-z0-9_-]*`;
 /** A value in double quotes, escaped-JSON quotes (\"…\") or single quotes; an unterminated one runs to the end. */
 const QUOTED_VALUE = String.raw`\\"(?:(?!\\").)*(?:\\")?|"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?`;
 // (?<![A-Za-z0-9_]): the key word starts a word, so "spin" or "client secret" never match "pin" / "secret".
@@ -166,7 +167,8 @@ export function safeMessage(raw: string | null | undefined): string | null {
     .replace(KEY_COLON_RE, "$1$2$1: [redacted]")
     // The whole pair goes: a kept `token=` would trip the guard and drop the message.
     .replace(KEY_EQUALS_RE, "[redacted]")
-    .replace(/\b(?:access_token|refresh_token)\b/gi, "[credential field]")
+    // Anywhere in a key (my_access_token), so a kept key name can't trip the guard and drop the whole message.
+    .replace(/(?:access|refresh)_token/gi, "[credential field]")
     .replace(/(https?:\/\/[^\s?]*)\?\S*/g, "$1")
     .replace(/\s+/g, " ")
     .trim();

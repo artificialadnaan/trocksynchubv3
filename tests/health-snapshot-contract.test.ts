@@ -113,8 +113,19 @@ describe("safeMessage: the credential list Core and the CRM share (any case, any
     ["Authorization: Token short1", "short1"],
     ["Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"],
     ['{\\"session\\":\\"esc-json-value-17\\"}', "esc-json-value-17"],
+    // The word anywhere in the key (prefix segments ending in _ or -), and signature / sig / private key.
+    ["db_password=dbpw-value-18 retry", "dbpw-value-18"],
+    ["x-auth-token: xat-value-19", "xat-value-19"],
+    ["my_api_key=myak-value-20", "myak-value-20"],
+    ["signature=sigval-value-21", "sigval-value-21"],
+    ["private_key=pk-value-22", "pk-value-22"],
+    ['{"my_access_token":"mat-value-23"}', "mat-value-23"],
   ])("%s loses its value", (raw, value) => {
     expect(safeMessage(raw) ?? "").not.toContain(value);
+  });
+
+  it("a key kept around its cut value never trips the guard (the message survives)", () => {
+    expect(safeMessage('refresh failed: {"my_access_token":"mat-value-24"}')).toBe('refresh failed: {"my_[credential field]": [redacted]}');
   });
 
   it("key=value cuts ONE bare token: the words after it stay", () => {
@@ -127,5 +138,6 @@ describe("safeMessage: the credential list Core and the CRM share (any case, any
     expect(safeMessage("AADSTS7000222: client secret expired")).toBe("AADSTS7000222: client secret expired");
     expect(safeMessage("Token has been expired or revoked.")).toBe("Token has been expired or revoked.");
     expect(safeMessage("spin=3 retries")).toBe("spin=3 retries");
+    expect(safeMessage("design=v2 retries")).toBe("design=v2 retries");
   });
 });
