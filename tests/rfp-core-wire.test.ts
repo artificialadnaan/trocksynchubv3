@@ -408,3 +408,25 @@ describe("the signed POSTs (rfp-core-http.ts)", () => {
     expect(r2).toEqual({ kind: "response", status: 502, body: {} });
   });
 });
+
+describe("the selected estimator's email, passed through to Core (Core PLAN-EST-PR-E; a4 ruling f3ef44f0)", () => {
+  it("E1's deal.estimatorEmail reaches E2 trimmed and lower-cased; the NAME stays the display text beside it", () => {
+    const r = build(e1({}, { estimatorEmail: "  Pat.Example@Example.Test " }));
+    expect(r).toMatchObject({ ok: true, body: { deal: { estimator: "Pat Example", estimatorEmail: "pat.example@example.test" } } });
+  });
+
+  it("anything Core would refuse is null, never sent: absent, null, blank, malformed, too long, not a string", () => {
+    for (const bad of [undefined, null, "", "   ", "not-an-email", "a@b", "x@y.z@w", `${"a".repeat(320)}@example.test`, 42, { email: "x@y.z" }]) {
+      const r = build(e1({}, { estimatorEmail: bad }));
+      expect(r.ok && r.body.deal.estimatorEmail, String(bad)).toBeNull();
+    }
+  });
+
+  it("the CRM route keeps deal.estimatorEmail (zod would strip an undeclared key) and drops a malformed one rather than refusing the RFP", async () => {
+    const { rfpRequestBodySchema } = await import("../server/routes/rfp-requests.ts");
+    const deal = { name: "Synthetic Tower Reroof", projectNumber: "DFW-2-12345-ab", projectType: "2", amount: null, estimator: "Pat Example" };
+    expect(rfpRequestBodySchema.shape.deal.parse({ ...deal, estimatorEmail: "pat@example.test" }).estimatorEmail).toBe("pat@example.test");
+    expect(rfpRequestBodySchema.shape.deal.parse({ ...deal, estimatorEmail: 42 }).estimatorEmail).toBeUndefined();
+    expect(rfpRequestBodySchema.shape.deal.parse(deal)).not.toHaveProperty("estimatorEmail");
+  });
+});
