@@ -424,7 +424,12 @@ describe("the selected estimator's email, passed through to Core (Core PLAN-EST-
 
   it("the CRM route keeps deal.estimatorEmail (zod would strip an undeclared key) and drops a malformed one rather than refusing the RFP", async () => {
     const { rfpRequestBodySchema } = await import("../server/routes/rfp-requests.ts");
-    const deal = { name: "Synthetic Tower Reroof", projectNumber: "DFW-2-12345-ab", projectType: "2", amount: null, estimator: "Pat Example" };
+    // Every key the deal schema requires (nullable, not optional), so only the field under test decides.
+    const deal = {
+      name: "Synthetic Tower Reroof", projectNumber: "DFW-2-12345-ab", projectType: "2", amount: null, estimator: "Pat Example",
+      companyName: null, contactName: null, clientEmail: null, clientPhone: null, address: null, description: null, dueDate: null,
+      workflowRoute: null,
+    };
     expect(rfpRequestBodySchema.shape.deal.parse({ ...deal, estimatorEmail: "pat@example.test" }).estimatorEmail).toBe("pat@example.test");
     expect(rfpRequestBodySchema.shape.deal.parse({ ...deal, estimatorEmail: 42 }).estimatorEmail).toBeUndefined();
     expect(rfpRequestBodySchema.shape.deal.parse(deal)).not.toHaveProperty("estimatorEmail");
