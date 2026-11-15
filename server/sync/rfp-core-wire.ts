@@ -126,7 +126,7 @@ export interface RfpBidCreateBody {
     projectType: string | null;
     amount: number | null;
     estimator: string | null;
-    estimatorEmail: null;
+    estimatorEmail: string | null;
     ownerName: string | null;
     ownerEmail: string | null;
     ownerSource: string | null;
@@ -166,10 +166,22 @@ function utcInstant(value: unknown): string | null {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
+/** Core's email rule (crm-ingress/wire.ts EMAIL_RE, nullableEmail: at most 320 characters, lower-cased). */
+const CORE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** The selected estimator's email as Core accepts it (trimmed, lower-cased, at most 320, Core's pattern), else null. */
+export function wireEstimatorEmail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const email = value.trim().toLowerCase();
+  return email.length > 0 && email.length <= 320 && CORE_EMAIL_RE.test(email) ? email : null;
+}
+
 /**
  * E1 → E2 (§5). `office` = E1's office when dallas | atlanta, else { ok:false, reason:"office_not_supported" } (r2, d9
- * ruling 5; checked first: without an office there is no Core path). `estimator` = the CRM's free-text NAME
- * (estimatorEmail always null); `dueDate` = a UTC ISO instant;
+ * ruling 5; checked first: without an office there is no Core path). `estimator` = the CRM's free-text NAME (display
+ * only); `estimatorEmail` = the estimator the CRM's rep selected, lower-cased, when E1 carries a usable email, else null (Core
+ * seats a production bid's estimator by it only; a malformed one would be Core's 400 for the whole body); `dueDate` = a UTC ISO
+ * instant;
  * companyId null ⇒ { ok:false, reason:"company_missing" } (SyncHub pre-refuses, nothing is sent); property null when
  * propertyId is null, else E1's address keys verbatim; contact null unless clientEmail is valid; the rest verbatim.
  * Blank strings read as null (Core's nullable strings refuse ""). `approvalKind` prefers the command row's stamp (§2).
@@ -217,7 +229,7 @@ export function buildRfpBidCreateBody(
       projectType: textOrNull(d.projectType),
       amount: typeof d.amount === "number" ? d.amount : null,
       estimator: textOrNull(d.estimator),
-      estimatorEmail: null,
+      estimatorEmail: wireEstimatorEmail(d.estimatorEmail),
       ownerName: textOrNull(d.ownerName),
       ownerEmail: textOrNull(d.ownerEmail),
       ownerSource: textOrNull(d.ownerSource),

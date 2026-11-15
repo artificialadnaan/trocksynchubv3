@@ -25,6 +25,10 @@ export const rfpRequestBodySchema = z.object({
     projectType: z.string().trim().min(1),
     amount: z.number().finite().nullable(),
     estimator: z.string().trim().nullable(),
+    // The estimator the CRM's rep SELECTED, by email (TROCK Core seats a PRODUCTION RFP's estimator by this only, never by the
+    // name above; Core PLAN-EST-PR-E, a4 ruling f3ef44f0). Soft exactly like ownerEmail: a malformed value is DROPPED, never a
+    // 422; without this line zod would strip the key before it reached deal_data.
+    estimatorEmail: z.string().trim().nullable().optional().catch(undefined),
     // Deal owner / rep — the "Requested by" person. Truly non-rejecting: a malformed value
     // (e.g. an object/id sent mid-rollout) is DROPPED via .catch(undefined), not 422'd — a soft
     // display field must never block RFP ingestion. The CRM resolves it from assigned_rep → owner.
