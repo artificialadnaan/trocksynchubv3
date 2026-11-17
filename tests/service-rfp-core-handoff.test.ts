@@ -1118,4 +1118,78 @@ describe("service RFP → TROCK Core handoff", () => {
       expect(predicate).not.toContain("'pending'");
     });
   });
+
+  // The no-silent-cut series, S2 (d6 D6-RULING-S2-S3-Q1-Q3-AND-WORDS 65a0b05d + ADD-2 / ADD-5; a4 55995368; 70's words 368d4c8e line 1, ADD-1
+  // f33c31b1; d6 ADD-6: option (A)). The Description and the approver's Notes go WHOLE (line breaks kept) up to Core's 10,000; past it
+  // the approval is HELD: nothing goes to Core, the existing 'failed' refusal row records 70's operator line, and the existing
+  // operator alert fires.
+  // New exports are looked up by name, so one that does not exist yet fails as an assertion.
+  describe("S2: the Description and Notes go whole, and what Core cannot take is held, never cut", () => {
+    const D3000 = `Scope line one.\n${"a".repeat(3_000 - 16)}`;
+    const N3000 = `Note line one.\n${"n".repeat(3_000 - 15)}`;
+    const D_LINE =
+      "description_too_long: the deal's Description is 10,001 characters, over the 10,000 Core takes. Nothing was sent. " +
+      "The approver shortens the Description on the deal and approves the RFP again, which sends it.";
+    const N_LINE =
+      "notes_too_long: the approval's Notes are 10,002 characters, over the 10,000 Core takes. Nothing was sent. " +
+      "The approver approves the RFP again with shorter Notes, which sends it.";
+    const B_LINE =
+      "description_too_long, notes_too_long: the deal's Description is 12,345 characters and the approval's Notes are 10,001, " +
+      "both over the 10,000 Core takes. Nothing was sent. The approver shortens the Description on the deal and approves the RFP " +
+      "again with shorter Notes, which sends it.";
+
+    async function build(dealOverrides: Record<string, any> = {}, edited: Record<string, string> = {}) {
+      const { buildServiceRfpApprovedBody } = await import("../server/sync/service-rfp-core-outbox.ts");
+      return buildServiceRfpApprovedBody({
+        sourceSystem: "trock_crm",
+        sourceDealId: CRM_DEAL_ID,
+        rfpRequestId: 77,
+        projectNumber: "DFW-4-12345-aa",
+        dealData: makeRequest({}, dealOverrides).dealData,
+        editedFieldsOverride: edited,
+      }) as any;
+    }
+
+    it("S2-R1: a 3,000-character Description with a line break reaches the body whole, the break kept", async () => {
+      const built = await build({ description: D3000, notes: null });
+      expect(built.ok && built.body.bid.description, "the Description, whole").toBe(D3000);
+    });
+
+    it("S2-R1n: the approver's 3,000-character Notes with a line break reach the body whole", async () => {
+      const built = await build({ description: "Short scope.", notes: null }, { notes: N3000 });
+      expect(built.ok && built.body.bid.notes, "the Notes, whole").toBe(N3000);
+    });
+
+    it("S2-R2: 10,000 characters go whole; past Core's 10,000 the approval is held with 70's operator line and the count(s)", async () => {
+      const outbox = (await import("../server/sync/service-rfp-core-outbox.ts")) as Record<string, any>;
+      expect(outbox.SERVICE_RFP_CORE_TEXT_MAX, "Core's bound, one named constant").toBe(10_000);
+      const at = await build({ description: "c".repeat(10_000), notes: null });
+      expect(at.ok && at.body.bid.description, "10,000 characters, whole").toBe("c".repeat(10_000));
+      expect(await build({ description: "b".repeat(10_001), notes: null })).toEqual({
+        ok: false, reason: "description_too_long", detail: D_LINE, descriptionChars: 10_001,
+      });
+      expect(await build({ description: "Short scope.", notes: null }, { notes: "m".repeat(10_002) })).toEqual({
+        ok: false, reason: "notes_too_long", detail: N_LINE, notesChars: 10_002,
+      });
+      expect(await build({ description: "b".repeat(12_345), notes: null }, { notes: "m".repeat(10_001) })).toEqual({
+        ok: false, reason: "description_and_notes_too_long", detail: B_LINE, descriptionChars: 12_345, notesChars: 10_001,
+      });
+    });
+
+    // d6 ADD-6 (Q1 re-ruled (A) under the owner's "dont overengineer"): the hold is the existing pre-POST refusal row, status
+    // 'failed', with last_error = 70's operator line, and the existing operator alert. No CRM change.
+    it("S2-R3: an approval past the bound sends NOTHING to Core, records 70's line on a 'failed' row, and alerts operators once", async () => {
+      approvalRequest.current = makeRequest({}, { description: "b".repeat(10_001), notes: null });
+      const result = await runApproval();
+      expect(outboundCalls, "nothing reaches Core").toEqual([]);
+      expect(result).toEqual({ success: true });
+      const sqlText = executedSql();
+      // The status PARAMETER (a JSON string value), not the ON CONFLICT clause's own 'failed' text.
+      expect(sqlText, "the existing refusal row").toContain('"failed"');
+      expect(sqlText, "last_error is 70's line").toContain(JSON.stringify(D_LINE));
+      expect(sqlText, "the code is not doubled").not.toContain("description_too_long: description_too_long");
+      expect(alertCalls).toHaveLength(1);
+      expect(JSON.stringify(alertCalls[0])).toContain("description_too_long: the deal's Description is 10,001 characters");
+    });
+  });
 });
