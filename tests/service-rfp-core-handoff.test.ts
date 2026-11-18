@@ -1129,14 +1129,14 @@ describe("service RFP → TROCK Core handoff", () => {
     const N3000 = `Note line one.\n${"n".repeat(3_000 - 15)}`;
     const D_LINE =
       "description_too_long: the deal's Description is 10,001 characters, over the 10,000 Core takes. Nothing was sent. " +
-      "The approver shortens the Description on the deal and approves the RFP again, which sends it.";
+      "Approving the RFP again won't send it. Shorten the Description on the deal, then tell Engineering.";
     const N_LINE =
       "notes_too_long: the approval's Notes are 10,002 characters, over the 10,000 Core takes. Nothing was sent. " +
-      "The approver approves the RFP again with shorter Notes, which sends it.";
+      "Approving the RFP again won't send it. Ask the approver for shorter Notes, then tell Engineering.";
     const B_LINE =
       "description_too_long, notes_too_long: the deal's Description is 12,345 characters and the approval's Notes are 10,001, " +
-      "both over the 10,000 Core takes. Nothing was sent. The approver shortens the Description on the deal and approves the RFP " +
-      "again with shorter Notes, which sends it.";
+      "both over the 10,000 Core takes. Nothing was sent. Approving the RFP again won't send it. Shorten the Description on " +
+      "the deal and ask the approver for shorter Notes, then tell Engineering.";
 
     async function build(dealOverrides: Record<string, any> = {}, edited: Record<string, string> = {}) {
       const { buildServiceRfpApprovedBody } = await import("../server/sync/service-rfp-core-outbox.ts");
