@@ -176,7 +176,7 @@ function wholeText(value: unknown): string | null {
   return cleaned || null;
 }
 
-/** 70's operator line for a hold (368d4c8e line 1, ADD-1 f33c31b1): it leads with the reason code(s) and says who acts. */
+/** 70's operator line for a hold (WORDS-S2-HOLD-CLOSINGS-141-FINAL eac3a7f7): it leads with the reason code(s) and says who acts. */
 function serviceRfpHold(descriptionChars: number | null, notesChars: number | null): ServiceRfpBodyResult {
   const count = (value: number) => value.toLocaleString("en-US");
   const limit = count(SERVICE_RFP_CORE_TEXT_MAX);
@@ -184,7 +184,7 @@ function serviceRfpHold(descriptionChars: number | null, notesChars: number | nu
     return {
       ok: false,
       reason: "description_and_notes_too_long",
-      detail: `description_too_long, notes_too_long: the deal's Description is ${count(descriptionChars)} characters and the approval's Notes are ${count(notesChars)}, both over the ${limit} Core takes. Nothing was sent. The approver shortens the Description on the deal and approves the RFP again with shorter Notes, which sends it.`,
+      detail: `description_too_long, notes_too_long: the deal's Description is ${count(descriptionChars)} characters and the approval's Notes are ${count(notesChars)}, both over the ${limit} Core takes. Nothing was sent. Approving the RFP again won't send it. Shorten the Description on the deal and ask the approver for shorter Notes, then tell Engineering.`,
       descriptionChars,
       notesChars,
     };
@@ -193,14 +193,14 @@ function serviceRfpHold(descriptionChars: number | null, notesChars: number | nu
     return {
       ok: false,
       reason: "description_too_long",
-      detail: `description_too_long: the deal's Description is ${count(descriptionChars)} characters, over the ${limit} Core takes. Nothing was sent. The approver shortens the Description on the deal and approves the RFP again, which sends it.`,
+      detail: `description_too_long: the deal's Description is ${count(descriptionChars)} characters, over the ${limit} Core takes. Nothing was sent. Approving the RFP again won't send it. Shorten the Description on the deal, then tell Engineering.`,
       descriptionChars,
     };
   }
   return {
     ok: false,
     reason: "notes_too_long",
-    detail: `notes_too_long: the approval's Notes are ${count(notesChars ?? 0)} characters, over the ${limit} Core takes. Nothing was sent. The approver approves the RFP again with shorter Notes, which sends it.`,
+    detail: `notes_too_long: the approval's Notes are ${count(notesChars ?? 0)} characters, over the ${limit} Core takes. Nothing was sent. Approving the RFP again won't send it. Ask the approver for shorter Notes, then tell Engineering.`,
     notesChars: notesChars ?? 0,
   };
 }
@@ -220,7 +220,7 @@ function wireString(value: unknown, max: number): string | null {
  * {address, city, state, zip}, each a string non-empty after trim; address <= 255; state two letters; ZIP 5 digits or
  * ZIP+4. Anything else is null, so the key is OMITTED: Core answers a malformed one with a 400 for the WHOLE body, and
  * an RFP must never be lost over it. city <= 255 is this producer's own bound (Core sets none) so a runaway value can
- * never push the body past Core's 32 KiB. Values are sent trimmed, otherwise as the CRM has them (Core upper-cases the
+ * never push the body past Core's 96 KiB. Values are sent trimmed, otherwise as the CRM has them (Core upper-cases the
  * state itself).
  */
 export function wireCompanyBillAddress(value: unknown): { address: string; city: string; state: string; zip: string } | null {
