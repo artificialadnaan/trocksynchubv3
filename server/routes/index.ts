@@ -58,6 +58,7 @@ import { startProcoreTokenKeepAlive } from "../procore-token-keepalive";
 import { startServiceRfpCoreOutboxWorker } from "../sync/service-rfp-core-outbox";
 import { startTrockCrmRelayScheduler } from "../cron/trockcrmRelayScheduler";
 import { startPendingRfpDigestScheduler } from "../cron/pendingRfpDigestScheduler";
+import { startRfpAutoExpireScheduler } from "../cron/rfpAutoExpireScheduler";
 import { startRfpApprovingStuckScheduler } from "../cron/rfpApprovingStuckScheduler";
 
 const PgSession = connectPgSimple(session);
@@ -148,6 +149,7 @@ export async function registerRoutes(
   startServiceRfpCoreOutboxWorker();
   startTrockCrmRelayScheduler();
   startPendingRfpDigestScheduler();
+  startRfpAutoExpireScheduler();
   startRfpApprovingStuckScheduler();
 
   // Initialize polling systems from saved config
