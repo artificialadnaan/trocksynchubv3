@@ -270,13 +270,13 @@ describe("the daily run", () => {
 });
 
 describe("scheduling", () => {
-  it("runs daily at 4:40 PM America/Chicago, before the 5:00 PM digest, and the server starts it beside the digest", async () => {
+  it("runs daily at 3:10 AM America/Chicago (no approver acting; before the 5:00 PM digest), and the server starts it beside the digest", async () => {
     const schedule = vi.fn(() => ({ stop: vi.fn() }));
     vi.doMock("node-cron", () => ({ default: { schedule } }));
     const { startRfpAutoExpireScheduler, stopRfpAutoExpireScheduler, RFP_AUTO_EXPIRE_CRON } = await import("../server/cron/rfpAutoExpireScheduler.ts");
     startRfpAutoExpireScheduler();
-    expect(RFP_AUTO_EXPIRE_CRON).toBe("40 16 * * *");
-    expect(schedule).toHaveBeenCalledWith("40 16 * * *", expect.any(Function), { timezone: "America/Chicago" });
+    expect(RFP_AUTO_EXPIRE_CRON).toBe("10 3 * * *");
+    expect(schedule).toHaveBeenCalledWith("10 3 * * *", expect.any(Function), { timezone: "America/Chicago" });
     stopRfpAutoExpireScheduler();
     vi.doUnmock("node-cron");
     const index = readFileSync(new URL("../server/routes/index.ts", import.meta.url), "utf8");
