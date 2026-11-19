@@ -140,7 +140,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 /** Core's canonical uuid: lowercase, with the variant nibble pinned. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-/** Core's per-field bounds. `description`/`notes` are this producer's own cap under the 32 KiB body. */
+/** Core's per-field bounds. The Description and Notes are not cut: they go whole up to SERVICE_RFP_CORE_TEXT_MAX (wholeText). */
 const MAX = {
   companyName: 200,
   contactName: 200,
@@ -153,16 +153,65 @@ const MAX = {
   city: 100,
   state: 100,
   postalCode: 32,
-  description: 2_000,
 } as const;
+
+/**
+ * Core's bound on bid.description and bid.notes: trock-core crm-ingress/service-rfp.contract.ts :242 / :243 after the (C) raise
+ * (10,000, with \n \r \t allowed). The no-silent-cut series, S2 (d6 65a0b05d; Fable / owner: "send it whole, or hold it with a
+ * plain reason"): up to it the text goes whole; past it the approval is held, never cut.
+ */
+export const SERVICE_RFP_CORE_TEXT_MAX = 10_000;
+
+/**
+ * The Description / Notes, whole: line breaks and tabs kept (Core takes \n \r \t), every other control character a space, trimmed.
+ * A browser posts the Notes box's line breaks as CRLF while the stored prefill has LF, so line breaks are normalised to \n first;
+ * the prefill comparison below then still recognises an untouched box (it compared the folded text before).
+ */
+function wholeText(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const cleaned = String(value)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+/g, " ")
+    .trim();
+  return cleaned || null;
+}
+
+/** 70's operator line for a hold (WORDS-S2-HOLD-CLOSINGS-141-FINAL eac3a7f7): it leads with the reason code(s) and says who acts. */
+function serviceRfpHold(descriptionChars: number | null, notesChars: number | null): ServiceRfpBodyResult {
+  const count = (value: number) => value.toLocaleString("en-US");
+  const limit = count(SERVICE_RFP_CORE_TEXT_MAX);
+  if (descriptionChars !== null && notesChars !== null) {
+    return {
+      ok: false,
+      reason: "description_and_notes_too_long",
+      detail: `description_too_long, notes_too_long: the deal's Description is ${count(descriptionChars)} characters and the approval's Notes are ${count(notesChars)}, both over the ${limit} Core takes. Nothing was sent. Approving the RFP again won't send it. Shorten the Description on the deal and ask the approver for shorter Notes, then tell Engineering.`,
+      descriptionChars,
+      notesChars,
+    };
+  }
+  if (descriptionChars !== null) {
+    return {
+      ok: false,
+      reason: "description_too_long",
+      detail: `description_too_long: the deal's Description is ${count(descriptionChars)} characters, over the ${limit} Core takes. Nothing was sent. Approving the RFP again won't send it. Shorten the Description on the deal, then tell Engineering.`,
+      descriptionChars,
+    };
+  }
+  return {
+    ok: false,
+    reason: "notes_too_long",
+    detail: `notes_too_long: the approval's Notes are ${count(notesChars ?? 0)} characters, over the ${limit} Core takes. Nothing was sent. Approving the RFP again won't send it. Ask the approver for shorter Notes, then tell Engineering.`,
+    notesChars: notesChars ?? 0,
+  };
+}
 
 function wireString(value: unknown, max: number): string | null {
   if (value === null || value === undefined) return null;
   const collapsed = String(value).replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
   if (!collapsed) return null;
   if (collapsed.length <= max) return collapsed;
-  // Truncate rather than refuse: Procore still receives the full text, and losing the tail of a
-  // description is strictly better than the job never reaching Core's estimating lane at all.
+  // For the short fields only (titles, names, address parts), whose caps are Core's door bounds. The Description and
+  // Notes are never cut: they go whole (wholeText) and are held past Core's bound (S2).
   return `${collapsed.slice(0, max - 1).trim()}…`;
 }
 
@@ -171,7 +220,7 @@ function wireString(value: unknown, max: number): string | null {
  * {address, city, state, zip}, each a string non-empty after trim; address <= 255; state two letters; ZIP 5 digits or
  * ZIP+4. Anything else is null, so the key is OMITTED: Core answers a malformed one with a 400 for the WHOLE body, and
  * an RFP must never be lost over it. city <= 255 is this producer's own bound (Core sets none) so a runaway value can
- * never push the body past Core's 32 KiB. Values are sent trimmed, otherwise as the CRM has them (Core upper-cases the
+ * never push the body past Core's 96 KiB. Values are sent trimmed, otherwise as the CRM has them (Core upper-cases the
  * state itself).
  */
 export function wireCompanyBillAddress(value: unknown): { address: string; city: string; state: string; zip: string } | null {
@@ -297,7 +346,11 @@ export type ServiceRfpSkipReason =
   | "source_system_unsupported"
   | "office_unmapped"
   | "missing_crm_identity"
-  | "missing_required_field";
+  | "missing_required_field"
+  // Held, never cut: the Description and / or the approver's Notes are past Core's bound (SERVICE_RFP_CORE_TEXT_MAX).
+  | "description_too_long"
+  | "notes_too_long"
+  | "description_and_notes_too_long";
 
 export interface ServiceRfpHandoffInput {
   sourceSystem: string;
@@ -321,7 +374,7 @@ export interface ServiceRfpHandoffInput {
 
 export type ServiceRfpBodyResult =
   | { ok: true; office: string; body: ServiceRfpApprovedBody }
-  | { ok: false; reason: ServiceRfpSkipReason; detail: string };
+  | { ok: false; reason: ServiceRfpSkipReason; detail: string; descriptionChars?: number; notesChars?: number };
 
 /**
  * The effective value of a deal field, resolving edits exactly the way
@@ -395,24 +448,30 @@ export function buildServiceRfpApprovedBody(input: ServiceRfpHandoffInput): Serv
 
   // Same fallback chain the Procore create uses, so the two descriptions are the same string.
   // crm_activity_log is kept out of both systems' description fields.
+  // Whole, line breaks kept (wholeText): past Core's bound the approval is held below, never cut.
   const description =
-    wireString(effectiveField(input, "description"), MAX.description)
-    ?? wireString(input.dealData.project_description__briefly_describe_the_project_, MAX.description)
-    ?? wireString(input.dealData.project_description, MAX.description)
-    ?? wireString(input.dealData.notes, MAX.description);
+    wholeText(effectiveField(input, "description"))
+    ?? wholeText(input.dealData.project_description__briefly_describe_the_project_)
+    ?? wholeText(input.dealData.project_description)
+    ?? wholeText(input.dealData.notes);
 
   // bid.notes carries only a note a REVIEWER wrote. The form's Notes box is prefilled with the deal's
   // `notes`, itself a verbatim copy of the description, so an untouched box (or one holding the
   // description) would store that string twice.
   // A reviewer who types AFTER the prefilled text sends prefill + their note: strip an unchanged prefilled prefix
   // (the prefill itself or the description it copies) and keep only what they added (#92 R1).
-  const editedNotes = wireString(input.editedFieldsOverride.notes, MAX.description);
-  const prefill = wireString(input.dealData.notes, MAX.description);
+  const editedNotes = wholeText(input.editedFieldsOverride.notes);
+  const prefill = wholeText(input.dealData.notes);
   let ownNote = editedNotes;
   for (const prefix of [prefill, description]) {
-    if (ownNote && prefix && ownNote.startsWith(prefix)) ownNote = wireString(ownNote.slice(prefix.length), MAX.description);
+    if (ownNote && prefix && ownNote.startsWith(prefix)) ownNote = wholeText(ownNote.slice(prefix.length));
   }
   const notes = ownNote && ownNote !== prefill && ownNote !== description ? ownNote : null;
+
+  // Past Core's bound: held with 70's plain line (the operator alert shows it), never cut.
+  const descriptionOver = description !== null && description.length > SERVICE_RFP_CORE_TEXT_MAX ? description.length : null;
+  const notesOver = notes !== null && notes.length > SERVICE_RFP_CORE_TEXT_MAX ? notes.length : null;
+  if (descriptionOver !== null || notesOver !== null) return serviceRfpHold(descriptionOver, notesOver);
 
   const line1 = wireString(effectiveField(input, "address"), MAX.line);
   const city = wireString(effectiveField(input, "city"), MAX.city);
@@ -878,7 +937,9 @@ export async function handOffServiceRfpApprovalToCore(
       // Terminal, and LOUD. Not a silent drop: the row records what was refused and why, and the
       // alert makes the gap visible while the manual creation door is still open.
       const office = coreRfpTenant();
-      const error = `${built.reason}: ${built.detail}`;
+      // A hold's detail is 70's operator line, which already leads with its reason code(s) (S2; d6 ADD-6).
+      const held = built.descriptionChars !== undefined || built.notesChars !== undefined;
+      const error = held ? built.detail : `${built.reason}: ${built.detail}`;
       const inserted = await insertOutboxRow({
         sourceSystem: input.sourceSystem,
         sourceDealId: input.sourceDealId,
