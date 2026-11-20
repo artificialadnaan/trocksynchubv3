@@ -1,0 +1,1528 @@
+[
+  {
+    "name": "missing_required_field",
+    "why": "every connection field is required (null, never absent)",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "health_color_from_producer",
+    "why": "producers send measurements, never a state",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          },
+          "state": "healthy"
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "timestamp_without_z",
+    "why": "timestamps are UTC with Z",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "email_in_message",
+    "why": "message_safe carries no email address",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "failed for someone@example.test"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "bearer_in_message",
+    "why": "message_safe carries no credential",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Bearer abc.def"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "bearer_link_in_record",
+    "why": "never emit a bearer approval link",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": "https://synchub.example.test/rfp-review/abc123"
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "http_correction_url",
+    "why": "links are https",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "http://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "negative_count",
+    "why": "counts are >= 0",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": -1,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "string_count",
+    "why": "counts are integers or null",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": "6",
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "nested_extra",
+    "why": "extra is flat",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6,
+            "by_office": {
+              "dallas": 1
+            }
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "extra_too_many_keys",
+    "why": "extra has at most 20 keys",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "k0": 0,
+            "k1": 1,
+            "k2": 2,
+            "k3": 3,
+            "k4": 4,
+            "k5": 5,
+            "k6": 6,
+            "k7": 7,
+            "k8": 8,
+            "k9": 9,
+            "k10": 10,
+            "k11": 11,
+            "k12": 12,
+            "k13": 13,
+            "k14": 14,
+            "k15": 15,
+            "k16": 16,
+            "k17": 17,
+            "k18": 18,
+            "k19": 19,
+            "k20": 20
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "too_many_records",
+    "why": "at most 20 records",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9000",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9002",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9003",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9004",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9005",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9006",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9007",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9008",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9009",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9010",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9011",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9012",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9013",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9014",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9015",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9016",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9017",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9018",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9019",
+              "state": "pending",
+              "url": null
+            },
+            {
+              "kind": "rfp_approval_request",
+              "id": "9020",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "bad_key",
+    "why": "keys are lower-case system.dotted.name",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "synchub",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "SyncHub.Mail",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown_system",
+    "why": "system is one of synchub / crm / expense / core",
+    "doc": {
+      "schema": "trock.integration-health.snapshot.v1",
+      "system": "erp",
+      "generated_at": "2026-01-05T15:00:00.000Z",
+      "producer_commit": "0123abc",
+      "connections": [
+        {
+          "key": "synchub.mail.outlook",
+          "label": "Outgoing mail (Outlook)",
+          "peer": "microsoft-graph",
+          "direction": "outbound",
+          "purpose": "Sends approval and alert email",
+          "impact": "Approvers get no review links",
+          "paused": null,
+          "connection": {
+            "credential_present": true,
+            "expires_at": "2026-01-02T15:16:00Z",
+            "last_auth_ok_at": "2026-01-02T14:00:00Z",
+            "last_auth_error": {
+              "code": "AADSTS50079",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "MFA enrolment required"
+            }
+          },
+          "processing": {
+            "last_attempt_at": "2026-01-05T14:32:00Z",
+            "last_success_at": "2026-01-01T17:55:00Z",
+            "cadence_seconds": null,
+            "next_run_at": null,
+            "last_error": {
+              "code": "not_connected",
+              "at": "2026-01-05T14:32:00Z",
+              "message_safe": "Outlook not connected"
+            }
+          },
+          "delivery": [
+            {
+              "direction": "out",
+              "pending": 3,
+              "oldest_pending_at": "2026-01-03T17:25:00Z",
+              "failed_24h": 6,
+              "failed_7d": 9,
+              "exhausted": 0,
+              "last_delivered_at": "2026-01-01T17:55:00Z"
+            }
+          ],
+          "records": [
+            {
+              "kind": "rfp_approval_request",
+              "id": "9001",
+              "state": "pending",
+              "url": null
+            }
+          ],
+          "correction_url": "https://synchub.example.test/settings",
+          "extra": {
+            "active_provider": "outlook",
+            "fallback": "gmail",
+            "status.queued": 3,
+            "status.failed": 6
+          }
+        },
+        {
+          "key": "synchub.procore.token",
+          "label": "Procore sign-in",
+          "peer": "procore",
+          "direction": "pull",
+          "purpose": "The Procore token",
+          "impact": "Procore reads stop",
+          "paused": {
+            "reason": "flag ENABLE_X=false",
+            "since": null
+          },
+          "connection": {
+            "credential_present": null,
+            "expires_at": null,
+            "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+            "last_auth_error": null
+          },
+          "processing": {
+            "last_attempt_at": null,
+            "last_success_at": null,
+            "cadence_seconds": 900,
+            "next_run_at": null,
+            "last_error": null
+          },
+          "delivery": [],
+          "records": [],
+          "correction_url": null,
+          "extra": {
+            "auth_ok_source": "oauth_tokens.updated_at"
+          }
+        }
+      ]
+    }
+  }
+]

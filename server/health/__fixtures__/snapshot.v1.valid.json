@@ -1,0 +1,95 @@
+{
+  "schema": "trock.integration-health.snapshot.v1",
+  "system": "synchub",
+  "generated_at": "2026-01-05T15:00:00.000Z",
+  "producer_commit": "0123abc",
+  "connections": [
+    {
+      "key": "synchub.mail.outlook",
+      "label": "Outgoing mail (Outlook)",
+      "peer": "microsoft-graph",
+      "direction": "outbound",
+      "purpose": "Sends approval and alert email",
+      "impact": "Approvers get no review links",
+      "paused": null,
+      "connection": {
+        "credential_present": true,
+        "expires_at": "2026-01-02T15:16:00Z",
+        "last_auth_ok_at": "2026-01-02T14:00:00Z",
+        "last_auth_error": {
+          "code": "AADSTS50079",
+          "at": "2026-01-05T14:32:00Z",
+          "message_safe": "MFA enrolment required"
+        }
+      },
+      "processing": {
+        "last_attempt_at": "2026-01-05T14:32:00Z",
+        "last_success_at": "2026-01-01T17:55:00Z",
+        "cadence_seconds": null,
+        "next_run_at": null,
+        "last_error": {
+          "code": "not_connected",
+          "at": "2026-01-05T14:32:00Z",
+          "message_safe": "Outlook not connected"
+        }
+      },
+      "delivery": [
+        {
+          "direction": "out",
+          "pending": 3,
+          "oldest_pending_at": "2026-01-03T17:25:00Z",
+          "failed_24h": 6,
+          "failed_7d": 9,
+          "exhausted": 0,
+          "last_delivered_at": "2026-01-01T17:55:00Z"
+        }
+      ],
+      "records": [
+        {
+          "kind": "rfp_approval_request",
+          "id": "9001",
+          "state": "pending",
+          "url": null
+        }
+      ],
+      "correction_url": "https://synchub.example.test/settings",
+      "extra": {
+        "active_provider": "outlook",
+        "fallback": "gmail",
+        "status.queued": 3,
+        "status.failed": 6
+      }
+    },
+    {
+      "key": "synchub.procore.token",
+      "label": "Procore sign-in",
+      "peer": "procore",
+      "direction": "pull",
+      "purpose": "The Procore token",
+      "impact": "Procore reads stop",
+      "paused": {
+        "reason": "flag ENABLE_X=false",
+        "since": null
+      },
+      "connection": {
+        "credential_present": null,
+        "expires_at": null,
+        "last_auth_ok_at": "2026-01-05T14:00:00.123456Z",
+        "last_auth_error": null
+      },
+      "processing": {
+        "last_attempt_at": null,
+        "last_success_at": null,
+        "cadence_seconds": 900,
+        "next_run_at": null,
+        "last_error": null
+      },
+      "delivery": [],
+      "records": [],
+      "correction_url": null,
+      "extra": {
+        "auth_ok_source": "oauth_tokens.updated_at"
+      }
+    }
+  ]
+}

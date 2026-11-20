@@ -42,6 +42,7 @@
 import { google } from 'googleapis';
 import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
+import { recordMailAuthFailure, recordMailAuthOk } from './health/mail-auth-health';
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -133,6 +134,8 @@ export async function exchangeGoogleCode(code: string): Promise<GmailTokens> {
     description: 'Gmail OAuth tokens',
     isActive: true,
   });
+  // Integration health (S2): the sign-in works. Best-effort, never throws.
+  await recordMailAuthOk('gmail');
 
   console.log(`[Gmail] OAuth connected for ${tokens.userEmail}`);
   return tokens;
@@ -196,10 +199,13 @@ export async function getGmailTokens(): Promise<GmailTokens | null> {
           description: 'Gmail OAuth tokens',
           isActive: true,
         });
+        // Integration health (S2): keep the last good refresh and the last failure. Best-effort, never throws.
+        await recordMailAuthOk('gmail');
 
         return refreshed;
       } catch (error) {
         console.error('[Gmail] Token refresh failed:', error);
+        await recordMailAuthFailure('gmail', error);
         return null;
       }
     }

@@ -1,6 +1,7 @@
 import { storage } from './storage';
 import { fetchWithTimeout } from './lib/fetch-with-timeout';
 import { legacySecretToKeep, resolveClientSecret, stripClientSecret } from './lib/client-secret';
+import { recordMailAuthFailure, recordMailAuthOk } from './health/mail-auth-health';
 
 function getMicrosoftAuthBaseUrl(tenantId?: string): string {
   const tid = tenantId || process.env.MICROSOFT_TENANT_ID || 'common';
@@ -139,6 +140,8 @@ export async function exchangeMicrosoftCode(code: string): Promise<MicrosoftToke
     description: 'Microsoft OAuth tokens for OneDrive and Outlook',
     isActive: true,
   });
+  // Integration health (S2): the sign-in works. Best-effort, never throws.
+  await recordMailAuthOk('outlook');
 
   console.log(`[Microsoft] OAuth connected for ${tokens.userEmail}`);
   return tokens;
@@ -191,10 +194,13 @@ export async function getMicrosoftTokens(): Promise<MicrosoftTokens | null> {
         description: 'Microsoft OAuth tokens for OneDrive and Outlook',
         isActive: true,
       });
+      // Integration health (S2): keep the last good refresh and the last failure. Best-effort, never throws.
+      await recordMailAuthOk('outlook');
 
       return refreshed;
     } catch (error) {
       console.error('[Microsoft] Token refresh failed:', error);
+      await recordMailAuthFailure('outlook', error);
       return null;
     }
   }
