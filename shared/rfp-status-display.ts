@@ -12,6 +12,9 @@ export const RFP_APPROVING_LABEL = "Creating Bid Board project…";
  */
 export const RFP_BEING_APPROVED_MESSAGE = "This is being approved right now. Try again in a minute.";
 
+/** A decision on a request an interrupted attempt may have left half-written in HubSpot, while HubSpot can't be read (a4 ADD-1). */
+export const RFP_HUBSPOT_UNREACHABLE_MESSAGE = "HubSpot can't be reached to check this request. Try again in a minute.";
+
 /** The statuses that mean a Bid Board create is in progress (the summary chips' in-progress count). */
 export const RFP_IN_PROGRESS_STATUSES: readonly string[] = ["approving", "override_approving"];
 

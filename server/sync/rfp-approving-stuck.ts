@@ -41,7 +41,8 @@ export type StuckSweepOptions = { db: Querier; now?: Date; recipient?: string; s
 /** `alerted` / `cleared`: the request ids whose stuck / cleared email was SENT by this sweep; `released`: claims it released. */
 export type StuckSweepResult = { stuck: StuckApprovingRequest[]; alerted: number[]; cleared: number[]; released: number[] };
 
-/** Releases approval-claim `approving` rows older than 30 minutes (database clock) to pending, in ONE statement; their side rows go. */
+/** Releases approval-claim `approving` rows older than 30 minutes (database clock) to pending, in ONE statement. The side row STAYS:
+ *  it tells the next decision to reconcile what the attempt may have written to HubSpot (a4 ADD-1). */
 export async function releaseStaleApprovalClaims(db: Querier): Promise<Array<{ requestId: number; sourceDealId: string }>> {
   const { rows } = await db.query(
     `WITH released AS (
@@ -50,8 +51,6 @@ export async function releaseStaleApprovalClaims(db: Querier): Promise<Array<{ r
         WHERE a.request_id = r.id AND r.status = 'approving' AND r.bidboard_project_id IS NULL AND a.submit_at IS NULL AND a.approved_by IS NULL
           AND a.started_at < (now() AT TIME ZONE 'UTC') - make_interval(mins => $1)
        RETURNING r.id, r.source_deal_id
-     ), gone AS (
-       DELETE FROM rfp_approval_approving a USING released x WHERE a.request_id = x.id
      )
      SELECT id, source_deal_id FROM released ORDER BY id`,
     [RFP_APPROVING_STUCK_AFTER_MINUTES],

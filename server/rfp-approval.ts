@@ -31,8 +31,8 @@ import {
 } from './sync/bidboard-callback-worker';
 import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox';
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
-import { RFP_APPROVING_STATUS, claimRfpRequestForApproval, clearRfpApprovalClaimRow, releaseRfpApprovalClaim } from './sync/rfp-approving';
-import { RFP_BEING_APPROVED_MESSAGE } from '@shared/rfp-status-display';
+import { RFP_APPROVING_STATUS, claimRfpRequestForApproval, clearRfpApprovalClaimRow, releaseRfpApprovalClaim, releasedApprovalAttempt } from './sync/rfp-approving';
+import { RFP_BEING_APPROVED_MESSAGE, RFP_HUBSPOT_UNREACHABLE_MESSAGE } from '@shared/rfp-status-display';
 import { PROCORE_CREATE_RETIRED_ERROR } from './sync/procore-create-retired';
 import { enqueueRfpApprovedCallbackIfCoreConfirmed } from './sync/rfp-approved-callback';
 
@@ -1396,6 +1396,83 @@ function refusedNotPending(status: string): { success: false; error: string; sta
     : { success: false, error: `Request already ${status}` };
 }
 
+// ── An interrupted attempt's HubSpot writes (a4 ADD-1 ba1d1a25; Greptile P1 4650915940) ──────────────────────────────────────────
+// A claim released after a crash may have left HubSpot written with THAT attempt's values (its number, its edited fields, the
+// approved stage), while the stored dealData still holds the originals. The next decision reads HubSpot's CURRENT values for every
+// field the interrupted attempt(s) may have written (the claim's footprint) and writes back, absolutely, whatever differs from the
+// new decision: the new approval's values, or on a decline the stored originals and the deal's original stage. HubSpot unreadable ⇒
+// the decision refuses with one plain line and writes nothing.
+const APPROVAL_HUBSPOT_KEYS = ['dealname', 'amount', 'project_types', 'project_number', 'project_location',
+  'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
+  'notes', 'due_date', 'client_email', 'client_phone', 'company_name'];
+const DESCRIPTION_HUBSPOT_KEY = 'project_description__briefly_describe_the_project_';
+
+class HubSpotUnreachableError extends Error {}
+
+/** What HubSpot should hold, for each property an approval could have written from these edited keys. `edited` null = a decline. */
+function hubspotTargets(dealData: Record<string, any>, keys: string[], edited: Record<string, string> | null): Record<string, string> {
+  const e = edited ?? {};
+  const want: Record<string, string> = {};
+  const value = (k: string) => String((e[k] !== undefined ? e[k] : dealData[k]) ?? '');
+  for (const k of keys) {
+    if (k === 'project_types' || k === 'project_number') {
+      const stored = String(dealData.project_number ?? '');
+      const storedType = parseProjectTypeFromNumber(stored) ?? dealData.project_types ?? '';
+      const type = e.project_types;
+      const changed = Boolean(type) && type !== storedType;
+      want.project_number = changed ? replaceProjectTypeInNumber(stored, type) : stored;
+      want.project_types = changed ? type : String(dealData.project_types ?? '');
+    } else if (APPROVAL_HUBSPOT_KEYS.includes(k)) {
+      want[k] = value(k);
+    }
+    if (k === 'description') want[DESCRIPTION_HUBSPOT_KEY] = e.description !== undefined ? e.description : String(dealData[DESCRIPTION_HUBSPOT_KEY] ?? '');
+    if (k === 'bid_due_date') {
+      const date = e.bid_due_date;
+      if (date && /^\d{4}-\d{2}-\d{2}/.test(date)) {
+        want.closedate = new Date(date).getTime().toString();
+        want.proposal_due_date = want.closedate;
+      } else {
+        want.closedate = String(dealData.closedate ?? '');
+        want.proposal_due_date = String(dealData.proposal_due_date ?? '');
+      }
+    }
+  }
+  return want;
+}
+
+/**
+ * Reconcile HubSpot after a released attempt: read the current values of the footprint's properties (plus the stage on a decline),
+ * then write absolutely the ones that differ from the decision. Throws HubSpotUnreachableError when HubSpot can't be read.
+ */
+async function reconcileReleasedAttempt(
+  hubspotDealId: string, dealData: Record<string, any>, footprint: string[], edited: Record<string, string> | null,
+): Promise<void> {
+  const want = hubspotTargets(dealData, footprint, edited);
+  const props = [...Object.keys(want), ...(edited === null ? ['dealstage'] : [])];
+  if (props.length === 0) return;
+  let current: Record<string, any>;
+  try {
+    const client = await getHubSpotClient();
+    current = ((await client.crm.deals.basicApi.getById(hubspotDealId, props)) as any)?.properties ?? {};
+  } catch (err: any) {
+    throw new HubSpotUnreachableError(err?.message || String(err));
+  }
+  const differs: Record<string, string> = {};
+  for (const [k, v] of Object.entries(want)) if (String(current[k] ?? '') !== v) differs[k] = v;
+  if (Object.keys(differs).length > 0) {
+    const res = await updateHubSpotDeal(hubspotDealId, differs);
+    if (res && (res as any).success === false) throw new Error(`HubSpot write-back failed: ${(res as any).message}`);
+  }
+  const originalStage = String(dealData.dealstage ?? '');
+  if (edited === null && originalStage && String(current.dealstage ?? '') !== originalStage) {
+    const res = await updateHubSpotDealStage(hubspotDealId, originalStage);
+    if (res && (res as any).success === false) throw new Error(`HubSpot stage write-back failed: ${(res as any).message}`);
+  }
+  log(`[rfp-approval] Deal ${hubspotDealId}: reconciled ${Object.keys(differs).length} field(s) an interrupted attempt may have left in HubSpot`, 'rfp');
+}
+
+const hubspotUnreachable = () => ({ success: false as const, statusCode: 503, error: 'hubspot_unreachable', message: RFP_HUBSPOT_UNREACHABLE_MESSAGE });
+
 export async function processRfpApproval(
   token: string,
   editedFields: Record<string, string>,
@@ -1456,13 +1533,26 @@ export async function processRfpApproval(
     // sync, and the Core hand-off and CRM callbacks come only after the final write: so a claim a crash leaves, released by the stuck
     // sweep, is safe to approve again. The override (force) holds its own claim; the resolver's replay (resume) runs on one.
     if (!force && !resume) {
-      const claimed = await claimRfpRequestForApproval(request.id);
+      const claimed = await claimRfpRequestForApproval(request.id, Object.keys(editedFields));
       if (!claimed.claimed) {
         // The row changed since the read above (a decline or another approval won it): a 409, like the final write's.
         const now = await storage.getRfpApprovalRequestByToken(token);
         return { ...refusedNotPending(now?.status ?? 'missing'), statusCode: 409 };
       }
       claim = { requestId: request.id, stamp: claimed.stamp };
+      // An earlier attempt was released (a4 ADD-1): put right what it may have left in HubSpot before this decision writes.
+      if (claimed.released && request.sourceSystem === 'hubspot' && claimed.footprint.length > 0) {
+        try {
+          await reconcileReleasedAttempt(identity.sourceDealId, request.dealData as Record<string, any>, claimed.footprint, editedFields);
+        } catch (err: any) {
+          if (!(err instanceof HubSpotUnreachableError)) throw err;
+          const held = claim;
+          claim = null;
+          await releaseRfpApprovalClaim(held.requestId, held.stamp);
+          log(`[rfp-approval] Request ${request.id}: HubSpot unreadable after a released attempt; nothing written (${err.message})`, 'rfp');
+          return hubspotUnreachable();
+        }
+      }
     }
 
     const sourceDealId = identity.sourceDealId;
@@ -1839,6 +1929,29 @@ export async function processRfpDecline(
     if (isRfpApprovalRequestExpired(request)) {
       await auditRfpDeclineAttempt(request, 'expired', declinerEmail, 'Token expired');
       return { success: false, error: 'expired' };
+    }
+
+    // A released approval attempt may have moved the HubSpot deal (a4 ADD-1): hold the row, put HubSpot back to the stored originals
+    // and the original stage, let go, then decline as usual. HubSpot unreadable ⇒ the plain line, nothing written.
+    if (request.sourceSystem === 'hubspot') {
+      const prior = await releasedApprovalAttempt(request.id);
+      if (prior.released) {
+        const claimed = await claimRfpRequestForApproval(request.id);
+        if (!claimed.claimed) {
+          const now = await storage.getRfpApprovalRequestByToken(token);
+          return { ...refusedNotPending(now?.status ?? 'missing'), statusCode: 409 };
+        }
+        try {
+          await reconcileReleasedAttempt(sourceDealId, request.dealData as Record<string, any>, ['dealstage', ...claimed.footprint], null);
+        } catch (err: any) {
+          await releaseRfpApprovalClaim(request.id, claimed.stamp);
+          if (!(err instanceof HubSpotUnreachableError)) throw err;
+          log(`[rfp-approval] Request ${request.id}: HubSpot unreadable after a released attempt; the decline wrote nothing (${err.message})`, 'rfp');
+          return hubspotUnreachable();
+        }
+        await releaseRfpApprovalClaim(request.id, claimed.stamp);
+        await clearRfpApprovalClaimRow(request.id, claimed.stamp);
+      }
     }
 
     await auditRfpDeclineAttempt(request, 'declined', declinerEmail);
