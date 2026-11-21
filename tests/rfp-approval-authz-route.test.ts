@@ -376,6 +376,21 @@ describe("RFP approve/decline route authorization", () => {
     });
   });
 
+  // L69 (a4 on d6's point): the 202 goes before the approval runs, so a missing estimator is said on the request's review page.
+  it("the review page of an approved request that handed Core no estimator shows that line", async () => {
+    const line = "No estimator was picked; set one on the bid in T-Rock Core.";
+    requestRow.current = makeRequest({
+      status: "approved", approvedBy: "jhelms@trockgc.com",
+      dealData: { ...makeRequest().dealData, estimator_handoff_warning: line },
+    });
+    await withApp(async (baseUrl) => {
+      const html = await (await fetch(`${baseUrl}/rfp-review/tok-authz`)).text();
+
+      expect(html).toContain("already <strong>approved</strong>");
+      expect(html).toContain(line);
+    });
+  });
+
   it("a4 ADD-2: the review page of a pending request whose last approval was refused in the background shows that line", async () => {
     const line = "HubSpot can't be reached to check this request. Try again in a minute.";
     requestRow.current = makeRequest({ dealData: { ...makeRequest().dealData, approval_notice: line } });

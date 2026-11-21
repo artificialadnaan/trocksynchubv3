@@ -185,3 +185,48 @@ describe("processRfpApproval with Procore project creation retired", () => {
     expect(vi.mocked(createBidBoardProjectFromDeal).mock.calls.length).toBe(0);
   });
 });
+
+// L69 (a4 40810897, OK a92858a3; a4 ruling on d6's point: the 202 is sent before the approval runs, so the line goes in the status email
+// and on the request, where its review page shows it): the approval hands Core the estimator it resolved, and says so when it has none.
+describe("L69: the approval hands Core the CRM's estimator, or says plainly that it has none", () => {
+  const NONE = "No estimator was picked; set one on the bid in T-Rock Core.";
+  const NO_LIST_EMAIL = "This estimator has no email in SyncHub's estimator list; add it there, or pick another.";
+  const statusHtml = () => String((vi.mocked(sendEmail).mock.calls.at(-1)?.[0] as any)?.htmlBody ?? "");
+
+  it("no estimator anywhere (bid 91a8d0b8's shape): Core is handed none, the status email says so, and the request keeps the line", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
+
+    expect(await processRfpApproval("synthetic-token-70", { estimator: "" }, "approver@example.test")).toEqual({ success: true });
+
+    expect(handOffServiceRfpApprovalToCore).toHaveBeenCalledWith(expect.objectContaining({ estimatorEmail: null }));
+    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(
+      70,
+      expect.objectContaining({ status: "approved", dealData: expect.objectContaining({ estimator_handoff_warning: NONE }) }),
+      { expectedStatus: "approving", claimStamp: null },
+    );
+    expect(statusHtml()).toContain(NONE);
+  });
+
+  it("the CRM's stored email with the estimator unchanged: Core is handed THAT email, and no line anywhere", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest({
+      dealData: { dealname: "Synthetic Service RFP", project_number: "DFW-4-70070-aa", project_types: "4", estimator: "Crm Estimator", estimator_email: "crm.estimator@example.test" },
+    }) as any);
+
+    expect(await processRfpApproval("synthetic-token-70", {}, "approver@example.test")).toEqual({ success: true });
+
+    expect(handOffServiceRfpApprovalToCore).toHaveBeenCalledWith(expect.objectContaining({ estimatorEmail: "crm.estimator@example.test" }));
+    const approvedWrite = vi.mocked(storage.updateRfpApprovalRequest).mock.calls.find((c) => (c[1] as any)?.status === "approved")?.[1] as any;
+    expect(approvedWrite?.dealData?.estimator_handoff_warning ?? null).toBeNull();
+    expect(statusHtml()).not.toContain(NONE);
+    expect(statusHtml()).not.toContain(NO_LIST_EMAIL);
+  });
+
+  it("a picked name with no estimator_list email: Core is handed none, and the status email carries the fix-path line", async () => {
+    vi.mocked(storage.getRfpApprovalRequestByToken).mockResolvedValue(crmRequest() as any);
+
+    expect(await processRfpApproval("synthetic-token-70", { estimator: "Not Listed" }, "approver@example.test")).toEqual({ success: true });
+
+    expect(handOffServiceRfpApprovalToCore).toHaveBeenCalledWith(expect.objectContaining({ estimatorEmail: null }));
+    expect(statusHtml()).toContain(NO_LIST_EMAIL);
+  });
+});

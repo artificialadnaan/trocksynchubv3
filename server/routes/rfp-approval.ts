@@ -467,8 +467,13 @@ export function registerRfpApprovalRoutes(app: Express) {
     if (request.status !== 'pending') {
       // `approving` = an approval holds the request (N6; a4 8ea49d91 (3)): it reads the one plain line, never "declined". The
       // other non-declined statuses (an override in progress, held, cancelled) are not "declined" either.
+      // L69: an approval that handed Core no estimator says so here (it answered 202 before it ran).
+      const estimatorLine = (request.dealData as Record<string, any> | null)?.estimator_handoff_warning;
+      const estimatorNote = typeof estimatorLine === 'string' && estimatorLine
+        ? `<p>${estimatorLine.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`
+        : '';
       const statusMsg = request.status === 'approved'
-        ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>`
+        ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>${estimatorNote}`
         : request.status === 'approving'
         ? `<p>${RFP_BEING_APPROVED_MESSAGE}</p>`
         : request.status === 'override_approving'

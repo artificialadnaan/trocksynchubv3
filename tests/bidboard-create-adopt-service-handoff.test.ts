@@ -254,6 +254,16 @@ describe("create-from-rfp ADOPT of a service deal -> TROCK Core handoff", () => 
     expect(coreFetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("L69: the CRM's estimator email rides the adopt handoff to Core (lower-cased) and is kept on the request", async () => {
+    await mapDealTo(SERVICE_NUMBER);
+
+    expect(await performCreateFromRfpVote(vote({ deal: { estimator: "Crm Estimator", estimatorEmail: " Crm.Estimator@Example.test " } }), VOTE_AT)).toBe("adopted");
+
+    expect(handoffArg().estimatorEmail).toBe("crm.estimator@example.test");
+    const [request] = await rows("rfp_approval_requests");
+    expect(request.deal_data).toMatchObject({ estimator_email: "crm.estimator@example.test" });
+  });
+
   it("a distinct vote on a deal with an earlier APPROVED request gets its OWN request id; the old row is untouched", async () => {
     await mapDealTo(SERVICE_NUMBER);
     const earlier = await seedRequest("approved", "crm:rfp:request-1");
