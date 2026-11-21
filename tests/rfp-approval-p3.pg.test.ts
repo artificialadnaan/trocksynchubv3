@@ -651,7 +651,8 @@ describe.skipIf(!BASE_URL)("a4 ADD-2: the footprint is what the approval changed
 });
 
 // a4 round 4 (d6 on 03d7150d: Codex 4651092717 / 4651092719, Greptile 4651097734).
-const BEFORE_UNKNOWN = "HubSpot's values from before the earlier approval weren't recorded, so SyncHub can't put them back. Check the deal in HubSpot, then ask a SyncHub admin to close this request.";
+// a4: the line names a step that exists (no SyncHub screen closes such a request): the person changes the field in HubSpot, then decides.
+const FIELD_LEFT_AMOUNT = "HubSpot still shows the amount an unfinished approval wrote. Change it in HubSpot, then decide here again.";
 const HS_ORIGINALS = { closedate: "1767225600000", proposal_due_date: "1767225600000", description: "HubSpot description", project_description__briefly_describe_the_project_: "HubSpot description" };
 const dueAndDescription = { bid_due_date: "2026-12-15", description: "The attempt's description" };
 
@@ -683,7 +684,7 @@ describe.skipIf(!BASE_URL)("a4 round 4: restore from HubSpot's own snapshot, gua
     expect(await requestStatus(id)).toBe("approved");
   });
 
-  it("T1: a field an earlier attempt may have written with NO snapshot (HubSpot was unreadable then): the decline refuses with its line, writing nothing", async () => {
+  it("T1: a field an earlier attempt wrote with NO snapshot: refused, writing nothing, while HubSpot still shows that attempt's value; fine once a person changes it", async () => {
     const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
     fakeHubSpot();
     const realClient = await hubspotClientMock();
@@ -696,10 +697,16 @@ describe.skipIf(!BASE_URL)("a4 round 4: restore from HubSpot's own snapshot, gua
     expect((await processRfpApproval(token, { amount: "200" }, APPROVER)).success).toBe(false);
     const writes = hubspotUpdateMock.mock.calls.length + stageMock.mock.calls.length;
 
-    expect(await processRfpDecline(token, "other@example.test")).toMatchObject({ success: false, statusCode: 409, message: BEFORE_UNKNOWN });
+    expect(await processRfpDecline(token, "other@example.test")).toMatchObject({ success: false, statusCode: 409, message: FIELD_LEFT_AMOUNT });
 
     expect(hubspotUpdateMock.mock.calls.length + stageMock.mock.calls.length).toBe(writes);
     expect(await requestStatus(id)).toBe("pending");
+
+    hs.amount = "150"; // a person corrects it in HubSpot
+    hs.dealstage = "rfp-stage-set-by-a-person";
+    expect((await processRfpDecline(token, "other@example.test")).success).toBe(true);
+    expect(hs).toMatchObject({ amount: "150", dealstage: "rfp-stage-set-by-a-person" });
+    expect(await requestStatus(id)).toBe("declined");
   });
 
   it("T2: a decision whose claim is lost while it reconciles writes NOTHING back (the reconcile's writes are guarded too)", async () => {
@@ -751,6 +758,19 @@ describe.skipIf(!BASE_URL)("a4 round 4: restore from HubSpot's own snapshot, gua
     expect(await processRfpApproval(token, {}, APPROVER)).toEqual({ success: true });
     expect(hs.amount).toBe("100");
     expect(await notice(id)).toBeNull();
+  });
+
+  it("Greptile 4651150648: the type an interrupted attempt changed is put back though the next reviewer edits only the project number", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+    expect((await processRfpApproval(token, { project_types: "4" }, APPROVER)).success).toBe(false);
+    expect(hs).toMatchObject({ project_number: "DFW-4-54321-cd", project_types: "4" });
+
+    expect(await processRfpApproval(token, { project_number: "DFW-2-54321-zz" }, APPROVER)).toEqual({ success: true });
+
+    expect(hs).toMatchObject({ project_number: "DFW-2-54321-zz", project_types: "2" });
+    expect(await requestStatus(id)).toBe("approved");
   });
 
   it("the notice also clears once the request is declined", async () => {
