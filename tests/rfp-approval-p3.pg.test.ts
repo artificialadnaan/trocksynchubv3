@@ -53,6 +53,7 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 const { storage } = await import("../server/storage.ts");
 const { processRfpApproval, processRfpDecline } = await import("../server/rfp-approval.ts");
 const stageMock = vi.mocked((await import("../server/hubspot.ts")).updateHubSpotDealStage);
+const hubspotClientMock = vi.mocked((await import("../server/hubspot.ts")).getHubSpotClient);
 const handoffMock = vi.mocked((await import("../server/sync/service-rfp-core-outbox.ts")).handOffServiceRfpApprovalToCore);
 const { runRfpApprovingStuckSweep } = await import("../server/sync/rfp-approving-stuck.ts");
 
@@ -156,7 +157,7 @@ const DEAL = "00000000-0000-4000-8000-0000000000f3";
 const HS_DEAL = "910000003";
 const APPROVER = "approver@example.test";
 let tokenSeq = 0;
-async function insertRequest(status: string, o: { system?: "trock_crm" | "hubspot"; p?: pg.Pool; service?: boolean } = {}) {
+async function insertRequest(status: string, o: { system?: "trock_crm" | "hubspot"; p?: pg.Pool; service?: boolean; deal?: Record<string, string> } = {}) {
   const system = o.system ?? "trock_crm";
   const deal = system === "hubspot" ? HS_DEAL : DEAL;
   const token = `synthetic-token-${++tokenSeq}`;
@@ -166,7 +167,7 @@ async function insertRequest(status: string, o: { system?: "trock_crm" | "hubspo
     `INSERT INTO rfp_approval_requests (source_system, source_deal_id, project_number, hubspot_deal_id, token, token_expires_at, status, deal_data)
      VALUES ($1, $2, $7, $3, $4, now() + interval '7 days', $5, $6::jsonb) RETURNING id`,
     [system, deal, system === "hubspot" ? deal : null, token, status,
-      JSON.stringify({ dealname: "Synthetic Deal", project_number: number, project_types: type }), number],
+      JSON.stringify({ dealname: "Synthetic Deal", project_number: number, project_types: type, ...(o.deal ?? {}) }), number],
   );
   return { id: r.rows[0].id as number, token };
 }
@@ -342,6 +343,111 @@ describe.skipIf(!BASE_URL)("an approval claims its row before it writes HubSpot 
     expect(await requestStatus(id)).toBe("approved");
     expect(stageMock).toHaveBeenCalledTimes(2);
     expect(new Set(stageMock.mock.calls.map((c) => c[1]))).toEqual(new Set(["s-1"]));
+    expect(handoffMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// a4 ADD-1 ba1d1a25 (Greptile P1 4650915940): an attempt that wrote HubSpot and then failed is released; the NEXT decision must leave
+// HubSpot equal to ITSELF, whatever the attempt wrote. A fake HubSpot deal: writes land in `hs`, reads answer from it.
+const ORIGINAL = { amount: "100", dealstage: "rfp-stage", project_number: "DFW-2-54321-cd", project_types: "2" };
+let hs: Record<string, string> = {};
+function fakeHubSpot(o: { unreadable?: boolean } = {}) {
+  hs = { ...ORIGINAL };
+  hubspotUpdateMock.mockImplementation(async (_id: string, props: Record<string, string>) => { Object.assign(hs, props); return { success: true }; });
+  stageMock.mockReset();
+  stageMock.mockImplementation(async (_id: string, stage: string) => { hs.dealstage = stage; return { success: true } as any; });
+  hubspotClientMock.mockResolvedValue({ crm: { deals: { basicApi: { getById: vi.fn(async (_id: string, props: string[]) => {
+    if (o.unreadable) throw new Error("synthetic HubSpot outage");
+    return { properties: Object.fromEntries(props.map((k) => [k, hs[k] ?? ""])) };
+  }) } } } } as any);
+}
+/** The first approval writes its fields and its stage, then dies: a handled failure, so its claim is released (the row stays pending). */
+function dieAfterTheFirstStageWrite() {
+  stageMock.mockImplementationOnce(async (_id: string, stage: string) => { hs.dealstage = stage; throw new Error("synthetic crash after the stage write"); });
+}
+const HUBSPOT_UNREACHABLE = "HubSpot can't be reached to check this request. Try again in a minute.";
+
+describe.skipIf(!BASE_URL)("a4 ADD-1: after a released attempt, the next decision leaves HubSpot equal to itself", () => {
+  it("amount: the attempt wrote 200 and died; re-approving the original 100 writes 100 back", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+
+    expect((await processRfpApproval(token, { amount: "200" }, APPROVER)).success).toBe(false);
+    expect(hs.amount).toBe("200");
+    expect(await requestStatus(id)).toBe("pending");
+
+    expect(await processRfpApproval(token, { amount: "100" }, APPROVER)).toEqual({ success: true });
+    expect(hs.amount).toBe("100");
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("type / number: the attempt renumbered it to type 4 and died; re-approving unchanged puts the type-2 number back", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+
+    expect((await processRfpApproval(token, { project_types: "4" }, APPROVER)).success).toBe(false);
+    expect(hs).toMatchObject({ project_number: "DFW-4-54321-cd", project_types: "4" });
+
+    expect(await processRfpApproval(token, {}, APPROVER)).toEqual({ success: true });
+    expect(hs).toMatchObject({ project_number: "DFW-2-54321-cd", project_types: "2" });
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("a decline after the released attempt puts HubSpot back: the original amount and the original stage", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+
+    expect((await processRfpApproval(token, { amount: "200" }, APPROVER)).success).toBe(false);
+    expect(hs).toMatchObject({ amount: "200", dealstage: "s-1" });
+
+    expect((await processRfpDecline(token, "other@example.test")).success).toBe(true);
+    expect(hs).toMatchObject({ amount: "100", dealstage: "rfp-stage" });
+    expect(await requestStatus(id)).toBe("declined");
+  });
+
+  it("HubSpot unreadable after a released attempt: the decline and the approval each refuse with the plain line and write nothing", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+    expect((await processRfpApproval(token, { amount: "200" }, APPROVER)).success).toBe(false);
+    fakeHubSpot({ unreadable: true });
+    hs = { ...ORIGINAL, amount: "200", dealstage: "s-1" };
+    const writesBefore = hubspotUpdateMock.mock.calls.length + stageMock.mock.calls.length;
+
+    expect(await processRfpDecline(token, "other@example.test")).toMatchObject({ success: false, statusCode: 503, message: HUBSPOT_UNREACHABLE });
+    expect(await processRfpApproval(token, {}, APPROVER)).toMatchObject({ success: false, statusCode: 503, message: HUBSPOT_UNREACHABLE });
+
+    expect(hubspotUpdateMock.mock.calls.length + stageMock.mock.calls.length).toBe(writesBefore);
+    expect(await requestStatus(id)).toBe("pending");
+  });
+
+  it("the claim stamp: an approval whose claim was released and TAKEN AGAIN cannot finish on the new claim (one Core job)", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", service: true });
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const gateA = new Promise<void>((r) => { releaseA = r; });
+    const gateB = new Promise<void>((r) => { releaseB = r; });
+    stageMock.mockReset();
+    stageMock.mockResolvedValue({ success: true } as any);
+    stageMock.mockImplementationOnce(async () => { await gateA; return { success: true } as any; });
+    stageMock.mockImplementationOnce(async () => { await gateB; return { success: true } as any; });
+    handoffMock.mockClear();
+
+    const a = processRfpApproval(token, {}, APPROVER);
+    expect(await until(() => stageMock.mock.calls.length === 1)).toBe(true);
+    await sql(`UPDATE rfp_approval_approving SET started_at = started_at - interval '31 minutes' WHERE request_id = $1`, [id]);
+    expect((await runRfpApprovingStuckSweep({ db: pool, recipient: "" })).released).toEqual([id]);
+    const b = processRfpApproval(token, {}, APPROVER);
+    expect(await until(() => stageMock.mock.calls.length === 2)).toBe(true);
+    releaseA();
+
+    expect(await a).toMatchObject({ success: false, statusCode: 409 });
+    releaseB();
+    expect(await b).toEqual({ success: true });
+    expect(await requestStatus(id)).toBe("approved");
     expect(handoffMock).toHaveBeenCalledTimes(1);
   });
 });
