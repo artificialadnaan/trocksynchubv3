@@ -45,7 +45,7 @@ beforeEach(() => {
 
 describe("the intake keeps the CRM's estimator email", () => {
   const deal = (estimatorEmail: unknown) => ({
-    sourceSystem: "trock_crm" as const, sourceDealId: "d-69", sourceEventId: "e-69",
+    sourceSystem: "trock_crm" as const, sourceDealId: "d-69", sourceEventId: "e-69", attachments: [],
     deal: { name: "Synthetic", projectNumber: "DFW-4-69069-aa", projectType: "4", amount: null, estimator: "Crm Estimator", estimatorEmail } as any,
   });
 
