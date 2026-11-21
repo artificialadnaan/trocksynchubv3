@@ -2,11 +2,12 @@
  * Alert `rfp_request_approving_stuck` (S0b-2b; runbook r5 §1; d9 Q7). A request is STUCK when its status is `approving` and
  * rfp_approval_approving.started_at is more than 30 minutes old: the process that claimed it most likely died mid-create, and
  * the Procore project may or may not exist. A person resolves it with scripts/rfp-resolve-approving.ts under an a4 GO.
- * N6 (a4 078c37ce residual; a4 8ea49d91): a CLAIM-ONLY row (no submit_at, no Bid Board project: an approval that died between its
- * claim and its final write; nothing can be creating since Procore creation retired) is RELEASED back to pending by the sweep
+ * N6 (a4 078c37ce residual; a4 8ea49d91): an approval CLAIM row (the N6 claim's shape: no submit_at, no recorded approver, no Bid
+ * Board project: an approval that died between its claim and its final write) is RELEASED back to pending by the sweep
  * instead, with one audit line (rfp_approval_claim_released), so the link works again without anyone running anything.
  * Re-approving is safe: the approval's HubSpot writes set absolute values and Core / the CRM are told only after its final write.
- * A submitted row and a row with no side-table row (age unknown) still alert as before.
+ * A Procore-era claim (it recorded its approver; nothing makes one since Procore creation retired), a submitted row and a row with
+ * no side-table row (age unknown) still alert as before, for the resolver.
  *
  * - One debounce key PER REQUEST (`rfp-approving-stuck:<id>`) on bidboard-crm-alert's state machine, re-alerting every 24 h
  *   while the row stays stuck.
@@ -40,13 +41,13 @@ export type StuckSweepOptions = { db: Querier; now?: Date; recipient?: string; s
 /** `alerted` / `cleared`: the request ids whose stuck / cleared email was SENT by this sweep; `released`: claims it released. */
 export type StuckSweepResult = { stuck: StuckApprovingRequest[]; alerted: number[]; cleared: number[]; released: number[] };
 
-/** Releases claim-only `approving` rows older than 30 minutes (database clock) to pending, in ONE statement; their side rows go. */
+/** Releases approval-claim `approving` rows older than 30 minutes (database clock) to pending, in ONE statement; their side rows go. */
 export async function releaseStaleApprovalClaims(db: Querier): Promise<Array<{ requestId: number; sourceDealId: string }>> {
   const { rows } = await db.query(
     `WITH released AS (
        UPDATE rfp_approval_requests r SET status = 'pending'
          FROM rfp_approval_approving a
-        WHERE a.request_id = r.id AND r.status = 'approving' AND r.bidboard_project_id IS NULL AND a.submit_at IS NULL
+        WHERE a.request_id = r.id AND r.status = 'approving' AND r.bidboard_project_id IS NULL AND a.submit_at IS NULL AND a.approved_by IS NULL
           AND a.started_at < (now() AT TIME ZONE 'UTC') - make_interval(mins => $1)
        RETURNING r.id, r.source_deal_id
      ), gone AS (

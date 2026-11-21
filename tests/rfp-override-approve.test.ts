@@ -23,6 +23,10 @@ vi.mock("../server/sync/rfp-approving.ts", () => ({
   RFP_APPROVING_STATUS: "approving",
   claimRfpRequestForCreate: vi.fn(async () => ({ outcome: "legacy" })),
   markRfpApprovingSubmitted: vi.fn(async () => {}),
+  // N6: the approval claim (pending -> approving) before its first HubSpot write; this suite is not about it, so it always holds.
+  claimRfpRequestForApproval: vi.fn(async () => ({ claimed: true, stamp: null })),
+  releaseRfpApprovalClaim: vi.fn(async () => true),
+  clearRfpApprovalClaimRow: vi.fn(async () => {}),
 }));
 
 vi.mock("../server/storage.ts", () => ({
