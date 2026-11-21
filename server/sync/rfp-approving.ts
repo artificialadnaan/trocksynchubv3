@@ -122,18 +122,27 @@ export async function markRfpApprovingSubmitted(requestId: number, db?: Executor
  */
 export type RfpApprovalClaim =
   | { claimed: false }
-  | { claimed: true; stamp: string | null; released: boolean; footprint: string[]; stageBefore: string | null; stageRecorded: boolean };
+  | { claimed: true; stamp: string | null; released: boolean } & AttemptRecord;
 /**
- * The side row's edited_fields: the footprint keys (true), plus the deal's HubSpot stage before any attempt wrote: `_stage_before`, or
- * `_stage_unknown` when it could not be read (a4 ADD-2: a fresh approval proceeds as main did). Either, once recorded, is kept for good.
+ * The side row's edited_fields (a4 ADD-1 / ADD-2, round 4):
+ * - the footprint: the form keys an attempt changes (true);
+ * - `_before`: HubSpot's values of every property an attempt may write (and `dealstage`), read BEFORE its first write, the earliest
+ *   value per property kept for good, so a later decision restores what HubSpot really held, never deal_data's copy (which, for a
+ *   HubSpot request, has no stage, due dates or description: d6 T1);
+ * - `_before_unknown`: the properties whose value could not be read (a fresh approval still goes on, as main did).
  */
-const STAGE_BEFORE_KEY = "_stage_before";
-const STAGE_UNKNOWN_KEY = "_stage_unknown";
-function readFootprint(editedFields: unknown): { footprint: string[]; stageBefore: string | null; stageRecorded: boolean } {
+export type AttemptRecord = { footprint: string[]; before: Record<string, string>; unknown: string[] };
+const BEFORE_KEY = "_before";
+const BEFORE_UNKNOWN_KEY = "_before_unknown";
+function readFootprint(editedFields: unknown): AttemptRecord {
   const o = (editedFields && typeof editedFields === "object" ? editedFields : {}) as Record<string, unknown>;
-  const stage = o[STAGE_BEFORE_KEY];
-  const known = typeof stage === "string" && stage ? stage : null;
-  return { footprint: Object.keys(o).filter((k) => !k.startsWith("_")), stageBefore: known, stageRecorded: Boolean(known) || o[STAGE_UNKNOWN_KEY] === true };
+  const before = o[BEFORE_KEY] && typeof o[BEFORE_KEY] === "object" ? (o[BEFORE_KEY] as Record<string, unknown>) : {};
+  const unknown = Array.isArray(o[BEFORE_UNKNOWN_KEY]) ? (o[BEFORE_UNKNOWN_KEY] as unknown[]).map(String) : [];
+  return {
+    footprint: Object.keys(o).filter((k) => !k.startsWith("_")),
+    before: Object.fromEntries(Object.entries(before).map(([k, v]) => [k, String(v ?? "")])),
+    unknown: unknown.filter((k) => !(k in before)),
+  };
 }
 export async function claimRfpRequestForApproval(requestId: number, editedKeys: string[] = [], db?: Executor): Promise<RfpApprovalClaim> {
   const exec = db ?? (await defaultDb());
@@ -146,12 +155,13 @@ export async function claimRfpRequestForApproval(requestId: number, editedKeys: 
       RETURNING id
     `));
     if (!claimed) return { claimed: false };
-    if (!sideTable) return { claimed: true, stamp: null, released: false, footprint: [], stageBefore: null, stageRecorded: false };
+    if (!sideTable) return { claimed: true, stamp: null, released: false, footprint: [], before: {}, unknown: [] };
     const prior = firstRow(await tx.execute(sql`SELECT edited_fields FROM rfp_approval_approving WHERE request_id = ${requestId} FOR UPDATE`));
-    const { footprint, stageBefore, stageRecorded } = prior ? readFootprint(prior.edited_fields) : { footprint: [], stageBefore: null, stageRecorded: false };
+    const record = prior ? readFootprint(prior.edited_fields) : { footprint: [], before: {}, unknown: [] };
     const keys = JSON.stringify({
-      ...Object.fromEntries([...new Set([...footprint, ...editedKeys])].filter((k) => !k.startsWith("_")).map((k) => [k, true])),
-      ...(stageBefore ? { [STAGE_BEFORE_KEY]: stageBefore } : stageRecorded ? { [STAGE_UNKNOWN_KEY]: true } : {}),
+      ...Object.fromEntries([...new Set([...record.footprint, ...editedKeys])].filter((k) => !k.startsWith("_")).map((k) => [k, true])),
+      [BEFORE_KEY]: record.before,
+      [BEFORE_UNKNOWN_KEY]: record.unknown,
     });
     // This claim owns the row from here: anything a reset override left (its recorded approver and inputs) is cleared, so the row
     // has the N6 claim shape the stuck sweep releases (CodeRabbit on #143).
@@ -162,7 +172,7 @@ export async function claimRfpRequestForApproval(requestId: number, editedKeys: 
         approved_by = NULL, approved_attachments = NULL, force = NULL, hubspot_done_at = NULL
       RETURNING started_at::text AS stamp
     `));
-    return { claimed: true, stamp: side.stamp as string, released: Boolean(prior), footprint, stageBefore, stageRecorded };
+    return { claimed: true, stamp: side.stamp as string, released: Boolean(prior), ...record };
   });
 }
 
@@ -172,29 +182,32 @@ export async function claimRfpRequestForApproval(requestId: number, editedKeys: 
  */
 export async function releasedApprovalAttempt(
   requestId: number, db?: Executor,
-): Promise<{ released: boolean; footprint: string[]; stageBefore: string | null; stageRecorded: boolean }> {
+): Promise<{ released: boolean } & AttemptRecord> {
   const exec = db ?? (await defaultDb());
-  if (!firstRow(await exec.execute(sql`SELECT to_regclass('public.rfp_approval_approving')::text AS t`))?.t) return { released: false, footprint: [], stageBefore: null, stageRecorded: false };
+  if (!firstRow(await exec.execute(sql`SELECT to_regclass('public.rfp_approval_approving')::text AS t`))?.t) return { released: false, footprint: [], before: {}, unknown: [] };
   const row = firstRow(await exec.execute(sql`
     SELECT a.edited_fields FROM rfp_approval_approving a JOIN rfp_approval_requests r ON r.id = a.request_id
      WHERE a.request_id = ${requestId} AND r.status = 'pending' AND a.submit_at IS NULL AND a.approved_by IS NULL
   `));
-  return row ? { released: true, ...readFootprint(row.edited_fields) } : { released: false, footprint: [], stageBefore: null, stageRecorded: false };
+  return row ? { released: true, ...readFootprint(row.edited_fields) } : { released: false, footprint: [], before: {}, unknown: [] };
 }
 
 /**
- * Records the deal's HubSpot stage before this attempt's first write, once per request (the earliest is kept), on THIS claim's row.
- * `stage` null = it could not be read: recorded as unknown, and never filled in later (a later read could see a stage an attempt moved).
+ * Records HubSpot's values from BEFORE this attempt's first write, on THIS claim's row: `values` merged in with the earliest value per
+ * property kept (an earlier attempt's reading wins); `unknownProps` (the read failed) added to `_before_unknown`.
  */
-export async function recordStageBefore(requestId: number, stamp: string, stage: string | null, db?: Executor): Promise<void> {
+export async function recordHubSpotBefore(
+  requestId: number, stamp: string, values: Record<string, string>, unknownProps: string[], db?: Executor,
+): Promise<void> {
   const exec = db ?? (await defaultDb());
-  const entry = stage ? sql`jsonb_build_object(${STAGE_BEFORE_KEY}::text, ${stage}::text)` : sql`jsonb_build_object(${STAGE_UNKNOWN_KEY}::text, true)`;
   await exec.execute(sql`
     UPDATE rfp_approval_approving
-       SET edited_fields = coalesce(edited_fields, '{}'::jsonb) || ${entry}
+       SET edited_fields = jsonb_set(
+             jsonb_set(coalesce(edited_fields, '{}'::jsonb), ${"{" + BEFORE_KEY + "}"}::text[],
+                       ${JSON.stringify(values)}::jsonb || coalesce(edited_fields -> ${BEFORE_KEY}, '{}'::jsonb)),
+             ${"{" + BEFORE_UNKNOWN_KEY + "}"}::text[],
+             coalesce(edited_fields -> ${BEFORE_UNKNOWN_KEY}, '[]'::jsonb) || ${JSON.stringify(unknownProps)}::jsonb)
      WHERE request_id = ${requestId} AND started_at = ${stamp}::timestamp
-       AND NOT jsonb_exists(coalesce(edited_fields, '{}'::jsonb), ${STAGE_BEFORE_KEY})
-       AND NOT jsonb_exists(coalesce(edited_fields, '{}'::jsonb), ${STAGE_UNKNOWN_KEY})
   `);
 }
 

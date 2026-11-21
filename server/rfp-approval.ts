@@ -31,8 +31,8 @@ import {
 } from './sync/bidboard-callback-worker';
 import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox';
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
-import { RFP_APPROVING_STATUS, claimRfpRequestForApproval, clearRfpApprovalClaimRow, recordStageBefore, releaseRfpApprovalClaim, releasedApprovalAttempt, rfpApprovalClaimStillHeld } from './sync/rfp-approving';
-import { RFP_APPROVAL_STOPPED_MESSAGE, RFP_BEING_APPROVED_MESSAGE, RFP_HUBSPOT_UNREACHABLE_MESSAGE, RFP_STAGE_UNKNOWN_MESSAGE } from '@shared/rfp-status-display';
+import { RFP_APPROVING_STATUS, claimRfpRequestForApproval, clearRfpApprovalClaimRow, recordHubSpotBefore, releaseRfpApprovalClaim, releasedApprovalAttempt, rfpApprovalClaimStillHeld, type AttemptRecord } from './sync/rfp-approving';
+import { RFP_APPROVAL_STOPPED_MESSAGE, RFP_BEING_APPROVED_MESSAGE, RFP_HUBSPOT_BEFORE_UNKNOWN_MESSAGE, RFP_HUBSPOT_UNREACHABLE_MESSAGE, RFP_STAGE_UNKNOWN_MESSAGE } from '@shared/rfp-status-display';
 import { PROCORE_CREATE_RETIRED_ERROR } from './sync/procore-create-retired';
 import { enqueueRfpApprovedCallbackIfCoreConfirmed } from './sync/rfp-approved-callback';
 
@@ -370,6 +370,8 @@ async function sendRfpApprovalStatusEmail(params: {
   bidboardProjectId?: string;
   bidboardFailed: boolean;
   steps: RfpStatusStep[];
+  /** The recipient; the admin address when absent. */
+  to?: string;
 }): Promise<void> {
   try {
     const allSuccess = params.steps.every(s => s.success);
@@ -418,12 +420,12 @@ async function sendRfpApprovalStatusEmail(params: {
     </div>`;
 
     await sendEmail({
-      to: RFP_ADMIN_EMAIL,
+      to: params.to ?? RFP_ADMIN_EMAIL,
       subject: `RFP ${allSuccess ? 'Approved' : 'Partial Failure'}: ${params.dealName} (${params.projectNumber || 'no number'})`,
       htmlBody,
       fromName: 'T-Rock Sync Hub',
     });
-    log(`[rfp-approval] Status email sent to ${RFP_ADMIN_EMAIL} for deal ${params.hubspotDealId}`, 'rfp');
+    log(`[rfp-approval] Status email sent to ${params.to ? 'the approver' : RFP_ADMIN_EMAIL} for deal ${params.hubspotDealId}`, 'rfp');
   } catch (emailErr: any) {
     console.error(`[rfp-approval] Failed to send status email: ${emailErr.message}`);
   }
@@ -1396,12 +1398,13 @@ function refusedNotPending(status: string): { success: false; error: string; sta
     : { success: false, error: `Request already ${status}` };
 }
 
-// ── An interrupted attempt's HubSpot writes (a4 ADD-1 ba1d1a25; Greptile P1 4650915940) ──────────────────────────────────────────
-// A claim released after a crash may have left HubSpot written with THAT attempt's values (its number, its edited fields, the
-// approved stage), while the stored dealData still holds the originals. The next decision reads HubSpot's CURRENT values for every
-// field the interrupted attempt(s) may have written (the claim's footprint) and writes back, absolutely, whatever differs from the
-// new decision: the new approval's values, or on a decline the stored originals and the deal's original stage. HubSpot unreadable ⇒
-// the decision refuses with one plain line and writes nothing.
+// ── An interrupted attempt's HubSpot writes (a4 ADD-1 ba1d1a25, ADD-2 6025b95c, round 4; Greptile P1 4650915940 / 4650989301) ───────
+// A claim released after a crash may have left HubSpot written with THAT attempt's values. Before its first write, every attempt
+// snapshots HubSpot's own values of the properties it may write (and the stage) onto its claim (`_before`, earliest kept). The next
+// decision restores, absolutely, every property an earlier attempt may have written and this decision does not write itself, FROM THAT
+// SNAPSHOT, never from deal_data (whose HubSpot copy has no stage, due dates or description: d6 T1). A decline restores the stage too.
+// Refusals, each with one plain line and nothing written: HubSpot unreadable; a property an earlier attempt may have written with no
+// snapshot; an unknown stage while HubSpot shows the approved stage (ADD-2). Every write takes the claim-ownership check (d6 T2).
 const APPROVAL_HUBSPOT_KEYS = ['dealname', 'amount', 'project_types', 'project_number', 'project_location',
   'address', 'city', 'state', 'zip', 'country', 'description', 'estimator',
   'notes', 'due_date', 'client_email', 'client_phone', 'company_name'];
@@ -1410,91 +1413,82 @@ const DESCRIPTION_HUBSPOT_KEY = 'project_description__briefly_describe_the_proje
 class HubSpotUnreachableError extends Error {}
 /** A decline after a released attempt whose pre-write stage is unknown while HubSpot shows the approved stage (a4 ADD-2). */
 class HubSpotStageUnknownError extends Error {}
+/** A property an earlier attempt may have written, with no snapshot of what HubSpot held before it (round 4). */
+class HubSpotBeforeUnknownError extends Error {}
 /** This attempt's claim no longer holds the row (the stuck sweep released it; maybe another approval took it): write nothing more. */
 class ApprovalClaimLostError extends Error {}
 
-/** The deal's current HubSpot stage, read before an attempt's first write (so a decline after a release can put it back). */
-async function readHubSpotStage(hubspotDealId: string): Promise<string> {
+/** The HubSpot properties an approval writes for one changed form key. */
+function hubspotPropsFor(key: string): string[] {
+  if (key === 'project_types' || key === 'project_number') return ['project_number', 'project_types'];
+  if (key === 'description') return ['description', DESCRIPTION_HUBSPOT_KEY];
+  if (key === 'bid_due_date') return ['closedate', 'proposal_due_date'];
+  return APPROVAL_HUBSPOT_KEYS.includes(key) ? [key] : [];
+}
+const propsForKeys = (keys: string[]) => [...new Set(keys.flatMap(hubspotPropsFor))];
+
+/** HubSpot's current values of these properties. Throws HubSpotUnreachableError when HubSpot can't be read. */
+async function readHubSpotProps(hubspotDealId: string, props: string[]): Promise<Record<string, string>> {
   try {
     const client = await getHubSpotClient();
-    return String(((await client.crm.deals.basicApi.getById(hubspotDealId, ['dealstage'])) as any)?.properties?.dealstage ?? '');
+    const got = ((await client.crm.deals.basicApi.getById(hubspotDealId, props)) as any)?.properties ?? {};
+    return Object.fromEntries(props.map((k) => [k, String(got[k] ?? '')]));
   } catch (err: any) {
     throw new HubSpotUnreachableError(err?.message || String(err));
   }
-}
-
-/** What HubSpot should hold, for each property an approval could have written from these edited keys. `edited` null = a decline. */
-function hubspotTargets(dealData: Record<string, any>, keys: string[], edited: Record<string, string> | null): Record<string, string> {
-  const e = edited ?? {};
-  const want: Record<string, string> = {};
-  const value = (k: string) => String((e[k] !== undefined ? e[k] : dealData[k]) ?? '');
-  for (const k of keys) {
-    if (k === 'project_types' || k === 'project_number') {
-      const stored = String(dealData.project_number ?? '');
-      const storedType = parseProjectTypeFromNumber(stored) ?? dealData.project_types ?? '';
-      const type = e.project_types;
-      const changed = Boolean(type) && type !== storedType;
-      want.project_number = changed ? replaceProjectTypeInNumber(stored, type) : stored;
-      want.project_types = changed ? type : String(dealData.project_types ?? '');
-    } else if (APPROVAL_HUBSPOT_KEYS.includes(k)) {
-      want[k] = value(k);
-    }
-    if (k === 'description') want[DESCRIPTION_HUBSPOT_KEY] = e.description !== undefined ? e.description : String(dealData[DESCRIPTION_HUBSPOT_KEY] ?? '');
-    if (k === 'bid_due_date') {
-      const date = e.bid_due_date;
-      if (date && /^\d{4}-\d{2}-\d{2}/.test(date)) {
-        want.closedate = new Date(date).getTime().toString();
-        want.proposal_due_date = want.closedate;
-      } else {
-        want.closedate = String(dealData.closedate ?? '');
-        want.proposal_due_date = String(dealData.proposal_due_date ?? '');
-      }
-    }
-  }
-  return want;
 }
 
 /**
- * Reconcile HubSpot after a released attempt: read the current values of the footprint's properties (plus the stage on a decline),
- * then write absolutely the ones that differ from the decision. Throws HubSpotUnreachableError when HubSpot can't be read.
+ * Before this attempt's first HubSpot write: snapshot what HubSpot holds now for every property it may write and for the stage, skipping
+ * what an earlier attempt already recorded. A read that fails records them as unknown and the approval goes on (a4 ADD-2).
+ */
+async function snapshotHubSpotBefore(requestId: number, stamp: string, hubspotDealId: string, record: AttemptRecord, keys: string[]): Promise<void> {
+  const props = [...new Set([...propsForKeys(keys), 'dealstage'])].filter((p) => !(p in record.before) && !record.unknown.includes(p));
+  if (props.length === 0) return;
+  try {
+    await recordHubSpotBefore(requestId, stamp, await readHubSpotProps(hubspotDealId, props), []);
+  } catch (err: any) {
+    if (!(err instanceof HubSpotUnreachableError)) throw err;
+    log(`[rfp-approval] Request ${requestId}: HubSpot unreadable before the first write; ${props.length} value(s) recorded as unknown (${err.message})`, 'rfp');
+    await recordHubSpotBefore(requestId, stamp, {}, props);
+  }
+}
+
+/**
+ * Put HubSpot right after a released attempt. `writtenNow` = the properties THIS decision writes itself (an approval's changes; none for
+ * a decline). `guard` throws ApprovalClaimLostError when this decision's claim no longer holds the row.
  */
 async function reconcileReleasedAttempt(
-  hubspotDealId: string, dealData: Record<string, any>, footprint: string[], edited: Record<string, string> | null,
-  stageBefore: string | null = null,
+  hubspotDealId: string, record: AttemptRecord, writtenNow: string[], decline: boolean, guard: () => Promise<void>,
 ): Promise<void> {
-  const want = hubspotTargets(dealData, footprint, edited);
-  const props = [...Object.keys(want), ...(edited === null ? ['dealstage'] : [])];
-  if (props.length === 0) return;
-  let current: Record<string, any>;
-  try {
-    const client = await getHubSpotClient();
-    current = ((await client.crm.deals.basicApi.getById(hubspotDealId, props)) as any)?.properties ?? {};
-  } catch (err: any) {
-    throw new HubSpotUnreachableError(err?.message || String(err));
-  }
-  // The stage the deal had before ANY attempt wrote (recorded on the claim; Greptile P1 4650989301: normalizedDealData keeps none).
-  const originalStage = String(stageBefore ?? dealData.dealstage ?? '');
-  if (edited === null && !originalStage) {
-    // Unknown (a4 ADD-2): never restore blindly, and refuse BEFORE writing anything. While HubSpot shows the approved stage the decline
-    // refuses with its line; a person moves the deal back in HubSpot, then the decline goes through (the stage then left as they set it).
+  const restore = propsForKeys(record.footprint).filter((p) => !writtenNow.includes(p));
+  if (restore.length === 0 && !decline) return;
+  const current = await readHubSpotProps(hubspotDealId, [...restore, ...(decline ? ['dealstage'] : [])]);
+  if (restore.some((p) => !(p in record.before))) throw new HubSpotBeforeUnknownError();
+  const originalStage = record.before.dealstage ?? '';
+  if (decline && !originalStage) {
+    // Unknown stage (a4 ADD-2): never restore blindly. While HubSpot shows the approved stage the decline refuses with its line; once a
+    // person moves the deal in HubSpot, the decline goes through and leaves their stage.
     const approvedStages = new Set<string>();
     for (const name of ['Estimating', 'Service - Estimating', 'Service – Estimating']) {
       const s = await resolveHubspotStageId(name);
       if (s?.stageId) approvedStages.add(String(s.stageId));
     }
-    if (approvedStages.has(String(current.dealstage ?? ''))) throw new HubSpotStageUnknownError();
+    if (approvedStages.has(current.dealstage ?? '')) throw new HubSpotStageUnknownError();
   }
   const differs: Record<string, string> = {};
-  for (const [k, v] of Object.entries(want)) if (String(current[k] ?? '') !== v) differs[k] = v;
+  for (const p of restore) if (current[p] !== record.before[p]) differs[p] = record.before[p];
   if (Object.keys(differs).length > 0) {
+    await guard();
     const res = await updateHubSpotDeal(hubspotDealId, differs);
     if (res && (res as any).success === false) throw new Error(`HubSpot write-back failed: ${(res as any).message}`);
   }
-  if (edited === null && originalStage && String(current.dealstage ?? '') !== originalStage) {
+  if (decline && originalStage && current.dealstage !== originalStage) {
+    await guard();
     const res = await updateHubSpotDealStage(hubspotDealId, originalStage);
     if (res && (res as any).success === false) throw new Error(`HubSpot stage write-back failed: ${(res as any).message}`);
   }
-  log(`[rfp-approval] Deal ${hubspotDealId}: reconciled ${Object.keys(differs).length} field(s) an interrupted attempt may have left in HubSpot`, 'rfp');
+  log(`[rfp-approval] Deal ${hubspotDealId}: restored ${Object.keys(differs).length} field(s) an interrupted attempt may have left in HubSpot`, 'rfp');
 }
 
 const hubspotUnreachable = () => ({ success: false as const, statusCode: 503, error: 'hubspot_unreachable', message: RFP_HUBSPOT_UNREACHABLE_MESSAGE });
@@ -1512,12 +1506,19 @@ async function tellApproverRefused(request: any, approverEmail: string, line: st
     approverEmail,
     bidboardFailed: false,
     steps: [{ name: 'Approval not recorded', success: false, detail: line }],
+    // To the person who pressed Approve (d6 T3; a4: what ADD-2 meant); the status email's usual address is the admin's.
+    to: approverEmail,
   });
   try {
     await storage.updateRfpApprovalRequest(request.id, { dealData: { ...dealData, approval_notice: line } } as any, { expectedStatus: 'pending' });
   } catch (err: any) {
     log(`[rfp-approval] Request ${request.id}: the refusal notice could not be kept on the request: ${err?.message || err}`, 'rfp');
   }
+}
+function withoutApprovalNotice(dealData: Record<string, any>): Record<string, any> {
+  const rest = { ...dealData };
+  delete rest.approval_notice;
+  return rest;
 }
 const refusalLine = (status: string) =>
   status === RFP_APPROVING_STATUS ? RFP_BEING_APPROVED_MESSAGE : `This RFP is already ${status}; this approval was not recorded.`;
@@ -1601,31 +1602,28 @@ export async function processRfpApproval(
         return { ...refusedNotPending(status), statusCode: 409 };
       }
       claim = { requestId: request.id, stamp: claimed.stamp };
-      // Before this attempt's first HubSpot write: the deal's stage as it is now, kept once per request on the claim, so a decline
-      // after a release can put it back (Greptile P1 4650989301). HubSpot unreadable ⇒ the plain line, nothing written.
-      // A stage that can't be read does NOT refuse a fresh approval (a4 ADD-2): it goes on as main did, the stage recorded as unknown.
-      if (request.sourceSystem === 'hubspot' && claimed.stamp !== null && !claimed.stageRecorded) {
-        let stage: string | null = null;
-        try {
-          stage = (await readHubSpotStage(identity.sourceDealId)) || null;
-        } catch (err: any) {
-          if (!(err instanceof HubSpotUnreachableError)) throw err;
-          log(`[rfp-approval] Request ${request.id}: HubSpot stage unreadable before the first write; recorded as unknown (${err.message})`, 'rfp');
-        }
-        await recordStageBefore(request.id, claimed.stamp, stage);
-      }
-      // An earlier attempt was released (a4 ADD-1): put right what it may have left in HubSpot before this decision writes.
-      if (claimed.released && request.sourceSystem === 'hubspot' && claimed.footprint.length > 0) {
-        try {
-          await reconcileReleasedAttempt(identity.sourceDealId, request.dealData as Record<string, any>, claimed.footprint, editedFields);
-        } catch (err: any) {
-          if (!(err instanceof HubSpotUnreachableError)) throw err;
-          const held = claim;
-          claim = null;
-          await releaseRfpApprovalClaim(held.requestId, held.stamp);
-          log(`[rfp-approval] Request ${request.id}: HubSpot unreadable after a released attempt; nothing written (${err.message})`, 'rfp');
-          await tellApproverRefused(request, approverEmail, RFP_HUBSPOT_UNREACHABLE_MESSAGE);
-          return hubspotUnreachable();
+      if (request.sourceSystem === 'hubspot' && claimed.stamp !== null) {
+        const held = { requestId: request.id, stamp: claimed.stamp };
+        const guard = async () => {
+          if (!(await rfpApprovalClaimStillHeld(held.requestId, held.stamp))) throw new ApprovalClaimLostError();
+        };
+        // Before this attempt's first HubSpot write: what HubSpot holds now, kept on the claim (round 4: d6 T1).
+        await snapshotHubSpotBefore(request.id, claimed.stamp, identity.sourceDealId, claimed, footprintKeys);
+        // An earlier attempt was released (a4 ADD-1): put right what it may have left in HubSpot before this decision writes.
+        if (claimed.released && claimed.footprint.length > 0) {
+          try {
+            await reconcileReleasedAttempt(identity.sourceDealId, claimed, propsForKeys(footprintKeys), false, guard);
+          } catch (err: any) {
+            const line = err instanceof HubSpotUnreachableError ? RFP_HUBSPOT_UNREACHABLE_MESSAGE
+              : err instanceof HubSpotBeforeUnknownError ? RFP_HUBSPOT_BEFORE_UNKNOWN_MESSAGE : null;
+            if (!line) throw err;
+            claim = null;
+            await releaseRfpApprovalClaim(held.requestId, held.stamp);
+            log(`[rfp-approval] Request ${request.id}: after a released attempt, nothing written (${err.message || err.constructor.name})`, 'rfp');
+            await tellApproverRefused(request, approverEmail, line);
+            return err instanceof HubSpotUnreachableError ? hubspotUnreachable()
+              : { success: false, statusCode: 409, error: 'hubspot_before_unknown', message: line };
+          }
         }
       }
     }
@@ -1813,6 +1811,8 @@ export async function processRfpApproval(
       approvedBy: approverEmail,
       approvedAt,
       bidboardProjectId: null,
+      // A refusal notice from an earlier attempt goes once the request is decided (a4 round 4).
+      ...(dealData.approval_notice !== undefined ? { dealData: withoutApprovalNotice(dealData) } : {}),
       // Override-approve clears the prior decline so reporting can't show both an approved and a rejected decision.
       ...(force ? { declinedBy: null, declinedAt: null } : {}),
     }, claim ? { expectedStatus: RFP_APPROVING_STATUS, claimStamp: claim.stamp } : { expectedStatus: request.status });
@@ -2034,13 +2034,25 @@ export async function processRfpDecline(
           const now = await storage.getRfpApprovalRequestByToken(token);
           return { ...refusedNotPending(now?.status ?? 'missing'), statusCode: 409 };
         }
+        const stamp = claimed.stamp;
+        const guard = async () => {
+          if (stamp !== null && !(await rfpApprovalClaimStillHeld(request.id, stamp))) throw new ApprovalClaimLostError();
+        };
         try {
-          await reconcileReleasedAttempt(sourceDealId, request.dealData as Record<string, any>, claimed.footprint, null, claimed.stageBefore ?? prior.stageBefore);
+          await reconcileReleasedAttempt(sourceDealId, claimed, [], true, guard);
         } catch (err: any) {
+          if (err instanceof ApprovalClaimLostError) {
+            const now = await storage.getRfpApprovalRequestByToken(token);
+            return { ...refusedNotPending(now?.status ?? 'missing'), statusCode: 409 };
+          }
           await releaseRfpApprovalClaim(request.id, claimed.stamp);
           if (err instanceof HubSpotStageUnknownError) {
             log(`[rfp-approval] Request ${request.id}: the pre-write HubSpot stage is unknown and HubSpot shows the approved stage; decline refused`, 'rfp');
             return { success: false, statusCode: 409, error: 'hubspot_stage_unknown', message: RFP_STAGE_UNKNOWN_MESSAGE };
+          }
+          if (err instanceof HubSpotBeforeUnknownError) {
+            log(`[rfp-approval] Request ${request.id}: a field an earlier attempt may have written has no snapshot; decline refused`, 'rfp');
+            return { success: false, statusCode: 409, error: 'hubspot_before_unknown', message: RFP_HUBSPOT_BEFORE_UNKNOWN_MESSAGE };
           }
           if (!(err instanceof HubSpotUnreachableError)) throw err;
           log(`[rfp-approval] Request ${request.id}: HubSpot unreadable after a released attempt; the decline wrote nothing (${err.message})`, 'rfp');
@@ -2058,6 +2070,8 @@ export async function processRfpDecline(
       status: 'declined',
       declinedBy: declinerEmail,
       declinedAt,
+      // A refusal notice from an earlier attempt goes once the request is decided (a4 round 4).
+      ...((request.dealData as any)?.approval_notice !== undefined ? { dealData: withoutApprovalNotice(request.dealData as Record<string, any>) } : {}),
     };
     const callbackData = buildRfpDeclinedCallbackData({
       request,
