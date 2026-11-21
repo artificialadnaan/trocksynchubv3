@@ -120,7 +120,16 @@ export async function markRfpApprovingSubmitted(requestId: number, db?: Executor
  * attempt's: a release keeps the row, so `released` + `footprint` tell the next decision which HubSpot fields an interrupted attempt
  * may have left behind (a4 ADD-1 ba1d1a25, Greptile P1 4650915940); the row goes only when a decision completes.
  */
-export type RfpApprovalClaim = { claimed: false } | { claimed: true; stamp: string | null; released: boolean; footprint: string[] };
+export type RfpApprovalClaim =
+  | { claimed: false }
+  | { claimed: true; stamp: string | null; released: boolean; footprint: string[]; stageBefore: string | null };
+/** The side row's edited_fields: the footprint keys (true), plus `_stage_before`, the deal's HubSpot stage before any attempt wrote. */
+const STAGE_BEFORE_KEY = "_stage_before";
+function readFootprint(editedFields: unknown): { footprint: string[]; stageBefore: string | null } {
+  const o = (editedFields && typeof editedFields === "object" ? editedFields : {}) as Record<string, unknown>;
+  const stage = o[STAGE_BEFORE_KEY];
+  return { footprint: Object.keys(o).filter((k) => !k.startsWith("_")), stageBefore: typeof stage === "string" && stage ? stage : null };
+}
 export async function claimRfpRequestForApproval(requestId: number, editedKeys: string[] = [], db?: Executor): Promise<RfpApprovalClaim> {
   const exec = db ?? (await defaultDb());
   // The same probe the stuck sweep makes (an error throws: fail closed, nothing claimed).
@@ -132,17 +141,23 @@ export async function claimRfpRequestForApproval(requestId: number, editedKeys: 
       RETURNING id
     `));
     if (!claimed) return { claimed: false };
-    if (!sideTable) return { claimed: true, stamp: null, released: false, footprint: [] };
+    if (!sideTable) return { claimed: true, stamp: null, released: false, footprint: [], stageBefore: null };
     const prior = firstRow(await tx.execute(sql`SELECT edited_fields FROM rfp_approval_approving WHERE request_id = ${requestId} FOR UPDATE`));
-    const footprint = prior ? Object.keys((prior.edited_fields as Record<string, unknown> | null) ?? {}) : [];
-    const keys = JSON.stringify(Object.fromEntries([...new Set([...footprint, ...editedKeys])].map((k) => [k, true])));
+    const { footprint, stageBefore } = prior ? readFootprint(prior.edited_fields) : { footprint: [], stageBefore: null };
+    const keys = JSON.stringify({
+      ...Object.fromEntries([...new Set([...footprint, ...editedKeys])].filter((k) => !k.startsWith("_")).map((k) => [k, true])),
+      ...(stageBefore ? { [STAGE_BEFORE_KEY]: stageBefore } : {}),
+    });
+    // This claim owns the row from here: anything a reset override left (its recorded approver and inputs) is cleared, so the row
+    // has the N6 claim shape the stuck sweep releases (CodeRabbit on #143).
     const side = firstRow(await tx.execute(sql`
       INSERT INTO rfp_approval_approving (request_id, started_at, submit_at, edited_fields)
       VALUES (${requestId}, now() AT TIME ZONE 'UTC', NULL, ${keys}::jsonb)
-      ON CONFLICT (request_id) DO UPDATE SET started_at = now() AT TIME ZONE 'UTC', submit_at = NULL, edited_fields = EXCLUDED.edited_fields
+      ON CONFLICT (request_id) DO UPDATE SET started_at = now() AT TIME ZONE 'UTC', submit_at = NULL, edited_fields = EXCLUDED.edited_fields,
+        approved_by = NULL, approved_attachments = NULL, force = NULL, hubspot_done_at = NULL
       RETURNING started_at::text AS stamp
     `));
-    return { claimed: true, stamp: side.stamp as string, released: Boolean(prior), footprint };
+    return { claimed: true, stamp: side.stamp as string, released: Boolean(prior), footprint, stageBefore };
   });
 }
 
@@ -150,14 +165,35 @@ export async function claimRfpRequestForApproval(requestId: number, editedKeys: 
  * A pending request an interrupted approval attempt left behind (its claim released; the side row kept): the HubSpot keys that
  * attempt may have written. `released: false` when there is none (or 0027 is absent).
  */
-export async function releasedApprovalAttempt(requestId: number, db?: Executor): Promise<{ released: boolean; footprint: string[] }> {
+export async function releasedApprovalAttempt(
+  requestId: number, db?: Executor,
+): Promise<{ released: boolean; footprint: string[]; stageBefore: string | null }> {
   const exec = db ?? (await defaultDb());
-  if (!firstRow(await exec.execute(sql`SELECT to_regclass('public.rfp_approval_approving')::text AS t`))?.t) return { released: false, footprint: [] };
+  if (!firstRow(await exec.execute(sql`SELECT to_regclass('public.rfp_approval_approving')::text AS t`))?.t) return { released: false, footprint: [], stageBefore: null };
   const row = firstRow(await exec.execute(sql`
     SELECT a.edited_fields FROM rfp_approval_approving a JOIN rfp_approval_requests r ON r.id = a.request_id
      WHERE a.request_id = ${requestId} AND r.status = 'pending' AND a.submit_at IS NULL AND a.approved_by IS NULL
   `));
-  return row ? { released: true, footprint: Object.keys((row.edited_fields as Record<string, unknown> | null) ?? {}) } : { released: false, footprint: [] };
+  return row ? { released: true, ...readFootprint(row.edited_fields) } : { released: false, footprint: [], stageBefore: null };
+}
+
+/** Records the deal's HubSpot stage before this attempt's first write, once per request (the earliest is kept), on THIS claim's row. */
+export async function recordStageBefore(requestId: number, stamp: string, stage: string, db?: Executor): Promise<void> {
+  const exec = db ?? (await defaultDb());
+  await exec.execute(sql`
+    UPDATE rfp_approval_approving
+       SET edited_fields = coalesce(edited_fields, '{}'::jsonb) || jsonb_build_object(${STAGE_BEFORE_KEY}::text, ${stage}::text)
+     WHERE request_id = ${requestId} AND started_at = ${stamp}::timestamp AND NOT jsonb_exists(coalesce(edited_fields, '{}'::jsonb), ${STAGE_BEFORE_KEY})
+  `);
+}
+
+/** Does THIS claim still hold the row? Asked right before each HubSpot write, so a holder whose claim was released writes nothing more. */
+export async function rfpApprovalClaimStillHeld(requestId: number, stamp: string, db?: Executor): Promise<boolean> {
+  const exec = db ?? (await defaultDb());
+  return Boolean(firstRow(await exec.execute(sql`
+    SELECT 1 AS held FROM rfp_approval_requests r JOIN rfp_approval_approving a ON a.request_id = r.id
+     WHERE r.id = ${requestId} AND r.status = ${RFP_APPROVING_STATUS} AND a.started_at = ${stamp}::timestamp
+  `)));
 }
 
 /** The SQL condition "this claim still holds the row": its side row carries the stamp the claim wrote (no stamp: 0027 absent). */

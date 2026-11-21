@@ -41,16 +41,33 @@ export type StuckSweepOptions = { db: Querier; now?: Date; recipient?: string; s
 /** `alerted` / `cleared`: the request ids whose stuck / cleared email was SENT by this sweep; `released`: claims it released. */
 export type StuckSweepResult = { stuck: StuckApprovingRequest[]; alerted: number[]; cleared: number[]; released: number[] };
 
-/** Releases approval-claim `approving` rows older than 30 minutes (database clock) to pending, in ONE statement. The side row STAYS:
- *  it tells the next decision to reconcile what the attempt may have written to HubSpot (a4 ADD-1). */
+/**
+ * Releases approval-claim `approving` rows older than 30 minutes (database clock) to pending, in ONE statement:
+ * - it LOCKS each stale claim it judges (the request and its side row, FOR UPDATE), so a claim released and taken again meanwhile is
+ *   re-checked on its new side row and kept (CodeRabbit on #143: under Read Committed an UPDATE ... FROM re-checks only its target row);
+ * - it releases only while that exact claim (its stamp) still holds the row;
+ * - it writes the rfp_approval_claim_released audit line in the same statement, so a release never lacks its line.
+ * The side row STAYS: it tells the next decision to reconcile what the attempt may have written to HubSpot (a4 ADD-1).
+ */
 export async function releaseStaleApprovalClaims(db: Querier): Promise<Array<{ requestId: number; sourceDealId: string }>> {
   const { rows } = await db.query(
-    `WITH released AS (
-       UPDATE rfp_approval_requests r SET status = 'pending'
-         FROM rfp_approval_approving a
-        WHERE a.request_id = r.id AND r.status = 'approving' AND r.bidboard_project_id IS NULL AND a.submit_at IS NULL AND a.approved_by IS NULL
+    `WITH stale AS (
+       SELECT r.id, a.started_at
+         FROM rfp_approval_requests r JOIN rfp_approval_approving a ON a.request_id = r.id
+        WHERE r.status = 'approving' AND r.bidboard_project_id IS NULL AND a.submit_at IS NULL AND a.approved_by IS NULL
           AND a.started_at < (now() AT TIME ZONE 'UTC') - make_interval(mins => $1)
+        FOR UPDATE OF r, a
+     ), released AS (
+       UPDATE rfp_approval_requests r SET status = 'pending'
+         FROM stale s
+        WHERE r.id = s.id AND r.status = 'approving'
+          AND EXISTS (SELECT 1 FROM rfp_approval_approving a WHERE a.request_id = s.id AND a.started_at = s.started_at)
        RETURNING r.id, r.source_deal_id
+     ), audited AS (
+       INSERT INTO audit_logs (action, entity_type, entity_id, source, status, details, category)
+       SELECT 'rfp_approval_claim_released', 'deal', source_deal_id, 'rfp-approving-stuck', 'success',
+              jsonb_build_object('rfpApprovalRequestId', id, 'olderThanMinutes', $1::int), 'sync'
+         FROM released
      )
      SELECT id, source_deal_id FROM released ORDER BY id`,
     [RFP_APPROVING_STUCK_AFTER_MINUTES],
@@ -107,19 +124,6 @@ export async function runRfpApprovingStuckSweep(opts: StuckSweepOptions): Promis
   if (!sideTable) return { stuck: [], alerted: [], cleared: [], released: [] };
   // Before the stuck read and whatever the recipient: a released claim is not stuck, and the release must not wait on email.
   const releasedRows = await releaseStaleApprovalClaims(opts.db);
-  if (releasedRows.length > 0) {
-    const { storage } = await import("../storage");
-    for (const row of releasedRows) {
-      await storage.createAuditLog({
-        action: "rfp_approval_claim_released",
-        entityType: "deal",
-        entityId: row.sourceDealId,
-        source: "rfp-approving-stuck",
-        status: "success",
-        details: { rfpApprovalRequestId: row.requestId, olderThanMinutes: RFP_APPROVING_STUCK_AFTER_MINUTES },
-      }).catch((err: any) => console.error(`[rfp-approving-stuck] request ${row.requestId}: audit failed: ${err?.message || err}`));
-    }
-  }
   const released = releasedRows.map((r) => r.requestId);
   const stuck = await findStuckApprovingRequests(opts.db, now);
   const alerted: number[] = [];
