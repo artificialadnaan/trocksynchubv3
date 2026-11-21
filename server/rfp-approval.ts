@@ -1466,12 +1466,16 @@ async function snapshotHubSpotBefore(requestId: number, stamp: string, hubspotDe
 async function reconcileReleasedAttempt(
   hubspotDealId: string, record: AttemptRecord, writtenNow: string[], decline: boolean, guard: () => Promise<void>,
 ): Promise<void> {
-  const restore = propsForKeys(record.footprint).filter((p) => !writtenNow.includes(p));
-  if (restore.length === 0 && !decline) return;
-  const current = await readHubSpotProps(hubspotDealId, [...restore, ...(decline ? ['dealstage'] : [])]);
-  if (restore.some((p) => !(p in record.before))) throw new HubSpotBeforeUnknownError();
+  // An attempt snapshots BEFORE its first write, so a property with neither a snapshot nor an "unknown" mark was never written by it:
+  // nothing to put back. One marked unknown (the snapshot read failed, then the attempt went on) can't be put back: refuse.
+  const candidates = propsForKeys(record.footprint).filter((p) => !writtenNow.includes(p));
+  if (candidates.some((p) => record.unknown.includes(p))) throw new HubSpotBeforeUnknownError();
+  const restore = candidates.filter((p) => p in record.before);
+  const stageWritten = 'dealstage' in record.before || record.unknown.includes('dealstage');
+  if (restore.length === 0 && !(decline && stageWritten)) return;
+  const current = await readHubSpotProps(hubspotDealId, [...restore, ...(decline && stageWritten ? ['dealstage'] : [])]);
   const originalStage = record.before.dealstage ?? '';
-  if (decline && !originalStage) {
+  if (decline && stageWritten && !originalStage) {
     // Unknown stage (a4 ADD-2): never restore blindly. While HubSpot shows the approved stage the decline refuses with its line; once a
     // person moves the deal in HubSpot, the decline goes through and leaves their stage.
     const approvedStages = new Set<string>();
