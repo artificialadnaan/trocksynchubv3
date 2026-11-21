@@ -15,6 +15,12 @@ export const RFP_BEING_APPROVED_MESSAGE = "This is being approved right now. Try
 /** A decision on a request an interrupted attempt may have left half-written in HubSpot, while HubSpot can't be read (a4 ADD-1). */
 export const RFP_HUBSPOT_UNREACHABLE_MESSAGE = "HubSpot can't be reached to check this request. Try again in a minute.";
 
+/** An approval stopped by its own safety check after the stuck sweep freed the request (a4 ADD-2 F-143-2). */
+export const RFP_APPROVAL_STOPPED_MESSAGE = "This approval took too long and was stopped before it finished. Open the request and approve it again.";
+
+/** A decline after an interrupted approval, when the deal's HubSpot stage from before that approval was never recorded (a4 ADD-2). */
+export const RFP_STAGE_UNKNOWN_MESSAGE = "HubSpot's stage for this deal from before the approval isn't known, so it can't be put back. Move the deal to its earlier stage in HubSpot, then decline again.";
+
 /** The statuses that mean a Bid Board create is in progress (the summary chips' in-progress count). */
 export const RFP_IN_PROGRESS_STATUSES: readonly string[] = ["approving", "override_approving"];
 

@@ -220,6 +220,7 @@ async function renderRfpReviewPage(
     <div class="body">
       <h1>RFP Review &amp; Approval</h1>
       <p class="subtitle">Review the deal details below. Edit any fields as needed, then approve or decline.</p>
+      ${d.approval_notice ? `<div class="result error" style="display:block;margin-bottom:16px;">${esc(d.approval_notice)}</div>` : ''}
 
       <div class="info-banner">
         <p>Fields you edit here will be updated in ${esc(source.label)} upon approval. If project type is <strong>4 (Service)</strong>, the deal moves to <strong>Service - Estimating</strong>; otherwise it moves to <strong>Estimating</strong>.</p>
