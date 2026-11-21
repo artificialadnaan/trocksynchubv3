@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { asyncHandler } from "../lib/async-handler";
 import { formatRfpFormDate, rfpFormDueDateSource } from "../lib/rfp-form-date";
 import { storage } from "../storage";
-import { RFP_APPROVING_LABEL } from "@shared/rfp-status-display";
+import { RFP_BEING_APPROVED_MESSAGE } from "@shared/rfp-status-display";
 import { parseProjectTypeFromNumber, replaceProjectTypeInNumber } from "../constants";
 import {
   buildExpiredRfpMessage,
@@ -220,6 +220,7 @@ async function renderRfpReviewPage(
     <div class="body">
       <h1>RFP Review &amp; Approval</h1>
       <p class="subtitle">Review the deal details below. Edit any fields as needed, then approve or decline.</p>
+      ${d.approval_notice ? `<div class="result error" style="display:block;margin-bottom:16px;">${esc(d.approval_notice)}</div>` : ''}
 
       <div class="info-banner">
         <p>Fields you edit here will be updated in ${esc(source.label)} upon approval. If project type is <strong>4 (Service)</strong>, the deal moves to <strong>Service - Estimating</strong>; otherwise it moves to <strong>Estimating</strong>.</p>
@@ -464,12 +465,12 @@ export function registerRfpApprovalRoutes(app: Express) {
       return res.status(410).send(renderRfpPage('Link Expired', `<p>${buildExpiredRfpMessage(request)}</p>`));
     }
     if (request.status !== 'pending') {
-      // `approving` = the Bid Board create is running (S0b-2b; d9 Q10): it reads as such, never "declined". The other
-      // non-declined statuses (an override in progress, held, cancelled) are not "declined" either.
+      // `approving` = an approval holds the request (N6; a4 8ea49d91 (3)): it reads the one plain line, never "declined". The
+      // other non-declined statuses (an override in progress, held, cancelled) are not "declined" either.
       const statusMsg = request.status === 'approved'
         ? `<p>This RFP was already <strong>approved</strong> by ${request.approvedBy || 'a reviewer'}.</p>`
         : request.status === 'approving'
-        ? `<p>This RFP was approved and its Bid Board project is being created: <strong>${RFP_APPROVING_LABEL}</strong></p>`
+        ? `<p>${RFP_BEING_APPROVED_MESSAGE}</p>`
         : request.status === 'override_approving'
         ? `<p>An override approval of this RFP is in progress.</p>`
         : request.status === 'held_cross_destination' || request.status === 'cancelled_source_ineligible'
@@ -570,7 +571,11 @@ export function registerRfpApprovalRoutes(app: Express) {
           });
         }
         if (request.status !== 'pending') {
-          return res.status(409).json({ success: false, error: `Request already ${request.status}` });
+          return res.status(409).json({
+            success: false,
+            error: `Request already ${request.status}`,
+            ...(request.status === 'approving' ? { message: RFP_BEING_APPROVED_MESSAGE } : {}),
+          });
         }
 
         // Authorize the submitter (against rfp_approver_config + the always-CC'd admin allowlist) for
@@ -672,7 +677,9 @@ export function registerRfpApprovalRoutes(app: Express) {
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return res.status(404).json({ success: false, error: 'Approval request not found' });
     // S0b-2a (runbook r5 §2): a create in progress can't be declined through the review link.
-    if (request.status === 'approving') return res.status(409).json({ success: false, error: 'Request already approving' });
+    if (request.status === 'approving') {
+      return res.status(409).json({ success: false, error: 'Request already approving', message: RFP_BEING_APPROVED_MESSAGE });
+    }
     if (isRfpApprovalRequestExpired(request)) {
       const message = buildExpiredRfpMessage(request);
       await auditRouteAttempt(request, 'rfp_decline_attempt', 'expired', declinerEmail, 'Token expired');

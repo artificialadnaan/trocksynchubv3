@@ -2,6 +2,12 @@
  * Alert `rfp_request_approving_stuck` (S0b-2b; runbook r5 §1; d9 Q7). A request is STUCK when its status is `approving` and
  * rfp_approval_approving.started_at is more than 30 minutes old: the process that claimed it most likely died mid-create, and
  * the Procore project may or may not exist. A person resolves it with scripts/rfp-resolve-approving.ts under an a4 GO.
+ * N6 (a4 078c37ce residual; a4 8ea49d91): an approval CLAIM row (the N6 claim's shape: no submit_at, no recorded approver, no Bid
+ * Board project: an approval that died between its claim and its final write) is RELEASED back to pending by the sweep
+ * instead, with one audit line (rfp_approval_claim_released), so the link works again without anyone running anything.
+ * Re-approving is safe: the approval's HubSpot writes set absolute values and Core / the CRM are told only after its final write.
+ * A Procore-era claim (it recorded its approver; nothing makes one since Procore creation retired), a submitted row and a row with
+ * no side-table row (age unknown) still alert as before, for the resolver.
  *
  * - One debounce key PER REQUEST (`rfp-approving-stuck:<id>`) on bidboard-crm-alert's state machine, re-alerting every 24 h
  *   while the row stays stuck.
@@ -32,8 +38,42 @@ export type StuckAlertSend = (msg: { to: string; subject: string; htmlBody: stri
 
 export type StuckSweepOptions = { db: Querier; now?: Date; recipient?: string; send?: StuckAlertSend };
 
-/** `alerted` / `cleared`: the request ids whose stuck / cleared email was SENT by this sweep. */
-export type StuckSweepResult = { stuck: StuckApprovingRequest[]; alerted: number[]; cleared: number[] };
+/** `alerted` / `cleared`: the request ids whose stuck / cleared email was SENT by this sweep; `released`: claims it released. */
+export type StuckSweepResult = { stuck: StuckApprovingRequest[]; alerted: number[]; cleared: number[]; released: number[] };
+
+/**
+ * Releases approval-claim `approving` rows older than 30 minutes (database clock) to pending, in ONE statement:
+ * - it LOCKS each stale claim it judges (the request and its side row, FOR UPDATE), so a claim released and taken again meanwhile is
+ *   re-checked on its new side row and kept (CodeRabbit on #143: under Read Committed an UPDATE ... FROM re-checks only its target row);
+ * - it releases only while that exact claim (its stamp) still holds the row;
+ * - it writes the rfp_approval_claim_released audit line in the same statement, so a release never lacks its line.
+ * The side row STAYS: it tells the next decision to reconcile what the attempt may have written to HubSpot (a4 ADD-1).
+ */
+export async function releaseStaleApprovalClaims(db: Querier): Promise<Array<{ requestId: number; sourceDealId: string }>> {
+  const { rows } = await db.query(
+    `WITH stale AS (
+       SELECT r.id, a.started_at
+         FROM rfp_approval_requests r JOIN rfp_approval_approving a ON a.request_id = r.id
+        WHERE r.status = 'approving' AND r.bidboard_project_id IS NULL AND a.submit_at IS NULL AND a.approved_by IS NULL
+          AND a.started_at < (now() AT TIME ZONE 'UTC') - make_interval(mins => $1)
+        FOR UPDATE OF r, a
+     ), released AS (
+       UPDATE rfp_approval_requests r SET status = 'pending'
+         FROM stale s
+        WHERE r.id = s.id AND r.status = 'approving'
+          AND EXISTS (SELECT 1 FROM rfp_approval_approving a WHERE a.request_id = s.id AND a.started_at = s.started_at)
+       RETURNING r.id, r.source_deal_id
+     ), audited AS (
+       INSERT INTO audit_logs (action, entity_type, entity_id, source, status, details, category)
+       SELECT 'rfp_approval_claim_released', 'deal', source_deal_id, 'rfp-approving-stuck', 'success',
+              jsonb_build_object('rfpApprovalRequestId', id, 'olderThanMinutes', $1::int), 'sync'
+         FROM released
+     )
+     SELECT id, source_deal_id FROM released ORDER BY id`,
+    [RFP_APPROVING_STUCK_AFTER_MINUTES],
+  );
+  return rows.map((r) => ({ requestId: Number(r.id), sourceDealId: String(r.source_deal_id) }));
+}
 
 /** `approving` rows whose side-table row is older than 30 minutes, or that have NO side-table row (age unknown; d9 QB). */
 export async function findStuckApprovingRequests(db: Querier, _now: Date): Promise<StuckApprovingRequest[]> {
@@ -81,11 +121,14 @@ export async function runRfpApprovingStuckSweep(opts: StuckSweepOptions): Promis
   const recipient = (opts.recipient ?? process.env.BIDBOARD_CRM_ALERT_RECIPIENT ?? "").trim();
   // 0027 not applied yet ⇒ no side table and no request can be approving: a quiet no-op, not an error every tick.
   const sideTable = (await opts.db.query(`SELECT to_regclass('public.rfp_approval_approving')::text AS t`)).rows[0]?.t;
-  if (!sideTable) return { stuck: [], alerted: [], cleared: [] };
+  if (!sideTable) return { stuck: [], alerted: [], cleared: [], released: [] };
+  // Before the stuck read and whatever the recipient: a released claim is not stuck, and the release must not wait on email.
+  const releasedRows = await releaseStaleApprovalClaims(opts.db);
+  const released = releasedRows.map((r) => r.requestId);
   const stuck = await findStuckApprovingRequests(opts.db, now);
   const alerted: number[] = [];
   const cleared: number[] = [];
-  if (!recipient) return { stuck, alerted, cleared };
+  if (!recipient) return { stuck, alerted, cleared, released };
   const { recordPushOutcomeAndMaybeAlert, escapeHtml } = await import("./bidboard-crm-alert");
   const deps = { db: opts.db, ...(opts.send ? { send: opts.send as any } : {}) };
 
@@ -104,7 +147,7 @@ export async function runRfpApprovingStuckSweep(opts: StuckSweepOptions): Promis
   }
 
   cleared.push(...(await clearTerminal(null, { db: opts.db, recipient, send: opts.send, now })));
-  return { stuck, alerted, cleared };
+  return { stuck, alerted, cleared, released };
 }
 
 /**

@@ -5,7 +5,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // callback once Core confirms it; a non-service RFP approved by link has no Core route, so the CRM is told it FAILED. The
 // Procore create below is a stub that records calls and throws ("Procore unavailable"): every case expects it untouched.
 // Synthetic data only (I7).
-vi.mock("../server/sync/rfp-approving.ts", () => ({ RFP_APPROVING_STATUS: "approving" }));
+vi.mock("../server/sync/rfp-approving.ts", () => ({
+  RFP_APPROVING_STATUS: "approving",
+  // N6: the approval claim (pending -> approving) before its first HubSpot write; this suite is not about it, so it always holds.
+  claimRfpRequestForApproval: vi.fn(async () => ({ claimed: true, stamp: null, released: false, footprint: [] })),
+  releasedApprovalAttempt: vi.fn(async () => ({ released: false, footprint: [] })),
+  releaseRfpApprovalClaim: vi.fn(async () => true),
+  clearRfpApprovalClaimRow: vi.fn(async () => {}),
+}));
 vi.mock("../server/storage.ts", () => ({
   storage: {
     getRfpApprovalRequestByToken: vi.fn(),
@@ -85,7 +92,7 @@ describe("processRfpApproval with Procore project creation retired", () => {
     expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(
       70,
       expect.objectContaining({ status: "approved", approvedBy: "approver@example.test", bidboardProjectId: null }),
-      { expectedStatus: "pending" },
+      { expectedStatus: "approving", claimStamp: null },
     );
     expect(enqueueRfpApprovedCallbackIfCoreConfirmed).toHaveBeenCalledWith(70);
     expect(storage.enqueueBidboardCallback).not.toHaveBeenCalled();
@@ -98,7 +105,7 @@ describe("processRfpApproval with Procore project creation retired", () => {
     const result = await processRfpApproval("synthetic-token-70", {}, "approver@example.test");
 
     expect(result).toEqual({ success: true });
-    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(70, expect.objectContaining({ status: "approved" }), { expectedStatus: "pending" });
+    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(70, expect.objectContaining({ status: "approved" }), { expectedStatus: "approving", claimStamp: null });
     expect(raiseRfpCoreAlert).toHaveBeenCalledWith("service_handoff_skipped", expect.objectContaining({ requestId: 70, sourceDealId: DEAL }));
     // Core never confirmed a card, so the CRM is not told 'approved' (it waits on the re-drive).
     expect(enqueueRfpApprovedCallbackIfCoreConfirmed).not.toHaveBeenCalled();
@@ -115,7 +122,7 @@ describe("processRfpApproval with Procore project creation retired", () => {
     const result = await processRfpApproval("synthetic-token-70", {}, "approver@example.test");
 
     expect(result).toEqual({ success: true });
-    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(70, expect.objectContaining({ status: "approved" }), { expectedStatus: "pending" });
+    expect(storage.updateRfpApprovalRequest).toHaveBeenCalledWith(70, expect.objectContaining({ status: "approved" }), { expectedStatus: "approving", claimStamp: null });
     // The refusal's own delivery alert has already fired in the outbox; no second alert, and no CRM 'approved'.
     expect(raiseRfpCoreAlert).not.toHaveBeenCalled();
     expect(enqueueRfpApprovedCallbackIfCoreConfirmed).not.toHaveBeenCalled();

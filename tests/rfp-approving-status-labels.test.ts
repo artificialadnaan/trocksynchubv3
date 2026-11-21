@@ -158,11 +158,11 @@ describe("the review page (GET /rfp-review/:token)", () => {
     approvedBy: null, declinedBy: null, tokenExpiresAt: new Date(Date.now() + 86_400_000), dealData: { dealname: "Synthetic Label Project" }, ...o,
   });
 
-  it("an approving request reads 'Creating Bid Board project…', never 'declined'", async () => {
+  it("an approving request (an approval holds it, N6) reads the being-approved line, never 'declined'", async () => {
     reqState.current = request("approving", { approvedBy: "approver@example.test" });
     const res = await fetch(`${base}/rfp-review/synthetic-label-token`);
     const html = await res.text();
-    expect(html).toContain(LABEL);
+    expect(html).toContain("This is being approved right now. Try again in a minute.");
     expect(html).not.toMatch(/declined/i);
   });
 

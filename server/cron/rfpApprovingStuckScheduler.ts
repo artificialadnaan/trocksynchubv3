@@ -17,8 +17,8 @@ async function runSweep(): Promise<void> {
     const { pool } = await import("../db");
     const { runRfpApprovingStuckSweep } = await import("../sync/rfp-approving-stuck");
     const res = await runRfpApprovingStuckSweep({ db: pool });
-    if (res.stuck.length > 0 || res.cleared.length > 0) {
-      console.log(`[rfp-approving-stuck] stuck=${res.stuck.length} alerted=${res.alerted.length} cleared=${res.cleared.length}`);
+    if (res.stuck.length > 0 || res.cleared.length > 0 || res.released.length > 0) {
+      console.log(`[rfp-approving-stuck] stuck=${res.stuck.length} alerted=${res.alerted.length} cleared=${res.cleared.length} released=${res.released.length}`);
     }
   } catch (err) {
     console.error(`[rfp-approving-stuck] sweep failed: ${err instanceof Error ? err.message : String(err)}`);
