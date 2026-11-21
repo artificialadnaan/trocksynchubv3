@@ -52,6 +52,7 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 
 const { storage } = await import("../server/storage.ts");
 const { processRfpApproval, processRfpDecline } = await import("../server/rfp-approval.ts");
+const stageMock = vi.mocked((await import("../server/hubspot.ts")).updateHubSpotDealStage);
 
 const migration = (file: string) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
 const BASE_DDL = `
@@ -267,5 +268,52 @@ describe.skipIf(!BASE_URL)("processRfpApproval on real PG with Procore project c
     expect(result).toEqual({ success: true });
     expect(await requestStatus(id, pool27less)).toBe("approved");
     expect(createMock).not.toHaveBeenCalled();
+  });
+});
+
+// N6 (a4 078c37ce, the residual): the pending check above is a plain read, and a HubSpot RFP's deal is written (its stage,
+// number, edited fields) BEFORE the one conditional write. The route's in-flight set lives in one process only. So a second
+// approval, or a decline, that reads the row while the first approval is still writing HubSpot gets through: HubSpot is
+// written twice, or the row ends declined for a deal HubSpot was already moved for. The approval must claim its row
+// (pending → claimed, conditional) before its first HubSpot write.
+/** Holds the FIRST HubSpot stage write until `release()`; any later one passes straight through. */
+function holdFirstStageWrite() {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  stageMock.mockReset();
+  stageMock.mockResolvedValue({ success: true } as any);
+  stageMock.mockImplementationOnce(async () => { await gate; return { success: true } as any; });
+  return release;
+}
+
+describe.skipIf(!BASE_URL)("an approval claims its row before it writes HubSpot (N6)", () => {
+  it("a double click on a HubSpot RFP writes HubSpot ONCE: the second approval is refused before it touches the deal", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot" });
+    const release = holdFirstStageWrite();
+
+    const first = processRfpApproval(token, {}, APPROVER);
+    expect(await until(() => stageMock.mock.calls.length === 1)).toBe(true);
+    const second = await processRfpApproval(token, {}, APPROVER);
+    release();
+
+    expect(await first).toEqual({ success: true });
+    expect(second.success).toBe(false);
+    expect(stageMock).toHaveBeenCalledTimes(1);
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("a decline while an approval is writing HubSpot is refused: the row ends approved, as the deal HubSpot moved", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot" });
+    const release = holdFirstStageWrite();
+
+    const approval = processRfpApproval(token, {}, APPROVER);
+    expect(await until(() => stageMock.mock.calls.length === 1)).toBe(true);
+    const decline = await processRfpDecline(token, "other@example.test");
+    release();
+
+    expect(decline.success).toBe(false);
+    expect(await approval).toEqual({ success: true });
+    expect(stageMock).toHaveBeenCalledTimes(1);
+    expect(await requestStatus(id)).toBe("approved");
   });
 });
