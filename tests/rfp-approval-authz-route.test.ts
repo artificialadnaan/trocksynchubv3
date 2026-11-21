@@ -391,6 +391,17 @@ describe("RFP approve/decline route authorization", () => {
     });
   });
 
+  it("a4 ADD-2: the review page of a pending request whose last approval was refused in the background shows that line", async () => {
+    const line = "HubSpot can't be reached to check this request. Try again in a minute.";
+    requestRow.current = makeRequest({ dealData: { ...makeRequest().dealData, approval_notice: line } });
+    await withApp(async (baseUrl) => {
+      const html = (await (await fetch(`${baseUrl}/rfp-review/tok-authz`)).text()).replace(/&#39;/g, "'");
+
+      expect(html).toContain(line);
+      expect(html).toContain(">Approve</button>");
+    });
+  });
+
   it("the review page of a request being approved says the plain line, and offers no buttons", async () => {
     requestRow.current = makeRequest({ status: "approving" });
     await withApp(async (baseUrl) => {

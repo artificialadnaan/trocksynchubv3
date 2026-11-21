@@ -54,6 +54,7 @@ const { storage } = await import("../server/storage.ts");
 const { processRfpApproval, processRfpDecline } = await import("../server/rfp-approval.ts");
 const stageMock = vi.mocked((await import("../server/hubspot.ts")).updateHubSpotDealStage);
 const hubspotClientMock = vi.mocked((await import("../server/hubspot.ts")).getHubSpotClient);
+const sendEmailMock = vi.mocked((await import("../server/email-service.ts")).sendEmail);
 const handoffMock = vi.mocked((await import("../server/sync/service-rfp-core-outbox.ts")).handOffServiceRfpApprovalToCore);
 const { runRfpApprovingStuckSweep } = await import("../server/sync/rfp-approving-stuck.ts");
 
@@ -524,5 +525,124 @@ describe.skipIf(!BASE_URL)("N6 round 2 (Greptile P1 4650989301, CodeRabbit on #1
 
     const lines = (await sql(`SELECT details ->> 'rfpApprovalRequestId' AS rid FROM audit_logs WHERE action = 'rfp_approval_claim_released'`)).rows;
     expect(lines).toEqual([{ rid: String(id) }]);
+  });
+});
+
+// a4 ADD-2 6025b95c (d6 F-143-1 / F-143-2 on 0c3eb130).
+const STOPPED = "This approval took too long and was stopped before it finished. Open the request and approve it again.";
+const STAGE_UNKNOWN = "HubSpot's stage for this deal from before the approval isn't known, so it can't be put back. Move the deal to its earlier stage in HubSpot, then decline again.";
+const emailedLines = () => sendEmailMock.mock.calls.map((c) => String((c[0] as any)?.htmlBody ?? ""));
+const notice = async (id: number) => (await sql(`SELECT deal_data ->> 'approval_notice' AS n FROM rfp_approval_requests WHERE id = $1`, [id])).rows[0]?.n ?? null;
+/** The review form posts EVERY named field; most equal the stored deal. */
+const wholeForm = (over: Record<string, string>) => ({ dealname: "Synthetic Deal", city: "Intake City", amount: "100", ...over });
+
+describe.skipIf(!BASE_URL)("a4 ADD-2: the footprint is what the approval changed; a background refusal is never silent; an unknown stage", () => {
+  it("F-143-1: a field no attempt changed, edited in HubSpot by a person, keeps the person's value after a re-approve", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: { ...ORIGINAL, city: "Intake City" } });
+    fakeHubSpot();
+    hs.city = "Intake City";
+    dieAfterTheFirstStageWrite();
+    expect((await processRfpApproval(token, wholeForm({ amount: "200" }), APPROVER)).success).toBe(false);
+    hs.city = "Person City";
+
+    expect(await processRfpApproval(token, wholeForm({}), APPROVER)).toEqual({ success: true });
+
+    expect(hs).toMatchObject({ amount: "100", city: "Person City" });
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("F-143-1: the same after a decline: the person's HubSpot edit stands, the attempt's own field is put back", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: { ...ORIGINAL, city: "Intake City" } });
+    fakeHubSpot();
+    hs.city = "Intake City";
+    dieAfterTheFirstStageWrite();
+    expect((await processRfpApproval(token, wholeForm({ amount: "200" }), APPROVER)).success).toBe(false);
+    hs.city = "Person City";
+
+    expect((await processRfpDecline(token, "other@example.test")).success).toBe(true);
+
+    expect(hs).toMatchObject({ amount: "100", city: "Person City", dealstage: "rfp-stage" });
+    expect(await requestStatus(id)).toBe("declined");
+  });
+
+  it("F-143-2: HubSpot unreadable after a released attempt: the approver gets the line by email, and the pending request keeps it", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+    expect((await processRfpApproval(token, { amount: "200" }, APPROVER)).success).toBe(false);
+    fakeHubSpot({ unreadable: true });
+    sendEmailMock.mockClear();
+
+    expect(await processRfpApproval(token, {}, APPROVER)).toMatchObject({ statusCode: 503 });
+
+    expect(emailedLines().some((h) => h.includes(HUBSPOT_UNREACHABLE))).toBe(true);
+    expect(await notice(id)).toBe(HUBSPOT_UNREACHABLE);
+  });
+
+  it("F-143-2: a second approval refused while the first holds the row gets the being-approved line by email", async () => {
+    const { token } = await insertRequest("pending", { system: "hubspot" });
+    const release = holdFirstStageWrite();
+    const first = processRfpApproval(token, {}, APPROVER);
+    expect(await until(() => stageMock.mock.calls.length === 1)).toBe(true);
+    sendEmailMock.mockClear();
+
+    expect((await processRfpApproval(token, {}, APPROVER)).success).toBe(false);
+    expect(emailedLines().some((h) => h.includes(BEING_APPROVED))).toBe(true);
+    release();
+    expect(await first).toEqual({ success: true });
+  });
+
+  it("F-143-2: a holder that lost its claim tells the approver it was stopped", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    let resume!: () => void;
+    const stall = new Promise<void>((r) => { resume = r; });
+    const realClient = await hubspotClientMock();
+    let first = true;
+    hubspotClientMock.mockResolvedValue({ crm: { deals: { basicApi: { getById: vi.fn(async (dealId: string, props: string[]) => {
+      if (first) { first = false; await stall; }
+      return (realClient as any).crm.deals.basicApi.getById(dealId, props);
+    }) } } } } as any);
+    const a = processRfpApproval(token, { amount: "999" }, APPROVER);
+    expect(await until(async () => Boolean((await sql(`SELECT 1 FROM rfp_approval_approving WHERE request_id = $1`, [id])).rows[0]))).toBe(true);
+    await sql(`UPDATE rfp_approval_approving SET started_at = started_at - interval '31 minutes' WHERE request_id = $1`, [id]);
+    expect((await runRfpApprovingStuckSweep({ db: pool, recipient: "" })).released).toEqual([id]);
+    sendEmailMock.mockClear();
+    resume();
+
+    expect(await a).toMatchObject({ success: false, statusCode: 409, message: STOPPED });
+    expect(emailedLines().some((h) => h.includes(STOPPED))).toBe(true);
+    expect(await notice(id)).toBe(STOPPED);
+  });
+
+  it("a stage that can't be read does NOT refuse a fresh approval: it goes on as main did", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot({ unreadable: true });
+
+    expect(await processRfpApproval(token, {}, APPROVER)).toEqual({ success: true });
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("a decline after a released attempt whose pre-write stage is unknown: refused while HubSpot shows the approved stage, then fine once a person moves it back", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: { amount: "100" } });
+    fakeHubSpot();
+    const realClient = await hubspotClientMock();
+    let firstRead = true;
+    hubspotClientMock.mockResolvedValue({ crm: { deals: { basicApi: { getById: vi.fn(async (dealId: string, props: string[]) => {
+      if (firstRead) { firstRead = false; throw new Error("synthetic outage on the first stage read"); }
+      return (realClient as any).crm.deals.basicApi.getById(dealId, props);
+    }) } } } } as any);
+    dieAfterTheFirstStageWrite();
+    expect((await processRfpApproval(token, { amount: "200" }, APPROVER)).success).toBe(false);
+    expect(hs.dealstage).toBe("s-1");
+
+    expect(await processRfpDecline(token, "other@example.test")).toMatchObject({ success: false, statusCode: 409, message: STAGE_UNKNOWN });
+    expect(await requestStatus(id)).toBe("pending");
+    expect(hs.amount).toBe("200"); // refused BEFORE writing anything
+
+    hs.dealstage = "rfp-stage-set-by-a-person";
+    expect((await processRfpDecline(token, "other@example.test")).success).toBe(true);
+    expect(hs).toMatchObject({ amount: "100", dealstage: "rfp-stage-set-by-a-person" });
+    expect(await requestStatus(id)).toBe("declined");
   });
 });
