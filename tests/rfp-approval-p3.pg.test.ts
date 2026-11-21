@@ -753,6 +753,19 @@ describe.skipIf(!BASE_URL)("a4 round 4: restore from HubSpot's own snapshot, gua
     expect(await notice(id)).toBeNull();
   });
 
+  it("Greptile 4651150648: the type an interrupted attempt changed is put back though the next reviewer edits only the project number", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+    expect((await processRfpApproval(token, { project_types: "4" }, APPROVER)).success).toBe(false);
+    expect(hs).toMatchObject({ project_number: "DFW-4-54321-cd", project_types: "4" });
+
+    expect(await processRfpApproval(token, { project_number: "DFW-2-54321-zz" }, APPROVER)).toEqual({ success: true });
+
+    expect(hs).toMatchObject({ project_number: "DFW-2-54321-zz", project_types: "2" });
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
   it("the notice also clears once the request is declined", async () => {
     const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
     await sql(`UPDATE rfp_approval_requests SET deal_data = deal_data || '{"approval_notice": "an earlier refusal"}'::jsonb WHERE id = $1`, [id]);
