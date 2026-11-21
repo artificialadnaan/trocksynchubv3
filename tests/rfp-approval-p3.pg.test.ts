@@ -53,6 +53,8 @@ vi.mock("../server/sync/rfp-core-alert.ts", () => ({ raiseRfpCoreAlert: alertMoc
 const { storage } = await import("../server/storage.ts");
 const { processRfpApproval, processRfpDecline } = await import("../server/rfp-approval.ts");
 const stageMock = vi.mocked((await import("../server/hubspot.ts")).updateHubSpotDealStage);
+const handoffMock = vi.mocked((await import("../server/sync/service-rfp-core-outbox.ts")).handOffServiceRfpApprovalToCore);
+const { runRfpApprovingStuckSweep } = await import("../server/sync/rfp-approving-stuck.ts");
 
 const migration = (file: string) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
 const BASE_DDL = `
@@ -154,15 +156,17 @@ const DEAL = "00000000-0000-4000-8000-0000000000f3";
 const HS_DEAL = "910000003";
 const APPROVER = "approver@example.test";
 let tokenSeq = 0;
-async function insertRequest(status: string, o: { system?: "trock_crm" | "hubspot"; p?: pg.Pool } = {}) {
+async function insertRequest(status: string, o: { system?: "trock_crm" | "hubspot"; p?: pg.Pool; service?: boolean } = {}) {
   const system = o.system ?? "trock_crm";
   const deal = system === "hubspot" ? HS_DEAL : DEAL;
   const token = `synthetic-token-${++tokenSeq}`;
+  const type = o.service ? "4" : "2";
+  const number = `DFW-${type}-54321-cd`;
   const r = await (o.p ?? pool).query(
     `INSERT INTO rfp_approval_requests (source_system, source_deal_id, project_number, hubspot_deal_id, token, token_expires_at, status, deal_data)
-     VALUES ($1, $2, 'DFW-2-54321-cd', $3, $4, now() + interval '7 days', $5, $6::jsonb) RETURNING id`,
+     VALUES ($1, $2, $7, $3, $4, now() + interval '7 days', $5, $6::jsonb) RETURNING id`,
     [system, deal, system === "hubspot" ? deal : null, token, status,
-      JSON.stringify({ dealname: "Synthetic Deal", project_number: "DFW-2-54321-cd", project_types: "2" })],
+      JSON.stringify({ dealname: "Synthetic Deal", project_number: number, project_types: type }), number],
   );
   return { id: r.rows[0].id as number, token };
 }
@@ -275,7 +279,10 @@ describe.skipIf(!BASE_URL)("processRfpApproval on real PG with Procore project c
 // number, edited fields) BEFORE the one conditional write. The route's in-flight set lives in one process only. So a second
 // approval, or a decline, that reads the row while the first approval is still writing HubSpot gets through: HubSpot is
 // written twice, or the row ends declined for a deal HubSpot was already moved for. The approval must claim its row
-// (pending → claimed, conditional) before its first HubSpot write.
+// (pending → claimed, conditional) before its first HubSpot write, and anyone refused meanwhile reads one plain line (a4
+// 8ea49d91 (3)). A claim a crash leaves behind is released by the stuck sweep; re-approving is safe because every HubSpot write
+// sets an absolute value and the Core hand-off only follows the final write (a4 8ea49d91 (2)).
+const BEING_APPROVED = "This is being approved right now. Try again in a minute.";
 /** Holds the FIRST HubSpot stage write until `release()`; any later one passes straight through. */
 function holdFirstStageWrite() {
   let release!: () => void;
@@ -297,7 +304,7 @@ describe.skipIf(!BASE_URL)("an approval claims its row before it writes HubSpot 
     release();
 
     expect(await first).toEqual({ success: true });
-    expect(second.success).toBe(false);
+    expect(second).toMatchObject({ success: false, statusCode: 409, message: BEING_APPROVED });
     expect(stageMock).toHaveBeenCalledTimes(1);
     expect(await requestStatus(id)).toBe("approved");
   });
@@ -311,9 +318,30 @@ describe.skipIf(!BASE_URL)("an approval claims its row before it writes HubSpot 
     const decline = await processRfpDecline(token, "other@example.test");
     release();
 
-    expect(decline.success).toBe(false);
+    expect(decline).toMatchObject({ success: false, statusCode: 409, message: BEING_APPROVED });
     expect(await approval).toEqual({ success: true });
     expect(stageMock).toHaveBeenCalledTimes(1);
     expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("a crash after the HubSpot write leaves a claim the stuck sweep releases; re-approving sets the SAME stage and hands Core ONE job", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", service: true });
+    holdFirstStageWrite(); // never released: this approval's process dies inside its HubSpot write
+    handoffMock.mockClear();
+
+    void processRfpApproval(token, {}, APPROVER);
+    expect(await until(() => stageMock.mock.calls.length === 1)).toBe(true);
+    expect(await requestStatus(id)).toBe("approving");
+    await sql(`UPDATE rfp_approval_approving SET started_at = started_at - interval '31 minutes' WHERE request_id = $1`, [id]);
+    const swept = await runRfpApprovingStuckSweep({ db: pool, recipient: "" });
+    expect(swept.released).toEqual([id]);
+    expect(await requestStatus(id)).toBe("pending");
+
+    expect(await processRfpApproval(token, {}, APPROVER)).toEqual({ success: true });
+
+    expect(await requestStatus(id)).toBe("approved");
+    expect(stageMock).toHaveBeenCalledTimes(2);
+    expect(new Set(stageMock.mock.calls.map((c) => c[1]))).toEqual(new Set(["s-1"]));
+    expect(handoffMock).toHaveBeenCalledTimes(1);
   });
 });

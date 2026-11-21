@@ -342,4 +342,47 @@ describe("RFP approve/decline route authorization", () => {
       expect(processRfpDeclineMock).toHaveBeenCalledWith("tok-authz", "jhelms@trockgc.com");
     });
   });
+
+  // N6 (a4 8ea49d91 (3)): while an approval holds the row ('approving'), a decline or a second approval is refused with ONE plain
+  // line, never a silent drop or a status word; the review page says the same.
+  const BEING_APPROVED = "This is being approved right now. Try again in a minute.";
+
+  it("a decline while the request is being approved is refused with the plain line (409)", async () => {
+    requestRow.current = makeRequest({ status: "approving" });
+    await withApp(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/decline`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ declinerEmail: "jhelms@trockgc.com" }),
+      });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ success: false, message: BEING_APPROVED });
+      expect(processRfpDeclineMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("a second approval while the request is being approved is refused with the plain line (409)", async () => {
+    requestRow.current = makeRequest({ status: "approving" });
+    await withApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append("approverEmail", "jhelms@trockgc.com");
+      form.append("editedFields", JSON.stringify({}));
+      const response = await fetch(`${baseUrl}/api/rfp-approval/tok-authz/approve`, { method: "POST", body: form });
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ success: false, message: BEING_APPROVED });
+      expect(processRfpApprovalMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("the review page of a request being approved says the plain line, and offers no buttons", async () => {
+    requestRow.current = makeRequest({ status: "approving" });
+    await withApp(async (baseUrl) => {
+      const html = await (await fetch(`${baseUrl}/rfp-review/tok-authz`)).text();
+
+      expect(html).toContain(BEING_APPROVED);
+      expect(html).not.toContain(">Approve</button>");
+    });
+  });
 });
