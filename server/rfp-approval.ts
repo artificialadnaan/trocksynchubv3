@@ -33,6 +33,7 @@ import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox'
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
 import { RFP_APPROVING_STATUS, claimRfpRequestForApproval, clearRfpApprovalClaimRow, recordStageBefore, releaseRfpApprovalClaim, releasedApprovalAttempt, rfpApprovalClaimStillHeld } from './sync/rfp-approving';
 import { RFP_BEING_APPROVED_MESSAGE, RFP_HUBSPOT_UNREACHABLE_MESSAGE } from '@shared/rfp-status-display';
+import { resolveApprovalEstimator, validEstimatorEmail, type ApprovalEstimator } from './sync/rfp-estimator';
 import { PROCORE_CREATE_RETIRED_ERROR } from './sync/procore-create-retired';
 import { enqueueRfpApprovedCallbackIfCoreConfirmed } from './sync/rfp-approved-callback';
 
@@ -53,6 +54,8 @@ export interface NormalizedRfpRequestInput {
     projectType: string;
     amount: number | null;
     estimator: string | null;
+    /** The estimator the CRM's rep selected, by email (#1869, from deals.estimator_user_id): kept as deal_data.estimator_email (L69). */
+    estimatorEmail?: string | null;
     /** Deal owner / rep — the "Requested by" person (CRM-sourced; HubSpot resolves its own). */
     ownerName?: string | null;
     ownerEmail?: string | null;
@@ -917,6 +920,8 @@ export function normalizedDealData(input: NormalizedRfpRequestInput, ownerInfo: 
     due_date: input.deal.dueDate || '',
     workflowRoute: input.deal.workflowRoute || '',
     estimator: input.deal.estimator || '',
+    // L69: the CRM's confirmed estimator, so the approval can hand Core that person (valid, lower-cased; else absent).
+    ...(validEstimatorEmail(input.deal.estimatorEmail) ? { estimator_email: validEstimatorEmail(input.deal.estimatorEmail) } : {}),
     company_name: input.deal.companyName || '',
     client_email: input.deal.clientEmail || '',
     client_phone: input.deal.clientPhone || '',
@@ -1755,6 +1760,12 @@ export async function processRfpApproval(
       log(`[rfp-approval] Request ${request.id}: ${newFileNames.length} file(s) added at approval were not stored (Procore creation retired)`, 'rfp');
     }
 
+    // L69: the estimator this approval hands Core, resolved once here (the CRM's kept email while the estimator is unchanged, else the
+    // picked name's estimator_list email), so the status email and the request's review page can say plainly when there is none.
+    const estimator: ApprovalEstimator | null = isService && !resume
+      ? await resolveApprovalEstimator({ rfpRequestId: request.id, dealData, editedFieldsOverride })
+      : null;
+
     const approvedAt = new Date();
     // Written only while the row still has the status read above (pending; the override's claimed status), so a concurrent
     // decline or a second approval of the same link makes this a no-op instead of a second approval.
@@ -1765,6 +1776,8 @@ export async function processRfpApproval(
       approvedBy: approverEmail,
       approvedAt,
       bidboardProjectId: null,
+      // L69: the line the review page shows when Core was handed no estimator (the approval answered 202 before it ran).
+      ...(estimator?.warning ? { dealData: { ...dealData, estimator_handoff_warning: estimator.warning } } : {}),
       // Override-approve clears the prior decline so reporting can't show both an approved and a rejected decision.
       ...(force ? { declinedBy: null, declinedAt: null } : {}),
     }, claim ? { expectedStatus: RFP_APPROVING_STATUS, claimStamp: claim.stamp } : { expectedStatus: request.status });
@@ -1794,6 +1807,7 @@ export async function processRfpApproval(
         projectNumber: finalProjectNumber,
         dealData,
         editedFieldsOverride,
+        estimatorEmail: estimator?.email ?? null,
       });
     }
 
@@ -1873,6 +1887,7 @@ export async function processRfpApproval(
       steps: [
         { name: 'Source Deal Updated', success: true, detail: `Stage: ${hubspotDealId ? targetStageName : 'unchanged'}, Fields: ${Object.keys(changedFields).length} changed` },
         crmStep,
+        ...(estimator?.warning ? [{ name: 'Estimator', success: false, detail: estimator.warning }] : []),
         ...(newFileNames.length > 0
           ? [{ name: 'Files added at approval', success: false, detail: `${newFileNames.length} file(s) were not stored: Procore project creation is retired` }]
           : []),

@@ -7,6 +7,7 @@ import { buildSourceDealUrl, checkRfpApprovalSourceEligibility, normalizedDealDa
 import { RFP_OVERRIDE_APPROVING_STATUS } from "@shared/schema";
 import { buildBidBoardCreatedCallbackTargetUrl } from "./bidboard-callback-worker";
 import type { CreateFromRfpInput } from "../routes/rfp-requests";
+import { validEstimatorEmail } from "./rfp-estimator";
 import {
   RFP_HELD_CROSS_DESTINATION_STATUS,
   RFP_HELD_DESTINATION_CHANGED_STATUS,
@@ -1323,6 +1324,8 @@ async function handOffAdoptedServiceDealToCore(input: CreateFromRfpInput, bidboa
       dealData,
       editedFieldsOverride: { project_types: "4" },
       approvedAt,
+      // L69: the CRM's confirmed estimator rides the adopt handoff too; without it, the exact estimator_list name match as before.
+      ...(validEstimatorEmail(input.deal.estimatorEmail) ? { estimatorEmail: validEstimatorEmail(input.deal.estimatorEmail) } : {}),
     });
     log(`[bidboard-create] Adopted service deal ${input.sourceDealId} handed to Core as RFP request ${request.id} (${result.status})`, "sync");
   } catch (err: any) {
