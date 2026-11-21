@@ -31,7 +31,8 @@ import {
 } from './sync/bidboard-callback-worker';
 import { handOffServiceRfpApprovalToCore } from './sync/service-rfp-core-outbox';
 import { RFP_OVERRIDE_APPROVING_STATUS } from '@shared/schema';
-import { RFP_APPROVING_STATUS } from './sync/rfp-approving';
+import { RFP_APPROVING_STATUS, claimRfpRequestForApproval, clearRfpApprovalClaimRow, releaseRfpApprovalClaim } from './sync/rfp-approving';
+import { RFP_BEING_APPROVED_MESSAGE } from '@shared/rfp-status-display';
 import { PROCORE_CREATE_RETIRED_ERROR } from './sync/procore-create-retired';
 import { enqueueRfpApprovedCallbackIfCoreConfirmed } from './sync/rfp-approved-callback';
 
@@ -1388,6 +1389,13 @@ export interface RfpApprovalAttachmentOptions {
   newFiles: Array<{ buffer: Buffer; originalname: string; mimetype?: string; size?: number }>;
 }
 
+/** A request that is no longer pending: while another approval holds it (`approving`), one plain line (N6; a4 8ea49d91 (3)). */
+function refusedNotPending(status: string): { success: false; error: string; statusCode?: number; message?: string } {
+  return status === RFP_APPROVING_STATUS
+    ? { success: false, error: `Request already ${status}`, statusCode: 409, message: RFP_BEING_APPROVED_MESSAGE }
+    : { success: false, error: `Request already ${status}` };
+}
+
 export async function processRfpApproval(
   token: string,
   editedFields: Record<string, string>,
@@ -1402,6 +1410,8 @@ export async function processRfpApproval(
   // server-to-server via HMAC, not via the (possibly stale) email token — but on a Playwright
   // failure it leaves the request re-tryable instead of marking it approved (see below).
   const force = options?.force === true;
+  // N6: the claim this call took (pending → approving), released if anything below throws before the final write.
+  let claim: { requestId: number; stamp: string | null } | null = null;
   try {
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
@@ -1409,7 +1419,7 @@ export async function processRfpApproval(
       if (request.id !== resume.requestId || request.status !== 'approving' || request.bidboardProjectId) {
         return { success: false, error: `Recreate refused: request ${request.id} is ${request.status}${request.bidboardProjectId ? `, BidBoard ${request.bidboardProjectId}` : ''}` };
       }
-    } else if (request.status !== 'pending' && !force) return { success: false, error: `Request already ${request.status}` };
+    } else if (request.status !== 'pending' && !force) return refusedNotPending(request.status);
     // Force (override) path: the claim guaranteed no project at claim time, but the row could have
     // been resolved between the 202 response and this re-read (e.g. a reviewer approved it manually).
     // If it now carries a project id or reached a terminal state, abort rather than double-create.
@@ -1438,6 +1448,21 @@ export async function processRfpApproval(
       // A replay writes nothing on an ineligible deal: STOP and escalate (runbook r5 §3C), never a cancel.
       if (resume) return { success: false, error: `Recreate refused: the source deal is no longer eligible (${eligibility.reason || 'ineligible'})` };
       return cancelIneligibleRfpApproval(request, approverEmail, eligibility.reason || 'Source deal is no longer eligible');
+    }
+
+    // N6 (a4 078c37ce residual; a4 8ea49d91): CLAIM the row before the first HubSpot write. The pending check above is a plain read,
+    // so a second approval or a decline that read the row as pending is refused here instead of writing HubSpot again. Everything
+    // between the claim and the final write is a HubSpot write of an absolute value (the number, the fields, the stage) or the cache
+    // sync, and the Core hand-off and CRM callbacks come only after the final write: so a claim a crash leaves, released by the stuck
+    // sweep, is safe to approve again. The override (force) holds its own claim; the resolver's replay (resume) runs on one.
+    if (!force && !resume) {
+      const claimed = await claimRfpRequestForApproval(request.id);
+      if (!claimed.claimed) {
+        // The row changed since the read above (a decline or another approval won it): a 409, like the final write's.
+        const now = await storage.getRfpApprovalRequestByToken(token);
+        return { ...refusedNotPending(now?.status ?? 'missing'), statusCode: 409 };
+      }
+      claim = { requestId: request.id, stamp: claimed.stamp };
     }
 
     const sourceDealId = identity.sourceDealId;
@@ -1615,9 +1640,16 @@ export async function processRfpApproval(
       bidboardProjectId: null,
       // Override-approve clears the prior decline so reporting can't show both an approved and a rejected decision.
       ...(force ? { declinedBy: null, declinedAt: null } : {}),
-    }, { expectedStatus: request.status });
+    }, claim ? { expectedStatus: RFP_APPROVING_STATUS, claimStamp: claim.stamp } : { expectedStatus: request.status });
     if (!approved) {
+      claim = null; // the row moved on (a release, another claim): nothing of ours to release
       return { success: false, error: `Request ${request.id} changed while it was being approved`, statusCode: 409 };
+    }
+    if (claim) {
+      const done = claim;
+      claim = null;
+      await clearRfpApprovalClaimRow(done.requestId, done.stamp).catch((err: any) =>
+        log(`[rfp-approval] Request ${done.requestId}: the claim row could not be cleared: ${err?.message || err}`, 'rfp'));
     }
 
     // Tell TROCK Core about the service job: its card IS the job now that Procore project creation is retired. AFTER the
@@ -1723,6 +1755,12 @@ export async function processRfpApproval(
     return { success: true };
   } catch (e: any) {
     console.error(`[rfp-approval] Error processing approval for token ${token}:`, e.message);
+    if (claim) {
+      // A handled failure before the final write: the link stays usable (approving → pending, only while this claim holds it).
+      const held = claim;
+      await releaseRfpApprovalClaim(held.requestId, held.stamp).catch((err: any) =>
+        log(`[rfp-approval] Request ${held.requestId}: the claim could not be released (the stuck sweep will): ${err?.message || err}`, 'rfp'));
+    }
     return { success: false, error: e.message };
   }
 }
@@ -1792,12 +1830,12 @@ export async function recreateApprovingRequest(
 export async function processRfpDecline(
   token: string,
   declinerEmail: string
-): Promise<{ success: boolean; error?: string; statusCode?: number }> {
+): Promise<{ success: boolean; error?: string; statusCode?: number; message?: string }> {
   try {
     const request = await storage.getRfpApprovalRequestByToken(token);
     if (!request) return { success: false, error: 'Approval request not found' };
     const sourceDealId = request.sourceSystem === 'hubspot' ? request.hubspotDealId! : request.sourceDealId;
-    if (request.status !== 'pending') return { success: false, error: `Request already ${request.status}` };
+    if (request.status !== 'pending') return refusedNotPending(request.status);
     if (isRfpApprovalRequestExpired(request)) {
       await auditRfpDeclineAttempt(request, 'expired', declinerEmail, 'Token expired');
       return { success: false, error: 'expired' };
@@ -1822,7 +1860,7 @@ export async function processRfpDecline(
       if (!declined) {
         // Lost the race to the email path's flip (or another resolution): the conditional decline updated nothing (d9 5b).
         const now = await storage.getRfpApprovalRequestByToken(token);
-        return { success: false, error: `Request already ${now?.status ?? 'resolved'}`, statusCode: 409 };
+        return { ...refusedNotPending(now?.status ?? 'resolved'), statusCode: 409 };
       }
     } else {
       await storage.updateRfpApprovalRequest(request.id, declineData);

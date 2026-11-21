@@ -29,6 +29,7 @@ const {
   RFP_APPROVING_STUCK_ALERT_CODE,
   RFP_APPROVING_STUCK_KEY_PREFIX,
 } = await import("../server/sync/rfp-approving-stuck.ts");
+const { storage } = await import("../server/storage.ts");
 const { startRfpApprovingStuckScheduler, stopRfpApprovingStuckScheduler, RFP_APPROVING_STUCK_SWEEP_CRON } = await import(
   "../server/cron/rfpApprovingStuckScheduler.ts"
 );
@@ -100,8 +101,9 @@ beforeEach(async () => {
 
 const DEAL_NAME = "Synthetic Stuck Deal Name";
 let seq = 0;
-/** An `approving` request; `minutesAgo` null ⇒ no rfp_approval_approving row at all. */
-async function insertApproving(minutesAgo: number | null, o: { status?: string; submitted?: boolean } = {}) {
+/** An `approving` request; `minutesAgo` null ⇒ no rfp_approval_approving row at all. Submitted (a create was started) unless
+ *  `submitted: false`: a claim-only row is released by the sweep, not alerted (N6), so the alert cases model a submitted one. */
+async function insertApproving(minutesAgo: number | null, o: { status?: string; submitted?: boolean; bidboard?: string } = {}) {
   const n = ++seq;
   const r = await sql(
     `INSERT INTO rfp_approval_requests (source_system, source_deal_id, project_number, token, status, deal_data)
@@ -114,9 +116,10 @@ async function insertApproving(minutesAgo: number | null, o: { status?: string; 
     await sql(
       `INSERT INTO rfp_approval_approving (request_id, started_at, submit_at)
        VALUES ($1, now() - make_interval(mins => $2), CASE WHEN $3 THEN now() - make_interval(mins => $2) ELSE NULL END)`,
-      [id, minutesAgo, o.submitted ?? false],
+      [id, minutesAgo, o.submitted ?? true],
     );
   }
+  if (o.bidboard) await sql(`UPDATE rfp_approval_requests SET bidboard_project_id = $2 WHERE id = $1`, [id, o.bidboard]);
   return id;
 }
 const sweep = (now?: Date) => runRfpApprovingStuckSweep({ db: pool, recipient: RECIPIENT, send, now });
@@ -225,6 +228,38 @@ describe.skipIf(!BASE_URL)("rfp_request_approving_stuck: clears only on a termin
     await sql(`UPDATE rfp_approval_requests SET status = 'pending' WHERE id = $1`, [id]);
     expect((await sweep()).cleared).toEqual([]);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.skipIf(!BASE_URL)("N6: a claim-only row (an approval that died between its claim and its final write) is released", () => {
+  it("31 min old ⇒ back to pending with ONE audit line, its side row gone, no alert; 29 min old ⇒ left alone", async () => {
+    const audit = vi.spyOn(storage, "createAuditLog").mockResolvedValue({} as any);
+    const old = await insertApproving(31, { submitted: false });
+    const young = await insertApproving(29, { submitted: false });
+
+    const res = await sweep();
+
+    expect(res.released).toEqual([old]);
+    expect(res.stuck).toEqual([]);
+    expect(res.alerted).toEqual([]);
+    expect(send).not.toHaveBeenCalled();
+    const status = async (id: number) => (await sql(`SELECT status FROM rfp_approval_requests WHERE id = $1`, [id])).rows[0].status;
+    expect(await status(old)).toBe("pending");
+    expect(await status(young)).toBe("approving");
+    expect((await sql(`SELECT request_id FROM rfp_approval_approving ORDER BY request_id`)).rows.map((r) => r.request_id)).toEqual([young]);
+    expect(audit).toHaveBeenCalledTimes(1);
+    expect(audit.mock.calls[0][0]).toMatchObject({ action: "rfp_approval_claim_released", status: "success", details: { rfpApprovalRequestId: old } });
+    audit.mockRestore();
+  });
+
+  it("a claim-only row that has a Bid Board project, or a submitted one, is NOT released: it alerts as before", async () => {
+    const withProject = await insertApproving(40, { submitted: false, bidboard: "BB-77" });
+    const submitted = await insertApproving(40, { submitted: true });
+
+    const res = await sweep();
+
+    expect(res.released).toEqual([]);
+    expect(res.alerted.sort()).toEqual([withProject, submitted].sort());
   });
 });
 

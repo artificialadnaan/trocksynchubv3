@@ -111,6 +111,65 @@ export async function markRfpApprovingSubmitted(requestId: number, db?: Executor
 }
 
 /**
+ * N6 (a4 078c37ce residual; a4 8ea49d91): the email path's claim, taken BEFORE its first HubSpot write. pending → approving in ONE
+ * conditional write, so a second approval or a decline that read the row as pending is refused instead of writing HubSpot again.
+ * With 0027 present it also stamps rfp_approval_approving on the database clock: the stuck sweep ages a claim a crash left by it,
+ * and the stamp (started_at, as text so no precision is lost) is what the final write and a release must still find, so a stalled
+ * approval whose claim was released and taken again can never finish on the new one. `{ claimed: false }`: nothing was written.
+ */
+export type RfpApprovalClaim = { claimed: false } | { claimed: true; stamp: string | null };
+export async function claimRfpRequestForApproval(requestId: number, db?: Executor): Promise<RfpApprovalClaim> {
+  const exec = db ?? (await defaultDb());
+  // The same probe the stuck sweep makes (an error throws: fail closed, nothing claimed).
+  const sideTable = Boolean(firstRow(await exec.execute(sql`SELECT to_regclass('public.rfp_approval_approving')::text AS t`))?.t);
+  return exec.transaction!(async (tx: any): Promise<RfpApprovalClaim> => {
+    const claimed = firstRow(await tx.execute(sql`
+      UPDATE rfp_approval_requests SET status = ${RFP_APPROVING_STATUS}
+       WHERE id = ${requestId} AND status = 'pending' AND bidboard_project_id IS NULL
+      RETURNING id
+    `));
+    if (!claimed) return { claimed: false };
+    if (!sideTable) return { claimed: true, stamp: null };
+    const side = firstRow(await tx.execute(sql`
+      INSERT INTO rfp_approval_approving (request_id, started_at, submit_at) VALUES (${requestId}, now() AT TIME ZONE 'UTC', NULL)
+      ON CONFLICT (request_id) DO UPDATE SET started_at = now() AT TIME ZONE 'UTC', submit_at = NULL
+      RETURNING started_at::text AS stamp
+    `));
+    return { claimed: true, stamp: side.stamp as string };
+  });
+}
+
+/** The SQL condition "this claim still holds the row": its side row carries the stamp the claim wrote (no stamp: 0027 absent). */
+export function rfpApprovalClaimHeld(requestId: number, stamp: string | null) {
+  return stamp === null
+    ? sql`true`
+    : sql`EXISTS (SELECT 1 FROM rfp_approval_approving a WHERE a.request_id = ${requestId} AND a.started_at = ${stamp}::timestamp)`;
+}
+
+/** A handled failure after the claim: approving → pending, only while THIS claim still holds the row; its side row goes with it. */
+export async function releaseRfpApprovalClaim(requestId: number, stamp: string | null, db?: Executor): Promise<boolean> {
+  const exec = db ?? (await defaultDb());
+  return exec.transaction!(async (tx: any) => {
+    const released = firstRow(await tx.execute(sql`
+      UPDATE rfp_approval_requests SET status = 'pending'
+       WHERE id = ${requestId} AND status = ${RFP_APPROVING_STATUS} AND bidboard_project_id IS NULL AND ${rfpApprovalClaimHeld(requestId, stamp)}
+      RETURNING id
+    `));
+    if (released && stamp !== null) await tx.execute(sql`DELETE FROM rfp_approval_approving WHERE request_id = ${requestId} AND submit_at IS NULL`);
+    return Boolean(released);
+  });
+}
+
+/** After the final write: the claim's own side row is done with (a submitted create's row, or another claim's, stays). */
+export async function clearRfpApprovalClaimRow(requestId: number, stamp: string | null, db?: Executor): Promise<void> {
+  if (stamp === null) return;
+  const exec = db ?? (await defaultDb());
+  await exec.execute(sql`
+    DELETE FROM rfp_approval_approving WHERE request_id = ${requestId} AND submit_at IS NULL AND started_at = ${stamp}::timestamp
+  `);
+}
+
+/**
  * For the reset route's rfp_request_override_reset alert (d9 5a): may the override being reset already have created a project?
  * syncMapping = a Bid Board mapping for the deal; createCommand = a Procore create command in flight / done for it. Read from the
  * Procore footprint (0027 required). Informational only: with 0027 absent, or on any read error, both read false and the reset

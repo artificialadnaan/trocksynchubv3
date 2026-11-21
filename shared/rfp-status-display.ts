@@ -6,6 +6,12 @@
  */
 export const RFP_APPROVING_LABEL = "Creating Bid Board project…";
 
+/**
+ * What a person reads when an approval already holds the request (`approving`, N6; a4 8ea49d91 (3)): a decline, a second
+ * approval and the review page all say this one line, never a silent drop or a status word.
+ */
+export const RFP_BEING_APPROVED_MESSAGE = "This is being approved right now. Try again in a minute.";
+
 /** The statuses that mean a Bid Board create is in progress (the summary chips' in-progress count). */
 export const RFP_IN_PROGRESS_STATUSES: readonly string[] = ["approving", "override_approving"];
 

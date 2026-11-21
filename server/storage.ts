@@ -488,7 +488,7 @@ export interface IStorage {
   getRfpApprovalRequestBySourceEventId(sourceSystem: SourceSystem, sourceEventId: string): Promise<RfpApprovalRequest | undefined>;
   getLatestRfpApprovalRequestBySourceDeal(sourceSystem: SourceSystem, sourceDealId: string): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestByProjectNumberAndStatus(projectNumber: string, status: string): Promise<RfpApprovalRequest | undefined>;
-  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>, opts?: { expectedStatus?: string }): Promise<RfpApprovalRequest | undefined>;
+  updateRfpApprovalRequest(id: number, data: Partial<InsertRfpApprovalRequest>, opts?: { expectedStatus?: string; claimStamp?: string | null }): Promise<RfpApprovalRequest | undefined>;
   supersedeExpiredPendingRfpApprovalRequest(id: number): Promise<RfpApprovalRequest | undefined>;
   getRfpApprovalRequestById(id: number): Promise<RfpApprovalRequest | undefined>;
   createRfpApprovalEdit(data: InsertRfpApprovalEdit): Promise<RfpApprovalEdit>;
@@ -2269,13 +2269,17 @@ export class DatabaseStorage implements IStorage {
   async updateRfpApprovalRequest(
     id: number,
     data: Partial<InsertRfpApprovalRequest>,
-    opts: { expectedStatus?: string } = {},
+    opts: { expectedStatus?: string; claimStamp?: string | null } = {},
   ): Promise<RfpApprovalRequest | undefined> {
     // opts.expectedStatus (CodeRabbit 4534112622): write only while the row still has the status the caller read, so a
     // concurrent claim (pending → approving) makes this a no-op (undefined) instead of being overwritten.
-    const where = opts.expectedStatus === undefined
-      ? eq(rfpApprovalRequests.id, id)
-      : and(eq(rfpApprovalRequests.id, id), eq(rfpApprovalRequests.status, opts.expectedStatus));
+    // opts.claimStamp (N6): ALSO only while the caller's own approval claim holds the row (its side row carries the stamp it
+    // wrote), so an approval whose claim was released and taken again cannot finish on the other claim.
+    const status = opts.expectedStatus === undefined ? undefined : eq(rfpApprovalRequests.status, opts.expectedStatus);
+    const claim = opts.claimStamp == null
+      ? undefined
+      : sql`EXISTS (SELECT 1 FROM rfp_approval_approving a WHERE a.request_id = ${id} AND a.started_at = ${opts.claimStamp}::timestamp)`;
+    const where = and(eq(rfpApprovalRequests.id, id), status, claim);
     const [result] = await db.update(rfpApprovalRequests).set(data).where(where).returning();
     return result;
   }

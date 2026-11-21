@@ -7,7 +7,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 // processRfpApproval END TO END on REAL postgres with the REAL storage SQL, now that PROCORE PROJECT CREATION IS RETIRED (owner
 // 2026-11-13, b0cb0c4f). The S0b-2a claim that guarded the Procore create (pending → approving, the beforeCreate submit record,
 // the Core-footprint hold) is gone with the create: an approval goes pending → approved in ONE conditional write, so
-//   - it never passes through 'approving', writes no rfp_approval_approving row and calls no Procore create;
+//   - it passes through 'approving' only as its own claim (N6, below), clears that claim's row, and calls no Procore create;
 //   - a double click approves once (the second write matches nothing: 409);
 //   - a decline that lands first wins (the approval's write matches nothing: 409, the CRM is not told);
 //   - a Core footprint no longer holds it (there is no second destination to protect); 0027 absent changes nothing.
@@ -210,7 +210,7 @@ async function lockIsFree(dealId: string): Promise<boolean> {
 }
 
 describe.skipIf(!BASE_URL)("processRfpApproval on real PG with Procore project creation retired", () => {
-  it("an approval goes pending → approved directly: no 'approving', no claim row, no Procore create; a non-service CRM request gets ONE 'failed' (no Core route)", async () => {
+  it("an approval goes pending → approved: no claim row left, no Procore create; a non-service CRM request gets ONE 'failed' (no Core route)", async () => {
     const { id, token } = await insertRequest("pending");
 
     const result = await processRfpApproval(token, {}, APPROVER);
