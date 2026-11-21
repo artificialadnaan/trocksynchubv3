@@ -1427,6 +1427,24 @@ function hubspotPropsFor(key: string): string[] {
 }
 const propsForKeys = (keys: string[]) => [...new Set(keys.flatMap(hubspotPropsFor))];
 
+/**
+ * The HubSpot properties THIS approval actually writes (Greptile 4651150648): a type change writes the number and the type; a changed
+ * field writes its own property; a description writes both description properties; a valid bid_due_date writes both due dates. Never
+ * the broader snapshot mapping, so the reconcile still puts back what an earlier attempt wrote and this approval doesn't.
+ */
+function hubspotWritesFor(editedFields: Record<string, string>, dealData: Record<string, any>): string[] {
+  const storedType = parseProjectTypeFromNumber(String(dealData.project_number ?? '')) ?? dealData.project_types ?? '';
+  const out = new Set<string>();
+  if (editedFields.project_types && editedFields.project_types !== storedType) { out.add('project_number'); out.add('project_types'); }
+  for (const [k, v] of Object.entries(editedFields)) {
+    if (v === undefined || v === dealData[k]) continue;
+    if (APPROVAL_HUBSPOT_KEYS.includes(k)) out.add(k);
+    if (k === 'description') out.add(DESCRIPTION_HUBSPOT_KEY);
+    if (k === 'bid_due_date' && v && /^\d{4}-\d{2}-\d{2}/.test(v)) { out.add('closedate'); out.add('proposal_due_date'); }
+  }
+  return [...out];
+}
+
 /** HubSpot's current values of these properties. Throws HubSpotUnreachableError when HubSpot can't be read. */
 async function readHubSpotProps(hubspotDealId: string, props: string[]): Promise<Record<string, string>> {
   try {
@@ -1616,7 +1634,7 @@ export async function processRfpApproval(
         // An earlier attempt was released (a4 ADD-1): put right what it may have left in HubSpot before this decision writes.
         if (claimed.released && claimed.footprint.length > 0) {
           try {
-            await reconcileReleasedAttempt(identity.sourceDealId, claimed, propsForKeys(footprintKeys), false, guard);
+            await reconcileReleasedAttempt(identity.sourceDealId, claimed, hubspotWritesFor(editedFields, dealData), false, guard);
           } catch (err: any) {
             const line = err instanceof HubSpotUnreachableError ? RFP_HUBSPOT_UNREACHABLE_MESSAGE
               : err instanceof HubSpotBeforeUnknownError ? RFP_HUBSPOT_BEFORE_UNKNOWN_MESSAGE : null;
