@@ -131,9 +131,12 @@ export type RfpApprovalClaim =
  *   HubSpot request, has no stage, due dates or description: d6 T1);
  * - `_before_unknown`: the properties whose value could not be read (a fresh approval still goes on, as main did).
  */
-export type AttemptRecord = { footprint: string[]; before: Record<string, string>; unknown: string[] };
+export type AttemptRecord = { footprint: string[]; before: Record<string, string>; unknown: string[]; attempted: Record<string, string[]> };
 const BEFORE_KEY = "_before";
 const BEFORE_UNKNOWN_KEY = "_before_unknown";
+/** The values the attempts wrote (or meant to write) to HubSpot, per property: so a field whose original is unknown is refused only while
+ *  HubSpot still shows one of them (a4: the line then names a real step). */
+const ATTEMPTED_KEY = "_attempted";
 function readFootprint(editedFields: unknown): AttemptRecord {
   const o = (editedFields && typeof editedFields === "object" ? editedFields : {}) as Record<string, unknown>;
   const before = o[BEFORE_KEY] && typeof o[BEFORE_KEY] === "object" ? (o[BEFORE_KEY] as Record<string, unknown>) : {};
@@ -142,6 +145,8 @@ function readFootprint(editedFields: unknown): AttemptRecord {
     footprint: Object.keys(o).filter((k) => !k.startsWith("_")),
     before: Object.fromEntries(Object.entries(before).map(([k, v]) => [k, String(v ?? "")])),
     unknown: unknown.filter((k) => !(k in before)),
+    attempted: Object.fromEntries(Object.entries(o[ATTEMPTED_KEY] && typeof o[ATTEMPTED_KEY] === "object" ? (o[ATTEMPTED_KEY] as Record<string, unknown>) : {})
+      .map(([k, v]) => [k, Array.isArray(v) ? v.map(String) : []])),
   };
 }
 export async function claimRfpRequestForApproval(requestId: number, editedKeys: string[] = [], db?: Executor): Promise<RfpApprovalClaim> {
@@ -155,13 +160,14 @@ export async function claimRfpRequestForApproval(requestId: number, editedKeys: 
       RETURNING id
     `));
     if (!claimed) return { claimed: false };
-    if (!sideTable) return { claimed: true, stamp: null, released: false, footprint: [], before: {}, unknown: [] };
+    if (!sideTable) return { claimed: true, stamp: null, released: false, footprint: [], before: {}, unknown: [], attempted: {} };
     const prior = firstRow(await tx.execute(sql`SELECT edited_fields FROM rfp_approval_approving WHERE request_id = ${requestId} FOR UPDATE`));
-    const record = prior ? readFootprint(prior.edited_fields) : { footprint: [], before: {}, unknown: [] };
+    const record = prior ? readFootprint(prior.edited_fields) : { footprint: [], before: {}, unknown: [], attempted: {} };
     const keys = JSON.stringify({
       ...Object.fromEntries([...new Set([...record.footprint, ...editedKeys])].filter((k) => !k.startsWith("_")).map((k) => [k, true])),
       [BEFORE_KEY]: record.before,
       [BEFORE_UNKNOWN_KEY]: record.unknown,
+      [ATTEMPTED_KEY]: record.attempted,
     });
     // This claim owns the row from here: anything a reset override left (its recorded approver and inputs) is cleared, so the row
     // has the N6 claim shape the stuck sweep releases (CodeRabbit on #143).
@@ -184,31 +190,38 @@ export async function releasedApprovalAttempt(
   requestId: number, db?: Executor,
 ): Promise<{ released: boolean } & AttemptRecord> {
   const exec = db ?? (await defaultDb());
-  if (!firstRow(await exec.execute(sql`SELECT to_regclass('public.rfp_approval_approving')::text AS t`))?.t) return { released: false, footprint: [], before: {}, unknown: [] };
+  if (!firstRow(await exec.execute(sql`SELECT to_regclass('public.rfp_approval_approving')::text AS t`))?.t) return { released: false, footprint: [], before: {}, unknown: [], attempted: {} };
   const row = firstRow(await exec.execute(sql`
     SELECT a.edited_fields FROM rfp_approval_approving a JOIN rfp_approval_requests r ON r.id = a.request_id
      WHERE a.request_id = ${requestId} AND r.status = 'pending' AND a.submit_at IS NULL AND a.approved_by IS NULL
   `));
-  return row ? { released: true, ...readFootprint(row.edited_fields) } : { released: false, footprint: [], before: {}, unknown: [] };
+  return row ? { released: true, ...readFootprint(row.edited_fields) } : { released: false, footprint: [], before: {}, unknown: [], attempted: {} };
 }
 
 /**
- * Records HubSpot's values from BEFORE this attempt's first write, on THIS claim's row: `values` merged in with the earliest value per
- * property kept (an earlier attempt's reading wins); `unknownProps` (the read failed) added to `_before_unknown`.
+ * Records, on THIS claim's row, HubSpot's values from BEFORE this attempt's first write (`values`, merged with the earliest value per
+ * property kept), the properties whose read failed (`unknownProps`), and the values this attempt writes (`attempted`, added per property).
  */
 export async function recordHubSpotBefore(
-  requestId: number, stamp: string, values: Record<string, string>, unknownProps: string[], db?: Executor,
+  requestId: number, stamp: string, values: Record<string, string>, unknownProps: string[], attempted: Record<string, string> = {}, db?: Executor,
 ): Promise<void> {
   const exec = db ?? (await defaultDb());
-  await exec.execute(sql`
-    UPDATE rfp_approval_approving
-       SET edited_fields = jsonb_set(
-             jsonb_set(coalesce(edited_fields, '{}'::jsonb), ${"{" + BEFORE_KEY + "}"}::text[],
-                       ${JSON.stringify(values)}::jsonb || coalesce(edited_fields -> ${BEFORE_KEY}, '{}'::jsonb)),
-             ${"{" + BEFORE_UNKNOWN_KEY + "}"}::text[],
-             coalesce(edited_fields -> ${BEFORE_UNKNOWN_KEY}, '[]'::jsonb) || ${JSON.stringify(unknownProps)}::jsonb)
-     WHERE request_id = ${requestId} AND started_at = ${stamp}::timestamp
-  `);
+  await exec.transaction!(async (tx: any) => {
+    const row = firstRow(await tx.execute(sql`
+      SELECT edited_fields FROM rfp_approval_approving WHERE request_id = ${requestId} AND started_at = ${stamp}::timestamp FOR UPDATE
+    `));
+    if (!row) return;
+    const o = { ...((row.edited_fields as Record<string, any> | null) ?? {}) };
+    const before = { ...values, ...((o[BEFORE_KEY] as Record<string, string> | undefined) ?? {}) };
+    const unknown = [...new Set([...((o[BEFORE_UNKNOWN_KEY] as string[] | undefined) ?? []), ...unknownProps])];
+    const tried: Record<string, string[]> = { ...((o[ATTEMPTED_KEY] as Record<string, string[]> | undefined) ?? {}) };
+    for (const [k, v] of Object.entries(attempted)) tried[k] = [...new Set([...(tried[k] ?? []), v])];
+    await tx.execute(sql`
+      UPDATE rfp_approval_approving
+         SET edited_fields = ${JSON.stringify({ ...o, [BEFORE_KEY]: before, [BEFORE_UNKNOWN_KEY]: unknown, [ATTEMPTED_KEY]: tried })}::jsonb
+       WHERE request_id = ${requestId} AND started_at = ${stamp}::timestamp
+    `);
+  });
 }
 
 /** Does THIS claim still hold the row? Asked right before each HubSpot write, so a holder whose claim was released writes nothing more. */
