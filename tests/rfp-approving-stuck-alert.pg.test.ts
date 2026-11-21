@@ -29,7 +29,6 @@ const {
   RFP_APPROVING_STUCK_ALERT_CODE,
   RFP_APPROVING_STUCK_KEY_PREFIX,
 } = await import("../server/sync/rfp-approving-stuck.ts");
-const { storage } = await import("../server/storage.ts");
 const { startRfpApprovingStuckScheduler, stopRfpApprovingStuckScheduler, RFP_APPROVING_STUCK_SWEEP_CRON } = await import(
   "../server/cron/rfpApprovingStuckScheduler.ts"
 );
@@ -48,6 +47,11 @@ const BASE_DDL = `
     id serial PRIMARY KEY, source_system text NOT NULL, source_deal_id text NOT NULL,
     rfp_approval_request_id integer NOT NULL, payload jsonb NOT NULL, target_url text NOT NULL,
     status text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE TABLE audit_logs (
+    id serial PRIMARY KEY, action text NOT NULL, entity_type text NOT NULL, entity_id text, source text NOT NULL, destination text,
+    status text NOT NULL, details jsonb, error_message text, duration_ms integer, user_id varchar, idempotency_key text,
+    category text NOT NULL DEFAULT 'system', created_at timestamp DEFAULT now()
   );
 `;
 
@@ -93,7 +97,7 @@ const send = vi.fn(async (_m: { to: string; subject: string; htmlBody: string })
 const RECIPIENT = "ops-alerts@example.test";
 beforeEach(async () => {
   if (!BASE_URL) return;
-  await sql(`TRUNCATE rfp_approval_approving, rfp_approval_requests RESTART IDENTITY CASCADE`);
+  await sql(`TRUNCATE rfp_approval_approving, rfp_approval_requests, audit_logs RESTART IDENTITY CASCADE`);
   await sql(`DROP TABLE IF EXISTS bidboard_crm_push_alert_state`);
   send.mockReset();
   send.mockResolvedValue({ success: true });
@@ -234,7 +238,6 @@ describe.skipIf(!BASE_URL)("rfp_request_approving_stuck: clears only on a termin
 
 describe.skipIf(!BASE_URL)("N6: a claim-only row (an approval that died between its claim and its final write) is released", () => {
   it("31 min old ⇒ back to pending with ONE audit line, no alert, its side row KEPT (the next decision reconciles HubSpot); 29 min old ⇒ left alone", async () => {
-    const audit = vi.spyOn(storage, "createAuditLog").mockResolvedValue({} as any);
     const old = await insertApproving(31, { submitted: false });
     const young = await insertApproving(29, { submitted: false });
 
@@ -248,9 +251,8 @@ describe.skipIf(!BASE_URL)("N6: a claim-only row (an approval that died between 
     expect(await status(old)).toBe("pending");
     expect(await status(young)).toBe("approving");
     expect((await sql(`SELECT request_id FROM rfp_approval_approving ORDER BY request_id`)).rows.map((r) => r.request_id)).toEqual([old, young]);
-    expect(audit).toHaveBeenCalledTimes(1);
-    expect(audit.mock.calls[0][0]).toMatchObject({ action: "rfp_approval_claim_released", status: "success", details: { rfpApprovalRequestId: old } });
-    audit.mockRestore();
+    const lines = (await sql(`SELECT action, status, details ->> 'rfpApprovalRequestId' AS rid FROM audit_logs`)).rows;
+    expect(lines).toEqual([{ action: "rfp_approval_claim_released", status: "success", rid: String(old) }]);
   });
 
   it("a claim-only row that has a Bid Board project, a submitted one, or one that RECORDED its approver (a Procore-era claim) is NOT released: it alerts as before", async () => {
@@ -262,6 +264,30 @@ describe.skipIf(!BASE_URL)("N6: a claim-only row (an approval that died between 
 
     expect(res.released).toEqual([]);
     expect(res.alerted.sort()).toEqual([withProject, submitted, procoreEra].sort());
+  });
+});
+
+describe.skipIf(!BASE_URL)("N6: the release locks what it judges (CodeRabbit on #143)", () => {
+  it("a stale claim released and TAKEN AGAIN while the sweep waits on its lock is NOT released: the sweep re-checks the new claim", async () => {
+    const id = await insertApproving(40, { submitted: false });
+    const other = await pool.connect();
+    try {
+      await other.query("BEGIN");
+      await other.query(`UPDATE rfp_approval_requests SET status = 'pending' WHERE id = $1`, [id]);
+      await other.query(`UPDATE rfp_approval_approving SET started_at = now() AT TIME ZONE 'UTC' WHERE request_id = $1`, [id]);
+      await other.query(`UPDATE rfp_approval_requests SET status = 'approving' WHERE id = $1`, [id]);
+      const sweeping = sweep();
+      const waiting = async () =>
+        Number((await sql(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`)).rows[0].n) > 0;
+      for (let i = 0; i < 200 && !(await waiting()); i++) await new Promise((r) => setTimeout(r, 25));
+      await other.query("COMMIT");
+      const res = await sweeping;
+      expect(res.released).toEqual([]);
+      expect((await sql(`SELECT status FROM rfp_approval_requests WHERE id = $1`, [id])).rows[0].status).toBe("approving");
+      expect((await sql(`SELECT count(*)::int AS n FROM audit_logs`)).rows[0].n).toBe(0);
+    } finally {
+      other.release();
+    }
   });
 });
 

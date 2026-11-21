@@ -78,6 +78,11 @@ const BASE_DDL = `
     sent_at timestamp
   );
   CREATE UNIQUE INDEX idx_bidboard_callback_outbox_rfp_request ON bidboard_callback_outbox(rfp_approval_request_id);
+  CREATE TABLE audit_logs (
+    id serial PRIMARY KEY, action text NOT NULL, entity_type text NOT NULL, entity_id text, source text NOT NULL, destination text,
+    status text NOT NULL, details jsonb, error_message text, duration_ms integer, user_id varchar, idempotency_key text,
+    category text NOT NULL DEFAULT 'system', created_at timestamp DEFAULT now()
+  );
 `;
 
 let admin: pg.Client;
@@ -138,7 +143,7 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!BASE_URL) return;
   await sql(`TRUNCATE rfp_core_followup_outbox, rfp_core_create_outbox, bidboard_create_outbox, bidboard_callback_outbox,
-                      sync_mappings, rfp_approval_approving, rfp_approval_requests RESTART IDENTITY CASCADE`);
+                      sync_mappings, rfp_approval_approving, rfp_approval_requests, audit_logs RESTART IDENTITY CASCADE`);
   await pool27less.query(`TRUNCATE bidboard_callback_outbox, rfp_approval_requests RESTART IDENTITY CASCADE`);
   dbHolder.pool = pool;
   dbHolder.db = mainDb;
@@ -147,6 +152,9 @@ beforeEach(async () => {
   createMock.mockResolvedValue({ success: true, projectId: "900111" });
   hubspotUpdateMock.mockReset();
   hubspotUpdateMock.mockResolvedValue({ success: true });
+  // Every HubSpot approval's first attempt reads the deal's stage (N6, Greptile P1 4650989301): a readable HubSpot by default.
+  hubspotClientMock.mockResolvedValue({ crm: { deals: { basicApi: { getById: vi.fn(async (_id: string, props: string[]) =>
+    ({ properties: Object.fromEntries(props.map((k) => [k, k === "dealstage" ? "rfp-stage" : ""])) })) } } } } as any);
   vi.spyOn(storage, "createAuditLog").mockResolvedValue({} as any);
   vi.spyOn(storage, "getAutomationConfig").mockResolvedValue({ value: { companyId: "42" } } as any);
   process.env.TROCK_CRM_BASE_URL = "https://crm.example.test";
@@ -449,5 +457,72 @@ describe.skipIf(!BASE_URL)("a4 ADD-1: after a released attempt, the next decisio
     expect(await b).toEqual({ success: true });
     expect(await requestStatus(id)).toBe("approved");
     expect(handoffMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.skipIf(!BASE_URL)("N6 round 2 (Greptile P1 4650989301, CodeRabbit on #143)", () => {
+  it("a decline after a released attempt restores the stage the deal had BEFORE the first write, though deal_data keeps no stage", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: { amount: "100" } });
+    fakeHubSpot();
+    dieAfterTheFirstStageWrite();
+
+    expect((await processRfpApproval(token, { amount: "200" }, APPROVER)).success).toBe(false);
+    expect(hs).toMatchObject({ amount: "200", dealstage: "s-1" });
+
+    expect((await processRfpDecline(token, "other@example.test")).success).toBe(true);
+    expect(hs).toMatchObject({ amount: "100", dealstage: "rfp-stage" });
+    expect(await requestStatus(id)).toBe("declined");
+  });
+
+  it("a holder that stalls past the sweep, whose claim is released and taken again, writes NOTHING to HubSpot after it resumes", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", deal: ORIGINAL });
+    fakeHubSpot();
+    let resume!: () => void;
+    const stall = new Promise<void>((r) => { resume = r; });
+    const realClient = await hubspotClientMock();
+    let first = true;
+    hubspotClientMock.mockResolvedValue({ crm: { deals: { basicApi: { getById: vi.fn(async (dealId: string, props: string[]) => {
+      if (first) { first = false; await stall; }
+      return (realClient as any).crm.deals.basicApi.getById(dealId, props);
+    }) } } } } as any);
+
+    const a = processRfpApproval(token, { project_types: "4", amount: "999" }, APPROVER);
+    expect(await until(async () => Boolean((await sql(`SELECT 1 FROM rfp_approval_approving WHERE request_id = $1`, [id])).rows[0]))).toBe(true);
+    await sql(`UPDATE rfp_approval_approving SET started_at = started_at - interval '31 minutes' WHERE request_id = $1`, [id]);
+    expect((await runRfpApprovingStuckSweep({ db: pool, recipient: "" })).released).toEqual([id]);
+    expect(await processRfpApproval(token, {}, APPROVER)).toEqual({ success: true });
+    const after = { ...hs };
+    const writes = hubspotUpdateMock.mock.calls.length + stageMock.mock.calls.length;
+    resume();
+
+    expect(await a).toMatchObject({ success: false, statusCode: 409 });
+    expect(hubspotUpdateMock.mock.calls.length + stageMock.mock.calls.length).toBe(writes);
+    expect(hs).toEqual(after);
+    expect(await requestStatus(id)).toBe("approved");
+  });
+
+  it("an email claim on a row a reset override left (approved_by recorded) takes it over: approved_by cleared, so the sweep can release it", async () => {
+    const { id, token } = await insertRequest("pending");
+    await sql(`INSERT INTO rfp_approval_approving (request_id, started_at, submit_at, approved_by) VALUES ($1, now() - interval '2 hours', NULL, 'override@example.test')`, [id]);
+    vi.spyOn(storage, "updateRfpApprovalRequest").mockRejectedValueOnce(new Error("synthetic failure before the final write"));
+
+    expect((await processRfpApproval(token, {}, APPROVER)).success).toBe(false);
+
+    expect(await requestStatus(id)).toBe("pending");
+    expect((await sql(`SELECT approved_by FROM rfp_approval_approving WHERE request_id = $1`, [id])).rows[0]).toEqual({ approved_by: null });
+  });
+
+  it("the sweep writes its rfp_approval_claim_released audit line in the same statement as the release (one line per release)", async () => {
+    const { id, token } = await insertRequest("pending", { system: "hubspot", service: true });
+    holdFirstStageWrite();
+    void processRfpApproval(token, {}, APPROVER);
+    expect(await until(() => stageMock.mock.calls.length === 1)).toBe(true);
+    await sql(`UPDATE rfp_approval_approving SET started_at = started_at - interval '31 minutes' WHERE request_id = $1`, [id]);
+
+    expect((await runRfpApprovingStuckSweep({ db: pool, recipient: "" })).released).toEqual([id]);
+    expect((await runRfpApprovingStuckSweep({ db: pool, recipient: "" })).released).toEqual([]);
+
+    const lines = (await sql(`SELECT details ->> 'rfpApprovalRequestId' AS rid FROM audit_logs WHERE action = 'rfp_approval_claim_released'`)).rows;
+    expect(lines).toEqual([{ rid: String(id) }]);
   });
 });
