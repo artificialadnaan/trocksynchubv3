@@ -530,7 +530,8 @@ describe.skipIf(!BASE_URL)("N6 round 2 (Greptile P1 4650989301, CodeRabbit on #1
 
 // a4 ADD-2 6025b95c (d6 F-143-1 / F-143-2 on 0c3eb130).
 const STOPPED = "This approval took too long and was stopped before it finished. Open the request and approve it again.";
-const STAGE_UNKNOWN = "HubSpot's stage for this deal from before the approval isn't known, so it can't be put back. Move the deal to its earlier stage in HubSpot, then decline again.";
+// a4 (on ee's reading of ADD-2): the line names the person's step plainly.
+const STAGE_UNKNOWN = "HubSpot still shows this deal as approved. Move it to the right stage in HubSpot, then decline here.";
 const emailedLines = () => sendEmailMock.mock.calls.map((c) => String((c[0] as any)?.htmlBody ?? ""));
 const notice = async (id: number) => (await sql(`SELECT deal_data ->> 'approval_notice' AS n FROM rfp_approval_requests WHERE id = $1`, [id])).rows[0]?.n ?? null;
 /** The review form posts EVERY named field; most equal the stored deal. */
