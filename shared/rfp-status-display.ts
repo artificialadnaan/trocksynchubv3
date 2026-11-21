@@ -24,6 +24,9 @@ export const RFP_APPROVAL_STOPPED_MESSAGE = "This approval took too long and was
  */
 export const RFP_STAGE_UNKNOWN_MESSAGE = "HubSpot still shows this deal as approved. Move it to the right stage in HubSpot, then decline here.";
 
+/** A decision after an interrupted approval when HubSpot's earlier value of a field it may have written was never recorded (round 4). */
+export const RFP_HUBSPOT_BEFORE_UNKNOWN_MESSAGE = "HubSpot's values from before the earlier approval weren't recorded, so SyncHub can't put them back. Check the deal in HubSpot, then ask a SyncHub admin to close this request.";
+
 /** The statuses that mean a Bid Board create is in progress (the summary chips' in-progress count). */
 export const RFP_IN_PROGRESS_STATUSES: readonly string[] = ["approving", "override_approving"];
 
